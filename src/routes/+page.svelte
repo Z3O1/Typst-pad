@@ -334,7 +334,6 @@
 
 <div class="app" class:light={resolvedTheme === "light"}>
   <header class="toolbar">
-    <div class="app-title">Typst-pad</div>
     <MenuBar groups={menuGroups()} />
   </header>
 
@@ -442,16 +441,10 @@
   .toolbar {
     display: flex;
     align-items: center;
-    gap: 16px;
-    padding: 8px 16px;
+    padding: 0 4px;
     background: var(--bg-toolbar);
     border-bottom: 1px solid var(--border);
     user-select: none;
-  }
-
-  .app-title {
-    font-weight: 600;
-    color: var(--accent);
   }
 
   .modal-overlay {

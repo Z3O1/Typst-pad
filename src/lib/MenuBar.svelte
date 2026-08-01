@@ -118,6 +118,7 @@
     align-items: center;
     flex: 1;
     min-width: 0;
+    padding-left: 4px; /* 传统菜单栏：首项距左侧少量留白 */
     user-select: none;
   }
 
