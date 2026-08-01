@@ -12,6 +12,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { loadState, saveState } from "$lib/persistence";
   import MenuBar from "$lib/MenuBar.svelte";
@@ -214,10 +215,38 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    const key = e.key.toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod) return;
+
     // Ctrl/Cmd + S：保存当前文档
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    if (key === "s") {
       e.preventDefault();
       handleSave();
+      return;
+    }
+    // Ctrl/Cmd + N：打开新窗口（Tauri）；浏览器环境阻止默认并忽略
+    if (key === "n") {
+      e.preventDefault();
+      if (isTauri()) {
+        new WebviewWindow(`editor-${Date.now()}`, {
+          url: "/",
+          title: "Typst-pad",
+          width: 1280,
+          height: 800,
+          minWidth: 800,
+          minHeight: 600,
+          center: true,
+        });
+      }
+      return;
+    }
+    // Ctrl/Cmd + W：关闭当前窗口
+    if (key === "w") {
+      e.preventDefault();
+      if (isTauri()) {
+        getCurrentWindow().close();
+      }
     }
   }
 
