@@ -88,7 +88,11 @@
         class:selected={selectedIndex === i}
         onclick={() => toggle(i)}
         onmouseenter={() => {
-          if (openIndex !== null) openIndex = i; // 已展开时悬停切换
+          // 已展开时悬停切换；同步选中态保持一致
+          if (openIndex !== null) {
+            openIndex = i;
+            selectedIndex = i;
+          }
         }}
       >
         {group.label}
@@ -127,7 +131,7 @@
   }
 
   .menu-title {
-    padding: 6px 14px;
+    padding: 3px 10px; /* 紧凑：上下 3px，降低菜单栏高度 */
     border: none;
     background: transparent;
     color: var(--fg);
@@ -135,7 +139,7 @@
     cursor: pointer;
   }
 
-  .menu-title:hover,
+  /* 平时（未按 Alt）悬停不高亮：仅 Alt 激活选中（.selected）或展开中（.active）时高亮 */
   .menu-title.active,
   .menu-title.selected {
     background: var(--bg-pane);
