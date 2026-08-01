@@ -18,6 +18,9 @@ src-tauri/target/
 # 调试产物
 scripts/svg-debug.svg
 
+# Tauri 构建日志
+tauri-build.log
+
 # Reasonix 会话元数据
 .reasonix/
 
