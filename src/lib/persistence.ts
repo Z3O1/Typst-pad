@@ -1,0 +1,44 @@
+// localStorage 持久化：记住主题偏好、上次编辑内容与文件路径。
+// 跨 dev（浏览器）与 Tauri（WebView2）环境一致；容量小（文档通常 <5MB）。
+
+const STORAGE_KEY = "typst-pad:state";
+
+export type ThemePreference = "system" | "dark" | "light";
+
+export interface PersistedState {
+  theme: ThemePreference;
+  content: string;
+  filePath: string | null;
+  fileTitle: string | null;
+}
+
+/** 读取持久化状态；不存在或损坏时返回空对象 */
+export function loadState(): Partial<PersistedState> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return {};
+    return parsed as Partial<PersistedState>;
+  } catch {
+    return {};
+  }
+}
+
+/** 保存状态；存储不可用（隐私模式/配额超限）时静默失败 */
+export function saveState(state: PersistedState): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // 忽略：持久化失败不影响使用
+  }
+}
+
+/** 清空持久化状态（用于"新建"） */
+export function clearState(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // 忽略
+  }
+}
