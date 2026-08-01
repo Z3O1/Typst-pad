@@ -24,16 +24,16 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
   let cursorLine = $state(1);
   let cursorCol = $state(1);
   let statusText = $state("就绪");
-  let theme: "dark" | "light" = $state("dark");
+  let theme: "system" | "dark" | "light" = $state("system");
+  let resolvedTheme: "dark" | "light" = $state("dark");
 
   let doc: string = SAMPLE_DOC;
   let editorDoc = $state(SAMPLE_DOC); // 绑定给 Editor 的受控文档
   let filePath: string | null = null;
-  let previewStatus: "idle" | "loading" | "ready" | "error" = $state("idle");
+  let previewStatus: "idle" | "ready" | "error" = $state("idle");
   let previewError = $state("");
   let pageCount = $state(0);
   let previewHost: HTMLElement;
-  let compileTimer: ReturnType<typeof setTimeout> | undefined;
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
 
   function handleCursor(line: number, col: number) {
@@ -75,8 +75,22 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     }
   }
 
+  function systemPrefersDark(): boolean {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+
+  function resolveTheme(): void {
+    resolvedTheme = theme === "system" ? (systemPrefersDark() ? "dark" : "light") : theme;
+  }
+
+  // theme 变化（含手动切换）时重算生效主题
+  $effect(() => {
+    resolveTheme();
+  });
+
   function toggleTheme() {
-    theme = theme === "dark" ? "light" : "dark";
+    theme =
+      theme === "system" ? "dark" : theme === "dark" ? "light" : "system";
   }
 
   async function handleExportPdf() {
@@ -99,13 +113,12 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
   }
 
   function scheduleCompile() {
-    clearTimeout(compileTimer);
-    compileTimer = setTimeout(runCompile, 500);
+    runCompile(); // 立即编译：内容变化后直接编译，编译完即显示（无防抖延迟）
   }
 
   async function runCompile() {
     const mySeq = ++compileSeq;
-    previewStatus = "loading";
+    // 编译期间保留旧预览，完成后直接替换（不做 loading 遮罩）
     const result = await compileToSvg(doc);
     if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
     if (result.ok) {
@@ -120,23 +133,40 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     }
   }
 
+  function handleKeydown(e: KeyboardEvent) {
+    // Ctrl/Cmd + S：保存当前文档
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      handleSave();
+    }
+  }
+
   onMount(() => {
     runCompile();
+    resolveTheme();
+    // 系统主题变化时跟随（仅当处于“自动”态）
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onSystemThemeChange = () => {
+      if (theme === "system") resolveTheme();
+    };
+    media.addEventListener("change", onSystemThemeChange);
+    window.addEventListener("keydown", handleKeydown);
     return () => {
-      clearTimeout(compileTimer);
+      media.removeEventListener("change", onSystemThemeChange);
+      window.removeEventListener("keydown", handleKeydown);
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
     };
   });
 </script>
 
-<div class="app" class:light={theme === "light"}>
+<div class="app" class:light={resolvedTheme === "light"}>
   <header class="toolbar">
     <div class="app-title">Tpyst-pad</div>
     <div class="file-title" title="当前文件">{dirty ? "● " : ""}{fileTitle}</div>
     <div class="toolbar-actions">
       <button class="tool-btn" onclick={handleOpen}>打开</button>
       <button class="tool-btn" onclick={handleSave}>保存</button>
-      <button class="tool-btn" onclick={toggleTheme}>主题: {theme === "dark" ? "暗" : "明"}</button>
+      <button class="tool-btn" onclick={toggleTheme} title="当前生效: {resolvedTheme === "dark" ? "暗色" : "亮色"}">主题: {theme === "system" ? "自动" : theme === "dark" ? "暗" : "明"}</button>
       <button class="tool-btn" onclick={handleExportPdf}>导出 PDF</button>
     </div>
   </header>
@@ -148,7 +178,7 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
         <Editor
           initialDoc={SAMPLE_DOC}
           doc={editorDoc}
-          theme={theme}
+          theme={resolvedTheme}
           onCursor={handleCursor}
           onDocChange={handleDocChange}
         />
@@ -157,9 +187,7 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     <section class="pane preview-pane">
       <div class="pane-label">预览</div>
       <div class="pane-body preview-body">
-        {#if previewStatus === "loading"}
-          <div class="preview-placeholder">编译中…</div>
-        {:else if previewStatus === "error"}
+        {#if previewStatus === "error"}
           <div class="preview-error">
             <div class="preview-error-title">编译错误</div>
             <pre class="preview-error-text">{previewError}</pre>

@@ -1,15 +1,17 @@
 # Tpyst-pad
 
+[![CI](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml/badge.svg)](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml)
+
 Typora 式布局的 Typst 桌面编辑器：**左侧编辑 Typst 源码，右侧实时预览**（非所见即所得）。
 
 ## 功能
 
 - 左侧 CodeMirror 6 编辑器：Typst 语法高亮、行号、括号匹配、光标行列状态栏
-- 右侧 typst.ts (WASM) 实时编译预览：内容变化防抖 500ms 编译为 SVG，编译错误带行号显示
+- 右侧 typst.ts (WASM) 实时编译预览：内容变化后立即编译并显示，编译错误带行号显示
 - 中文/数学公式完整支持（本地打包字体，离线可用）
-- 打开 / 保存 `.typ` 文件（Tauri 桌面环境）
+- 打开 / 保存 `.typ` 文件（Tauri 桌面环境）；**Ctrl/Cmd + S** 快速保存
 - 导出 PDF
-- 明 / 暗主题切换
+- 主题三态：自动（跟随系统）/ 暗 / 明
 
 ## 技术栈
 
@@ -29,9 +31,15 @@ npm install          # 安装依赖
 npm run dev          # 仅前端（浏览器，无文件功能）
 npm run tauri dev    # 桌面应用（需要 Rust）
 npm run check        # 类型检查（svelte-check）
+npm test             # 单元测试（vitest）
 npm run build        # 前端生产构建
 npm run tauri build  # 打包桌面安装程序（需要 Rust）
 ```
+
+## 测试与 CI
+
+- 单元测试（vitest + jsdom）：`npm test`，覆盖 SVG 净化（`src/lib/svg-sanitize.test.ts`）与编译互斥队列（`src/lib/enqueue.test.ts`）
+- CI（GitHub Actions，`.github/workflows/ci.yml`）：每个 PR 在 ubuntu 上跑 类型检查 → 单测 → 前端构建 → `cargo check`
 
 ## 架构
 
