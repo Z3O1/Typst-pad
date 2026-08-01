@@ -13,21 +13,13 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { confirm } from "@tauri-apps/plugin-dialog";
+  import { loadState, saveState } from "$lib/persistence";
+  import MenuBar from "$lib/MenuBar.svelte";
+  import type { MenuGroup } from "$lib/MenuBar.svelte";
+  import { clearState } from "$lib/persistence";
 
-  const SAMPLE_DOC = `= 欢迎使用 Typst-pad
-
-这是左侧的 *Typst* 源码，右侧将显示实时预览。
-
-== 数学公式
-
-$ sum_(k=1)^n k = (n(n+1)) / 2 $
-
-== 列表
-
-- 第一项
-- 第二项
-- 第三项
-`;
+  // 新建时默认空白文档（不再预填示例内容）
+  const SAMPLE_DOC = "";
 
   let fileTitle = $state("未命名.typ");
   let dirty = $state(false);
@@ -46,6 +38,16 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
   let previewHost: HTMLElement;
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
+  let persistTimer: ReturnType<typeof setTimeout> | undefined;
+  let showAbout = $state(false);
+
+  /** 轻量防抖：内容/主题/路径变化后 300ms 写入 localStorage */
+  function schedulePersist() {
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      saveState({ theme, content: doc, filePath, fileTitle });
+    }, 300);
+  }
 
   function handleCursor(line: number, col: number) {
     cursorLine = line;
@@ -56,6 +58,7 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     doc = newDoc;
     dirty = true;
     scheduleCompile();
+    schedulePersist();
   }
 
   /** 有未保存修改时请求确认（打开/拖放/关联打开前） */
@@ -84,6 +87,7 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
       dirty = false;
       editorDoc = opened.content; // 触发编辑器替换全文
       scheduleCompile();
+      schedulePersist();
       statusText = "已打开";
       return true;
     } catch (e) {
@@ -105,10 +109,49 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
       filePath = saved;
       fileTitle = saved.split(/[\\/]/).pop() ?? saved;
       dirty = false;
+      schedulePersist();
       statusText = "已保存";
     } catch (e) {
       statusText = "保存失败";
     }
+  }
+
+  /** 新建：清空文档并清除持久化的上次内容 */
+  function handleNew() {
+    doc = "";
+    editorDoc = "";
+    filePath = null;
+    fileTitle = "未命名.typ";
+    dirty = false;
+    clearState();
+    scheduleCompile();
+    statusText = "已新建";
+  }
+
+  function menuGroups(): MenuGroup[] {
+    return [
+      {
+        label: "文件",
+        items: [
+          { label: "新建", action: handleNew },
+          { label: "打开…", action: handleOpen },
+          { label: "保存", action: handleSave },
+          { label: "导出 PDF…", action: handleExportPdf },
+        ],
+      },
+      {
+        label: "视图",
+        items: [
+          { label: "主题：自动", checked: theme === "system", action: () => (theme = "system") },
+          { label: "主题：暗", checked: theme === "dark", action: () => (theme = "dark") },
+          { label: "主题：明", checked: theme === "light", action: () => (theme = "light") },
+        ],
+      },
+      {
+        label: "帮助",
+        items: [{ label: "关于 Typst-pad", action: () => (showAbout = true) }],
+      },
+    ];
   }
 
   function systemPrefersDark(): boolean {
@@ -119,9 +162,10 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     resolvedTheme = theme === "system" ? (systemPrefersDark() ? "dark" : "light") : theme;
   }
 
-  // theme 变化（含手动切换）时重算生效主题
+  // theme 变化（含手动切换）时重算生效主题并持久化
   $effect(() => {
     resolveTheme();
+    schedulePersist();
   });
 
   function toggleTheme() {
@@ -178,6 +222,18 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
   }
 
   onMount(() => {
+    // 恢复上次会话：主题偏好 + 编辑内容 + 文件路径
+    const saved = loadState();
+    if (saved.theme === "system" || saved.theme === "dark" || saved.theme === "light") {
+      theme = saved.theme;
+    }
+    if (typeof saved.content === "string") {
+      doc = saved.content;
+      editorDoc = saved.content;
+    }
+    if (typeof saved.filePath === "string") filePath = saved.filePath;
+    if (typeof saved.fileTitle === "string") fileTitle = saved.fileTitle;
+
     runCompile();
     resolveTheme();
     // 系统主题变化时跟随（仅当处于“自动”态）
@@ -236,6 +292,7 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
       unlisteners.forEach((un) => un());
+      clearTimeout(persistTimer);
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
     };
   });
@@ -244,13 +301,8 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
 <div class="app" class:light={resolvedTheme === "light"}>
   <header class="toolbar">
     <div class="app-title">Typst-pad</div>
+    <MenuBar groups={menuGroups()} />
     <div class="file-title" title="当前文件">{dirty ? "● " : ""}{fileTitle}</div>
-    <div class="toolbar-actions">
-      <button class="tool-btn" onclick={handleOpen}>打开</button>
-      <button class="tool-btn" onclick={handleSave}>保存</button>
-      <button class="tool-btn" onclick={toggleTheme} title="当前生效: {resolvedTheme === "dark" ? "暗色" : "亮色"}">主题: {theme === "system" ? "自动" : theme === "dark" ? "暗" : "明"}</button>
-      <button class="tool-btn" onclick={handleExportPdf}>导出 PDF</button>
-    </div>
   </header>
 
   <main class="panes">
@@ -258,7 +310,6 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
       <div class="drop-overlay">释放以打开 .typ 文件</div>
     {/if}
     <section class="pane editor-pane">
-      <div class="pane-label">编辑</div>
       <div class="pane-body">
         <Editor
           initialDoc={SAMPLE_DOC}
@@ -270,7 +321,6 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
       </div>
     </section>
     <section class="pane preview-pane">
-      <div class="pane-label">预览</div>
       <div class="pane-body preview-body">
         {#if previewStatus === "error"}
           <div class="preview-error">
@@ -295,6 +345,30 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     <span class="spacer"></span>
     <span>Ln {cursorLine}, Col {cursorCol}</span>
   </footer>
+
+  {#if showAbout}
+    <button
+      class="modal-overlay"
+      aria-label="关闭关于窗口"
+      onclick={(e) => {
+        if (e.target === e.currentTarget) showAbout = false;
+      }}
+    >
+      <div class="modal">
+        <h3 class="modal-title">Typst-pad</h3>
+        <p class="modal-text">版本 0.2.0</p>
+        <p class="modal-text">Typora 式布局的 Typst 桌面编辑器：左编辑 / 右实时预览。</p>
+        <p class="modal-text">MIT License © 2026 Z3O1</p>
+        <span
+          class="modal-close"
+          role="button"
+          tabindex="0"
+          onclick={() => (showAbout = false)}
+          onkeydown={(e) => e.key === "Enter" && (showAbout = false)}
+        >关闭</span>
+      </div>
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -355,22 +429,57 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     white-space: nowrap;
   }
 
-  .toolbar-actions {
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
     display: flex;
-    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+    border: none;
+    padding: 0;
+    cursor: default;
   }
 
-  .tool-btn {
-    padding: 4px 14px;
+  .app.light .modal-overlay {
+    background: rgba(255, 255, 255, 0.55);
+  }
+
+  .modal {
+    min-width: 320px;
+    background: var(--bg-toolbar);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    padding: 20px 24px;
+  }
+
+  .modal-title {
+    margin: 0 0 8px;
+    color: var(--accent);
+  }
+
+  .modal-text {
+    margin: 4px 0;
+    font-size: 13px;
+    color: var(--fg);
+  }
+
+  .modal-close {
+    display: inline-block;
+    margin-top: 12px;
+    padding: 6px 18px;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--bg-pane);
     color: var(--fg);
-    font-size: 12px;
+    font-size: 13px;
     cursor: pointer;
+    user-select: none;
   }
 
-  .tool-btn:hover {
+  .modal-close:hover {
     border-color: var(--accent);
     color: var(--accent);
   }
@@ -392,14 +501,6 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
   .editor-pane {
     border-right: 1px solid var(--border);
     background: var(--bg-pane);
-  }
-
-  .pane-label {
-    padding: 6px 12px;
-    font-size: 12px;
-    color: var(--fg-dim);
-    border-bottom: 1px solid var(--border);
-    user-select: none;
   }
 
   .pane-body {

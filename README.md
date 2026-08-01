@@ -79,3 +79,7 @@ node scripts/download-fonts.mjs # 重新下载字体（jsDelivr，含重试）
 - 预览不跟随滚动（非所见即所得）
 - `@myriaddreamin/typst.ts` 目前锁定 0.8.0-rc3（0.7.0 存在数学字体加载缺陷）
 - `tauri.conf.json` 的 `csp` 保持 `null`：设置生产 CSP 需在打包后实机验证（wasm/blob/tauri 协议交互易误伤），当前以 `sanitizeSvg` 净化 + 文件命令路径约束作为纵深防线；如需启用请在 `npm run tauri build` 后实测
+
+## License
+
+[MIT](./LICENSE) © 2026 Z3O1
