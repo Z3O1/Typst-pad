@@ -7,7 +7,7 @@ import {
   createTypstFontBuilder,
 } from "@myriaddreamin/typst.ts";
 
-const source = `= Hello, Tpyst-pad
+const source = `= Hello, Typst-pad
 
 这是一段 *中文* 测试文本。
 
