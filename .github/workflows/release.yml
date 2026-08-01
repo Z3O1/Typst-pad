@@ -1,5 +1,10 @@
 name: Release
 
+# 发版方式（重要：缓存按分支/tag 隔离）：
+# - 推荐：workflow_dispatch 手动触发，并在 "Branch" 选择 main。
+#   此时缓存 scope = main，跨版本稳定命中 Rust 缓存（快速构建）。
+# - 备选：push tag 触发。注意 tag 触发的缓存 scope 是各自 tag 名，
+#   不同 tag 之间缓存互不可见（GitHub 限制），每次都会全量编译。
 on:
   push:
     tags: ["v*"]
