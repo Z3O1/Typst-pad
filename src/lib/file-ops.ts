@@ -13,14 +13,28 @@ export interface OpenedFile {
   content: string;
 }
 
-/** 打开 .typ 文件对话框，返回路径与内容；取消返回 null */
-export async function openTypFile(): Promise<OpenedFile | null> {
+/** 判断路径是否为 .typ 文件（大小写不敏感） */
+export function isTypPath(path: string): boolean {
+  return path.toLowerCase().endsWith(".typ");
+}
+
+/** 从路径数组中选出第一个 .typ 文件；没有则返回 null */
+export function pickTypPath(paths: string[]): string | null {
+  return paths.find(isTypPath) ?? null;
+}
+
+/** 打开文件对话框选择 .typ 文件，返回路径；取消返回 null */
+export async function openTypFile(): Promise<string | null> {
   if (!isTauri()) {
     alert("文件功能仅在 Tauri 桌面应用内可用（浏览器中请直接编辑）");
     return null;
   }
   const path = await open({ filters: TYPST_FILTERS, multiple: false });
-  if (typeof path !== "string") return null;
+  return typeof path === "string" ? path : null;
+}
+
+/** 按路径读取 .typ 文件内容（供打开/拖放/关联打开复用） */
+export async function readTypFile(path: string): Promise<OpenedFile> {
   const content = await invoke<string>("read_file", { path });
   return { path, content };
 }

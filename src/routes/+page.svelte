@@ -2,7 +2,17 @@
   import { onMount } from "svelte";
   import Editor from "$lib/Editor.svelte";
   import { compileToSvg, compileToPdf } from "$lib/typst-engine";
-  import { openTypFile, saveTypFile } from "$lib/file-ops";
+  import {
+    openTypFile,
+    saveTypFile,
+    readTypFile,
+    pickTypPath,
+    isTauri,
+  } from "$lib/file-ops";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { confirm } from "@tauri-apps/plugin-dialog";
 
   const SAMPLE_DOC = `= 欢迎使用 Typst-pad
 
@@ -35,6 +45,7 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
   let pageCount = $state(0);
   let previewHost: HTMLElement;
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
+  let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
 
   function handleCursor(line: number, col: number) {
     cursorLine = line;
@@ -47,19 +58,44 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     scheduleCompile();
   }
 
-  async function handleOpen() {
+  /** 有未保存修改时请求确认（打开/拖放/关联打开前） */
+  async function confirmDiscard(): Promise<boolean> {
+    const message = "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？";
+    if (isTauri()) {
+      return await confirm(message, {
+        title: "未保存的修改",
+        kind: "warning",
+      });
+    }
+    return window.confirm(message);
+  }
+
+  /** 按路径加载 .typ 文件到编辑器（供打开对话框/拖放/关联打开复用） */
+  async function openPath(path: string): Promise<boolean> {
+    if (dirty && filePath !== path) {
+      const ok = await confirmDiscard();
+      if (!ok) return false;
+    }
     try {
-      const opened = await openTypFile();
-      if (!opened) return;
+      const opened = await readTypFile(path);
       doc = opened.content;
       filePath = opened.path;
       fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
       dirty = false;
       editorDoc = opened.content; // 触发编辑器替换全文
       scheduleCompile();
+      statusText = "已打开";
+      return true;
     } catch (e) {
       statusText = "打开失败";
+      return false;
     }
+  }
+
+  async function handleOpen() {
+    const path = await openTypFile();
+    if (!path) return;
+    await openPath(path);
   }
 
   async function handleSave() {
@@ -151,9 +187,55 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     };
     media.addEventListener("change", onSystemThemeChange);
     window.addEventListener("keydown", handleKeydown);
+
+    // Tauri 内：支持拖放打开 / 关联双击打开 / 跨实例转发打开
+    const unlisteners: Array<() => void> = [];
+    let disposed = false;
+    const keepUnlisten = (p: Promise<() => void>) =>
+      p.then((un) => {
+        if (disposed) un();
+        else unlisteners.push(un);
+      });
+    if (isTauri()) {
+      // 窗口级拖放：把 .typ 文件拖到窗口内自动打开
+      keepUnlisten(
+        getCurrentWindow().onDragDropEvent((event) => {
+          if (event.payload.type === "over" || event.payload.type === "enter") {
+            dragActive = true;
+          } else if (event.payload.type === "drop") {
+            dragActive = false;
+            const path = pickTypPath(event.payload.paths);
+            if (path) {
+              openPath(path);
+            } else if (event.payload.paths.length > 0) {
+              statusText = "仅支持打开 .typ 文件";
+            }
+          } else {
+            dragActive = false;
+          }
+        }),
+      );
+      // 应用已运行时再次打开文件（single-instance 转发）：先注册监听再取队列，
+      // 避免转发事件落在两者之间而丢失
+      const unlistenOpen = listen<string>("open-file", (e) => {
+        if (e.payload) openPath(e.payload);
+      });
+      keepUnlisten(unlistenOpen);
+      unlistenOpen.then(() => {
+        // 首次启动/跨实例转发的待打开文件（关联双击）：就绪后取走（取最后一个，即最新请求）
+        invoke<string[]>("take_pending_files")
+          .then((paths) => {
+            if (paths.length > 0) openPath(paths[paths.length - 1]);
+          })
+          .catch(() => {});
+      });
+    }
+
     return () => {
+      disposed = true;
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
+      unlisteners.forEach((un) => un());
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
     };
   });
@@ -172,6 +254,9 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
   </header>
 
   <main class="panes">
+    {#if dragActive}
+      <div class="drop-overlay">释放以打开 .typ 文件</div>
+    {/if}
     <section class="pane editor-pane">
       <div class="pane-label">编辑</div>
       <div class="pane-body">
@@ -346,6 +431,25 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
     padding: 24px 16px;
     background: #3a3a3c;
     overflow: auto;
+  }
+
+  .drop-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+    border: 3px dashed var(--accent);
+    color: var(--fg);
+    font-size: 18px;
+    font-weight: 600;
+    pointer-events: none;
+  }
+
+  .app.light .drop-overlay {
+    background: rgba(255, 255, 255, 0.6);
   }
 
   .app.light .preview-body {
