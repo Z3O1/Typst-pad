@@ -1,0 +1,26 @@
+# 依赖
+node_modules/
+
+# 构建产物
+/build/
+.svelte-kit/
+
+# Rust/Tauri
+src-tauri/target/
+
+# 编辑器/IDE
+.vscode/
+.idea/
+
+# 运行时缓存
+.cache/
+
+# 调试产物
+scripts/svg-debug.svg
+
+# Reasonix 会话元数据
+.reasonix/
+
+# 系统文件
+.DS_Store
+Thumbs.db
