@@ -88,12 +88,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        // 单实例：应用已运行时再次打开（如双击 .typ 关联文件），把路径转发给首个实例
-        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
-            if let Some(arg) = argv.into_iter().find(|a| is_typ_file(Path::new(a))) {
-                queue_open(app, absolutize(&arg, &cwd));
-            }
-        }))
+        // 注意：不使用 single-instance——每次启动都打开独立实例/新窗口
         .setup(|app| {
             // 首次启动：从命令行参数解析待打开的 .typ 文件
             let initial = std::env::args()
