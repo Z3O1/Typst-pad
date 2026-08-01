@@ -14,33 +14,52 @@
 
   let { groups }: { groups: MenuGroup[] } = $props();
 
-  let openIndex: number | null = $state(null);
+  let openIndex: number | null = $state(null); // 展开的菜单（键盘/点击）
+  let selectedIndex: number | null = $state(null); // 键盘选中的分类（Alt 激活）
   let rootEl: HTMLElement;
 
   function toggle(i: number) {
     openIndex = openIndex === i ? null : i;
+    selectedIndex = i;
   }
 
   function runAction(item: MenuItem) {
     openIndex = null;
+    selectedIndex = null;
     item.action();
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      openIndex = null;
-    } else if (e.key === "Alt") {
-      // Alt 按下：打开/聚焦第一个菜单（阻止系统菜单）
+    if (e.key === "Alt") {
+      // Alt 按下：选中第一个分类（不展开）；再次按 Alt 无额外效果
       e.preventDefault();
-      openIndex = openIndex ?? 0;
-    } else if (openIndex !== null) {
-      if (e.key === "ArrowRight") {
-        e.preventDefault();
-        openIndex = (openIndex + 1) % groups.length;
-      } else if (e.key === "ArrowLeft") {
-        e.preventDefault();
-        openIndex = (openIndex - 1 + groups.length) % groups.length;
-      }
+      selectedIndex = selectedIndex ?? 0;
+      openIndex = null;
+      return;
+    }
+    if (selectedIndex === null) return;
+
+    if (e.key === " " || e.key === "Enter") {
+      // 空格/Enter：展开/收起选中的分类
+      e.preventDefault();
+      openIndex = openIndex === selectedIndex ? null : selectedIndex;
+    } else if (e.key === "Escape") {
+      // Esc：先取消展开（保留选中），再按取消选中
+      e.preventDefault();
+      if (openIndex !== null) openIndex = null;
+      else selectedIndex = null;
+    } else if (e.key === "Tab") {
+      // Tab：循环切换选中的分类
+      e.preventDefault();
+      selectedIndex = (selectedIndex + 1) % groups.length;
+      openIndex = null;
+    } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      // 左右方向键：切换选中的分类
+      e.preventDefault();
+      selectedIndex =
+        (selectedIndex + (e.key === "ArrowRight" ? 1 : -1) + groups.length) %
+        groups.length;
+      openIndex = null;
     }
   }
 
@@ -66,6 +85,7 @@
       <button
         class="menu-title"
         class:active={openIndex === i}
+        class:selected={selectedIndex === i}
         onclick={() => toggle(i)}
         onmouseenter={() => {
           if (openIndex !== null) openIndex = i; // 已展开时悬停切换
@@ -92,10 +112,12 @@
 </nav>
 
 <style>
+  /* 文本式菜单栏：占满所在行（flex:1 由父级或此处控制），无按钮边框感 */
   .menubar {
     display: flex;
     align-items: center;
-    gap: 2px;
+    flex: 1;
+    min-width: 0;
     user-select: none;
   }
 
@@ -104,9 +126,8 @@
   }
 
   .menu-title {
-    padding: 4px 10px;
+    padding: 6px 14px;
     border: none;
-    border-radius: 4px;
     background: transparent;
     color: var(--fg);
     font-size: 13px;
@@ -114,9 +135,9 @@
   }
 
   .menu-title:hover,
-  .menu-title.active {
+  .menu-title.active,
+  .menu-title.selected {
     background: var(--bg-pane);
-    outline: 1px solid var(--border);
   }
 
   .menu-dropdown {

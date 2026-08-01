@@ -1,5 +1,9 @@
 [package]
 name = "typst-pad"
+# 注意：此版本号保持稳定（不与应用发版版本同步）。
+# CI 的 Rust 缓存（Swatinem/rust-cache）key 基于 Cargo.lock 哈希，
+# 每次改这里都会使 Cargo.lock 变化、缓存失效（全量重编约 14 分钟）。
+# 应用/安装包版本以 tauri.conf.json 与 package.json 的 version 为准。
 version = "0.2.2"
 description = "A Tauri App"
 authors = ["you"]
