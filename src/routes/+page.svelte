@@ -4,7 +4,7 @@
   import { compileToSvg, compileToPdf } from "$lib/typst-engine";
   import { openTypFile, saveTypFile } from "$lib/file-ops";
 
-  const SAMPLE_DOC = `= 欢迎使用 Tpyst-pad
+  const SAMPLE_DOC = `= 欢迎使用 Typst-pad
 
 这是左侧的 *Typst* 源码，右侧将显示实时预览。
 
@@ -161,7 +161,7 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
 
 <div class="app" class:light={resolvedTheme === "light"}>
   <header class="toolbar">
-    <div class="app-title">Tpyst-pad</div>
+    <div class="app-title">Typst-pad</div>
     <div class="file-title" title="当前文件">{dirty ? "● " : ""}{fileTitle}</div>
     <div class="toolbar-actions">
       <button class="tool-btn" onclick={handleOpen}>打开</button>

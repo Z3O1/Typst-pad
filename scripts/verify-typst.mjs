@@ -8,7 +8,7 @@ import {
 } from "@myriaddreamin/typst.ts";
 import { CompileFormatEnum } from "@myriaddreamin/typst.ts/compiler";
 
-const source = `= Hello, Tpyst-pad
+const source = `= Hello, Typst-pad
 
 这是一段 *中文* 测试文本。
 

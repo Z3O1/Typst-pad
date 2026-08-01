@@ -1,4 +1,4 @@
-# Tpyst-pad
+# Typst-pad
 
 [![CI](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml/badge.svg)](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml)
 
