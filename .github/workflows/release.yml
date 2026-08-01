@@ -22,6 +22,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Rust 增量编译缓存：二次构建可省约 8-10 分钟
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: Install frontend dependencies
         run: npm ci
 
