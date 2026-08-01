@@ -214,6 +214,17 @@
     }
   }
 
+  /** 窗口标题同步为“文件名 - Typst-pad”（Tauri）；文件名不再显示在 UI 顶部 */
+  function syncWindowTitle() {
+    if (!isTauri()) return;
+    getCurrentWindow().setTitle(`${fileTitle} - Typst-pad`);
+  }
+
+  // fileTitle 变化时（打开/保存/新建）同步窗口标题
+  $effect(() => {
+    syncWindowTitle();
+  });
+
   function handleKeydown(e: KeyboardEvent) {
     const key = e.key.toLowerCase();
     const mod = e.ctrlKey || e.metaKey;
@@ -231,7 +242,7 @@
       if (isTauri()) {
         new WebviewWindow(`editor-${Date.now()}`, {
           url: "/",
-          title: "Typst-pad",
+          title: "未命名.typ - Typst-pad",
           width: 1280,
           height: 800,
           minWidth: 800,
@@ -251,17 +262,11 @@
   }
 
   onMount(() => {
-    // 恢复上次会话：主题偏好 + 编辑内容 + 文件路径
+    // 每次启动都是全新会话：仅恢复主题偏好，不恢复上次编辑内容/文件
     const saved = loadState();
     if (saved.theme === "system" || saved.theme === "dark" || saved.theme === "light") {
       theme = saved.theme;
     }
-    if (typeof saved.content === "string") {
-      doc = saved.content;
-      editorDoc = saved.content;
-    }
-    if (typeof saved.filePath === "string") filePath = saved.filePath;
-    if (typeof saved.fileTitle === "string") fileTitle = saved.fileTitle;
 
     runCompile();
     resolveTheme();
@@ -331,7 +336,6 @@
   <header class="toolbar">
     <div class="app-title">Typst-pad</div>
     <MenuBar groups={menuGroups()} />
-    <div class="file-title" title="当前文件">{dirty ? "● " : ""}{fileTitle}</div>
   </header>
 
   <main class="panes">
@@ -448,14 +452,6 @@
   .app-title {
     font-weight: 600;
     color: var(--accent);
-  }
-
-  .file-title {
-    flex: 1;
-    color: var(--fg-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .modal-overlay {
