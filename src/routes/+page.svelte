@@ -46,6 +46,7 @@
   let showClosePrompt = $state(false); // 关闭确认弹窗（保存/不保存/取消）
   let showSettings = $state(false); // 设置弹窗（编译前缀代码）
   let editorDiagnostics = $state<CompileErrorLocation[]>([]); // 编译错误位置（传给编辑器画波浪线）
+  let errorCount = $state(0); // 编译错误个数（状态栏徽标，常驻显示）
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
   let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
@@ -280,11 +281,13 @@
       pageCount = result.pageCount;
       previewStatus = "ready";
       editorDiagnostics = [];
+      errorCount = 0; // 编译成功：错误徽标归零（与状态栏文本同源）
       statusText = `${doc.length} 字符 · ${result.pageCount} 页`;
     } else {
       // 编译错误：保留最后一次成功预览（不置 error、不隐藏预览、不显示错误面板），
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
       editorDiagnostics = result.errors;
+      errorCount = result.errors.length; // 与状态栏文本「编译错误：N 处」同源
       statusText = `编译错误：${result.errors.length} 处`;
     }
   }
@@ -471,6 +474,7 @@
 
   <footer class="statusbar">
     <span>{statusText}</span>
+    <span class="error-badge"><span class="error-icon">✕</span><span class="error-count">{errorCount}</span></span>
     <span class="spacer"></span>
     <span>Ln {cursorLine}, Col {cursorCol}</span>
   </footer>
@@ -722,6 +726,30 @@
 
   .spacer {
     flex: 1;
+  }
+
+  /* 编译错误徽标：圆圈 ✕ + 个数，常驻显示（无错误时为 0） */
+  .error-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: #e74c3c; /* 错误红：深浅主题下均清晰 */
+  }
+
+  .error-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    border: 1.5px solid currentColor; /* CSS 圆环，不用 ⓧ 字形（跨字体渲染不一致） */
+    border-radius: 50%;
+    font-size: 9px;
+    line-height: 1;
+  }
+
+  .error-count {
+    font-variant-numeric: tabular-nums; /* 数字变化时宽度稳定，不抖动 */
   }
 
   .preview-body {
