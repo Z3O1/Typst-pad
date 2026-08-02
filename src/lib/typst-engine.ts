@@ -41,9 +41,20 @@ export interface CompileOk {
   pageCount: number;
 }
 
+/** 编译错误的源码位置（1-based 行列），供编辑器画波浪线 / hover 提示 */
+export interface CompileErrorLocation {
+  message: string;
+  line: number;
+  col: number;
+  endLine: number;
+  endCol: number;
+}
+
 export interface CompileFail {
   ok: false;
   error: string;
+  /** 所有可定位的编译错误（含位置）；无法解析出 range 的错误会被跳过 */
+  errors: CompileErrorLocation[];
 }
 
 export type CompileResult = CompileOk | CompileFail;
@@ -120,10 +131,14 @@ export function compileToSvg(source: string): Promise<CompileResult> {
 
       const errors = (diagnostics ?? []).filter((d) => d.severity === "error");
       if (errors.length > 0) {
-        return { ok: false, error: formatDiagnostic(errors[0]) };
+        return {
+          ok: false,
+          error: formatDiagnostic(errors[0]),
+          errors: collectErrorLocations(errors),
+        };
       }
       if (!result) {
-        return { ok: false, error: "编译失败：未生成产物" };
+        return { ok: false, error: "编译失败：未生成产物", errors: [] };
       }
 
       const svg = await renderer!.renderSvg({
@@ -136,7 +151,11 @@ export function compileToSvg(source: string): Promise<CompileResult> {
       const pageCount = (svg.match(/class="typst-page"/g) ?? []).length;
       return { ok: true, svg: sanitizeSvg(svg), pageCount };
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        errors: [],
+      };
     }
   });
 }
@@ -144,6 +163,38 @@ export function compileToSvg(source: string): Promise<CompileResult> {
 function formatDiagnostic(d: DiagnosticMessage): string {
   const loc = d.range ? ` (${d.range})` : "";
   return `${d.message}${loc}`;
+}
+
+/**
+ * 从 LSP 风格 range 解析 1-based 行列。
+ * 支持 "2:9"、"2:9-3:15"、"main.typ:2:9-3:15"（可带路径前缀）；
+ * 解析失败返回 null（调用方跳过该错误）。
+ */
+function parseDiagnosticRange(
+  range: string,
+): { line: number; col: number; endLine: number; endCol: number } | null {
+  const m = /(\d+):(\d+)(?:-(\d+):(\d+))?$/.exec(range);
+  if (!m) return null;
+  const line = Number(m[1]);
+  const col = Number(m[2]);
+  return {
+    line,
+    col,
+    endLine: m[3] !== undefined ? Number(m[3]) : line,
+    endCol: m[4] !== undefined ? Number(m[4]) : col,
+  };
+}
+
+/** 把所有 error 级诊断转成带源码位置的错误列表（无法定位的跳过） */
+function collectErrorLocations(
+  diagnostics: DiagnosticMessage[],
+): CompileErrorLocation[] {
+  const locations: CompileErrorLocation[] = [];
+  for (const d of diagnostics) {
+    const loc = d.range ? parseDiagnosticRange(d.range) : null;
+    if (loc) locations.push({ message: d.message, ...loc });
+  }
+  return locations;
 }
 
 /** 编译为 PDF 字节并返回 Blob（供下载/保存） */

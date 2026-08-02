@@ -10,6 +10,10 @@ export interface PersistedState {
   content: string;
   filePath: string | null;
   fileTitle: string | null;
+  /** 编译/导出时是否自动在代码前插入前缀 */
+  prefixEnabled: boolean;
+  /** 前缀代码（插入到用户代码之前） */
+  prefixCode: string;
 }
 
 /** 读取持久化状态；不存在或损坏时返回空对象 */
@@ -19,7 +23,11 @@ export function loadState(): Partial<PersistedState> {
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) return {};
-    return parsed as Partial<PersistedState>;
+    const state = parsed as Partial<PersistedState>;
+    // 兼容旧存档：新增字段缺失时补默认值
+    if (state.prefixEnabled === undefined) state.prefixEnabled = false;
+    if (state.prefixCode === undefined) state.prefixCode = "";
+    return state;
   } catch {
     return {};
   }
