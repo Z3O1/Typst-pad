@@ -36,11 +36,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       # Rust 缓存：命中 ci.yml 的 main 分支构建写入的缓存，避免每次发版全量编译；
-      # 构建失败时也保存缓存，重试可增量编译
+      # 构建失败时也保存缓存，重试可增量编译。
+      # shared-key 必须与 ci.yml 的 build-bundles 相同（覆盖默认 job 名 key），
+      # 否则 key 含 job 名（release），读不到 build-bundles 写的缓存
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: tauri-build-windows
           cache-on-failure: true
 
       - name: Install frontend dependencies

@@ -80,11 +80,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       # Rust 缓存：main 分支触发时命中，避免每次全量编译；
-      # 构建失败时也保存缓存，重试可增量编译
+      # 构建失败时也保存缓存，重试可增量编译。
+      # shared-key 覆盖默认的 job 名 key，与 release.yml 的 release job 共享同一缓存
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: tauri-build-windows
           cache-on-failure: true
 
       - name: Install frontend dependencies
