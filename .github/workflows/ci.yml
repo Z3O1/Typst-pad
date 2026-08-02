@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# 同分支连续提交时取消排队中的旧 run，避免 Actions 分钟浪费
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -35,11 +40,13 @@ jobs:
         with:
           components: rustfmt
 
-      # Rust 缓存：cargo check 命中后只做增量检查，避免每次全量编译
+      # Rust 缓存：cargo check 命中后只做增量检查，避免每次全量编译；
+      # 构建失败时也保存缓存，重试可增量编译
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: npm ci
@@ -72,11 +79,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Rust 缓存：main 分支触发时命中，避免每次全量编译
+      # Rust 缓存：main 分支触发时命中，避免每次全量编译；
+      # 构建失败时也保存缓存，重试可增量编译
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: npm ci

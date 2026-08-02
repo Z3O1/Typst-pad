@@ -35,11 +35,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Rust 缓存：命中 ci.yml 的 main 分支构建写入的缓存，避免每次发版全量编译
+      # Rust 缓存：命中 ci.yml 的 main 分支构建写入的缓存，避免每次发版全量编译；
+      # 构建失败时也保存缓存，重试可增量编译
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: npm ci
