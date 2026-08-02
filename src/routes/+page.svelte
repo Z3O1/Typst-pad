@@ -13,7 +13,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-  import { confirm, message } from "@tauri-apps/plugin-dialog";
+  import { confirm } from "@tauri-apps/plugin-dialog";
   import { loadState, saveState } from "$lib/persistence";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
@@ -42,6 +42,25 @@
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
   let beforeUnloadHandler: ((e: BeforeUnloadEvent) => void) | null = null;
   let showAbout = $state(false);
+  let showClosePrompt = $state(false); // 关闭确认弹窗（保存/不保存/取消）
+
+  /** 关闭弹窗：保存后关闭 */
+  async function onClosePromptSave() {
+    showClosePrompt = false;
+    const saved = await handleSave();
+    if (saved) getCurrentWindow().destroy(); // destroy 不再次触发 close-requested
+  }
+
+  /** 关闭弹窗：不保存，直接关闭 */
+  function onClosePromptDiscard() {
+    showClosePrompt = false;
+    getCurrentWindow().destroy();
+  }
+
+  /** 关闭弹窗：取消，保持窗口打开 */
+  function onClosePromptCancel() {
+    showClosePrompt = false;
+  }
 
   /** 轻量防抖：内容/主题/路径变化后 300ms 写入 localStorage */
   function schedulePersist() {
@@ -290,28 +309,13 @@
         else unlisteners.push(un);
       });
     if (isTauri()) {
-      // 关闭确认：有未保存修改时弹窗（保存 / 不保存 / 取消）
+      // 关闭确认：有未保存修改时显示前端自定义三按钮弹窗
+      // （不依赖 dialog 插件返回值的语义差异，保证 保存/不保存/取消 可靠）
       keepUnlisten(
         getCurrentWindow().onCloseRequested(async (event) => {
           if (!dirty) return; // 无未保存修改，直接关闭
           event.preventDefault();
-          // 注意：message() 返回 Rust 端 MessageDialogResult 枚举的序列化值
-          // （"Yes"/"No"/"Cancel"），而非自定义按钮文本
-          const choice = await message(
-            "当前文档有未保存的修改，是否保存？",
-            {
-              title: "未保存的修改",
-              kind: "warning",
-              buttons: { yes: "保存", no: "不保存", cancel: "取消" },
-            },
-          );
-          if (choice === "Yes") {
-            const saved = await handleSave();
-            if (saved) getCurrentWindow().destroy(); // destroy 不再次触发 close-requested
-          } else if (choice === "No") {
-            getCurrentWindow().destroy();
-          }
-          // "Cancel"：保持窗口打开
+          showClosePrompt = true;
         }),
       );
       // 窗口级拖放：把 .typ 文件拖到窗口内自动打开
@@ -425,7 +429,7 @@
     >
       <div class="modal">
         <h3 class="modal-title">Typst-pad</h3>
-        <p class="modal-text">版本 0.2.0</p>
+        <p class="modal-text">版本 0.2.7</p>
         <p class="modal-text">Typora 式布局的 Typst 桌面编辑器：左编辑 / 右实时预览。</p>
         <p class="modal-text">MIT License © 2026 Z3O1</p>
         <span
@@ -437,6 +441,20 @@
         >关闭</span>
       </div>
     </button>
+  {/if}
+
+  {#if showClosePrompt}
+    <div class="modal-overlay-static">
+      <div class="modal">
+        <h3 class="modal-title">未保存的修改</h3>
+        <p class="modal-text">当前文档有未保存的修改，是否保存？</p>
+        <div class="modal-actions">
+          <button class="modal-btn primary" onclick={onClosePromptSave}>保存</button>
+          <button class="modal-btn" onclick={onClosePromptDiscard}>不保存</button>
+          <button class="modal-btn" onclick={onClosePromptCancel}>取消</button>
+        </div>
+      </div>
+    </div>
   {/if}
 </div>
 
@@ -537,6 +555,53 @@
   .modal-close:hover {
     border-color: var(--accent);
     color: var(--accent);
+  }
+
+  /* 关闭确认弹窗（纯静态遮罩：不响应点击，必须选择按钮） */
+  .modal-overlay-static {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+  }
+
+  .app.light .modal-overlay-static {
+    background: rgba(255, 255, 255, 0.55);
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    justify-content: flex-end;
+  }
+
+  .modal-btn {
+    padding: 6px 18px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-pane);
+    color: var(--fg);
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .modal-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .modal-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #ffffff;
+  }
+
+  .modal-btn.primary:hover {
+    opacity: 0.9;
   }
 
   .panes {
