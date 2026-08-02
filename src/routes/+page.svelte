@@ -37,6 +37,7 @@
   let previewStatus: "idle" | "ready" | "error" = $state("idle");
   let previewError = $state("");
   let pageCount = $state(0);
+  let charCount = $state(0); // 字符数（状态栏右侧独立显示）
   let previewHost: HTMLElement;
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
@@ -140,7 +141,6 @@
       fileTitle = saved.split(/[\\/]/).pop() ?? saved;
       dirty = false;
       schedulePersist();
-      statusText = "已保存";
       return saved;
     } catch (e) {
       statusText = "保存失败";
@@ -282,7 +282,8 @@
       previewStatus = "ready";
       editorDiagnostics = [];
       errorCount = 0; // 编译成功：错误徽标归零（与状态栏文本同源）
-      statusText = `${doc.length} 字符 · ${result.pageCount} 页`;
+      charCount = doc.length;
+      statusText = "就绪";
     } else {
       // 编译错误：保留最后一次成功预览（不置 error、不隐藏预览、不显示错误面板），
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
@@ -476,7 +477,8 @@
     <span>{statusText}</span>
     <span class="error-badge"><span class="error-icon">✕</span><span class="error-count">{errorCount}</span></span>
     <span class="spacer"></span>
-    <span>Ln {cursorLine}, Col {cursorCol}</span>
+    <span>{charCount} 字符 · {pageCount} 页</span>
+    <span>行 {cursorLine}, 列 {cursorCol}</span>
   </footer>
 
   {#if showAbout}
@@ -733,7 +735,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    color: #e74c3c; /* 错误红：深浅主题下均清晰 */
+    color: var(--fg-dim);
   }
 
   .error-icon {
