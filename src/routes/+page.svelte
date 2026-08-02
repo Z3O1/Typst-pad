@@ -679,7 +679,6 @@
 
   .preview-paper {
     width: 100%;
-    max-width: 820px;
     background: #ffffff;
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
     border-radius: 2px;
