@@ -728,8 +728,6 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 24px 16px;
-    background: #3a3a3c;
     overflow: auto;
   }
 
@@ -752,22 +750,20 @@
     background: rgba(255, 255, 255, 0.6);
   }
 
-  .app.light .preview-body {
-    background: #c9c9cc;
-  }
-
   .preview-paper {
     width: 100%;
-    background: #ffffff;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
-    border-radius: 2px;
-    padding: 16px;
+    /* 不再模拟 A4 纸外观：页面白底由 SVG 内部自行绘制，仅保留宽度 */
   }
 
   .preview-paper :global(svg.typst-doc) {
     display: block;
     width: 100%;
     height: auto;
+  }
+
+  /* 页间分隔线（svg-paginate 注入的 <line class="page-separator">），随主题自适应 */
+  .preview-paper :global(line.page-separator) {
+    stroke: var(--border);
   }
 
   .preview-placeholder {
