@@ -491,7 +491,7 @@
     >
       <div class="modal">
         <h3 class="modal-title">Typst-pad</h3>
-        <p class="modal-text">版本 0.2.7</p>
+        <p class="modal-text">版本 0.3.0</p>
         <p class="modal-text">Typora 式布局的 Typst 桌面编辑器：左编辑 / 右实时预览。</p>
         <p class="modal-text">MIT License © 2026 Z3O1</p>
         <span
