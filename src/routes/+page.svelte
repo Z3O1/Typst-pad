@@ -13,7 +13,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-  import { confirm } from "@tauri-apps/plugin-dialog";
+  import { confirm, message } from "@tauri-apps/plugin-dialog";
   import { loadState, saveState } from "$lib/persistence";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
@@ -40,6 +40,7 @@
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
+  let beforeUnloadHandler: ((e: BeforeUnloadEvent) => void) | null = null;
   let showAbout = $state(false);
 
   /** 轻量防抖：内容/主题/路径变化后 300ms 写入 localStorage */
@@ -103,17 +104,19 @@
     await openPath(path);
   }
 
-  async function handleSave() {
+  async function handleSave(): Promise<string | null> {
     try {
       const saved = await saveTypFile(filePath, doc);
-      if (!saved) return;
+      if (!saved) return null;
       filePath = saved;
       fileTitle = saved.split(/[\\/]/).pop() ?? saved;
       dirty = false;
       schedulePersist();
       statusText = "已保存";
+      return saved;
     } catch (e) {
       statusText = "保存失败";
+      return null;
     }
   }
 
@@ -214,13 +217,13 @@
     }
   }
 
-  /** 窗口标题同步为“文件名 - Typst-pad”（Tauri）；文件名不再显示在 UI 顶部 */
+  /** 窗口标题同步为“文件名 - Typst-pad”；未保存修改时文件名后加圆点（Tauri） */
   function syncWindowTitle() {
     if (!isTauri()) return;
-    getCurrentWindow().setTitle(`${fileTitle} - Typst-pad`);
+    getCurrentWindow().setTitle(`${fileTitle}${dirty ? " ●" : ""} - Typst-pad`);
   }
 
-  // fileTitle 变化时（打开/保存/新建）同步窗口标题
+  // fileTitle / dirty 变化时（打开/保存/新建/编辑）同步窗口标题
   $effect(() => {
     syncWindowTitle();
   });
@@ -287,6 +290,28 @@
         else unlisteners.push(un);
       });
     if (isTauri()) {
+      // 关闭确认：有未保存修改时弹窗（保存 / 不保存 / 取消）
+      keepUnlisten(
+        getCurrentWindow().onCloseRequested(async (event) => {
+          if (!dirty) return; // 无未保存修改，直接关闭
+          event.preventDefault();
+          const choice = await message(
+            "当前文档有未保存的修改，是否保存？",
+            {
+              title: "未保存的修改",
+              kind: "warning",
+              buttons: { yes: "保存", no: "不保存", cancel: "取消" },
+            },
+          );
+          if (choice === "保存") {
+            const saved = await handleSave();
+            if (saved) getCurrentWindow().destroy(); // destroy 不再次触发 close-requested
+          } else if (choice === "不保存") {
+            getCurrentWindow().destroy();
+          }
+          // "取消"：保持窗口打开
+        }),
+      );
       // 窗口级拖放：把 .typ 文件拖到窗口内自动打开
       keepUnlisten(
         getCurrentWindow().onDragDropEvent((event) => {
@@ -319,12 +344,22 @@
           })
           .catch(() => {});
       });
+    } else {
+      // 浏览器 dev：beforeunload 简单提示（无法自定义按钮）
+      beforeUnloadHandler = (e: BeforeUnloadEvent) => {
+        if (dirty) e.preventDefault();
+      };
+      window.addEventListener("beforeunload", beforeUnloadHandler);
     }
 
     return () => {
       disposed = true;
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
+      if (beforeUnloadHandler) {
+        window.removeEventListener("beforeunload", beforeUnloadHandler);
+        beforeUnloadHandler = null;
+      }
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
