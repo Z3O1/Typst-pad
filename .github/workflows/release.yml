@@ -1,11 +1,17 @@
 name: Release
 
 # 构建与发布分离：安装包由 CI（ci.yml，push main/PR）构建并上传为 artifact；
-# 本 workflow 仅在打 tag 时触发，只下载 artifact 并发布为 GitHub Release。
-# 不安装任何依赖、不使用 Rust 缓存（发布步骤本身就是轻量的）。
+# 本 workflow 在打 tag 时触发，或手动触发（artifact 就绪后重跑发布），
+# 只下载 artifact 并发布为 GitHub Release。不安装任何依赖、不使用 Rust 缓存。
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "发布用 tag（手动触发时填写，如 v0.2.7）"
+        required: false
+        default: ""
 
 # GITHUB_TOKEN 默认只读；创建/更新 Release 需要 contents: write
 permissions:
@@ -26,6 +32,7 @@ jobs:
       - name: Publish draft release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
           files: bundles/**
           draft: true
           generate_release_notes: false
