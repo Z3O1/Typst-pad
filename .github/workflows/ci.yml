@@ -49,3 +49,39 @@ jobs:
 
       - name: Cargo check (Tauri shell)
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+  # Windows 安装包构建（吃 main 分支缓存），产物上传供 Release workflow 发布
+  build-bundles:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Rust 缓存：main 分支触发时命中，避免每次全量编译
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build installers (nsis + msi)
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundles
+          path: src-tauri/target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 14

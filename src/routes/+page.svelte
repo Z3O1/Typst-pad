@@ -295,6 +295,8 @@
         getCurrentWindow().onCloseRequested(async (event) => {
           if (!dirty) return; // 无未保存修改，直接关闭
           event.preventDefault();
+          // 注意：message() 返回 Rust 端 MessageDialogResult 枚举的序列化值
+          // （"Yes"/"No"/"Cancel"），而非自定义按钮文本
           const choice = await message(
             "当前文档有未保存的修改，是否保存？",
             {
@@ -303,13 +305,13 @@
               buttons: { yes: "保存", no: "不保存", cancel: "取消" },
             },
           );
-          if (choice === "保存") {
+          if (choice === "Yes") {
             const saved = await handleSave();
             if (saved) getCurrentWindow().destroy(); // destroy 不再次触发 close-requested
-          } else if (choice === "不保存") {
+          } else if (choice === "No") {
             getCurrentWindow().destroy();
           }
-          // "取消"：保持窗口打开
+          // "Cancel"：保持窗口打开
         }),
       );
       // 窗口级拖放：把 .typ 文件拖到窗口内自动打开
