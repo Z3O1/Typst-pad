@@ -127,7 +127,7 @@
   }
 
   .menu-title {
-    padding: 6px 14px;
+    padding: 2px 10px;
     border: none;
     background: transparent;
     color: var(--fg);
