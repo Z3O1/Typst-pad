@@ -118,7 +118,12 @@
   });
 </script>
 
-<nav class="menubar" bind:this={rootEl} aria-label="主菜单">
+<nav
+  class="menubar"
+  class:menu-selected={selectedIndex !== null}
+  bind:this={rootEl}
+  aria-label="主菜单"
+>
   {#each groups as group, i (group.label)}
     <div class="menu">
       <button
@@ -130,7 +135,7 @@
           if (openIndex !== null) openIndex = i; // 已展开时悬停切换
         }}
       >
-        {group.label}{#if group.accessKey} ({group.accessKey}){/if}
+        {group.label}{#if group.accessKey} (<span class="access-key">{group.accessKey}</span>){/if}
       </button>
       {#if openIndex === i}
         <div class="menu-dropdown" role="menu">
@@ -178,6 +183,11 @@
   .menu-title.active,
   .menu-title.selected {
     background: var(--bg-pane);
+  }
+
+  /* 选中态（Alt 激活）：全部标题括号内字母加下划线（Windows 菜单风格） */
+  .menubar.menu-selected .access-key {
+    text-decoration: underline;
   }
 
   .menu-dropdown {
