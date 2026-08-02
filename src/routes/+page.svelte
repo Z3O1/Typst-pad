@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import Editor from "$lib/Editor.svelte";
   import { compileToSvg, compileToPdf } from "$lib/typst-engine";
+  import type { CompileErrorLocation } from "$lib/typst-engine";
   import {
     openTypFile,
     saveTypFile,
@@ -43,6 +44,13 @@
   let beforeUnloadHandler: ((e: BeforeUnloadEvent) => void) | null = null;
   let showAbout = $state(false);
   let showClosePrompt = $state(false); // 关闭确认弹窗（保存/不保存/取消）
+  let showSettings = $state(false); // 设置弹窗（编译前缀代码）
+  let editorDiagnostics = $state<CompileErrorLocation[]>([]); // 编译错误位置（传给编辑器画波浪线）
+  let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
+  let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
+  // 设置弹窗中的临时值（点“保存”才写回并持久化）
+  let settingsPrefixEnabled = $state(false);
+  let settingsPrefixCode = $state("");
 
   /** 关闭弹窗：保存后关闭 */
   async function onClosePromptSave() {
@@ -66,7 +74,7 @@
   function schedulePersist() {
     clearTimeout(persistTimer);
     persistTimer = setTimeout(() => {
-      saveState({ theme, content: doc, filePath, fileTitle });
+      saveState({ theme, content: doc, filePath, fileTitle, prefixEnabled, prefixCode });
     }, 300);
   }
 
@@ -159,6 +167,7 @@
           { label: "新建", action: handleNew },
           { label: "打开…", action: handleOpen },
           { label: "保存", action: handleSave },
+          { label: "设置…", action: openSettings },
           { label: "导出 PDF…", action: handleExportPdf },
         ],
       },
@@ -199,7 +208,8 @@
   async function handleExportPdf() {
     statusText = "导出 PDF…";
     try {
-      const blob = await compileToPdf(doc);
+      const source = prefixEnabled ? prefixCode + doc : doc;
+      const blob = await compileToPdf(source);
       const name = (fileTitle.replace(/\.[^.]+$/, "") || "document") + ".pdf";
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -219,20 +229,44 @@
     runCompile(); // 立即编译：内容变化后直接编译，编译完即显示（无防抖延迟）
   }
 
+  /** 打开设置弹窗：载入当前前缀配置副本，点“保存”才生效 */
+  function openSettings() {
+    settingsPrefixEnabled = prefixEnabled;
+    settingsPrefixCode = prefixCode;
+    showSettings = true;
+  }
+
+  /** 保存设置：应用前缀配置并持久化 */
+  function saveSettings() {
+    prefixEnabled = settingsPrefixEnabled;
+    prefixCode = settingsPrefixCode;
+    schedulePersist();
+    showSettings = false;
+    statusText = "设置已保存";
+  }
+
+  /** 关闭设置弹窗：放弃未保存的修改 */
+  function closeSettings() {
+    showSettings = false;
+  }
+
   async function runCompile() {
     const mySeq = ++compileSeq;
     // 编译期间保留旧预览，完成后直接替换（不做 loading 遮罩）
-    const result = await compileToSvg(doc);
+    const source = prefixEnabled ? prefixCode + doc : doc;
+    const result = await compileToSvg(source);
     if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
     if (result.ok) {
       previewHost.innerHTML = result.svg;
       pageCount = result.pageCount;
       previewStatus = "ready";
+      editorDiagnostics = [];
       statusText = `${doc.length} 字符 · ${result.pageCount} 页`;
     } else {
-      previewStatus = "error";
-      previewError = result.error;
-      statusText = "编译错误";
+      // 编译错误：保留最后一次成功预览（不置 error、不隐藏预览、不显示错误面板），
+      // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
+      editorDiagnostics = result.errors;
+      statusText = `编译错误：${result.errors.length} 处`;
     }
   }
 
@@ -289,6 +323,8 @@
     if (saved.theme === "system" || saved.theme === "dark" || saved.theme === "light") {
       theme = saved.theme;
     }
+    prefixEnabled = saved.prefixEnabled ?? false;
+    prefixCode = saved.prefixCode ?? "";
 
     runCompile();
     resolveTheme();
@@ -388,6 +424,7 @@
           initialDoc={SAMPLE_DOC}
           doc={editorDoc}
           theme={resolvedTheme}
+          diagnostics={editorDiagnostics}
           onCursor={handleCursor}
           onDocChange={handleDocChange}
         />
@@ -452,6 +489,29 @@
           <button class="modal-btn primary" onclick={onClosePromptSave}>保存</button>
           <button class="modal-btn" onclick={onClosePromptDiscard}>不保存</button>
           <button class="modal-btn" onclick={onClosePromptCancel}>取消</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showSettings}
+    <div class="modal-overlay-static">
+      <div class="modal settings-modal">
+        <h3 class="modal-title">设置</h3>
+        <p class="modal-text">编译/导出时自动在代码前插入前缀代码（可配置页面、字体等全局项）。</p>
+        <label class="settings-row">
+          <input type="checkbox" bind:checked={settingsPrefixEnabled} />
+          <span>启用前缀代码</span>
+        </label>
+        <textarea
+          class="settings-textarea"
+          bind:value={settingsPrefixCode}
+          placeholder="#set page(margin: 2cm)"
+          spellcheck="false"
+        ></textarea>
+        <div class="modal-actions">
+          <button class="modal-btn primary" onclick={saveSettings}>保存</button>
+          <button class="modal-btn" onclick={closeSettings}>关闭</button>
         </div>
       </div>
     </div>
@@ -719,5 +779,49 @@
     word-break: break-word;
     color: #ffc9c9;
     font-size: 12px;
+  }
+
+  /* 设置弹窗 */
+  .settings-modal {
+    width: 520px;
+    max-width: 90vw;
+  }
+
+  .settings-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0 4px;
+    color: var(--fg);
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .settings-row input[type="checkbox"] {
+    accent-color: var(--accent);
+    width: 15px;
+    height: 15px;
+  }
+
+  .settings-textarea {
+    width: 100%;
+    min-height: 160px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--bg-pane);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--fg);
+    font-family: Consolas, "Cascadia Code", "Courier New", monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    box-sizing: border-box;
+  }
+
+  .settings-textarea:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 </style>
