@@ -17,12 +17,16 @@ describe("persistence", () => {
       content: "= hello",
       filePath: "D:\\doc.typ",
       fileTitle: "doc.typ",
+      prefixEnabled: true,
+      prefixCode: "#set text(size: 12pt)\n",
     });
     expect(loadState()).toEqual({
       theme: "dark",
       content: "= hello",
       filePath: "D:\\doc.typ",
       fileTitle: "doc.typ",
+      prefixEnabled: true,
+      prefixCode: "#set text(size: 12pt)\n",
     });
   });
 
@@ -32,13 +36,13 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "" });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "" });
     expect(loadState().theme).toBe("system");
   });
 });
