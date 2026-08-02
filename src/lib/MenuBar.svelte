@@ -102,18 +102,34 @@
     }
   }
 
+  function onWindowBlur() {
+    // 窗口失焦（如 Alt+Tab 切走）：清空展开与选中态，恢复编辑器光标
+    if (selectedIndex === null && openIndex === null) return;
+    selectedIndex = null;
+    openIndex = null;
+    onMenuFocusChange?.(false);
+  }
+
   function onClickOutside(e: MouseEvent) {
+    // mousedown 在菜单栏外部：关闭下拉并退出选中态（恢复编辑器光标）。
+    // 菜单项按钮都在 rootEl 内部，不会被误判为外部，不干扰 click 的 runAction 流程。
     if (rootEl && !rootEl.contains(e.target as Node)) {
       openIndex = null;
+      if (selectedIndex !== null) {
+        selectedIndex = null;
+        onMenuFocusChange?.(false);
+      }
     }
   }
 
   onMount(() => {
     window.addEventListener("keydown", onKeydown);
-    window.addEventListener("click", onClickOutside);
+    window.addEventListener("mousedown", onClickOutside);
+    window.addEventListener("blur", onWindowBlur);
     return () => {
       window.removeEventListener("keydown", onKeydown);
-      window.removeEventListener("click", onClickOutside);
+      window.removeEventListener("mousedown", onClickOutside);
+      window.removeEventListener("blur", onWindowBlur);
     };
   });
 </script>
