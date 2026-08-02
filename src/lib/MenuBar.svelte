@@ -102,23 +102,44 @@
     }
   }
 
+  function onWindowBlur() {
+    // 窗口失焦（如 Alt+Tab 切走）：清空展开与选中态，恢复编辑器光标
+    if (selectedIndex === null && openIndex === null) return;
+    selectedIndex = null;
+    openIndex = null;
+    onMenuFocusChange?.(false);
+  }
+
   function onClickOutside(e: MouseEvent) {
+    // mousedown 在菜单栏外部：关闭下拉并退出选中态（恢复编辑器光标）。
+    // 菜单项按钮都在 rootEl 内部，不会被误判为外部，不干扰 click 的 runAction 流程。
     if (rootEl && !rootEl.contains(e.target as Node)) {
       openIndex = null;
+      if (selectedIndex !== null) {
+        selectedIndex = null;
+        onMenuFocusChange?.(false);
+      }
     }
   }
 
   onMount(() => {
     window.addEventListener("keydown", onKeydown);
-    window.addEventListener("click", onClickOutside);
+    window.addEventListener("mousedown", onClickOutside);
+    window.addEventListener("blur", onWindowBlur);
     return () => {
       window.removeEventListener("keydown", onKeydown);
-      window.removeEventListener("click", onClickOutside);
+      window.removeEventListener("mousedown", onClickOutside);
+      window.removeEventListener("blur", onWindowBlur);
     };
   });
 </script>
 
-<nav class="menubar" bind:this={rootEl} aria-label="主菜单">
+<nav
+  class="menubar"
+  class:menu-selected={selectedIndex !== null}
+  bind:this={rootEl}
+  aria-label="主菜单"
+>
   {#each groups as group, i (group.label)}
     <div class="menu">
       <button
@@ -130,7 +151,7 @@
           if (openIndex !== null) openIndex = i; // 已展开时悬停切换
         }}
       >
-        {group.label}{#if group.accessKey} ({group.accessKey}){/if}
+        {group.label}{#if group.accessKey} (<span class="access-key">{group.accessKey}</span>){/if}
       </button>
       {#if openIndex === i}
         <div class="menu-dropdown" role="menu">
@@ -151,13 +172,12 @@
 </nav>
 
 <style>
-  /* 文本式菜单栏：占满所在行（flex:1 由父级或此处控制），无按钮边框感 */
+  /* 文本式菜单栏：内容宽不拉伸、贴窗口左边界无留白，无按钮边框感 */
   .menubar {
     display: flex;
     align-items: center;
-    flex: 1;
     min-width: 0;
-    padding-left: 4px; /* 传统菜单栏：首项距左侧少量留白 */
+    padding-left: 0; /* 贴边：首项直接顶到窗口左边界 */
     user-select: none;
   }
 
@@ -166,7 +186,7 @@
   }
 
   .menu-title {
-    padding: 2px 10px;
+    padding: 2px 6px;
     border: none;
     background: transparent;
     color: var(--fg);
@@ -178,6 +198,11 @@
   .menu-title.active,
   .menu-title.selected {
     background: var(--bg-pane);
+  }
+
+  /* 选中态（Alt 激活）：全部标题括号内字母加下划线（Windows 菜单风格） */
+  .menubar.menu-selected .access-key {
+    text-decoration: underline;
   }
 
   .menu-dropdown {
