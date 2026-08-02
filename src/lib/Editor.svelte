@@ -85,4 +85,11 @@
   .editor-host :global(.cm-editor.cm-focused) {
     outline: none;
   }
+
+  /* 行号使用等宽 console 字体，保证与代码列对齐 */
+  .editor-host :global(.cm-gutters),
+  .editor-host :global(.cm-lineNumbers),
+  .editor-host :global(.cm-gutterElement) {
+    font-family: Consolas, "Courier New", monospace;
+  }
 </style>
