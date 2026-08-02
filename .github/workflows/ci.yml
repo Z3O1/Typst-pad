@@ -90,6 +90,13 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # 缓存 Tauri 打包工具（WiX/NSIS 下载解压产物），避免每次全新下载
+      - name: Cache Tauri bundler tools
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\AppData\Local\tauri
+          key: tauri-bundle-tools-${{ runner.os }}
+
       - name: Build installers (nsis + msi)
         run: npm run tauri build
         env:
