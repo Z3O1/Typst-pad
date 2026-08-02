@@ -35,6 +35,12 @@ jobs:
         with:
           components: rustfmt
 
+      # Rust 缓存：cargo check 命中后只做增量检查，避免每次全量编译
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -50,8 +56,11 @@ jobs:
       - name: Cargo check (Tauri shell)
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
-  # Windows 安装包构建（吃 main 分支缓存），产物上传供 Release workflow 发布
+  # Windows 安装包构建：仅 main 分支触发（PR 不构建，省资源）。
+  # 作用有二：1) 验证 Windows 上的真实构建；2) 写入 Rust/npm 缓存，
+  # 供后续 tag 触发时的 release.yml 构建命中（所有 tag 都能读 main 的缓存）。
   build-bundles:
+    if: github.event_name == 'push'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
