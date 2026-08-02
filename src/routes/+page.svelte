@@ -155,6 +155,7 @@
     return [
       {
         label: "文件",
+        accessKey: "F",
         items: [
           { label: "新建", action: handleNew },
           { label: "打开…", action: handleOpen },
@@ -164,6 +165,7 @@
       },
       {
         label: "视图",
+        accessKey: "V",
         items: [
           { label: "主题：自动", checked: theme === "system", action: () => (theme = "system") },
           { label: "主题：暗", checked: theme === "dark", action: () => (theme = "dark") },
@@ -172,9 +174,26 @@
       },
       {
         label: "帮助",
+        accessKey: "H",
         items: [{ label: "关于 Typst-pad", action: () => (showAbout = true) }],
       },
     ];
+  }
+
+  /**
+   * 菜单栏选中态与编辑器焦点协调：
+   * - 菜单被选中（Alt 激活）时让编辑器失焦、隐藏光标；
+   * - 菜单取消选中时恢复编辑器光标。
+   */
+  function handleMenuFocusChange(focused: boolean) {
+    if (focused) {
+      const el = document.activeElement;
+      if (el instanceof HTMLElement && el.closest(".cm-content")) {
+        el.blur();
+      }
+    } else {
+      document.querySelector<HTMLElement>(".editor-host .cm-content")?.focus();
+    }
   }
 
   function systemPrefersDark(): boolean {
@@ -375,7 +394,7 @@
 
 <div class="app" class:light={resolvedTheme === "light"}>
   <header class="toolbar">
-    <MenuBar groups={menuGroups()} />
+    <MenuBar groups={menuGroups()} onMenuFocusChange={handleMenuFocusChange} />
   </header>
 
   <main class="panes">
