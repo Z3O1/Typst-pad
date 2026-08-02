@@ -580,7 +580,7 @@
     display: flex;
     align-items: center;
     padding: 0 4px 0 0; /* 左内边距归 0：菜单栏贴窗口左边界 */
-    background: var(--bg-toolbar);
+    background: var(--bg-pane);
     border-bottom: 1px solid var(--border);
     user-select: none;
   }
@@ -756,6 +756,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    background: var(--bg-pane);
     overflow: auto;
   }
 
