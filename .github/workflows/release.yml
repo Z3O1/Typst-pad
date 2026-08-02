@@ -1,16 +1,18 @@
 name: Release
 
-# 构建与发布分离：安装包由 CI（ci.yml，push main/PR）构建并上传为 artifact；
-# 本 workflow 在打 tag 时触发，或手动触发（artifact 就绪后重跑发布），
-# 只下载 artifact 并发布为 GitHub Release。不安装任何依赖、不使用 Rust 缓存。
+# 发布在打 tag 时自动进行：本 workflow 自己 checkout + 构建安装包 + 发布，
+# 不再依赖 ci.yml 上传的 artifact（download-artifact 只能拿当前 run 的产物，
+# 且 push tag 不触发 ci.yml，跨 workflow 取产物链路不可靠）。
+# 构建可命中 ci.yml 中 main 分支 build-bundles 写入的 Rust/npm 缓存
+# （GitHub Actions 缓存按 ref 隔离，但所有 tag 都能读 main 分支的缓存）。
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "发布用 tag（手动触发时填写，如 v0.2.7）"
-        required: false
+        description: "发布用 tag，需已存在（如 v0.2.8）"
+        required: true
         default: ""
 
 # GITHUB_TOKEN 默认只读；创建/更新 Release 需要 contents: write
@@ -19,20 +21,39 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: bundles
-          path: bundles
+          # tag 触发时检出该 tag；手动触发时检出填写的 tag，保证产物与 tag 严格对应
+          ref: ${{ github.event.inputs.tag_name || github.ref }}
 
-      - name: List bundles
-        run: ls -la bundles
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Rust 缓存：命中 ci.yml 的 main 分支构建写入的缓存，避免每次发版全量编译
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build installers (nsis + msi)
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Publish draft release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
-          files: bundles/**
+          files: src-tauri/target/release/bundle/**
           draft: true
           generate_release_notes: false
