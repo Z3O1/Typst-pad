@@ -7,6 +7,7 @@ import {
 import { CompileFormatEnum } from "@myriaddreamin/typst.ts/compiler";
 import type { TypstCompiler, TypstRenderer } from "@myriaddreamin/typst.ts";
 import { sanitizeSvg } from "./svg-sanitize";
+import { paginateSvg } from "./svg-paginate";
 // 静态导入 wasm 包装模块 + wasm URL，通过 getWrapper/getModule 显式注入，
 // 绕开 typst.ts 内部的动态 import()——该动态导入在 Vite dev 预构建下会触发
 // "Cannot import wasm module without importer" 错误。
@@ -149,7 +150,8 @@ export function compileToSvg(source: string): Promise<CompileResult> {
         data_selection: { body: true, defs: true, css: true, js: false },
       });
       const pageCount = (svg.match(/class="typst-page"/g) ?? []).length;
-      return { ok: true, svg: sanitizeSvg(svg), pageCount };
+      // 净化后插入页间分隔线（pageCount 仍基于原始 svg 统计，见 svg-paginate.ts）
+      return { ok: true, svg: paginateSvg(sanitizeSvg(svg)), pageCount };
     } catch (e) {
       return {
         ok: false,
