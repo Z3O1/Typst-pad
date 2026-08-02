@@ -1,58 +1,38 @@
 name: Release
 
-# 发版方式（重要：缓存按分支/tag 隔离）：
-# - 推荐：workflow_dispatch 手动触发，并在 "Branch" 选择 main。
-#   此时缓存 scope = main，跨版本稳定命中 Rust 缓存（快速构建）。
-# - 备选：push tag 触发。注意 tag 触发的缓存 scope 是各自 tag 名，
-#   不同 tag 之间缓存互不可见（GitHub 限制），每次都会全量编译。
+# 构建与发布分离：安装包由 CI（ci.yml，push main/PR）构建并上传为 artifact；
+# 本 workflow 在打 tag 时触发，或手动触发（artifact 就绪后重跑发布），
+# 只下载 artifact 并发布为 GitHub Release。不安装任何依赖、不使用 Rust 缓存。
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "发布用 tag（手动触发时填写，如 v0.2.7）"
+        required: false
+        default: ""
 
 # GITHUB_TOKEN 默认只读；创建/更新 Release 需要 contents: write
 permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: windows-latest
+  release:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/download-artifact@v4
         with:
-          node-version: 22
-          cache: npm
+          name: bundles
+          path: bundles
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: List bundles
+        run: ls -la bundles
 
-      # Rust 增量编译缓存：二次构建可省约 8-10 分钟。
-      # 缓存 key 基于 rust 版本 + Cargo.lock 哈希；依赖不变（Cargo.lock 不变）
-      # 时跨版本命中，依赖变化则自动失效。请勿在每次发版时改 Cargo.toml
-      # 的 version（会导致 Cargo.lock 变化、缓存失效）。
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+      - name: Publish draft release
+        uses: softprops/action-gh-release@v2
         with:
-          workspaces: src-tauri
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 可选：配置后可生成带签名的安装包（应用内自动更新需要）
-          # 生成方式：npm run tauri signer generate
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: v__VERSION__
-          releaseName: "v__VERSION__"
-          releaseDraft: true
-          releaseBody: |
-            请下载对应安装包进行安装。
-
-            如需自动更新支持，请先在仓库 Secrets 中配置
-            `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          files: bundles/**
+          draft: true
+          generate_release_notes: false

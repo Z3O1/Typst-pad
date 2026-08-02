@@ -39,22 +39,21 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 ## 测试与 CI
 
 - 单元测试（vitest + jsdom）：`npm test`，覆盖 SVG 净化（`src/lib/svg-sanitize.test.ts`）与编译互斥队列（`src/lib/enqueue.test.ts`）
-- CI（GitHub Actions，`.github/workflows/ci.yml`）：每个 PR 在 ubuntu 上跑 类型检查 → 单测 → 前端构建 → `cargo check`
+- CI（GitHub Actions，`.github/workflows/ci.yml`）：
+  - `test`（ubuntu）：push 到 main / PR 时跑 类型检查 → 单测 → 前端构建 → `cargo check`
+  - `build-bundles`（windows）：同样在 main / PR 触发，构建 .exe/.msi 安装包并 `upload-artifact`（main 触发时吃 Rust 缓存）
 
 ## 发布（Release）
 
-自动构建与发布由 `.github/workflows/release.yml` 完成（windows 打包 .exe/.msi → 创建草稿 Release）。
-
-**推荐发版方式（缓存可命中）**：
+**构建与发布分离**：安装包由 CI 构建上传，发布 workflow 只做发布。
 
 1. 修改版本号：`package.json` 与 `src-tauri/tauri.conf.json` 的 `version`（两处一致；**不要**改 `src-tauri/Cargo.toml` 的 version——它是 Rust crate 版本，保持稳定以维持 CI 缓存）
-2. 提交推送（合并到 `main`）
-3. GitHub → **Actions → Release → Run workflow**（Branch 保持 `main`）→ 构建（命中 Rust 缓存，约 2-4 分钟）→ tauri-action 自动打 tag、生成草稿 Release
-4. Releases 页面编辑草稿 → 发布
+2. 提交推送并合并到 `main` → CI 自动构建安装包并上传 artifact（命中 Rust 缓存，快速）
+3. 打 tag 触发发布：`git tag v0.2.x && git push origin v0.2.x`
+4. GitHub → Actions → **Release**：下载最新 artifact → 生成草稿 Release（自动上传安装包）
+5. Releases 页面编辑草稿 → 发布
 
-**备选（tag 触发）**：`git tag v0.2.x && git push origin v0.2.x` 同样触发构建，但注意 **GitHub Actions 缓存按分支/tag 隔离**——tag 触发的每次构建都查不到上次的缓存（scope 是各自 tag 名），会全量编译约 14 分钟。因此**优先使用手动 dispatch（main）发版**，缓存稳定跨版本命中。
-
-> 缓存机制：`Swatinem/rust-cache` 的 key 基于 rust 版本 + `Cargo.lock` 哈希。依赖不变（Cargo.lock 不变）时跨版本命中；因此发版只改应用版本号、不动 `Cargo.toml`/依赖。
+> 缓存机制：`Swatinem/rust-cache` 的 key 基于 rust 版本 + `Cargo.lock` 哈希。安装包在 main 分支构建（scope=main），依赖不变（Cargo.lock 不变）时跨版本命中；发布 workflow 不安装依赖、不需要缓存。
 
 ## 架构
 
