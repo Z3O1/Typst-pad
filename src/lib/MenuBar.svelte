@@ -172,13 +172,12 @@
 </nav>
 
 <style>
-  /* 文本式菜单栏：占满所在行（flex:1 由父级或此处控制），无按钮边框感 */
+  /* 文本式菜单栏：内容宽不拉伸、贴窗口左边界无留白，无按钮边框感 */
   .menubar {
     display: flex;
     align-items: center;
-    flex: 1;
     min-width: 0;
-    padding-left: 4px; /* 传统菜单栏：首项距左侧少量留白 */
+    padding-left: 0; /* 贴边：首项直接顶到窗口左边界 */
     user-select: none;
   }
 
@@ -187,7 +186,7 @@
   }
 
   .menu-title {
-    padding: 2px 10px;
+    padding: 2px 6px;
     border: none;
     background: transparent;
     color: var(--fg);

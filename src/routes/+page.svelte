@@ -575,7 +575,7 @@
   .toolbar {
     display: flex;
     align-items: center;
-    padding: 0 4px;
+    padding: 0 4px 0 0; /* 左内边距归 0：菜单栏贴窗口左边界 */
     background: var(--bg-toolbar);
     border-bottom: 1px solid var(--border);
     user-select: none;
