@@ -77,3 +77,9 @@ export async function savePdfDialog(defaultName: string): Promise<string | null>
 export async function invokeWriteBinary(path: string, bytes: Uint8Array): Promise<void> {
   await invoke("write_binary", { path, bytes });
 }
+
+/** 列出文档目录下全部 .typ 文件（递归，返回绝对路径；浏览器环境返回 []） */
+export async function fetchDirLibraries(dir: string): Promise<string[]> {
+  if (!isTauri()) return [];
+  return await invoke<string[]>("list_dir_typ", { dir });
+}

@@ -21,6 +21,9 @@
   import { clearState } from "$lib/persistence";
   import { savePdfDialog, invokeWriteBinary } from "$lib/file-ops";
   import { pdfFileName } from "$lib/pdf-export";
+  import { registerLocalLibraries } from "$lib/typst-engine";
+  import { fetchDirLibraries } from "$lib/file-ops";
+  import { dirOfPath, libraryVirtualPaths, formatCompileFailMessage } from "$lib/typst-libs";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -114,6 +117,27 @@
     }
     try {
       const opened = await readTypFile(path);
+      // 注册同目录下的本地 .typ 库（供 #import "xxx.typ" 使用）；
+      // 失败仅降级提示，不影响打开主文档
+      let libLoadFailed = false;
+      if (isTauri()) {
+        try {
+          const dir = dirOfPath(opened.path);
+          const paths = await fetchDirLibraries(dir);
+          const files: Array<{ path: string; content: string }> = [];
+          for (const p of paths) {
+            try {
+              const f = await readTypFile(p);
+              files.push({ path: p, content: f.content });
+            } catch {
+              /* 非 UTF-8 等读取失败的文件跳过 */
+            }
+          }
+          await registerLocalLibraries(libraryVirtualPaths(files, dir));
+        } catch {
+          libLoadFailed = true;
+        }
+      }
       doc = opened.content;
       filePath = opened.path;
       fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
@@ -121,7 +145,7 @@
       editorDoc = opened.content; // 触发编辑器替换全文
       scheduleCompile();
       schedulePersist();
-      statusText = "已打开";
+      statusText = libLoadFailed ? "已打开（本地库加载失败）" : "已打开";
       return true;
     } catch (e) {
       statusText = "打开失败";
@@ -139,10 +163,30 @@
     try {
       const saved = await saveTypFile(filePath, doc);
       if (!saved) return null;
+      const prevDir = filePath ? dirOfPath(filePath) : null;
       filePath = saved;
       fileTitle = saved.split(/[\\/]/).pop() ?? saved;
       dirty = false;
       schedulePersist();
+      // 另存为到新目录（含首次保存）时，重注册该目录下的本地 .typ 库
+      if (isTauri() && dirOfPath(saved) !== prevDir) {
+        try {
+          const dir = dirOfPath(saved);
+          const paths = await fetchDirLibraries(dir);
+          const files: Array<{ path: string; content: string }> = [];
+          for (const p of paths) {
+            try {
+              const f = await readTypFile(p);
+              files.push({ path: p, content: f.content });
+            } catch {
+              /* 非 UTF-8 等读取失败的文件跳过 */
+            }
+          }
+          await registerLocalLibraries(libraryVirtualPaths(files, dir));
+        } catch {
+          /* 库加载失败不影响保存 */
+        }
+      }
       return saved;
     } catch (e) {
       statusText = "保存失败";
@@ -304,7 +348,11 @@
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
       editorDiagnostics = result.errors;
       errorCount = result.errors.length; // 与状态栏文本「编译错误：N 处」同源
-      statusText = `编译错误：${result.errors.length} 处`;
+      // 非定位错误（如包不存在 / 访问模型异常）必须可见，不再被吞掉
+      statusText =
+        result.errors.length === 0 && result.error
+          ? formatCompileFailMessage(0, result.error)
+          : `编译错误：${result.errors.length} 处`;
     }
   }
 

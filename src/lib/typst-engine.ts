@@ -4,6 +4,11 @@ import {
   createTypstRenderer,
   createTypstFontBuilder,
 } from "@myriaddreamin/typst.ts";
+import {
+  initOptions,
+  MemoryAccessModel,
+  FetchPackageRegistry,
+} from "@myriaddreamin/typst.ts";
 import { CompileFormatEnum } from "@myriaddreamin/typst.ts/compiler";
 import type { TypstCompiler, TypstRenderer } from "@myriaddreamin/typst.ts";
 import { sanitizeSvg } from "./svg-sanitize";
@@ -74,9 +79,17 @@ function ensureInit(): Promise<void> {
 async function doInit(): Promise<void> {
   compiler = createTypstCompiler();
   renderer = createTypstRenderer();
+  // 注入 access model 与 package registry，让 WASM 侧使用真实文件系统/联网包注册表
+  // （否则是 Dummy Registry / Dummy AccessModel，#import "@preview/..." 与本地 .typ 都会抛错）
+  const accessModel = new MemoryAccessModel();
+  const packageRegistry = new FetchPackageRegistry(accessModel);
   await compiler.init({
     getWrapper: () => Promise.resolve(typstCompilerModule),
     getModule: () => compilerWasmUrl,
+    beforeBuild: [
+      initOptions.withAccessModel(accessModel),
+      initOptions.withPackageRegistry(packageRegistry),
+    ],
   });
   await renderer.init({
     getWrapper: () => Promise.resolve(typstRendererModule),
@@ -109,6 +122,24 @@ export function enqueue<T>(task: () => Promise<T>): Promise<T> {
   const run = queueTail.then(task, task);
   queueTail = run.catch(() => undefined);
   return run;
+}
+
+/**
+ * 注册当前文档目录下的本地 .typ 库文件。keys 为相对虚拟路径（斜杠分隔、无前导斜杠，
+ * 如 "lib.typ"、"chapters/a.typ"），values 为文件文本内容。先 resetShadow（清掉
+ * main 的 shadow——但每次 compileToSvg/compileToPdf 都会先 addSource(MAIN_PATH)，
+ * 所以安全），再逐个 addSource("/" + rel)。空对象也用于清理上一份文档遗留的库文件。
+ */
+export function registerLocalLibraries(
+  files: Record<string, string>,
+): Promise<void> {
+  return enqueue(async () => {
+    await ensureInit();
+    compiler!.resetShadow();
+    for (const [rel, content] of Object.entries(files)) {
+      compiler!.addSource("/" + rel, content);
+    }
+  });
 }
 
 interface DiagnosticMessage {
