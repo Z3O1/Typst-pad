@@ -62,3 +62,18 @@ export async function saveTypFile(
   await invoke("write_file", { path: target, content });
   return target;
 }
+
+/** 弹出系统"另存为"对话框（默认文件名 defaultName），返回目标绝对路径；取消返回 null */
+export async function savePdfDialog(defaultName: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  const target = await save({
+    filters: [{ name: "PDF 文档", extensions: ["pdf"] }],
+    defaultPath: defaultName,
+  });
+  return typeof target === "string" ? target : null;
+}
+
+/** 通过 write_binary 命令写二进制文件（bytes 直接传 Uint8Array，Tauri IPC 会序列化为 JSON 数字数组） */
+export async function invokeWriteBinary(path: string, bytes: Uint8Array): Promise<void> {
+  await invoke("write_binary", { path, bytes });
+}

@@ -19,6 +19,8 @@
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
   import { clearState } from "$lib/persistence";
+  import { savePdfDialog, invokeWriteBinary } from "$lib/file-ops";
+  import { pdfFileName } from "$lib/pdf-export";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -230,14 +232,27 @@
     try {
       const source = prefixEnabled ? prefixCode + doc : doc;
       const blob = await compileToPdf(source);
-      const name = (fileTitle.replace(/\.[^.]+$/, "") || "document") + ".pdf";
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000); // 延迟回收避免中断下载
-      statusText = "已导出 PDF";
+      const name = pdfFileName(fileTitle);
+      if (isTauri()) {
+        // 桌面端：弹系统"另存为"对话框，落盘到用户选定的位置
+        const target = await savePdfDialog(name);
+        if (!target) {
+          statusText = "已取消导出";
+          return;
+        }
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        await invokeWriteBinary(target, bytes);
+        statusText = "已导出 PDF";
+      } else {
+        // 浏览器 dev 降级：沿用原 blob 下载
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000); // 延迟回收避免中断下载
+        statusText = "已导出 PDF";
+      }
     } catch (e) {
       statusText = "导出失败";
       previewStatus = "error";
