@@ -4,6 +4,11 @@ import {
   createTypstRenderer,
   createTypstFontBuilder,
 } from "@myriaddreamin/typst.ts";
+import {
+  initOptions,
+  MemoryAccessModel,
+  FetchPackageRegistry,
+} from "@myriaddreamin/typst.ts";
 import { CompileFormatEnum } from "@myriaddreamin/typst.ts/compiler";
 import type { TypstCompiler, TypstRenderer } from "@myriaddreamin/typst.ts";
 import { sanitizeSvg } from "./svg-sanitize";
@@ -74,9 +79,17 @@ function ensureInit(): Promise<void> {
 async function doInit(): Promise<void> {
   compiler = createTypstCompiler();
   renderer = createTypstRenderer();
+  // 注入 access model 与 package registry，让 WASM 侧使用真实文件系统/联网包注册表
+  // （否则是 Dummy Registry / Dummy AccessModel，#import "@preview/..." 与本地 .typ 都会抛错）
+  const accessModel = new MemoryAccessModel();
+  const packageRegistry = new FetchPackageRegistry(accessModel);
   await compiler.init({
     getWrapper: () => Promise.resolve(typstCompilerModule),
     getModule: () => compilerWasmUrl,
+    beforeBuild: [
+      initOptions.withAccessModel(accessModel),
+      initOptions.withPackageRegistry(packageRegistry),
+    ],
   });
   await renderer.init({
     getWrapper: () => Promise.resolve(typstRendererModule),
