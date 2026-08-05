@@ -348,7 +348,11 @@
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
       editorDiagnostics = result.errors;
       errorCount = result.errors.length; // 与状态栏文本「编译错误：N 处」同源
-      statusText = `编译错误：${result.errors.length} 处`;
+      // 非定位错误（如包不存在 / 访问模型异常）必须可见，不再被吞掉
+      statusText =
+        result.errors.length === 0 && result.error
+          ? formatCompileFailMessage(0, result.error)
+          : `编译错误：${result.errors.length} 处`;
     }
   }
 
