@@ -124,6 +124,24 @@ export function enqueue<T>(task: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/**
+ * 注册当前文档目录下的本地 .typ 库文件。keys 为相对虚拟路径（斜杠分隔、无前导斜杠，
+ * 如 "lib.typ"、"chapters/a.typ"），values 为文件文本内容。先 resetShadow（清掉
+ * main 的 shadow——但每次 compileToSvg/compileToPdf 都会先 addSource(MAIN_PATH)，
+ * 所以安全），再逐个 addSource("/" + rel)。空对象也用于清理上一份文档遗留的库文件。
+ */
+export function registerLocalLibraries(
+  files: Record<string, string>,
+): Promise<void> {
+  return enqueue(async () => {
+    await ensureInit();
+    compiler!.resetShadow();
+    for (const [rel, content] of Object.entries(files)) {
+      compiler!.addSource("/" + rel, content);
+    }
+  });
+}
+
 interface DiagnosticMessage {
   severity: string;
   message: string;
