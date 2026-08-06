@@ -583,6 +583,11 @@
   $effect(() => {
     if (!showErrors) return;
     let disposed = false;
+    // 关键：先复位上次打开遗留的 clamp（$state 在关闭时不自动清零）——否则第二次打开时
+    // Popover 带着旧的 transform 渲染，测量到的是已平移的正确矩形，算出位移 ≈ 0，
+    // 把变换清零后 Popover 跳回自然（溢出窗口）位置（实测「第一次对，第二次错」）。
+    // 复位触发一次额外渲染，tick() 在其后执行，保证测到的是未变换的自然矩形。
+    errorPopoverClamp = { translateX: 0, translateY: 0, maxWidth: 0 };
     void tick().then(() => {
       if (disposed || !errorPopoverEl) return;
       errorPopoverClamp = clampPopoverRect(
