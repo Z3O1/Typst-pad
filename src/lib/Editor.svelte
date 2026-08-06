@@ -3,12 +3,12 @@
   import { EditorView, Decoration, hoverTooltip } from "@codemirror/view";
   import { EditorState, Compartment, StateField } from "@codemirror/state";
   import type { DecorationSet } from "@codemirror/view";
-  import type { Range } from "@codemirror/state";
   import { basicSetup } from "codemirror";
   import { typst } from "codemirror-lang-typst";
   import { editorKeymap } from "./editor-keymap";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation } from "./typst-engine";
+  import { squiggleRanges, offsetAt } from "./diagnostics-utils";
 
   interface Props {
     initialDoc?: string;
@@ -18,20 +18,30 @@
     theme?: "dark" | "light";
     /** 编译错误位置列表（父组件传入）；为空时不显示波浪线 */
     diagnostics?: CompileErrorLocation[];
+    /** 编译前缀代码（启用前缀时传入）；波浪线位置按编译源（前缀 + 用户文档）换算回用户文档 */
+    prefixCode?: string;
     /** 跳转目标（1-based 行列；seq 变化确保重复跳同一位置也触发 effect） */
     jumpTo?: { line: number; col: number; seq: number } | null;
   }
 
-  let { initialDoc = "", onDocChange, onCursor, doc, theme = "dark", diagnostics, jumpTo = null }: Props =
-    $props();
+  let {
+    initialDoc = "",
+    onDocChange,
+    onCursor,
+    doc,
+    theme = "dark",
+    diagnostics,
+    prefixCode = "",
+    jumpTo = null,
+  }: Props = $props();
 
   let host: HTMLElement;
   let view: EditorView;
   let themeCompartment = new Compartment();
   let diagnosticsCompartment = new Compartment();
   let applyingExternal = false; // 外部 doc 同步时抑制 onDocChange，避免误标脏
-  // 当前生效的编译错误（由 diagnostics prop 驱动；供波浪线与 hover 提示读取）
-  let diagList: CompileErrorLocation[] = [];
+  // 当前生效的编译错误与前缀代码（由 diagnostics/prefixCode prop 驱动；供波浪线与 hover 提示读取）
+  let diagState: { list: CompileErrorLocation[]; prefix: string } = { list: [], prefix: "" };
 
   function buildExtensions() {
     return [
@@ -53,8 +63,8 @@
   }
 
   onMount(() => {
-    // 先写入初始诊断，再创建 view：buildExtensions 会按当时 diagList 生成装饰
-    diagList = diagnostics ?? [];
+    // 先写入初始诊断，再创建 view：buildExtensions 会按当时 diagState 生成装饰
+    diagState = { list: diagnostics ?? [], prefix: prefixCode ?? "" };
     view = new EditorView({
       parent: host,
       state: EditorState.create({ doc: initialDoc, extensions: buildExtensions() }),
@@ -81,7 +91,7 @@
   // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见
   $effect(() => {
     if (!view || !jumpTo) return;
-    const pos = posToOffset(view.state, jumpTo.line, jumpTo.col);
+    const pos = offsetAt(view.state.doc, jumpTo.line, jumpTo.col);
     view.dispatch({
       selection: { anchor: pos },
       effects: EditorView.scrollIntoView(pos, { y: "center" }),
@@ -97,25 +107,18 @@
     });
   });
 
-  // 编译错误（diagnostics）变化：通过 Compartment 重配，刷新波浪线与 hover 提示
+  // 编译错误（diagnostics）/ 前缀代码（prefixCode）变化：通过 Compartment 重配，
+  // 刷新波浪线与 hover 提示（reconfigure 会重跑 StateField.create，见 diagnostics-utils）
   $effect(() => {
     if (!view) return;
     const next = diagnostics ?? [];
-    if (next === diagList) return;
-    diagList = next;
+    const prefix = prefixCode ?? "";
+    if (next === diagState.list && prefix === diagState.prefix) return;
+    diagState = { list: next, prefix };
     view.dispatch({
       effects: diagnosticsCompartment.reconfigure(diagnosticsExtensions()),
     });
   });
-
-  /** 行/列（1-based）→ 文档 offset；越界时 clamp 到文档范围内 */
-  function posToOffset(state: EditorState, line: number, col: number): number {
-    const doc = state.doc;
-    if (doc.lines === 0) return 0;
-    const l = Math.min(Math.max(line, 1), doc.lines);
-    const lineObj = doc.line(l);
-    return lineObj.from + Math.min(Math.max(col, 1) - 1, lineObj.length);
-  }
 
   /**
    * 编辑器是否存在非空选区（供右键菜单计算剪切/复制是否可点）。
@@ -145,37 +148,21 @@
     document.execCommand(cmd);
   }
 
-  /** 单个错误的装饰区间 [from, to)；越界或无法构成有效区间时返回 null */
-  function diagRange(
-    state: EditorState,
-    d: CompileErrorLocation,
-  ): { from: number; to: number } | null {
-    const from = posToOffset(state, d.line, d.col);
-    // 结束列通常指向范围后一位，减一避免越出行尾；单点错误（end == start）保证至少画 1 字符
-    let to = posToOffset(state, d.endLine, Math.max(d.endCol - 1, 1));
-    if (to <= from) to = from + 1;
-    if (to > state.doc.length) to = state.doc.length;
-    if (to <= from) return null;
-    return { from, to };
-  }
-
-  /** 依据当前 diagList 生成红色波浪线装饰集 */
+  /** 依据当前 diagState 生成红色波浪线装饰集（位置计算见 diagnostics-utils.squiggleRanges） */
   function computeDeco(state: EditorState): DecorationSet {
-    if (diagList.length === 0) return Decoration.none;
-    const ranges: Range<Decoration>[] = [];
-    for (const d of diagList) {
-      const r = diagRange(state, d);
-      if (r) ranges.push(Decoration.mark({ class: "cm-diag-wavy" }).range(r.from, r.to));
-    }
-    return Decoration.set(ranges, true);
+    const ranges = squiggleRanges(state.doc, diagState.list, diagState.prefix);
+    if (ranges.length === 0) return Decoration.none;
+    return Decoration.set(
+      ranges.map((r) => Decoration.mark({ class: "cm-diag-wavy" }).range(r.from, r.to)),
+      true,
+    );
   }
 
   /** 查找覆盖 pos 的错误（供 hover 提示） */
   function diagAt(state: EditorState, pos: number): CompileErrorLocation | undefined {
-    return diagList.find((d) => {
-      const r = diagRange(state, d);
-      return r !== null && pos >= r.from && pos < r.to;
-    });
+    return squiggleRanges(state.doc, diagState.list, diagState.prefix).find(
+      (r) => pos >= r.from && pos < r.to,
+    )?.diag;
   }
 
   /** 编译错误扩展：波浪线 StateField + hover 错误提示（经 Compartment 动态重配） */
