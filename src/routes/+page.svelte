@@ -16,6 +16,7 @@
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { loadState, saveState } from "$lib/persistence";
+  import { isBlankDoc } from "$lib/doc-utils";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
   import { clearState } from "$lib/persistence";
@@ -478,11 +479,13 @@
         else unlisteners.push(un);
       });
     if (isTauri()) {
-      // 关闭确认：有未保存修改时显示前端自定义三按钮弹窗
+      // 关闭确认：有未保存修改且文档非空时显示前端自定义三按钮弹窗
       // （不依赖 dialog 插件返回值的语义差异，保证 保存/不保存/取消 可靠）
+      // 内容为空（含仅空白字符）视为无可丢失内容，即使 dirty 也直接关闭——
+      // 判断以内容为准：用户输入过内容又删光后 dirty 仍为 true，但无需再确认
       keepUnlisten(
         getCurrentWindow().onCloseRequested(async (event) => {
-          if (!dirty) return; // 无未保存修改，直接关闭
+          if (!dirty || isBlankDoc(doc)) return; // 无未保存修改或空文档，直接关闭
           event.preventDefault();
           showClosePrompt = true;
         }),
@@ -521,8 +524,9 @@
       });
     } else {
       // 浏览器 dev：beforeunload 简单提示（无法自定义按钮）
+      // 空文档（含仅空白字符）不触发提示，与 Tauri 端行为一致
       beforeUnloadHandler = (e: BeforeUnloadEvent) => {
-        if (dirty) e.preventDefault();
+        if (dirty && !isBlankDoc(doc)) e.preventDefault();
       };
       window.addEventListener("beforeunload", beforeUnloadHandler);
     }
