@@ -78,6 +78,14 @@ src-tauri/
 
 > 注：编译引擎使用 `createTypstFontBuilder().addFontData()` + `compiler.setFonts()` 注册字体。
 > 不要用 `loadFonts(字节数组)`：0.8.0-rc3 下数学字体不会生效（已实测排查）。
+> 编译器 init 必须带 `initOptions.disableDefaultFontAssets()`：否则 typst.ts 会在
+> 未提供字体相关 beforeBuild 时自动从 jsDelivr 拉取 17 个默认字体（typst-assets），
+> 网络差时启动会被拖慢十几秒（#7 已修复，勿删）。
+
+## 启动耗时观测
+
+`src/lib/startup-timing.ts`：启动关键阶段打点（O(1)，无阻塞），首次编译完成后向
+控制台输出 `[startup]` 报告（各阶段耗时 + wasm/字体网络资源耗时），供启动性能回归对比。
 
 ## 验证脚本
 

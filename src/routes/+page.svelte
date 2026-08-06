@@ -42,9 +42,13 @@
     prefixLineCharOffset,
     type LocatedErrorItem,
   } from "$lib/error-list";
+  import { mark, reportStartup } from "$lib/startup-timing";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
+
+  // 启动打点：组件脚本求值时刻（JS chunk 加载后的首个可测点）
+  mark("page-module-eval");
 
   /** Editor 组件实例方法（bind:this 获取，右键菜单调用） */
   interface EditorHandle {
@@ -465,10 +469,16 @@
   }
 
   async function runCompile() {
+    if (compileSeq === 0) mark("compile-request");
     const mySeq = ++compileSeq;
     // 编译期间保留旧预览，完成后直接替换（不做 loading 遮罩）
     const source = prefixEnabled ? prefixCode + doc : doc;
     const result = await compileToSvg(source);
+    if (mySeq === 1) {
+      // 首次编译完成 = 应用「可正常编辑/预览」就绪点，输出一次启动报告
+      mark("first-compile-result");
+      reportStartup();
+    }
     if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
     if (result.ok) {
       previewHost.innerHTML = result.svg;
@@ -599,6 +609,7 @@
   }
 
   onMount(() => {
+    mark("mount-start");
     // 每次启动都是全新会话：仅恢复主题偏好，不恢复上次编辑内容/文件
     const saved = loadState();
     if (saved.theme === "system" || saved.theme === "dark" || saved.theme === "light") {
@@ -606,6 +617,7 @@
     }
     prefixEnabled = saved.prefixEnabled ?? false;
     prefixCode = saved.prefixCode ?? "";
+    mark("persist-restore");
 
     runCompile();
     resolveTheme();
@@ -679,6 +691,8 @@
       };
       window.addEventListener("beforeunload", beforeUnloadHandler);
     }
+    mark("mount-listeners-done");
+    mark("mount-end");
 
     return () => {
       disposed = true;

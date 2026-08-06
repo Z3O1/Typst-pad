@@ -14,6 +14,8 @@ import type { TypstCompiler, TypstRenderer } from "@myriaddreamin/typst.ts";
 import { sanitizeSvg } from "./svg-sanitize";
 import { paginateSvg } from "./svg-paginate";
 import { parseDiagnosticRange } from "./diagnostics-utils";
+import { mark } from "./startup-timing";
+import { fetchFontBuffers } from "./font-load";
 // 静态导入 wasm 包装模块 + wasm URL，通过 getWrapper/getModule 显式注入，
 // 绕开 typst.ts 内部的动态 import()——该动态导入在 Vite dev 预构建下会触发
 // "Cannot import wasm module without importer" 错误。
@@ -80,44 +82,68 @@ function ensureInit(): Promise<void> {
 }
 
 async function doInit(): Promise<void> {
+  mark("engine-init-start");
   compiler = createTypstCompiler();
   renderer = createTypstRenderer();
   // 注入 access model 与 package registry，让 WASM 侧使用真实文件系统/联网包注册表
   // （否则是 Dummy Registry / Dummy AccessModel，#import "@preview/..." 与本地 .typ 都会抛错）
   const accessModel = new MemoryAccessModel();
   const packageRegistry = new FetchPackageRegistry(accessModel);
-  await compiler.init({
-    getWrapper: () => Promise.resolve(typstCompilerModule),
-    getModule: () => compilerWasmUrl,
-    beforeBuild: [
-      initOptions.withAccessModel(accessModel),
-      initOptions.withPackageRegistry(packageRegistry),
-    ],
-  });
-  await renderer.init({
-    getWrapper: () => Promise.resolve(typstRendererModule),
-    getModule: () => rendererWasmUrl,
-  });
+  // 字体下载只依赖网络、与 wasm 无关：先并行发起，下载时延隐藏在 wasm 实例化期间
+  // （不再占用启动关键路径）。
+  mark("fonts-download-start");
+  const fontDownload = fetchFontBuffers(FONT_URLS);
+  // compiler 与 renderer 是两个相互独立的 wasm 实例，可并行初始化；
+  // 30MB compiler wasm 下载/实例化期间 renderer 与字体的工作同时进行。
+  mark("compiler-init-start");
+  const engineInit = Promise.all([
+    compiler.init({
+      getWrapper: () => Promise.resolve(typstCompilerModule),
+      getModule: () => compilerWasmUrl,
+      beforeBuild: [
+        initOptions.withAccessModel(accessModel),
+        initOptions.withPackageRegistry(packageRegistry),
+        // 关闭 typst.ts 默认 CDN 字体资产下载（createTypstCompiler 未提供
+        // 字体相关 beforeBuild 时会自动挂 loadFonts([], {assets:["text"]})，
+        // 即从 jsdelivr 拉 17 个默认字体，网络差时启动被拖慢十几秒，见需求 #7）。
+        // 本应用已通过 fontBuilder.addFontData + setFonts 全套注册本地字体
+        // （含默认文档用到的 Libertinus Serif / NewCM Math / DejaVu Sans Mono），
+        // disableDefaultFontAssets 同时满足其强制 fontLoader 校验。
+        initOptions.disableDefaultFontAssets(),
+      ],
+    }),
+    renderer.init({
+      getWrapper: () => Promise.resolve(typstRendererModule),
+      getModule: () => rendererWasmUrl,
+    }),
+  ]);
+  mark("renderer-init-start");
+  await engineInit;
+  mark("compiler-init-end");
+  mark("renderer-init-end");
 
   // 注：不能用 loadFonts 传 Uint8Array（0.8.0-rc3 有 bug，且数学字体不生效），
   // 需用 fontBuilder.addFontData + setFonts 显式注册。fontBuilder 同样需
-  // 显式提供 wasm（无参 init 会走动态 import 触发 wasm 导入错误）。
+  // 显式提供 wasm（无参 init 会走动态 import 触发 wasm 导入错误；
+  // 因与 compiler 共用同一 wasm 包装模块，其 init 实际是幂等空操作）。
   const builder = createTypstFontBuilder();
+  mark("fontbuilder-init-start");
   await builder.init({
     getWrapper: () => Promise.resolve(typstCompilerModule),
     getModule: () => compilerWasmUrl,
   });
-  for (const url of FONT_URLS) {
-    const res = await fetch(url);
-    if (!res.ok) {
-      throw new Error(`字体加载失败: ${url} (${res.status})`);
-    }
-    const buf = await res.arrayBuffer();
-    await builder.addFontData(new Uint8Array(buf));
+  mark("fontbuilder-init-end");
+  const fontBufs = await fontDownload;
+  mark("fonts-download-end");
+  mark("fonts-register-start");
+  for (const buf of fontBufs) {
+    await builder.addFontData(buf);
   }
+  mark("fonts-register-end");
   await builder.build(async (fonts) => {
     compiler!.setFonts(fonts);
   });
+  mark("engine-init-end");
 }
 
 /** 串行化编译任务，避免并发 addSource 互相覆盖 */

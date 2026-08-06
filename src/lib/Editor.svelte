@@ -9,6 +9,7 @@
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation } from "./typst-engine";
   import { squiggleRanges, offsetAt } from "./diagnostics-utils";
+  import { mark } from "./startup-timing";
 
   interface Props {
     initialDoc?: string;
@@ -63,12 +64,14 @@
   }
 
   onMount(() => {
+    mark("editor-mount-start");
     // 先写入初始诊断，再创建 view：buildExtensions 会按当时 diagState 生成装饰
     diagState = { list: diagnostics ?? [], prefix: prefixCode ?? "" };
     view = new EditorView({
       parent: host,
       state: EditorState.create({ doc: initialDoc, extensions: buildExtensions() }),
     });
+    mark("editor-created");
 
     return () => {
       view.destroy();
