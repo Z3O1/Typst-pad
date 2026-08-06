@@ -28,3 +28,9 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[target.'cfg(windows)'.dependencies]
+# 禁用 WebView2 浏览器加速键（Ctrl+R 整页刷新等）：直接操作 WebView2 COM 接口
+webview2-com = "0.38"
+# Interface::cast（ICoreWebView2Settings → ICoreWebView2Settings3）所需，与 webview2-com 的 windows-core 同版本
+windows-core = "0.61"
+

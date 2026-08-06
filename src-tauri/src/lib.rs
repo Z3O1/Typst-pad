@@ -169,10 +169,44 @@ fn walk_typ_dir(dir: &Path, depth: usize, out: &mut Vec<String>) {
     }
 }
 
+/// 禁用 WebView2 浏览器加速键（如 Ctrl+R 整页刷新）：
+/// WebView2 中加速键在 web 内容之前处理，页面 JS 的 preventDefault 无法拦截，
+/// 必须在此禁用，让 Ctrl+R 等快捷键完全交由前端处理
+struct DisableBrowserAccelerators;
+
+impl tauri::plugin::Plugin<tauri::Wry> for DisableBrowserAccelerators {
+    fn name(&self) -> &'static str {
+        "disable-browser-accelerators"
+    }
+
+    fn webview_created(&mut self, webview: tauri::Webview<tauri::Wry>) {
+        #[cfg(target_os = "windows")]
+        {
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+            use windows_core::Interface;
+            // 闭包要求 Send + 'static：只借用入参、不捕获外部可变状态
+            let _ = webview.with_webview(|pw| {
+                let core = unsafe { pw.controller().CoreWebView2() }.ok();
+                if let Some(core) = core {
+                    let settings = unsafe { core.Settings() }.ok();
+                    if let Some(s3) = settings.and_then(|s| s.cast::<ICoreWebView2Settings3>().ok())
+                    {
+                        let _ = unsafe { s3.SetAreBrowserAcceleratorKeysEnabled(false) };
+                    }
+                }
+            });
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = webview;
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // 禁用浏览器加速键（Ctrl+R 不再触发整页刷新），放在 opener 之后注册
+        .plugin(DisableBrowserAccelerators)
         .plugin(tauri_plugin_dialog::init())
         // 注意：不使用 single-instance——每次启动都打开独立实例/新窗口
         .setup(|app| {
