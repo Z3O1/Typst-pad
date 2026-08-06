@@ -13,6 +13,7 @@ import { CompileFormatEnum } from "@myriaddreamin/typst.ts/compiler";
 import type { TypstCompiler, TypstRenderer } from "@myriaddreamin/typst.ts";
 import { sanitizeSvg } from "./svg-sanitize";
 import { paginateSvg } from "./svg-paginate";
+import { parseDiagnosticRange } from "./diagnostics-utils";
 // 静态导入 wasm 包装模块 + wasm URL，通过 getWrapper/getModule 显式注入，
 // 绕开 typst.ts 内部的动态 import()——该动态导入在 Vite dev 预构建下会触发
 // "Cannot import wasm module without importer" 错误。
@@ -47,13 +48,15 @@ export interface CompileOk {
   pageCount: number;
 }
 
-/** 编译错误的源码位置（1-based 行列），供编辑器画波浪线 / hover 提示 */
+/** 编译错误的源码位置（1-based 行列，parseDiagnosticRange 已从 0-based 转换），供编辑器画波浪线 / hover 提示 */
 export interface CompileErrorLocation {
   message: string;
   line: number;
   col: number;
   endLine: number;
   endCol: number;
+  /** 诊断来源文件的虚拟路径（"/main.typ"；本地库等为各自路径，编辑器不为其画波浪线） */
+  path?: string;
 }
 
 export interface CompileFail {
@@ -198,26 +201,6 @@ function formatDiagnostic(d: DiagnosticMessage): string {
   return `${d.message}${loc}`;
 }
 
-/**
- * 从 LSP 风格 range 解析 1-based 行列。
- * 支持 "2:9"、"2:9-3:15"、"main.typ:2:9-3:15"（可带路径前缀）；
- * 解析失败返回 null（调用方跳过该错误）。
- */
-function parseDiagnosticRange(
-  range: string,
-): { line: number; col: number; endLine: number; endCol: number } | null {
-  const m = /(\d+):(\d+)(?:-(\d+):(\d+))?$/.exec(range);
-  if (!m) return null;
-  const line = Number(m[1]);
-  const col = Number(m[2]);
-  return {
-    line,
-    col,
-    endLine: m[3] !== undefined ? Number(m[3]) : line,
-    endCol: m[4] !== undefined ? Number(m[4]) : col,
-  };
-}
-
 /** 把所有 error 级诊断转成带源码位置的错误列表（无法定位的跳过） */
 function collectErrorLocations(
   diagnostics: DiagnosticMessage[],
@@ -225,7 +208,7 @@ function collectErrorLocations(
   const locations: CompileErrorLocation[] = [];
   for (const d of diagnostics) {
     const loc = d.range ? parseDiagnosticRange(d.range) : null;
-    if (loc) locations.push({ message: d.message, ...loc });
+    if (loc) locations.push({ message: d.message, path: d.path, ...loc });
   }
   return locations;
 }
