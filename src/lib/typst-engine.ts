@@ -14,6 +14,7 @@ import type { TypstCompiler, TypstRenderer } from "@myriaddreamin/typst.ts";
 import { sanitizeSvg } from "./svg-sanitize";
 import { paginateSvg } from "./svg-paginate";
 import { parseDiagnosticRange } from "./diagnostics-utils";
+import { mark } from "./startup-timing";
 // 静态导入 wasm 包装模块 + wasm URL，通过 getWrapper/getModule 显式注入，
 // 绕开 typst.ts 内部的动态 import()——该动态导入在 Vite dev 预构建下会触发
 // "Cannot import wasm module without importer" 错误。
@@ -80,12 +81,14 @@ function ensureInit(): Promise<void> {
 }
 
 async function doInit(): Promise<void> {
+  mark("engine-init-start");
   compiler = createTypstCompiler();
   renderer = createTypstRenderer();
   // 注入 access model 与 package registry，让 WASM 侧使用真实文件系统/联网包注册表
   // （否则是 Dummy Registry / Dummy AccessModel，#import "@preview/..." 与本地 .typ 都会抛错）
   const accessModel = new MemoryAccessModel();
   const packageRegistry = new FetchPackageRegistry(accessModel);
+  mark("compiler-init-start");
   await compiler.init({
     getWrapper: () => Promise.resolve(typstCompilerModule),
     getModule: () => compilerWasmUrl,
@@ -94,30 +97,45 @@ async function doInit(): Promise<void> {
       initOptions.withPackageRegistry(packageRegistry),
     ],
   });
+  mark("compiler-init-end");
+  mark("renderer-init-start");
   await renderer.init({
     getWrapper: () => Promise.resolve(typstRendererModule),
     getModule: () => rendererWasmUrl,
   });
+  mark("renderer-init-end");
 
   // 注：不能用 loadFonts 传 Uint8Array（0.8.0-rc3 有 bug，且数学字体不生效），
   // 需用 fontBuilder.addFontData + setFonts 显式注册。fontBuilder 同样需
   // 显式提供 wasm（无参 init 会走动态 import 触发 wasm 导入错误）。
   const builder = createTypstFontBuilder();
+  mark("fontbuilder-init-start");
   await builder.init({
     getWrapper: () => Promise.resolve(typstCompilerModule),
     getModule: () => compilerWasmUrl,
   });
+  mark("fontbuilder-init-end");
+  // 下载与注册拆成两个阶段打点（下载阶段 → 注册阶段），便于观测各自耗时；
+  // 两阶段均保持原有顺序语义。
+  mark("fonts-download-start");
+  const fontBufs: Uint8Array[] = [];
   for (const url of FONT_URLS) {
     const res = await fetch(url);
     if (!res.ok) {
       throw new Error(`字体加载失败: ${url} (${res.status})`);
     }
-    const buf = await res.arrayBuffer();
-    await builder.addFontData(new Uint8Array(buf));
+    fontBufs.push(new Uint8Array(await res.arrayBuffer()));
   }
+  mark("fonts-download-end");
+  mark("fonts-register-start");
+  for (const buf of fontBufs) {
+    await builder.addFontData(buf);
+  }
+  mark("fonts-register-end");
   await builder.build(async (fonts) => {
     compiler!.setFonts(fonts);
   });
+  mark("engine-init-end");
 }
 
 /** 串行化编译任务，避免并发 addSource 互相覆盖 */
