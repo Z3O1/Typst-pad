@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import Editor from "$lib/Editor.svelte";
   import { compileToSvg, compileToPdf } from "$lib/typst-engine";
   import type { CompileErrorLocation } from "$lib/typst-engine";
@@ -38,6 +38,9 @@
     buildErrorListItems,
     formatErrorLoc,
     hasErrorToShow,
+    isErrorLineInPrefix,
+    prefixLineCharOffset,
+    type LocatedErrorItem,
   } from "$lib/error-list";
 
   // 新建时默认空白文档（不再预填示例内容）
@@ -80,7 +83,7 @@
   let showSettings = $state(false); // 设置弹窗（编译前缀代码）
   let editorDiagnostics = $state<CompileErrorLocation[]>([]); // 编译错误位置（传给编辑器画波浪线）
   let errorCount = $state(0); // 编译错误个数（状态栏徽标，常驻显示）
-  let showErrors = $state(false); // 错误列表弹窗（点击状态栏徽标打开）
+  let showErrors = $state(false); // 错误列表 Popover（点击状态栏徽标切换）
   // 自定义右键菜单：位置 + 条目；null 表示关闭
   let contextMenu = $state<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   let editorRef = $state<EditorHandle | null>(null); // Editor 组件实例（选区/剪贴板命令）
@@ -88,6 +91,8 @@
   let lastNonPosError = $state<string | null>(null); // 最近一次编译的非定位错误（无位置，如包不存在）
   let jumpSeq = 0; // 跳转代次：保证重复点击同一错误也触发跳转 effect
   let jumpTarget = $state<{ line: number; col: number; seq: number } | null>(null); // 编辑器跳转目标
+  let errorWrapEl = $state<HTMLElement | undefined>(undefined); // 徽标 + Popover 的外层容器（锚点，供外部点击判定）
+  let settingsPrefixTextarea = $state<HTMLTextAreaElement | undefined>(undefined); // 设置弹窗中的前缀代码 textarea（错误落前缀时定位）
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
   let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
@@ -500,14 +505,51 @@
     syncWindowTitle();
   });
 
-  // 错误列表弹窗打开期间按 Esc 关闭（Svelte 5 runes：effect 内注册/清理监听）
+  /**
+   * 错误列表 Popover 点击项：
+   * - 错误落在前缀代码内（启用前缀时）：不跳编辑器，打开设置弹窗并定位到前缀对应行；
+   * - 否则：跳转编辑器对应行列。
+   */
+  function onErrorItemClick(item: LocatedErrorItem) {
+    if (prefixEnabled && isErrorLineInPrefix(item.line, prefixCode)) {
+      showErrors = false;
+      openSettings(); // 载入当前前缀副本到 settingsPrefixCode，点“保存”才生效
+      void tick().then(() => locatePrefixLine(item.line)); // 下一 tick：等设置弹窗渲染出 textarea
+    } else {
+      jumpTarget = { line: item.line, col: item.col, seq: ++jumpSeq };
+      showErrors = false;
+    }
+  }
+
+  /** 在设置弹窗的前缀代码 textarea 中定位第 line 行起点（偏移按 settingsPrefixCode 计算） */
+  function locatePrefixLine(line: number) {
+    const textarea = settingsPrefixTextarea;
+    if (!textarea) return;
+    const offset = prefixLineCharOffset(settingsPrefixCode, line);
+    textarea.focus();
+    textarea.setSelectionRange(offset, offset);
+    textarea.scrollIntoView({ block: "nearest" });
+  }
+
+  // 错误列表 Popover 打开期间：Esc 关闭；点击 Popover 外部（mousedown，先于 click）
+  // 关闭——徽标本身在 errorWrapEl 内，点击徽标的切换逻辑不受干扰。
+  // （Svelte 5 runes：effect 内注册/清理监听）
   $effect(() => {
     if (!showErrors) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") showErrors = false;
     };
+    const onMouseDown = (e: MouseEvent) => {
+      if (errorWrapEl && !errorWrapEl.contains(e.target as Node)) {
+        showErrors = false;
+      }
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onMouseDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onMouseDown);
+    };
   });
 
   function handleKeydown(e: KeyboardEvent) {
@@ -702,21 +744,47 @@
 
   <footer class="statusbar">
     <span>{statusText}</span>
-    <span
-      class="error-badge"
-      class:clickable={hasErrorToShow(errorCount, lastNonPosError)}
-      role="button"
-      tabindex="0"
-      onclick={() => {
-        if (hasErrorToShow(errorCount, lastNonPosError)) showErrors = true;
-      }}
-      onkeydown={(e) => {
-        if (e.key === "Enter" && hasErrorToShow(errorCount, lastNonPosError)) {
-          showErrors = true;
-        }
-      }}
-    >
-      <span class="error-icon">✕</span><span class="error-count">{errorCount}</span>
+    <span class="error-badge-wrap" bind:this={errorWrapEl}>
+      <span
+        class="error-badge"
+        class:clickable={hasErrorToShow(errorCount, lastNonPosError)}
+        class:active={showErrors}
+        role="button"
+        tabindex="0"
+        aria-expanded={showErrors}
+        onclick={() => {
+          if (hasErrorToShow(errorCount, lastNonPosError)) showErrors = !showErrors;
+        }}
+        onkeydown={(e) => {
+          if (e.key === "Enter" && hasErrorToShow(errorCount, lastNonPosError)) {
+            showErrors = !showErrors;
+          }
+        }}
+      >
+        <span class="error-icon">✕</span><span class="error-count">{errorCount}</span>
+      </span>
+      {#if showErrors}
+        <div class="error-popover" role="dialog" aria-label="编译错误列表">
+          <div class="error-popover-title">
+            编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}
+          </div>
+          <div class="error-list">
+            {#each buildErrorListItems(editorDiagnostics, lastNonPosError) as item}
+              {#if item.kind === "located"}
+                <button class="error-item" onclick={() => onErrorItemClick(item)}>
+                  <span class="error-item-loc">{formatErrorLoc(item)}</span>
+                  <span class="error-item-msg">{item.message}</span>
+                </button>
+              {:else}
+                <div class="error-item error-item-generic">
+                  <span class="error-item-loc">{formatErrorLoc(item)}</span>
+                  <span class="error-item-msg">{item.message}</span>
+                </div>
+              {/if}
+            {/each}
+          </div>
+        </div>
+      {/if}
     </span>
     <span class="spacer"></span>
     <span>{charCount} 字符 · {pageCount} 页</span>
@@ -747,48 +815,6 @@
     </button>
   {/if}
 
-  {#if showErrors}
-    <div
-      class="modal-overlay"
-      role="dialog"
-      aria-label="编译错误列表"
-      tabindex="-1"
-      onclick={(e) => {
-        if (e.target === e.currentTarget) showErrors = false;
-      }}
-      onkeydown={(e) => {
-        if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
-          showErrors = false;
-        }
-      }}
-    >
-      <div class="modal error-modal">
-        <h3 class="modal-title">编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}</h3>
-        <div class="error-list">
-          {#each buildErrorListItems(editorDiagnostics, lastNonPosError) as item}
-            {#if item.kind === "located"}
-              <button
-                class="error-item"
-                onclick={() => {
-                  jumpTarget = { line: item.line, col: item.col, seq: ++jumpSeq };
-                  showErrors = false;
-                }}
-              >
-                <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                <span class="error-item-msg">{item.message}</span>
-              </button>
-            {:else}
-              <div class="error-item error-item-generic">
-                <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                <span class="error-item-msg">{item.message}</span>
-              </div>
-            {/if}
-          {/each}
-        </div>
-      </div>
-    </div>
-  {/if}
-
   {#if showClosePrompt}
     <div class="modal-overlay-static">
       <div class="modal">
@@ -815,6 +841,7 @@
         <textarea
           class="settings-textarea"
           bind:value={settingsPrefixCode}
+          bind:this={settingsPrefixTextarea}
           placeholder="#set page(margin: 2cm)"
           spellcheck="false"
         ></textarea>
@@ -1056,6 +1083,11 @@
     color: #ffc9c9;
   }
 
+  /* 徽标 Popover 展开中：保持高亮，提示再次点击可收起 */
+  .error-badge.clickable.active {
+    color: #ffc9c9;
+  }
+
   .preview-body {
     display: flex;
     flex-direction: column;
@@ -1172,17 +1204,39 @@
     border-color: var(--accent);
   }
 
-  /* 编译错误列表弹窗：宽 ~560px，列表超出时内部滚动 */
-  .error-modal {
-    width: 560px;
+  /* 错误徽标容器：Popover 的定位锚点（徽标 + 浮层同一容器） */
+  .error-badge-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+
+  /* 编译错误 Popover：锚定徽标上方，圆角阴影风格与菜单下拉一致，不遮全屏 */
+  .error-popover {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    width: 520px;
     max-width: 90vw;
     max-height: 70vh;
     display: flex;
     flex-direction: column;
+    background: var(--bg-toolbar);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    padding: 8px;
+    z-index: 50;
+  }
+
+  .error-popover-title {
+    margin: 2px 4px 6px;
+    color: var(--fg-dim);
+    font-size: 12px;
   }
 
   .error-list {
     margin-top: 4px;
+    min-height: 0; /* 允许在 max-height 的 Popover 内收缩，列表内部滚动 */
     overflow-y: auto;
     display: flex;
     flex-direction: column;
