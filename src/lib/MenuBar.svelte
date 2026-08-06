@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { decideMenuKey } from "./menu-keys";
 
   export interface MenuItem {
     label: string;
@@ -53,64 +54,78 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Alt") {
-      if (e.repeat) return; // 长按 Alt 的重复 keydown 不应反复切换选中态
-      // Alt 按下：切换菜单栏选中态。未选中 → 选中第一个分类（编辑器失焦）；
-      // 已选中 → 取消选中（恢复编辑器光标）。
-      e.preventDefault();
-      if (selectedIndex === null) {
-        selectedIndex = 0;
-        openIndex = null;
-        onMenuFocusChange?.(true);
-      } else {
-        selectedIndex = null;
-        openIndex = null;
-        onMenuFocusChange?.(false);
-      }
-      return;
-    }
-    if (selectedIndex === null) return;
-
-    // 字母 accessKey：跳转到对应选项卡；按当前已选中选项卡的字母则直接展开
-    if (!e.ctrlKey && !e.metaKey && e.key.length === 1) {
-      const ch = e.key.toLowerCase();
-      const match = groups.findIndex((g) => g.accessKey?.toLowerCase() === ch);
-      if (match !== -1) {
+    // 按键决策抽在 menu-keys.ts（纯函数，可单测）；这里只负责执行状态变更
+    const decision = decideMenuKey(e, { selectedIndex, groups });
+    switch (decision.type) {
+      case "ignored":
+        return;
+      case "alt-toggle": {
+        // Alt 按下：切换菜单栏选中态。未选中 → 选中第一个分类（编辑器失焦）；
+        // 已选中 → 取消选中（恢复编辑器光标）。
         e.preventDefault();
-        if (match === selectedIndex) {
-          openIndex = match; // 已选中该选项卡：直接展开
+        if (decision.selected) {
+          selectedIndex = null;
+          openIndex = null;
+          onMenuFocusChange?.(false);
         } else {
-          selectedIndex = match;
+          selectedIndex = 0;
+          openIndex = null;
+          onMenuFocusChange?.(true);
+        }
+        return;
+      }
+      case "shortcut": {
+        // Ctrl/Meta 组合键命中菜单项快捷键：触发动作并收起菜单（#3）
+        const item = groups[decision.group].items[decision.item];
+        e.preventDefault();
+        runAction(item);
+        return;
+      }
+      case "accesskey": {
+        // 字母 accessKey：跳转到对应选项卡；按当前已选中选项卡的字母则直接展开
+        e.preventDefault();
+        if (decision.expand) {
+          openIndex = decision.index; // 已选中该选项卡：直接展开
+        } else {
+          selectedIndex = decision.index;
           openIndex = null;
         }
         return;
       }
-    }
-
-    if (e.key === " " || e.key === "Enter") {
-      // 空格/Enter：展开/收起选中的分类
-      e.preventDefault();
-      openIndex = openIndex === selectedIndex ? null : selectedIndex;
-    } else if (e.key === "Escape") {
-      // Esc：先取消展开（保留选中），再按取消选中（恢复编辑器光标）
-      e.preventDefault();
-      if (openIndex !== null) openIndex = null;
-      else {
-        selectedIndex = null;
-        onMenuFocusChange?.(false);
+      case "toggle": {
+        // 空格/Enter：展开/收起选中的分类
+        e.preventDefault();
+        openIndex = openIndex === selectedIndex ? null : selectedIndex;
+        return;
       }
-    } else if (e.key === "Tab") {
-      // Tab：循环切换选中的分类
-      e.preventDefault();
-      selectedIndex = (selectedIndex + 1) % groups.length;
-      openIndex = null;
-    } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-      // 左右方向键：切换选中的分类
-      e.preventDefault();
-      selectedIndex =
-        (selectedIndex + (e.key === "ArrowRight" ? 1 : -1) + groups.length) %
-        groups.length;
-      openIndex = null;
+      case "escape": {
+        // Esc：先取消展开（保留选中），再按取消选中（恢复编辑器光标）
+        e.preventDefault();
+        if (openIndex !== null) openIndex = null;
+        else {
+          selectedIndex = null;
+          onMenuFocusChange?.(false);
+        }
+        return;
+      }
+      case "next":
+      case "prev": {
+        // Tab / 方向键左右：循环切换选中的分类
+        e.preventDefault();
+        const cur = selectedIndex ?? 0;
+        selectedIndex =
+          (cur + (decision.type === "next" ? 1 : -1) + groups.length) % groups.length;
+        openIndex = null;
+        return;
+      }
+      case "exit": {
+        // #2 退出规则：数字、标点、非 accessKey 字母等按键 → 退出选中态。
+        // 不 preventDefault：编辑器此时已失焦，事件自然结束。
+        selectedIndex = null;
+        openIndex = null;
+        onMenuFocusChange?.(false);
+        return;
+      }
     }
   }
 

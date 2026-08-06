@@ -21,7 +21,9 @@ export interface MenuKeyEvent {
 /** 菜单分类结构子集：决策只需 accessKey 与项内 shortcut（与 MenuGroup/MenuItem 结构兼容） */
 export interface MenuGroupLike {
   accessKey?: string;
-  items: Array<{ shortcut?: string }>;
+  // 与 { shortcut?: string } 相交的 object：弱类型检查要求源类型有共同属性，
+  // 而 MenuItem 还需携带 label/action/checked 等额外字段，用 object 放宽（不要求索引签名）
+  items: Array<{ shortcut?: string } & object>;
 }
 
 /** 按键决策结果：MenuBar 据此执行状态变更，并按需 preventDefault */
