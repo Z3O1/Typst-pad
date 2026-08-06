@@ -6,6 +6,7 @@
   import type { Range } from "@codemirror/state";
   import { basicSetup } from "codemirror";
   import { typst } from "codemirror-lang-typst";
+  import { editorKeymap } from "./editor-keymap";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation } from "./typst-engine";
 
@@ -33,6 +34,7 @@
   function buildExtensions() {
     return [
       basicSetup,
+      editorKeymap, // 自定义编辑快捷键（Prec.high，优先于 basicSetup 默认键位）
       typst(),
       themeCompartment.of(theme === "dark" ? oneDark : []),
       diagnosticsCompartment.of(diagnosticsExtensions()),
