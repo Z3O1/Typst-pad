@@ -24,6 +24,11 @@
   import { registerLocalLibraries } from "$lib/typst-engine";
   import { fetchDirLibraries } from "$lib/file-ops";
   import { dirOfPath, libraryVirtualPaths, formatCompileFailMessage } from "$lib/typst-libs";
+  import {
+    buildErrorListItems,
+    formatErrorLoc,
+    hasErrorToShow,
+  } from "$lib/error-list";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -53,6 +58,10 @@
   let showSettings = $state(false); // 设置弹窗（编译前缀代码）
   let editorDiagnostics = $state<CompileErrorLocation[]>([]); // 编译错误位置（传给编辑器画波浪线）
   let errorCount = $state(0); // 编译错误个数（状态栏徽标，常驻显示）
+  let showErrors = $state(false); // 错误列表弹窗（点击状态栏徽标打开）
+  let lastNonPosError = $state<string | null>(null); // 最近一次编译的非定位错误（无位置，如包不存在）
+  let jumpSeq = 0; // 跳转代次：保证重复点击同一错误也触发跳转 effect
+  let jumpTarget = $state<{ line: number; col: number; seq: number } | null>(null); // 编辑器跳转目标
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
   let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
@@ -357,6 +366,7 @@
       previewStatus = "ready";
       editorDiagnostics = [];
       errorCount = 0; // 编译成功：错误徽标归零（与状态栏文本同源）
+      lastNonPosError = null; // 编译成功：无非定位错误
       charCount = doc.length;
       statusText = "就绪";
     } else {
@@ -364,6 +374,9 @@
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
       editorDiagnostics = result.errors;
       errorCount = result.errors.length; // 与状态栏文本「编译错误：N 处」同源
+      // 非定位错误（如包不存在 / 访问模型异常）单独记录，供徽标弹窗展示
+      // （定位错误存在时与第一条同源，弹窗内不重复展示）
+      lastNonPosError = result.errors.length === 0 ? result.error : null;
       // 非定位错误（如包不存在 / 访问模型异常）必须可见，不再被吞掉
       statusText =
         result.errors.length === 0 && result.error
@@ -381,6 +394,16 @@
   // fileTitle / dirty 变化时（打开/保存/新建/编辑）同步窗口标题
   $effect(() => {
     syncWindowTitle();
+  });
+
+  // 错误列表弹窗打开期间按 Esc 关闭（Svelte 5 runes：effect 内注册/清理监听）
+  $effect(() => {
+    if (!showErrors) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") showErrors = false;
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   });
 
   function handleKeydown(e: KeyboardEvent) {
@@ -535,6 +558,7 @@
           doc={editorDoc}
           theme={resolvedTheme}
           diagnostics={editorDiagnostics}
+          jumpTo={jumpTarget}
           onCursor={handleCursor}
           onDocChange={handleDocChange}
         />
@@ -562,7 +586,22 @@
 
   <footer class="statusbar">
     <span>{statusText}</span>
-    <span class="error-badge"><span class="error-icon">✕</span><span class="error-count">{errorCount}</span></span>
+    <span
+      class="error-badge"
+      class:clickable={hasErrorToShow(errorCount, lastNonPosError)}
+      role="button"
+      tabindex="0"
+      onclick={() => {
+        if (hasErrorToShow(errorCount, lastNonPosError)) showErrors = true;
+      }}
+      onkeydown={(e) => {
+        if (e.key === "Enter" && hasErrorToShow(errorCount, lastNonPosError)) {
+          showErrors = true;
+        }
+      }}
+    >
+      <span class="error-icon">✕</span><span class="error-count">{errorCount}</span>
+    </span>
     <span class="spacer"></span>
     <span>{charCount} 字符 · {pageCount} 页</span>
     <span>行 {cursorLine}, 列 {cursorCol}</span>
@@ -590,6 +629,48 @@
         >关闭</span>
       </div>
     </button>
+  {/if}
+
+  {#if showErrors}
+    <div
+      class="modal-overlay"
+      role="dialog"
+      aria-label="编译错误列表"
+      tabindex="-1"
+      onclick={(e) => {
+        if (e.target === e.currentTarget) showErrors = false;
+      }}
+      onkeydown={(e) => {
+        if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+          showErrors = false;
+        }
+      }}
+    >
+      <div class="modal error-modal">
+        <h3 class="modal-title">编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}</h3>
+        <div class="error-list">
+          {#each buildErrorListItems(editorDiagnostics, lastNonPosError) as item}
+            {#if item.kind === "located"}
+              <button
+                class="error-item"
+                onclick={() => {
+                  jumpTarget = { line: item.line, col: item.col, seq: ++jumpSeq };
+                  showErrors = false;
+                }}
+              >
+                <span class="error-item-loc">{formatErrorLoc(item)}</span>
+                <span class="error-item-msg">{item.message}</span>
+              </button>
+            {:else}
+              <div class="error-item error-item-generic">
+                <span class="error-item-loc">{formatErrorLoc(item)}</span>
+                <span class="error-item-msg">{item.message}</span>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      </div>
+    </div>
   {/if}
 
   {#if showClosePrompt}
@@ -841,6 +922,16 @@
     font-variant-numeric: tabular-nums; /* 数字变化时宽度稳定，不抖动 */
   }
 
+  /* 徽标可点击（存在可展示错误时）：指针 + 悬停变亮，提示可查看详情 */
+  .error-badge.clickable {
+    cursor: pointer;
+    color: #ff8a8a;
+  }
+
+  .error-badge.clickable:hover {
+    color: #ffc9c9;
+  }
+
   .preview-body {
     display: flex;
     flex-direction: column;
@@ -955,5 +1046,68 @@
   .settings-textarea:focus {
     outline: none;
     border-color: var(--accent);
+  }
+
+  /* 编译错误列表弹窗：宽 ~560px，列表超出时内部滚动 */
+  .error-modal {
+    width: 560px;
+    max-width: 90vw;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .error-list {
+    margin-top: 4px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  /* 可点击的错误条目：左对齐、等宽定位、悬停高亮 */
+  .error-item {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    width: 100%;
+    padding: 6px 10px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: var(--bg-pane);
+    color: var(--fg);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .error-item:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .error-item-loc {
+    flex: none;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    color: var(--fg-dim);
+    white-space: nowrap;
+  }
+
+  .error-item-msg {
+    min-width: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* 非定位错误条目：纯文本展示，不可点击（悬停不高亮） */
+  .error-item-generic {
+    cursor: default;
+  }
+
+  .error-item-generic:hover {
+    border-color: transparent;
+    color: var(--fg);
   }
 </style>

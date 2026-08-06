@@ -18,9 +18,11 @@
     theme?: "dark" | "light";
     /** 编译错误位置列表（父组件传入）；为空时不显示波浪线 */
     diagnostics?: CompileErrorLocation[];
+    /** 跳转目标（1-based 行列；seq 变化确保重复跳同一位置也触发 effect） */
+    jumpTo?: { line: number; col: number; seq: number } | null;
   }
 
-  let { initialDoc = "", onDocChange, onCursor, doc, theme = "dark", diagnostics }: Props =
+  let { initialDoc = "", onDocChange, onCursor, doc, theme = "dark", diagnostics, jumpTo = null }: Props =
     $props();
 
   let host: HTMLElement;
@@ -74,6 +76,17 @@
       });
       applyingExternal = false;
     }
+  });
+
+  // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见
+  $effect(() => {
+    if (!view || !jumpTo) return;
+    const pos = posToOffset(view.state, jumpTo.line, jumpTo.col);
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: "center" }),
+    });
+    view.focus();
   });
 
   // 主题切换：通过 Compartment 动态重配
