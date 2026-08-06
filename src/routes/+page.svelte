@@ -717,6 +717,7 @@
           doc={editorDoc}
           theme={resolvedTheme}
           diagnostics={editorDiagnostics}
+          prefixCode={prefixEnabled ? prefixCode : ""}
           jumpTo={jumpTarget}
           onCursor={handleCursor}
           onDocChange={handleDocChange}
