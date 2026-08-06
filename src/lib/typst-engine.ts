@@ -15,6 +15,7 @@ import { sanitizeSvg } from "./svg-sanitize";
 import { paginateSvg } from "./svg-paginate";
 import { parseDiagnosticRange } from "./diagnostics-utils";
 import { mark } from "./startup-timing";
+import { dbg } from "./debug";
 import { fetchFontBuffers } from "./font-load";
 // 静态导入 wasm 包装模块 + wasm URL，通过 getWrapper/getModule 显式注入，
 // 绕开 typst.ts 内部的动态 import()——该动态导入在 Vite dev 预构建下会触发
@@ -192,10 +193,15 @@ export function compileToSvg(source: string): Promise<CompileResult> {
 
       const errors = (diagnostics ?? []).filter((d) => d.severity === "error");
       if (errors.length > 0) {
+        const locations = collectErrorLocations(errors);
+        // 调试日志：原始诊断（parseDiagnosticRange 转换前，range/path/severity 原样输出）与
+        // 转换后的位置列表各输出一次，供复现 0-based 行列/路径类问题（如 #42 波浪线偏位）
+        dbg.log("compile-diagnostics", "raw", diagnostics ?? []);
+        dbg.log("compile-diagnostics", "converted", locations);
         return {
           ok: false,
           error: formatDiagnostic(errors[0]),
-          errors: collectErrorLocations(errors),
+          errors: locations,
         };
       }
       if (!result) {

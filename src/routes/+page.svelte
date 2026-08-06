@@ -43,6 +43,7 @@
     type LocatedErrorItem,
   } from "$lib/error-list";
   import { mark, reportStartup } from "$lib/startup-timing";
+  import { dbg, setCliDebug } from "$lib/debug";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -471,6 +472,7 @@
   async function runCompile() {
     if (compileSeq === 0) mark("compile-request");
     const mySeq = ++compileSeq;
+    const t0 = performance.now(); // 编译耗时（调试日志用）
     // 编译期间保留旧预览，完成后直接替换（不做 loading 遮罩）
     const source = prefixEnabled ? prefixCode + doc : doc;
     const result = await compileToSvg(source);
@@ -489,6 +491,8 @@
       lastNonPosError = null; // 编译成功：无非定位错误
       charCount = doc.length;
       statusText = "就绪";
+      // 调试日志：编译结果摘要（ok/页数/耗时），排查编译链路时对照 compile-diagnostics
+      dbg.log("compile", `ok pages:${result.pageCount} t:${(performance.now() - t0).toFixed(1)}ms`);
     } else {
       // 编译错误：保留最后一次成功预览（不置 error、不隐藏预览、不显示错误面板），
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
@@ -502,6 +506,8 @@
         result.errors.length === 0 && result.error
           ? formatCompileFailMessage(0, result.error)
           : `编译错误：${result.errors.length} 处`;
+      // 调试日志：编译失败摘要（错误数/耗时），错误详情见 compile-diagnostics
+      dbg.log("compile", `fail errors:${result.errors.length} t:${(performance.now() - t0).toFixed(1)}ms`);
     }
   }
 
@@ -640,6 +646,9 @@
         else unlisteners.push(un);
       });
     if (isTauri()) {
+      // CLI --debug 开关（异步，仅桌面构建生效）：invoke 返回后补开调试日志；
+      // 浏览器 dev 环境无此来源（且 dev 构建本身已默认开启），跳过
+      invoke<boolean>("get_debug_flag").then(setCliDebug).catch(() => {});
       // 关闭确认：有未保存修改且文档非空时显示前端自定义三按钮弹窗
       // （不依赖 dialog 插件返回值的语义差异，保证 保存/不保存/取消 可靠）
       // 内容为空（含仅空白字符）视为无可丢失内容，即使 dirty 也直接关闭——

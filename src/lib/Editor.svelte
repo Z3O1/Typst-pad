@@ -10,6 +10,7 @@
   import type { CompileErrorLocation } from "./typst-engine";
   import { squiggleRanges, offsetAt } from "./diagnostics-utils";
   import { mark } from "./startup-timing";
+  import { dbg } from "./debug";
 
   interface Props {
     initialDoc?: string;
@@ -154,6 +155,10 @@
   /** 依据当前 diagState 生成红色波浪线装饰集（位置计算见 diagnostics-utils.squiggleRanges） */
   function computeDeco(state: EditorState): DecorationSet {
     const ranges = squiggleRanges(state.doc, diagState.list, diagState.prefix);
+    // 调试日志：存在诊断（或画出了波浪线）时输出实际条数，对照 compile-diagnostics 排查缺失/错位
+    if (diagState.list.length > 0 || ranges.length > 0) {
+      dbg.log("squiggle", `count:${ranges.length}/${diagState.list.length}`);
+    }
     if (ranges.length === 0) return Decoration.none;
     return Decoration.set(
       ranges.map((r) => Decoration.mark({ class: "cm-diag-wavy" }).range(r.from, r.to)),
