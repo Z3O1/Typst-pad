@@ -67,9 +67,17 @@ export function prefixLineCount(prefixCode: string): number {
   return prefixCode.split("\n").length;
 }
 
-/** 错误行号是否落在前缀代码内（仅应在 prefixEnabled 时调用） */
+/**
+ * 错误行号是否落在前缀代码内（仅应在 prefixEnabled 时调用）。
+ * 行号语义：编译源（prefixCode + doc）的 1-based 行号。
+ * 前缀以换行结尾时，split 计出的"末行"是空行——编译源里该位置已是用户文档第 1 行，
+ * 不算前缀（此前按 prefixLineCount 含入导致用户第 1 行的错误被误判为前缀错误）。
+ * 前缀未以换行结尾时最后一行与用户第 1 行拼接在同一行，行级判定整行按前缀处理
+ * （保守；编辑器波浪线用 diagnostics-utils.mapCompiledPosToDoc 做列级精确判定）。
+ */
 export function isErrorLineInPrefix(line: number, prefixCode: string): boolean {
-  return line >= 1 && line <= prefixLineCount(prefixCode);
+  const boundary = prefixLineCount(prefixCode) - (prefixCode.endsWith("\n") ? 1 : 0);
+  return line >= 1 && line <= boundary;
 }
 
 /**

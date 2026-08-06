@@ -89,6 +89,14 @@ describe("prefixLineCount / isErrorLineInPrefix", () => {
     expect(isErrorLineInPrefix(2, "#set page()")).toBe(false);
   });
 
+  it("前缀以换行结尾：split 的末尾空行不算前缀（编译源里该行是用户文档第 1 行）", () => {
+    const p = "#set page()\n";
+    expect(prefixLineCount(p)).toBe(2);
+    expect(isErrorLineInPrefix(1, p)).toBe(true);
+    expect(isErrorLineInPrefix(2, p)).toBe(false);
+    expect(isErrorLineInPrefix(3, p)).toBe(false);
+  });
+
   it("空前缀按 split 语义计 1 行", () => {
     expect(prefixLineCount("")).toBe(1);
     expect(isErrorLineInPrefix(1, "")).toBe(true);
