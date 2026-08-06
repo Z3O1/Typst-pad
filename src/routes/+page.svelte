@@ -97,9 +97,10 @@
     schedulePersist();
   }
 
-  /** 有未保存修改时请求确认（打开/拖放/关联打开前） */
-  async function confirmDiscard(): Promise<boolean> {
-    const message = "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？";
+  /** 有未保存修改时请求确认（打开/拖放/关联打开/重新读取前） */
+  async function confirmDiscard(
+    message = "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？",
+  ): Promise<boolean> {
     if (isTauri()) {
       return await confirm(message, {
         title: "未保存的修改",
@@ -107,6 +108,29 @@
       });
     }
     return window.confirm(message);
+  }
+
+  /**
+   * 注册某目录下的本地 .typ 库（供 #import "xxx.typ" 使用）：
+   * 逐文件读取失败仅跳过该文件；整体失败返回 false（调用方仅降级提示）
+   */
+  async function registerDirLibraries(dir: string): Promise<boolean> {
+    try {
+      const paths = await fetchDirLibraries(dir);
+      const files: Array<{ path: string; content: string }> = [];
+      for (const p of paths) {
+        try {
+          const f = await readTypFile(p);
+          files.push({ path: p, content: f.content });
+        } catch {
+          /* 非 UTF-8 等读取失败的文件跳过 */
+        }
+      }
+      await registerLocalLibraries(libraryVirtualPaths(files, dir));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** 按路径加载 .typ 文件到编辑器（供打开对话框/拖放/关联打开复用） */
@@ -119,25 +143,7 @@
       const opened = await readTypFile(path);
       // 注册同目录下的本地 .typ 库（供 #import "xxx.typ" 使用）；
       // 失败仅降级提示，不影响打开主文档
-      let libLoadFailed = false;
-      if (isTauri()) {
-        try {
-          const dir = dirOfPath(opened.path);
-          const paths = await fetchDirLibraries(dir);
-          const files: Array<{ path: string; content: string }> = [];
-          for (const p of paths) {
-            try {
-              const f = await readTypFile(p);
-              files.push({ path: p, content: f.content });
-            } catch {
-              /* 非 UTF-8 等读取失败的文件跳过 */
-            }
-          }
-          await registerLocalLibraries(libraryVirtualPaths(files, dir));
-        } catch {
-          libLoadFailed = true;
-        }
-      }
+      const libOk = isTauri() ? await registerDirLibraries(dirOfPath(opened.path)) : true;
       doc = opened.content;
       filePath = opened.path;
       fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
@@ -145,7 +151,7 @@
       editorDoc = opened.content; // 触发编辑器替换全文
       scheduleCompile();
       schedulePersist();
-      statusText = libLoadFailed ? "已打开（本地库加载失败）" : "已打开";
+      statusText = libOk ? "已打开" : "已打开（本地库加载失败）";
       return true;
     } catch (e) {
       statusText = "打开失败";
@@ -170,27 +176,37 @@
       schedulePersist();
       // 另存为到新目录（含首次保存）时，重注册该目录下的本地 .typ 库
       if (isTauri() && dirOfPath(saved) !== prevDir) {
-        try {
-          const dir = dirOfPath(saved);
-          const paths = await fetchDirLibraries(dir);
-          const files: Array<{ path: string; content: string }> = [];
-          for (const p of paths) {
-            try {
-              const f = await readTypFile(p);
-              files.push({ path: p, content: f.content });
-            } catch {
-              /* 非 UTF-8 等读取失败的文件跳过 */
-            }
-          }
-          await registerLocalLibraries(libraryVirtualPaths(files, dir));
-        } catch {
-          /* 库加载失败不影响保存 */
-        }
+        await registerDirLibraries(dirOfPath(saved)); // 库加载失败不影响保存
       }
       return saved;
     } catch (e) {
       statusText = "保存失败";
       return null;
+    }
+  }
+
+  /** Ctrl+R：从磁盘重新读取当前文件到编辑器（未命名文档忽略；有未保存修改先确认） */
+  async function reloadFile() {
+    if (!filePath) return; // 未命名文档：忽略
+    if (dirty) {
+      const ok = await confirmDiscard(
+        "当前文档有未保存的修改，重新读取将丢失这些修改。仍要重新读取吗？",
+      );
+      if (!ok) return;
+    }
+    try {
+      const opened = await readTypFile(filePath);
+      const libOk = isTauri() ? await registerDirLibraries(dirOfPath(opened.path)) : true;
+      doc = opened.content;
+      filePath = opened.path;
+      fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
+      dirty = false;
+      editorDoc = opened.content; // 触发编辑器替换全文
+      scheduleCompile();
+      schedulePersist();
+      statusText = libOk ? "已重新读取" : "已重新读取（本地库加载失败）";
+    } catch {
+      statusText = "重新读取失败";
     }
   }
 
@@ -372,6 +388,14 @@
     const mod = e.ctrlKey || e.metaKey;
     if (!mod) return;
 
+    // Ctrl/Cmd + R：重新读取当前文件（磁盘 → 编辑器）
+    if (key === "r") {
+      if (filePath) {
+        e.preventDefault(); // 仅在有文件时拦截；浏览器 dev 无文件路径 → 放行给浏览器刷新
+        reloadFile();
+      }
+      return;
+    }
     // Ctrl/Cmd + S：保存当前文档
     if (key === "s") {
       e.preventDefault();
