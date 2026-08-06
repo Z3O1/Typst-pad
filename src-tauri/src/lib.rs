@@ -74,6 +74,16 @@ fn take_pending_files(state: tauri::State<'_, PendingFiles>) -> Vec<String> {
     state.0.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
 }
 
+/// 命令行 --debug 开关（调试日志来源之一，仅桌面构建生效）：setup 解析命令行后存入，
+/// 前端经 get_debug_flag 命令异步查询
+struct CliDebugFlag(bool);
+
+/// 查询命令行 --debug 开关（支持 `--debug` 与 `--debug=1` 两种写法，其余值宽松视为未开启）
+#[tauri::command]
+fn get_debug_flag(state: tauri::State<'_, CliDebugFlag>) -> bool {
+    state.0
+}
+
 /// 把 .typ 路径加入待打开队列，并实时广播给已就绪的前端
 fn queue_open(app: &tauri::AppHandle, path: String) {
     if let Some(state) = app.try_state::<PendingFiles>() {
@@ -180,6 +190,9 @@ impl tauri::plugin::Plugin<tauri::Wry> for DisableBrowserAccelerators {
     }
 
     fn webview_created(&mut self, webview: tauri::Webview<tauri::Wry>) {
+        // 打点：webview 初始化完成（此处仅原生 webview 就绪，页面 HTML/JS 尚未加载）
+        #[cfg(debug_assertions)]
+        startup_timing::set_webview_created();
         #[cfg(target_os = "windows")]
         {
             use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
@@ -201,6 +214,48 @@ impl tauri::plugin::Plugin<tauri::Wry> for DisableBrowserAccelerators {
     }
 }
 
+/// 启动时序打点（仅 debug 构建编译，release 零输出零开销）：记录 Rust 壳
+/// 「窗口创建 → webview 就绪 → 前端加载完成」各阶段相对 setup 入口的耗时。
+/// 与前端 [startup] 打点（startup-timing.ts，无条件输出）配合，补全 #43 未实测的 Rust 段；
+/// 输出 [startup] rust phase:<name> t:<ms>，与前端同前缀便于统一抓取过滤。
+#[cfg(debug_assertions)]
+mod startup_timing {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    /// setup() 钩子入口时刻：Rust 壳初始化起点（窗口创建前的准备阶段）
+    static SETUP_ENTRY: OnceLock<Instant> = OnceLock::new();
+    /// DisableBrowserAccelerators.webview_created 时刻：webview 初始化完成（页面尚未加载）
+    static WEBVIEW_CREATED: OnceLock<Instant> = OnceLock::new();
+    /// RunEvent::Ready 时刻：前端页面加载完成（事件循环首次迭代）
+    static READY: OnceLock<Instant> = OnceLock::new();
+
+    pub fn set_setup_entry() {
+        let _ = SETUP_ENTRY.set(Instant::now());
+    }
+
+    pub fn set_webview_created() {
+        let _ = WEBVIEW_CREATED.set(Instant::now());
+    }
+
+    /// 记录 Ready 并输出各阶段相对 setup 入口的耗时
+    /// （多窗口场景下以首次到达为准：OnceLock 只接受第一个值）
+    pub fn set_ready_and_report() {
+        let _ = READY.set(Instant::now());
+        let Some(t0) = SETUP_ENTRY.get() else { return };
+        let ms = |name: &str, t: Option<&Instant>| {
+            if let Some(t) = t {
+                eprintln!(
+                    "[startup] rust phase:{name} t:{:.1}",
+                    t.duration_since(*t0).as_secs_f64() * 1000.0
+                );
+            }
+        };
+        ms("webview-created", WEBVIEW_CREATED.get());
+        ms("ready", READY.get());
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -210,6 +265,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // 注意：不使用 single-instance——每次启动都打开独立实例/新窗口
         .setup(|app| {
+            // 打点：setup 入口（窗口创建阶段起点）
+            #[cfg(debug_assertions)]
+            startup_timing::set_setup_entry();
+            // --debug 命令行开关（调试日志来源之一，仅桌面构建生效）：支持 --debug 与
+            // --debug=1 两种写法，其余值宽松视为未开启；前端经 get_debug_flag 命令查询
+            let cli_debug = std::env::args().any(|a| a == "--debug" || a == "--debug=1");
+            app.manage(CliDebugFlag(cli_debug));
             // 首次启动：从命令行参数解析待打开的 .typ 文件
             let initial = std::env::args()
                 .skip(1)
@@ -228,12 +290,19 @@ pub fn run() {
             write_file,
             take_pending_files,
             write_binary,
-            list_dir_typ
+            list_dir_typ,
+            get_debug_flag
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
     app.run(|app, event| {
+        // 打点：前端页面加载完成（RunEvent::Ready = 事件循环首次迭代）；
+        // 以引用匹配避免消耗 event（后续 macOS 分支仍需要它）
+        #[cfg(debug_assertions)]
+        if let tauri::RunEvent::Ready = &event {
+            startup_timing::set_ready_and_report();
+        }
         // macOS：Finder"打开方式"通过 Apple Events 传路径（命令行参数拿不到）
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Opened { urls } = event {
