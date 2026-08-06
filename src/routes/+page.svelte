@@ -16,7 +16,7 @@
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { loadState, saveState } from "$lib/persistence";
-  import { isBlankDoc } from "$lib/doc-utils";
+  import { isEffectiveDirty } from "$lib/doc-utils";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
   import ContextMenu from "$lib/ContextMenu.svelte";
@@ -71,7 +71,8 @@
   let theme: "system" | "dark" | "light" = $state("system");
   let resolvedTheme: "dark" | "light" = $state("dark");
 
-  let doc: string = SAMPLE_DOC;
+  // $state：窗口标题 effect 依赖内容——输入过又删光后 dirty 不变，须由内容变化驱动圆点实时清除
+  let doc: string = $state(SAMPLE_DOC);
   let editorDoc = $state(SAMPLE_DOC); // 绑定给 Editor 的受控文档
   let filePath: string | null = null;
   let previewStatus: "idle" | "ready" | "error" = $state("idle");
@@ -180,7 +181,7 @@
 
   /** 按路径加载 .typ 文件到编辑器（供打开对话框/拖放/关联打开复用） */
   async function openPath(path: string): Promise<boolean> {
-    if (dirty && filePath !== path) {
+    if (isEffectiveDirty(dirty, doc) && filePath !== path) {
       const ok = await confirmDiscard();
       if (!ok) return false;
     }
@@ -233,7 +234,7 @@
   /** Ctrl+R：从磁盘重新读取当前文件到编辑器（未命名文档忽略；有未保存修改先确认） */
   async function reloadFile() {
     if (!filePath) return; // 未命名文档：忽略
-    if (dirty) {
+    if (isEffectiveDirty(dirty, doc)) {
       const ok = await confirmDiscard(
         "当前文档有未保存的修改，重新读取将丢失这些修改。仍要重新读取吗？",
       );
@@ -514,7 +515,7 @@
   /** 窗口标题同步为“文件名 - Typst-pad”；未保存修改时文件名后加圆点（Tauri） */
   function syncWindowTitle() {
     if (!isTauri()) return;
-    getCurrentWindow().setTitle(`${fileTitle}${dirty ? " ●" : ""} - Typst-pad`);
+    getCurrentWindow().setTitle(`${fileTitle}${isEffectiveDirty(dirty, doc) ? " ●" : ""} - Typst-pad`);
   }
 
   // fileTitle / dirty 变化时（打开/保存/新建/编辑）同步窗口标题
@@ -649,13 +650,13 @@
       // CLI --debug 开关（异步，仅桌面构建生效）：invoke 返回后补开调试日志；
       // 浏览器 dev 环境无此来源（且 dev 构建本身已默认开启），跳过
       invoke<boolean>("get_debug_flag").then(setCliDebug).catch(() => {});
-      // 关闭确认：有未保存修改且文档非空时显示前端自定义三按钮弹窗
+      // 关闭确认：有实际未保存修改（dirty 且内容非空）时显示前端自定义三按钮弹窗
       // （不依赖 dialog 插件返回值的语义差异，保证 保存/不保存/取消 可靠）
-      // 内容为空（含仅空白字符）视为无可丢失内容，即使 dirty 也直接关闭——
-      // 判断以内容为准：用户输入过内容又删光后 dirty 仍为 true，但无需再确认
+      // 内容为空（含仅空白字符）视为无可丢失内容：输入过又删光后 dirty 仍为 true，
+      // 但 isEffectiveDirty 以内容为准判定为未修改，直接关闭
       keepUnlisten(
         getCurrentWindow().onCloseRequested(async (event) => {
-          if (!dirty || isBlankDoc(doc)) return; // 无未保存修改或空文档，直接关闭
+          if (!isEffectiveDirty(dirty, doc)) return; // 无实际未保存修改（含空文档），直接关闭
           event.preventDefault();
           showClosePrompt = true;
         }),
@@ -696,7 +697,7 @@
       // 浏览器 dev：beforeunload 简单提示（无法自定义按钮）
       // 空文档（含仅空白字符）不触发提示，与 Tauri 端行为一致
       beforeUnloadHandler = (e: BeforeUnloadEvent) => {
-        if (dirty && !isBlankDoc(doc)) e.preventDefault();
+        if (isEffectiveDirty(dirty, doc)) e.preventDefault();
       };
       window.addEventListener("beforeunload", beforeUnloadHandler);
     }
