@@ -19,7 +19,11 @@ export function toVirtualRelPath(absPath: string, dir: string): string | null {
   const normAbs = absPath.replace(/\\/g, "/");
   const normDir = dir.replace(/\\/g, "/").replace(/\/+$/, "");
   const prefix = normDir === "" ? "" : normDir + "/";
-  if (!normAbs.startsWith(prefix)) return null;
+  // Windows 路径大小写不敏感（盘符开头 ⇒ Windows 风格）：匹配前统一小写；POSIX 保持敏感
+  const caseFolded = /^[A-Za-z]:/.test(prefix);
+  const startAbs = caseFolded ? normAbs.toLowerCase() : normAbs;
+  const startPrefix = caseFolded ? prefix.toLowerCase() : prefix;
+  if (!startAbs.startsWith(startPrefix)) return null;
   const rel = normAbs.slice(prefix.length).replace(/^\/+/, "");
   if (rel === "") return null;
   if (rel.split("/").some((s) => s === ".." || s === ".")) return null;
