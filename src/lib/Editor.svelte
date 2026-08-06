@@ -117,6 +117,34 @@
     return lineObj.from + Math.min(Math.max(col, 1) - 1, lineObj.length);
   }
 
+  /**
+   * 编辑器是否存在非空选区（供右键菜单计算剪切/复制是否可点）。
+   * 基于 CM6 state 而非原生 selection：多光标/编辑器未聚焦时依然准确。
+   */
+  export function hasSelection(): boolean {
+    // 多选区（多光标）下任一选区非空即视为有选区：遍历 selection.ranges
+    return view.state.selection.ranges.some((r) => r.from !== r.to);
+  }
+
+  /** 全选：dispatch 选区覆盖全文并聚焦（CM6 原生 selectAll 命令的同义实现） */
+  export function selectAll(): void {
+    view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+    view.focus();
+  }
+
+  /**
+   * 执行剪贴板命令（右键菜单调用）：聚焦编辑器后走 document.execCommand。
+   * 选择 execCommand 而非 navigator.clipboard：
+   * - WebView2（Chromium）中 execCommand 在用户手势（菜单点击）内同步执行且稳定，
+   *   cut/paste 无需额外权限；navigator.clipboard 为异步且受权限策略/聚焦约束；
+   * - CM6 内置的 copy/cut 命令内部同样依赖 execCommand 或 ClipboardEvent 模拟，
+   *   直接调用最简，不引入事件派发的兼容成本。
+   */
+  export function execCommand(cmd: "cut" | "copy" | "paste"): void {
+    view.focus();
+    document.execCommand(cmd);
+  }
+
   /** 单个错误的装饰区间 [from, to)；越界或无法构成有效区间时返回 null */
   function diagRange(
     state: EditorState,
