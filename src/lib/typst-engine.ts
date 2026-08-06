@@ -95,6 +95,13 @@ async function doInit(): Promise<void> {
     beforeBuild: [
       initOptions.withAccessModel(accessModel),
       initOptions.withPackageRegistry(packageRegistry),
+      // 关闭 typst.ts 默认 CDN 字体资产下载（createTypstCompiler 未提供
+      // 字体相关 beforeBuild 时会自动挂 loadFonts([], {assets:["text"]})，
+      // 即从 jsdelivr 拉 17 个默认字体，网络差时启动被拖慢十几秒，见需求 #7）。
+      // 本应用已通过 fontBuilder.addFontData + setFonts 全套注册本地字体
+      // （含默认文档用到的 Libertinus Serif / NewCM Math / DejaVu Sans Mono），
+      // disableDefaultFontAssets 同时满足其强制 fontLoader 校验。
+      initOptions.disableDefaultFontAssets(),
     ],
   });
   mark("compiler-init-end");
