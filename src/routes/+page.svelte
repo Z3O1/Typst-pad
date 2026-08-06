@@ -44,6 +44,7 @@
   } from "$lib/error-list";
   import { mark, reportStartup } from "$lib/startup-timing";
   import { dbg, setCliDebug } from "$lib/debug";
+  import { clampPopoverRect } from "$lib/popover-utils";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -98,6 +99,9 @@
   let jumpSeq = 0; // 跳转代次：保证重复点击同一错误也触发跳转 effect
   let jumpTarget = $state<{ line: number; col: number; seq: number } | null>(null); // 编辑器跳转目标
   let errorWrapEl = $state<HTMLElement | undefined>(undefined); // 徽标 + Popover 的外层容器（锚点，供外部点击判定）
+  let errorPopoverEl = $state<HTMLElement | undefined>(undefined); // 错误列表 Popover 元素（打开后测量收边）
+  // Popover 视口收边结果（打开时计算一次）：transform 平移量 + 可选限宽，内联样式应用
+  let errorPopoverClamp = $state({ translateX: 0, translateY: 0, maxWidth: 0 });
   let settingsPrefixTextarea = $state<HTMLTextAreaElement | undefined>(undefined); // 设置弹窗中的前缀代码 textarea（错误落前缀时定位）
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
   let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
@@ -570,6 +574,27 @@
     };
   });
 
+  // 错误列表 Popover 打开时做一次视口收边：徽标在状态栏内靠左排布（状态文本短时
+  // 不在窗口右侧），right:0 锚定的 Popover 向左展开 520px 会从窗口左缘溢出。
+  // 下一 tick 等 {#if showErrors} 渲染完成后再测量 getBoundingClientRect，
+  // 越界则用 transform 平移（必要时叠加限宽）收回视口内，不破坏 right:0 锚定。
+  // 仅在打开瞬间 clamp 一次；窗口 resize 不重算——本页无现成 resize 监听，
+  // 且缩放时 Popover 通常已关闭，保持最小实现（ContextMenu 组件另有自己的重算逻辑）。
+  $effect(() => {
+    if (!showErrors) return;
+    let disposed = false;
+    void tick().then(() => {
+      if (disposed || !errorPopoverEl) return;
+      errorPopoverClamp = clampPopoverRect(
+        errorPopoverEl.getBoundingClientRect(),
+        { width: window.innerWidth, height: window.innerHeight },
+      );
+    });
+    return () => {
+      disposed = true;
+    };
+  });
+
   function handleKeydown(e: KeyboardEvent) {
     const key = e.key.toLowerCase();
     const mod = e.ctrlKey || e.metaKey;
@@ -791,7 +816,13 @@
         <span class="error-icon">✕</span><span class="error-count">{errorCount}</span>
       </span>
       {#if showErrors}
-        <div class="error-popover" role="dialog" aria-label="编译错误列表">
+        <div
+          class="error-popover"
+          bind:this={errorPopoverEl}
+          role="dialog"
+          aria-label="编译错误列表"
+          style="transform: translate({errorPopoverClamp.translateX}px, {errorPopoverClamp.translateY}px);{errorPopoverClamp.maxWidth > 0 ? `max-width:${errorPopoverClamp.maxWidth}px` : ""}"
+        >
           <div class="error-popover-title">
             编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}
           </div>
