@@ -1,10 +1,13 @@
-// error-list 错误列表组装纯函数单元测试（状态栏徽标弹窗的数据准备逻辑）
+// error-list 错误列表组装 + 前缀定位纯函数单元测试（状态栏徽标弹窗 / 前缀错误定位）
 import { describe, it, expect } from "vitest";
 import type { CompileErrorLocation } from "./typst-engine";
 import {
   buildErrorListItems,
   formatErrorLoc,
   hasErrorToShow,
+  prefixLineCharOffset,
+  prefixLineCount,
+  isErrorLineInPrefix,
 } from "./error-list";
 
 /** 构造一个定位错误（1-based 行列；end 取下一字符，模拟单点错误） */
@@ -67,5 +70,56 @@ describe("hasErrorToShow", () => {
 
   it("0 但有非定位错误：可点击", () => {
     expect(hasErrorToShow(0, "package @preview/cetz:0.1.0 not found")).toBe(true);
+  });
+});
+
+describe("prefixLineCount / isErrorLineInPrefix", () => {
+  const multi = '#set page(width: 10cm)\n#set text(14pt)\n#import "lib.typ"';
+
+  it("三行前缀：计 3 行，第 1/3 行在前缀内、第 4 行不在", () => {
+    expect(prefixLineCount(multi)).toBe(3);
+    expect(isErrorLineInPrefix(1, multi)).toBe(true);
+    expect(isErrorLineInPrefix(3, multi)).toBe(true);
+    expect(isErrorLineInPrefix(4, multi)).toBe(false);
+  });
+
+  it("单行前缀（无换行）：仅第 1 行在前缀内", () => {
+    expect(prefixLineCount("#set page()")).toBe(1);
+    expect(isErrorLineInPrefix(1, "#set page()")).toBe(true);
+    expect(isErrorLineInPrefix(2, "#set page()")).toBe(false);
+  });
+
+  it("空前缀按 split 语义计 1 行", () => {
+    expect(prefixLineCount("")).toBe(1);
+    expect(isErrorLineInPrefix(1, "")).toBe(true);
+  });
+
+  it("0 / 负行号不在前缀内", () => {
+    expect(isErrorLineInPrefix(0, "abc\ndef")).toBe(false);
+    expect(isErrorLineInPrefix(-1, "abc\ndef")).toBe(false);
+  });
+});
+
+describe("prefixLineCharOffset", () => {
+  const multi = "ab\ncd\nef"; // 总长 8：行起点偏移分别为 0 / 3 / 6
+
+  it("第 1 行起点偏移为 0", () => {
+    expect(prefixLineCharOffset(multi, 1)).toBe(0);
+  });
+
+  it("第 2 行起点 = 第 1 行长度 + 1 个换行", () => {
+    expect(prefixLineCharOffset(multi, 2)).toBe(3);
+  });
+
+  it("第 3 行起点 = 前两行长度 + 2 个换行", () => {
+    expect(prefixLineCharOffset(multi, 3)).toBe(6);
+  });
+
+  it("行号超出总行数：钳制到最后一行起点", () => {
+    expect(prefixLineCharOffset(multi, 99)).toBe(6);
+  });
+
+  it("空串（1 行）：第 1 行起点为 0", () => {
+    expect(prefixLineCharOffset("", 1)).toBe(0);
   });
 });

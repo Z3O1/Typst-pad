@@ -1,4 +1,4 @@
-// 编译错误列表弹窗的纯函数工具（不依赖 wasm / tauri，可单元测试）。
+// 编译错误列表与前缀定位的纯函数工具（不依赖 wasm / tauri，可单元测试）。
 import type { CompileErrorLocation } from "./typst-engine";
 
 /** 可定位错误条目：点击可跳转编辑器对应行列 */
@@ -53,4 +53,35 @@ export function formatErrorLoc(item: ErrorListItem): string {
 /** 徽标可点击条件：errorCount > 0 或存在非定位错误 */
 export function hasErrorToShow(errorCount: number, nonPos: string | null): boolean {
   return errorCount > 0 || hasNonPosError(nonPos);
+}
+
+// ---------------------------------------------------------------------------
+// 前缀代码行号定位（需求 #6：错误落在前缀代码内时，打开设置定位到对应行）
+// ---------------------------------------------------------------------------
+
+/**
+ * 前缀代码占用的总行数（1-based 行号语义下，第 1..N 行均属于前缀）。
+ * 按 split("\n") 计行：空串视为 1 行、末尾换行不额外计行。
+ */
+export function prefixLineCount(prefixCode: string): number {
+  return prefixCode.split("\n").length;
+}
+
+/** 错误行号是否落在前缀代码内（仅应在 prefixEnabled 时调用） */
+export function isErrorLineInPrefix(line: number, prefixCode: string): boolean {
+  return line >= 1 && line <= prefixLineCount(prefixCode);
+}
+
+/**
+ * 前缀代码中第 line 行（1-based）起点在字符串中的字符偏移；
+ * 行号超出总行数时钳制到最后一行起点（供 textarea.setSelectionRange 使用）。
+ */
+export function prefixLineCharOffset(prefixCode: string, line: number): number {
+  const lines = prefixCode.split("\n");
+  let offset = 0;
+  const target = Math.min(Math.max(line, 1), lines.length) - 1;
+  for (let i = 0; i < target; i++) {
+    offset += lines[i].length + 1; // +1 为行尾换行符
+  }
+  return Math.min(offset, prefixCode.length);
 }
