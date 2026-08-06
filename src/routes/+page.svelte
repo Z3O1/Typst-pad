@@ -346,11 +346,12 @@
         label: "文件",
         accessKey: "F",
         items: [
-          { label: "新建", action: handleNew },
-          { label: "打开…", action: handleOpen },
-          { label: "保存", action: handleSave },
-          { label: "设置…", action: openSettings },
-          { label: "导出 PDF…", action: handleExportPdf },
+          // shortcut 同时是菜单项右侧灰字显示与全局 Ctrl/Meta 组合键的触发来源（MenuBar 统一处理）
+          { label: "新建", shortcut: "Ctrl+N", action: handleNew },
+          { label: "打开…", shortcut: "Ctrl+O", action: handleOpen },
+          { label: "保存", shortcut: "Ctrl+S", action: handleSave },
+          { label: "设置…", shortcut: "Ctrl+,", action: openSettings },
+          { label: "导出 PDF…", shortcut: "Ctrl+P", action: handleExportPdf },
         ],
       },
       {
@@ -557,6 +558,11 @@
     const mod = e.ctrlKey || e.metaKey;
     if (!mod) return;
 
+    // 注意：菜单项全局快捷键（Ctrl+N 新建 / Ctrl+O 打开 / Ctrl+S 保存 / Ctrl+, 设置 /
+    // Ctrl+P 导出 PDF）由 MenuBar 的 window keydown 统一处理，不在此重复绑定，
+    // 避免同一组合键双重触发（如保存对话框双弹）。
+    // 此处仅保留未进菜单的键：Ctrl+R 重读、Ctrl+Shift+N 新窗口、Ctrl+W 关窗。
+
     // Ctrl/Cmd + R：重新读取当前文件（磁盘 → 编辑器）
     if (key === "r") {
       if (filePath) {
@@ -565,14 +571,10 @@
       }
       return;
     }
-    // Ctrl/Cmd + S：保存当前文档
-    if (key === "s") {
-      e.preventDefault();
-      handleSave();
-      return;
-    }
-    // Ctrl/Cmd + N：打开新窗口（Tauri）；浏览器环境阻止默认并忽略
-    if (key === "n") {
+    // Ctrl/Cmd + Shift + N：打开新窗口（Tauri）；浏览器环境阻止默认并忽略。
+    // 必须带 Shift：无 Shift 的 Ctrl+N 是菜单「新建文档」（由 MenuBar 处理），
+    // MenuBar 的快捷键匹配排除 Shift 修饰，两者互不干扰
+    if (key === "n" && e.shiftKey) {
       e.preventDefault();
       if (isTauri()) {
         new WebviewWindow(`editor-${Date.now()}`, {
