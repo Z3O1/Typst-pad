@@ -52,6 +52,31 @@ describe("toVirtualRelPath", () => {
     expect(toVirtualRelPath("C:\\proj2\\a.typ", "C:\\proj")).toBeNull();
     expect(toVirtualRelPath("C:\\proj\\a.typ", "D:\\proj")).toBeNull();
   });
+
+  it("Windows 目录与文件路径大小写不一致仍匹配（大小写不敏感）", () => {
+    expect(
+      toVirtualRelPath(
+        "d:\\users\\z301\\1\\typst-pad\\github-markdown.typ",
+        "D:\\Users\\Z301\\1\\typst-pad",
+      ),
+    ).toBe("github-markdown.typ");
+    expect(
+      toVirtualRelPath(
+        "D:\\USERS\\Z301\\1\\TYPST-PAD\\lib\\a.typ",
+        "D:\\Users\\Z301\\1\\typst-pad",
+      ),
+    ).toBe("lib/a.typ");
+  });
+
+  it("Windows 大小写一致正常路径返回相对路径", () => {
+    expect(
+      toVirtualRelPath("D:\\Users\\Z301\\1\\typst-pad\\lib.typ", "D:\\Users\\Z301\\1\\typst-pad"),
+    ).toBe("lib.typ");
+  });
+
+  it("POSIX 路径大小写敏感：大小写不同视为目录不匹配", () => {
+    expect(toVirtualRelPath("/home/user/LIB/a.typ", "/home/user/lib")).toBeNull();
+  });
 });
 
 describe("libraryVirtualPaths", () => {
