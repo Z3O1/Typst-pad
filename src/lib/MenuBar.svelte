@@ -6,6 +6,7 @@
     label: string;
     action: () => void;
     checked?: boolean;
+    shortcut?: string; // 快捷键显示文本（如 "Ctrl+N"），同时供全局 Ctrl/Meta 组合键匹配
   }
 
   export interface MenuGroup {
@@ -189,7 +190,10 @@
               role="menuitem"
               onclick={() => runAction(item)}
             >
-              {item.label}
+              <span class="menu-item-label">{item.label}</span>
+              {#if item.shortcut}
+                <span class="menu-item-shortcut">{item.shortcut}</span>
+              {/if}
             </button>
           {/each}
         </div>
@@ -248,6 +252,10 @@
   }
 
   .menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
     padding: 6px 12px;
     border: none;
     border-radius: 4px;
@@ -270,5 +278,15 @@
 
   .menu-item.checked:hover {
     color: #ffffff;
+  }
+
+  /* 快捷键灰字：与标签左右分布（Windows 菜单风格）；悬停高亮下用半透明白保持可读 */
+  .menu-item-shortcut {
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+
+  .menu-item:hover .menu-item-shortcut {
+    color: rgba(255, 255, 255, 0.85);
   }
 </style>
