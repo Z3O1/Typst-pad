@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import Editor from "$lib/Editor.svelte";
   import { compileToSvg, compileToPdf } from "$lib/typst-engine";
   import type { CompileErrorLocation } from "$lib/typst-engine";
@@ -38,6 +38,9 @@
     buildErrorListItems,
     formatErrorLoc,
     hasErrorToShow,
+    isErrorLineInPrefix,
+    prefixLineCharOffset,
+    type LocatedErrorItem,
   } from "$lib/error-list";
 
   // 新建时默认空白文档（不再预填示例内容）
@@ -89,6 +92,7 @@
   let jumpSeq = 0; // 跳转代次：保证重复点击同一错误也触发跳转 effect
   let jumpTarget = $state<{ line: number; col: number; seq: number } | null>(null); // 编辑器跳转目标
   let errorWrapEl = $state<HTMLElement | undefined>(undefined); // 徽标 + Popover 的外层容器（锚点，供外部点击判定）
+  let settingsPrefixTextarea = $state<HTMLTextAreaElement | undefined>(undefined); // 设置弹窗中的前缀代码 textarea（错误落前缀时定位）
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
   let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
@@ -501,6 +505,32 @@
     syncWindowTitle();
   });
 
+  /**
+   * 错误列表 Popover 点击项：
+   * - 错误落在前缀代码内（启用前缀时）：不跳编辑器，打开设置弹窗并定位到前缀对应行；
+   * - 否则：跳转编辑器对应行列。
+   */
+  function onErrorItemClick(item: LocatedErrorItem) {
+    if (prefixEnabled && isErrorLineInPrefix(item.line, prefixCode)) {
+      showErrors = false;
+      openSettings(); // 载入当前前缀副本到 settingsPrefixCode，点“保存”才生效
+      void tick().then(() => locatePrefixLine(item.line)); // 下一 tick：等设置弹窗渲染出 textarea
+    } else {
+      jumpTarget = { line: item.line, col: item.col, seq: ++jumpSeq };
+      showErrors = false;
+    }
+  }
+
+  /** 在设置弹窗的前缀代码 textarea 中定位第 line 行起点（偏移按 settingsPrefixCode 计算） */
+  function locatePrefixLine(line: number) {
+    const textarea = settingsPrefixTextarea;
+    if (!textarea) return;
+    const offset = prefixLineCharOffset(settingsPrefixCode, line);
+    textarea.focus();
+    textarea.setSelectionRange(offset, offset);
+    textarea.scrollIntoView({ block: "nearest" });
+  }
+
   // 错误列表 Popover 打开期间：Esc 关闭；点击 Popover 外部（mousedown，先于 click）
   // 关闭——徽标本身在 errorWrapEl 内，点击徽标的切换逻辑不受干扰。
   // （Svelte 5 runes：effect 内注册/清理监听）
@@ -741,13 +771,7 @@
           <div class="error-list">
             {#each buildErrorListItems(editorDiagnostics, lastNonPosError) as item}
               {#if item.kind === "located"}
-                <button
-                  class="error-item"
-                  onclick={() => {
-                    jumpTarget = { line: item.line, col: item.col, seq: ++jumpSeq };
-                    showErrors = false;
-                  }}
-                >
+                <button class="error-item" onclick={() => onErrorItemClick(item)}>
                   <span class="error-item-loc">{formatErrorLoc(item)}</span>
                   <span class="error-item-msg">{item.message}</span>
                 </button>
@@ -817,6 +841,7 @@
         <textarea
           class="settings-textarea"
           bind:value={settingsPrefixCode}
+          bind:this={settingsPrefixTextarea}
           placeholder="#set page(margin: 2cm)"
           spellcheck="false"
         ></textarea>
