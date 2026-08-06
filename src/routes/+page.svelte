@@ -19,6 +19,15 @@
   import { isBlankDoc } from "$lib/doc-utils";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
+  import ContextMenu from "$lib/ContextMenu.svelte";
+  import type { ContextMenuItem } from "$lib/ContextMenu.svelte";
+  import {
+    resolveContextZone,
+    previewSelectionHasContent,
+    buildContextMenuItems,
+    type ContextZone,
+    type ContextMenuItemSpec,
+  } from "$lib/context-menu-utils";
   import { clearState } from "$lib/persistence";
   import { savePdfDialog, invokeWriteBinary } from "$lib/file-ops";
   import { pdfFileName } from "$lib/pdf-export";
@@ -33,6 +42,18 @@
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
+
+  /** Editor 组件实例方法（bind:this 获取，右键菜单调用） */
+  interface EditorHandle {
+    hasSelection(): boolean;
+    selectAll(): void;
+    execCommand(cmd: "cut" | "copy" | "paste"): void;
+  }
+
+  /** MenuBar 组件实例方法（右键菜单弹出前联动收起） */
+  interface MenuBarHandle {
+    closeMenus(): void;
+  }
 
   let fileTitle = $state("未命名.typ");
   let dirty = $state(false);
@@ -60,6 +81,10 @@
   let editorDiagnostics = $state<CompileErrorLocation[]>([]); // 编译错误位置（传给编辑器画波浪线）
   let errorCount = $state(0); // 编译错误个数（状态栏徽标，常驻显示）
   let showErrors = $state(false); // 错误列表弹窗（点击状态栏徽标打开）
+  // 自定义右键菜单：位置 + 条目；null 表示关闭
+  let contextMenu = $state<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  let editorRef = $state<EditorHandle | null>(null); // Editor 组件实例（选区/剪贴板命令）
+  let menuBarRef = $state<MenuBarHandle | null>(null); // MenuBar 组件实例（联动收起）
   let lastNonPosError = $state<string | null>(null); // 最近一次编译的非定位错误（无位置，如包不存在）
   let jumpSeq = 0; // 跳转代次：保证重复点击同一错误也触发跳转 effect
   let jumpTarget = $state<{ line: number; col: number; seq: number } | null>(null); // 编辑器跳转目标
@@ -218,6 +243,84 @@
     } catch {
       statusText = "重新读取失败";
     }
+  }
+
+  /**
+   * 窗口级右键处理：编辑器/预览区替换原生菜单为自定义菜单；
+   * 其余区域（菜单栏/状态栏/弹窗遮罩等）保持原生——这些区域无编辑内容，
+   * 且自定义菜单与 MenuBar 选中态/弹窗交互会引入不必要的复杂度。
+   * 打开前联动收起 MenuBar 下拉/选中态：右键是 contextmenu 事件而非 mousedown，
+   * 不会触发 MenuBar 的外部关闭监听，不显式收起会导致两菜单叠加。
+   */
+  function handleContextMenu(e: MouseEvent) {
+    const zone = resolveContextZone(e.target);
+    if (zone === "other") return;
+    e.preventDefault();
+    menuBarRef?.closeMenus();
+    // enabled 依据：编辑器用 CM6 state（未聚焦也准确）；预览用原生选区（须落在预览容器内，
+    // 避免把编辑器的选区误算进来）
+    const hasSelection =
+      zone === "editor"
+        ? (editorRef?.hasSelection() ?? false)
+        : previewSelectionHasContent(window.getSelection(), previewHost);
+    contextMenu = {
+      x: e.clientX,
+      y: e.clientY,
+      items: buildContextMenuItems(zone, hasSelection).map((spec) => contextMenuItem(spec, zone)),
+    };
+  }
+
+  /** 菜单项描述 → 组件条目：把命令映射到具体执行函数（应用操作为异步，命令统一在这里接线） */
+  function contextMenuItem(spec: ContextMenuItemSpec, zone: "editor" | "preview"): ContextMenuItem {
+    if (spec.type === "separator") return { type: "separator" };
+    const label = spec.label ?? "";
+    const disabled = spec.disabled ?? false;
+    switch (spec.command) {
+      case "cut":
+        return { type: "item", label, disabled, onClick: () => editorRef?.execCommand("cut") };
+      case "copy":
+        return {
+          type: "item",
+          label,
+          disabled,
+          onClick: () => {
+            if (zone === "editor") editorRef?.execCommand("copy");
+            else document.execCommand("copy"); // 预览为不可编辑内容：直接复制当前选区
+          },
+        };
+      case "paste":
+        return { type: "item", label, disabled, onClick: () => editorRef?.execCommand("paste") };
+      case "select-all":
+        return {
+          type: "item",
+          label,
+          disabled,
+          onClick: () => {
+            if (zone === "editor") editorRef?.selectAll();
+            else selectAllPreview();
+          },
+        };
+      case "save":
+        return { type: "item", label, disabled, onClick: () => handleSave() };
+      case "export-pdf":
+        return { type: "item", label, disabled, onClick: () => handleExportPdf() };
+      case "settings":
+        return { type: "item", label, disabled, onClick: () => openSettings() };
+      case "open":
+        return { type: "item", label, disabled, onClick: () => handleOpen() };
+      default:
+        return { type: "item", label, disabled };
+    }
+  }
+
+  /** 预览区全选：用 Selection API 选中整个预览容器（SVG 不可编辑，execCommand selectAll 不适用） */
+  function selectAllPreview() {
+    const sel = window.getSelection();
+    if (!sel || !previewHost) return;
+    const range = document.createRange();
+    range.selectNodeContents(previewHost);
+    sel.removeAllRanges();
+    sel.addRange(range);
   }
 
   /** 新建：清空文档并清除持久化的上次内容 */
@@ -469,6 +572,8 @@
     };
     media.addEventListener("change", onSystemThemeChange);
     window.addEventListener("keydown", handleKeydown);
+    // 自定义右键菜单：编辑器/预览区替换原生菜单（其余区域放行给浏览器原生）
+    window.addEventListener("contextmenu", handleContextMenu);
 
     // Tauri 内：支持拖放打开 / 关联双击打开 / 跨实例转发打开
     const unlisteners: Array<() => void> = [];
@@ -535,6 +640,7 @@
       disposed = true;
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
+      window.removeEventListener("contextmenu", handleContextMenu);
       if (beforeUnloadHandler) {
         window.removeEventListener("beforeunload", beforeUnloadHandler);
         beforeUnloadHandler = null;
@@ -548,7 +654,11 @@
 
 <div class="app" class:light={resolvedTheme === "light"}>
   <header class="toolbar">
-    <MenuBar groups={menuGroups()} onMenuFocusChange={handleMenuFocusChange} />
+    <MenuBar
+      bind:this={menuBarRef}
+      groups={menuGroups()}
+      onMenuFocusChange={handleMenuFocusChange}
+    />
   </header>
 
   <main class="panes">
@@ -558,6 +668,7 @@
     <section class="pane editor-pane">
       <div class="pane-body">
         <Editor
+          bind:this={editorRef}
           initialDoc={SAMPLE_DOC}
           doc={editorDoc}
           theme={resolvedTheme}
@@ -569,7 +680,8 @@
       </div>
     </section>
     <section class="pane preview-pane">
-      <div class="pane-body preview-body">
+      <!-- data-context-zone：右键区域判定标记（覆盖占位/错误/预览纸张全部子区域） -->
+      <div class="pane-body preview-body" data-context-zone="preview">
         {#if previewStatus === "error"}
           <div class="preview-error">
             <div class="preview-error-title">编译错误</div>
@@ -712,6 +824,14 @@
         </div>
       </div>
     </div>
+  {/if}
+
+  {#if contextMenu}
+    <ContextMenu
+      position={{ x: contextMenu.x, y: contextMenu.y }}
+      items={contextMenu.items}
+      onClose={() => (contextMenu = null)}
+    />
   {/if}
 </div>
 
