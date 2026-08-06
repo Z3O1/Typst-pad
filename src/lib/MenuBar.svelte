@@ -40,6 +40,18 @@
     item.action();
   }
 
+  /**
+   * 关闭当前展开/选中的菜单（供右键菜单等外部入口联动收起）。
+   * 不依赖 mousedown 外部关闭监听：右键弹出自定义菜单不产生 mousedown 事件，
+   * 需要在打开前显式调用，避免两个菜单叠加显示。
+   */
+  export function closeMenus(): void {
+    if (selectedIndex === null && openIndex === null) return;
+    selectedIndex = null;
+    openIndex = null;
+    onMenuFocusChange?.(false);
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Alt") {
       if (e.repeat) return; // 长按 Alt 的重复 keydown 不应反复切换选中态
