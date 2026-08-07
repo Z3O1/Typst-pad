@@ -52,7 +52,29 @@ describe("resolveContextZone 区域判定", () => {
     expect(resolveContextZone(text)).toBe("preview");
   });
 
-  it("其余区域（body/菜单栏/状态栏）→ other", () => {
+  it("target 位于 .toolbar（顶部菜单栏）内 → chrome", () => {
+    const toolbar = makeElement(
+      `<header class="toolbar"><nav class="menubar"><button class="menu-title">文件</button></nav></header>`,
+    );
+    expect(resolveContextZone(toolbar.querySelector(".menu-title"))).toBe("chrome");
+  });
+
+  it("target 位于 .toolbar 内展开的下拉菜单按钮 → chrome", () => {
+    const toolbar = makeElement(
+      `<header class="toolbar"><nav class="menubar"><div class="menu-dropdown"><button class="menu-item">保存</button></div></nav></header>`,
+    );
+    expect(resolveContextZone(toolbar.querySelector(".menu-item"))).toBe("chrome");
+  });
+
+  it("target 位于 .statusbar（底部状态栏）内元素（错误徽标/Popover）→ chrome", () => {
+    const statusbar = makeElement(
+      `<footer class="statusbar"><span class="error-badge"><span class="error-count">2</span></span><div class="error-popover"><button>跳转</button></div></footer>`,
+    );
+    expect(resolveContextZone(statusbar.querySelector(".error-count"))).toBe("chrome");
+    expect(resolveContextZone(statusbar.querySelector("button"))).toBe("chrome");
+  });
+
+  it("其余区域（body/裸 .menubar 容器，不在 .toolbar 内）→ other", () => {
     const bar = makeElement(`<div class="menubar"><button>文件</button></div>`);
     expect(resolveContextZone(bar)).toBe("other");
     expect(resolveContextZone(document.body)).toBe("other");

@@ -2,8 +2,14 @@
 // 与 DOM/组件解耦（依赖以参数注入），便于单元测试；
 // 菜单 UI 与事件绑定在 ContextMenu.svelte，命令到执行函数的映射在 +page.svelte。
 
-/** 右键命中区域：编辑器 / 预览区 / 其余（保持浏览器原生菜单） */
-export type ContextZone = "editor" | "preview" | "other";
+/**
+ * 右键命中区域：
+ * - editor / preview：编辑器、预览区，弹自定义菜单；
+ * - chrome：顶部菜单栏/底部状态栏等程序框架区，右键无效果（自定义菜单与浏览器
+ *   原生菜单均不弹，见 +page.svelte 的 handleContextMenu）；
+ * - other：其余区域，保持浏览器原生菜单。
+ */
+export type ContextZone = "editor" | "preview" | "chrome" | "other";
 
 /** 菜单项对应的命令（由调用方映射到具体执行函数，避免纯逻辑依赖 DOM 与异步操作） */
 export type ContextMenuCommand =
@@ -28,7 +34,12 @@ export interface ContextMenuItemSpec {
  * 按 event target 判断右键所属区域：
  * - target 位于 .cm-content 或其祖先 .editor-host 内 → editor（覆盖行号栏等 CM 附属区域）；
  * - target 位于带 data-context-zone="preview" 的容器内 → preview；
- * - 其余（菜单栏/状态栏/弹窗遮罩等）→ other，保持原生菜单。
+ * - target 位于 .toolbar（顶部菜单栏，含展开的下拉菜单）或 .statusbar（底部状态栏，
+ *   含错误徽标/错误 Popover）内 → chrome，右键无效果；
+ * - 其余（弹窗遮罩等）→ other，保持原生菜单。
+ * 判定顺序：chrome 检查放在 editor/preview 之后。三者元素互不嵌套（工具栏在 header、
+ * 编辑/预览在主区、状态栏在 footer），顺序不影响命中结果，仅需在兜底返回 other 前
+ * 把 chrome 检查补上即可。
  */
 export function resolveContextZone(target: EventTarget | null): ContextZone {
   if (!(target instanceof Node)) return "other";
@@ -36,6 +47,7 @@ export function resolveContextZone(target: EventTarget | null): ContextZone {
   if (!el) return "other";
   if (el.closest(".cm-content, .editor-host")) return "editor";
   if (el.closest('[data-context-zone="preview"]')) return "preview";
+  if (el.closest(".toolbar, .statusbar")) return "chrome";
   return "other";
 }
 
