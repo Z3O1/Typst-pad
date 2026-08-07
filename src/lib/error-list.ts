@@ -55,6 +55,17 @@ export function hasErrorToShow(errorCount: number, nonPos: string | null): boole
   return errorCount > 0 || hasNonPosError(nonPos);
 }
 
+/**
+ * 编译失败的状态栏文案：errorCount>0 → "编译错误：N 处"；否则 →
+ * "编译错误：" + error（截断到 ~120 字符，防状态栏溢出）。
+ * （自 typst-libs 迁移，typst-libs 已随 wasm 链路删除）
+ */
+export function formatCompileFailMessage(errorCount: number, error: string): string {
+  if (errorCount > 0) return `编译错误：${errorCount} 处`;
+  const msg = error.length > 120 ? error.slice(0, 120) + "…" : error;
+  return `编译错误：${msg}`;
+}
+
 // ---------------------------------------------------------------------------
 // 前缀代码行号定位（需求 #6：错误落在前缀代码内时，打开设置定位到对应行）
 // ---------------------------------------------------------------------------

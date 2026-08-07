@@ -1,269 +1,184 @@
-// Typst 编译引擎：WASM 编译器 + 本地字体 + SVG/PDF 输出（单例懒加载）。
-import {
-  createTypstCompiler,
-  createTypstRenderer,
-  createTypstFontBuilder,
-} from "@myriaddreamin/typst.ts";
-import {
-  initOptions,
-  MemoryAccessModel,
-  FetchPackageRegistry,
-} from "@myriaddreamin/typst.ts";
-import { CompileFormatEnum } from "@myriaddreamin/typst.ts/compiler";
-import type { TypstCompiler, TypstRenderer } from "@myriaddreamin/typst.ts";
-import { sanitizeSvg } from "./svg-sanitize";
-import { paginateSvg } from "./svg-paginate";
-import { parseDiagnosticRange } from "./diagnostics-utils";
-import { mark } from "./startup-timing";
+// Typst 编译引擎：Tauri 进程内原生编译（compile_doc / export_pdf 命令）。
+// WASM 编译器（typst.ts）已移除：编译/PDF 导出/字体/include 解析全部由 Rust 侧完成，
+// 前端只负责发起命令并消费结构化结果。SVG 产物来自可信进程内编译，不再净化。
+import { invoke } from "@tauri-apps/api/core";
+import { savePdfDialog } from "./file-ops";
+import { pdfFileName } from "./pdf-export";
 import { dbg } from "./debug";
-import { fetchFontBuffers } from "./font-load";
-// 静态导入 wasm 包装模块 + wasm URL，通过 getWrapper/getModule 显式注入，
-// 绕开 typst.ts 内部的动态 import()——该动态导入在 Vite dev 预构建下会触发
-// "Cannot import wasm module without importer" 错误。
-import * as typstCompilerModule from "@myriaddreamin/typst-ts-web-compiler";
-import * as typstRendererModule from "@myriaddreamin/typst-ts-renderer";
-import compilerWasmUrl from "@myriaddreamin/typst-ts-web-compiler/pkg/typst_ts_web_compiler_bg.wasm?url";
-import rendererWasmUrl from "@myriaddreamin/typst-ts-renderer/pkg/typst_ts_renderer_bg.wasm?url";
 
-const MAIN_PATH = "/main.typ";
+/**
+ * 主文档在文档目录中的相对路径（与旧 WASM 模型 "/main.typ" 语义一致：相对文档目录、
+ * 无前导斜杠）。本地 .typ 库的 include 解析已移到 Rust 侧，按文档目录解析。
+ */
+export const DOCUMENT_PATH = "main.typ";
 
-// 打包在 static/fonts/ 的本地字体（离线可用，无需 CDN）
-const FONT_URLS = [
-  "/fonts/NotoSerifCJKsc-Regular.otf",
-  "/fonts/NewCMMath-Regular.otf",
-  "/fonts/NewCMMath-Bold.otf",
-  "/fonts/NewCMMath-Book.otf",
-  "/fonts/LibertinusSerif-Regular.otf",
-  "/fonts/LibertinusSerif-Bold.otf",
-  "/fonts/DejaVuSansMono.ttf",
-];
+// ---------------------------------------------------------------------------
+// 接口契约（Rust 侧实现，见 T1 任务契约）：
+// invoke("compile_doc", { src, documentPath }) → CompileOutput
+// invoke("export_pdf", { src, documentPath, targetPath }) → { ok, error? }
+// ---------------------------------------------------------------------------
 
-let compiler: TypstCompiler | null = null;
-let renderer: TypstRenderer | null = null;
-let initPromise: Promise<void> | null = null;
-
-// 单飞互斥：同一时刻只允许一个编译任务在跑（compiler 单例共享 addSource/compile）
-let queueTail: Promise<unknown> = Promise.resolve();
-
-export interface CompileOk {
-  ok: true;
-  svg: string;
-  pageCount: number;
+/** Rust 侧结构化诊断：1-based 行列；path 为空表示主文档 */
+export interface Diagnostic {
+  message: string;
+  severity: "error" | "warning";
+  line: number;
+  column: number;
+  endLine?: number;
+  endColumn?: number;
+  path?: string;
 }
 
-/** 编译错误的源码位置（1-based 行列，parseDiagnosticRange 已从 0-based 转换），供编辑器画波浪线 / hover 提示 */
+/** compile_doc 成功产物：pages 为每页 SVG 字符串（按页序） */
+export interface CompileOutputOk {
+  ok: true;
+  pages: string[];
+  warnings?: Diagnostic[];
+}
+
+/** compile_doc 编译失败：错误诊断列表 */
+export interface CompileOutputFail {
+  ok: false;
+  diagnostics: Diagnostic[];
+}
+
+export type CompileOutput = CompileOutputOk | CompileOutputFail;
+
+/** 编译错误的源码位置（1-based 行列；end 为独占终点），供编辑器画波浪线 / hover 提示 */
 export interface CompileErrorLocation {
   message: string;
   line: number;
   col: number;
   endLine: number;
   endCol: number;
-  /** 诊断来源文件的虚拟路径（"/main.typ"；本地库等为各自路径，编辑器不为其画波浪线） */
+  /** 诊断来源路径；空/缺失表示主文档（编辑器为其画波浪线），本地库等为各自路径（跳过） */
   path?: string;
+}
+
+export interface CompileOk {
+  ok: true;
+  svg: string;
+  pageCount: number;
+  /** 编译警告（Rust 侧携带；当前 UI 不展示，保留供后续使用） */
+  warnings?: Diagnostic[];
 }
 
 export interface CompileFail {
   ok: false;
   error: string;
-  /** 所有可定位的编译错误（含位置）；无法解析出 range 的错误会被跳过 */
+  /** 所有可定位的编译错误（含位置）；无法解析出位置的错误会被跳过 */
   errors: CompileErrorLocation[];
 }
 
 export type CompileResult = CompileOk | CompileFail;
 
-/** 懒加载初始化编译器/渲染器/字体；失败后允许下次重试 */
-function ensureInit(): Promise<void> {
-  if (!initPromise) {
-    initPromise = doInit().catch((e) => {
-      initPromise = null; // 初始化失败后允许重试
-      throw e;
-    });
-  }
-  return initPromise;
+/** PDF 导出成功：目标路径为用户经"另存为"对话框选定的落盘位置 */
+export interface PdfExportOk {
+  ok: true;
+  targetPath: string;
 }
 
-async function doInit(): Promise<void> {
-  mark("engine-init-start");
-  compiler = createTypstCompiler();
-  renderer = createTypstRenderer();
-  // 注入 access model 与 package registry，让 WASM 侧使用真实文件系统/联网包注册表
-  // （否则是 Dummy Registry / Dummy AccessModel，#import "@preview/..." 与本地 .typ 都会抛错）
-  const accessModel = new MemoryAccessModel();
-  const packageRegistry = new FetchPackageRegistry(accessModel);
-  // 字体下载只依赖网络、与 wasm 无关：先并行发起，下载时延隐藏在 wasm 实例化期间
-  // （不再占用启动关键路径）。
-  mark("fonts-download-start");
-  const fontDownload = fetchFontBuffers(FONT_URLS);
-  // compiler 与 renderer 是两个相互独立的 wasm 实例，可并行初始化；
-  // 30MB compiler wasm 下载/实例化期间 renderer 与字体的工作同时进行。
-  mark("compiler-init-start");
-  const engineInit = Promise.all([
-    compiler.init({
-      getWrapper: () => Promise.resolve(typstCompilerModule),
-      getModule: () => compilerWasmUrl,
-      beforeBuild: [
-        initOptions.withAccessModel(accessModel),
-        initOptions.withPackageRegistry(packageRegistry),
-        // 关闭 typst.ts 默认 CDN 字体资产下载（createTypstCompiler 未提供
-        // 字体相关 beforeBuild 时会自动挂 loadFonts([], {assets:["text"]})，
-        // 即从 jsdelivr 拉 17 个默认字体，网络差时启动被拖慢十几秒，见需求 #7）。
-        // 本应用已通过 fontBuilder.addFontData + setFonts 全套注册本地字体
-        // （含默认文档用到的 Libertinus Serif / NewCM Math / DejaVu Sans Mono），
-        // disableDefaultFontAssets 同时满足其强制 fontLoader 校验。
-        initOptions.disableDefaultFontAssets(),
-      ],
-    }),
-    renderer.init({
-      getWrapper: () => Promise.resolve(typstRendererModule),
-      getModule: () => rendererWasmUrl,
-    }),
-  ]);
-  mark("renderer-init-start");
-  await engineInit;
-  mark("compiler-init-end");
-  mark("renderer-init-end");
-
-  // 注：不能用 loadFonts 传 Uint8Array（0.8.0-rc3 有 bug，且数学字体不生效），
-  // 需用 fontBuilder.addFontData + setFonts 显式注册。fontBuilder 同样需
-  // 显式提供 wasm（无参 init 会走动态 import 触发 wasm 导入错误；
-  // 因与 compiler 共用同一 wasm 包装模块，其 init 实际是幂等空操作）。
-  const builder = createTypstFontBuilder();
-  mark("fontbuilder-init-start");
-  await builder.init({
-    getWrapper: () => Promise.resolve(typstCompilerModule),
-    getModule: () => compilerWasmUrl,
-  });
-  mark("fontbuilder-init-end");
-  const fontBufs = await fontDownload;
-  mark("fonts-download-end");
-  mark("fonts-register-start");
-  for (const buf of fontBufs) {
-    await builder.addFontData(buf);
-  }
-  mark("fonts-register-end");
-  await builder.build(async (fonts) => {
-    compiler!.setFonts(fonts);
-  });
-  mark("engine-init-end");
+/** 用户取消"另存为"对话框 */
+export interface PdfExportCancelled {
+  ok: false;
+  cancelled: true;
 }
 
-/** 串行化编译任务，避免并发 addSource 互相覆盖 */
-export function enqueue<T>(task: () => Promise<T>): Promise<T> {
-  const run = queueTail.then(task, task);
-  queueTail = run.catch(() => undefined);
-  return run;
+/** Rust 侧导出失败（编译错误 / 落盘失败等） */
+export interface PdfExportFail {
+  ok: false;
+  cancelled: false;
+  error: string;
+}
+
+export type PdfExportResult = PdfExportOk | PdfExportCancelled | PdfExportFail;
+
+/** 单条结构化诊断 → 编辑器用的错误位置（end 缺省回退为起点；1-based 原样透传） */
+export function diagnosticToLocation(d: Diagnostic): CompileErrorLocation {
+  return {
+    message: d.message,
+    line: d.line,
+    col: d.column,
+    endLine: d.endLine ?? d.line,
+    endCol: d.endColumn ?? d.column,
+    path: d.path,
+  };
+}
+
+/** 全部 error 级诊断 → 编辑器错误位置列表（warning 级不参与波浪线/错误计数） */
+export function errorLocations(diagnostics: Diagnostic[]): CompileErrorLocation[] {
+  return diagnostics
+    .filter((d) => d.severity === "error")
+    .map(diagnosticToLocation);
+}
+
+/** 诊断消息格式化（带位置后缀；供无法定位的错误作为状态栏/弹窗文案） */
+export function formatDiagnostic(d: Diagnostic): string {
+  return `${d.message} (行 ${d.line}, 列 ${d.column})`;
 }
 
 /**
- * 注册当前文档目录下的本地 .typ 库文件。keys 为相对虚拟路径（斜杠分隔、无前导斜杠，
- * 如 "lib.typ"、"chapters/a.typ"），values 为文件文本内容。先 resetShadow（清掉
- * main 的 shadow——但每次 compileToSvg/compileToPdf 都会先 addSource(MAIN_PATH)，
- * 所以安全），再逐个 addSource("/" + rel)。空对象也用于清理上一份文档遗留的库文件。
+ * 每页 SVG 字符串 → 预览容器 HTML：按页序拼接，页间插入分隔线。
+ * 页数与旧实现一致由页数直接得出（旧实现基于单文档内 typst-page 元素统计）。
  */
-export function registerLocalLibraries(
-  files: Record<string, string>,
-): Promise<void> {
-  return enqueue(async () => {
-    await ensureInit();
-    compiler!.resetShadow();
-    for (const [rel, content] of Object.entries(files)) {
-      compiler!.addSource("/" + rel, content);
-    }
-  });
+export function composePages(pages: string[]): string {
+  return pages.join('<div class="page-separator"></div>');
 }
 
-interface DiagnosticMessage {
-  severity: string;
-  message: string;
-  range?: string;
-  path?: string;
-}
-
-/** 编译 Typst 源码并渲染为 SVG */
-export function compileToSvg(source: string): Promise<CompileResult> {
-  return enqueue(async () => {
-    try {
-      await ensureInit();
-      compiler!.addSource(MAIN_PATH, source);
-      const { result, diagnostics } = await compiler!.compile({
-        mainFilePath: MAIN_PATH,
-        format: CompileFormatEnum.vector,
-        diagnostics: "full",
-      });
-
-      const errors = (diagnostics ?? []).filter((d) => d.severity === "error");
-      if (errors.length > 0) {
-        const locations = collectErrorLocations(errors);
-        // 调试日志：原始诊断（parseDiagnosticRange 转换前，range/path/severity 原样输出）与
-        // 转换后的位置列表各输出一次，供复现 0-based 行列/路径类问题（如 #42 波浪线偏位）
-        dbg.log("compile-diagnostics", "raw", diagnostics ?? []);
-        dbg.log("compile-diagnostics", "converted", locations);
-        return {
-          ok: false,
-          error: formatDiagnostic(errors[0]),
-          errors: locations,
-        };
-      }
-      if (!result) {
-        return { ok: false, error: "编译失败：未生成产物", errors: [] };
-      }
-
-      const svg = await renderer!.renderSvg({
-        format: "vector",
-        artifactContent: result,
-        // 关闭 JS 交互层：typst-ts 默认输出内嵌未正确转义的 JS（裸 & 导致 XML 解析失败），
-        // 且纯预览不需要交互脚本
-        data_selection: { body: true, defs: true, css: true, js: false },
-      });
-      const pageCount = (svg.match(/class="typst-page"/g) ?? []).length;
-      // 净化后插入页间分隔线（pageCount 仍基于原始 svg 统计，见 svg-paginate.ts）
-      return { ok: true, svg: paginateSvg(sanitizeSvg(svg)), pageCount };
-    } catch (e) {
+/**
+ * 编译 Typst 源码为 SVG 预览。失败返回错误结果对象（调用方保留上次成功预览），
+ * 不抛异常；invoke/IPC 异常也收敛为错误结果（errors 为空，error 带原始消息）。
+ */
+export async function compileToSvg(
+  source: string,
+  documentPath = DOCUMENT_PATH,
+): Promise<CompileResult> {
+  try {
+    const out = await invoke<CompileOutput>("compile_doc", { src: source, documentPath });
+    if (out.ok) {
       return {
-        ok: false,
-        error: e instanceof Error ? e.message : String(e),
-        errors: [],
+        ok: true,
+        svg: composePages(out.pages),
+        pageCount: out.pages.length,
+        warnings: out.warnings,
       };
     }
-  });
-}
-
-function formatDiagnostic(d: DiagnosticMessage): string {
-  const loc = d.range ? ` (${d.range})` : "";
-  return `${d.message}${loc}`;
-}
-
-/** 把所有 error 级诊断转成带源码位置的错误列表（无法定位的跳过） */
-function collectErrorLocations(
-  diagnostics: DiagnosticMessage[],
-): CompileErrorLocation[] {
-  const locations: CompileErrorLocation[] = [];
-  for (const d of diagnostics) {
-    const loc = d.range ? parseDiagnosticRange(d.range) : null;
-    if (loc) locations.push({ message: d.message, path: d.path, ...loc });
+    const errors = errorLocations(out.diagnostics);
+    // 调试日志：原始诊断（结构化，severity/行列/path 原样输出）与转换后的位置列表各输出一次
+    dbg.log("compile-diagnostics", "raw", out.diagnostics);
+    dbg.log("compile-diagnostics", "converted", errors);
+    const first = out.diagnostics[0];
+    return {
+      ok: false,
+      error: first ? formatDiagnostic(first) : "编译失败：未生成产物",
+      errors,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      errors: [],
+    };
   }
-  return locations;
 }
 
-/** 编译为 PDF 字节并返回 Blob（供下载/保存） */
-export function compileToPdf(source: string): Promise<Blob> {
-  return enqueue(async () => {
-    await ensureInit();
-    compiler!.addSource(MAIN_PATH, source);
-    const { result, diagnostics } = await compiler!.compile({
-      mainFilePath: MAIN_PATH,
-      format: CompileFormatEnum.pdf,
-      diagnostics: "full",
-    });
-    const errors = (diagnostics ?? []).filter((d) => d.severity === "error");
-    if (errors.length > 0) {
-      throw new Error(formatDiagnostic(errors[0]));
-    }
-    if (!result) {
-      throw new Error("PDF 导出失败：未生成产物");
-    }
-    return new Blob([result], { type: "application/pdf" });
+/**
+ * 导出 PDF：由建议文件名推导默认名 → 弹系统"另存为"对话框选定目标路径 →
+ * invoke export_pdf 让 Rust 侧编译并直接落盘。取消对话框返回 cancelled，
+ * 导出失败返回 error（调用方展示错误并保留预览）。
+ */
+export async function compileToPdf(
+  source: string,
+  documentPath = DOCUMENT_PATH,
+  suggestedName: string,
+): Promise<PdfExportResult> {
+  const target = await savePdfDialog(pdfFileName(suggestedName));
+  if (!target) return { ok: false, cancelled: true };
+  const res = await invoke<{ ok: boolean; error?: string }>("export_pdf", {
+    src: source,
+    documentPath,
+    targetPath: target,
   });
+  if (res.ok) return { ok: true, targetPath: target };
+  return { ok: false, cancelled: false, error: res.error ?? "PDF 导出失败：未生成产物" };
 }
-
-// 净化逻辑见 src/lib/svg-sanitize.ts（独立模块便于单元测试）

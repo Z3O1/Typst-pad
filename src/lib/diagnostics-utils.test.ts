@@ -1,73 +1,14 @@
-// diagnostics-utils 编译诊断纯函数单元测试（range 解析 / 位置映射 / 波浪线区间）。
-// 测试数据来自 typst.ts 0.8.0-rc3 实测输出（见 PR #5 调查）：range 为 0-based、终点独占。
+// diagnostics-utils 编译诊断纯函数单元测试（位置映射 / 波浪线区间）。
+// 诊断已切换为 Rust 侧结构化对象（1-based 行列，见 typst-engine.ts），
+// 不再有 range 字符串解析；测试数据直接构造 CompileErrorLocation。
 import { describe, it, expect } from "vitest";
 import { Text } from "@codemirror/state";
-import {
-  parseDiagnosticRange,
-  offsetAt,
-  mapCompiledPosToDoc,
-  squiggleRanges,
-} from "./diagnostics-utils";
+import { offsetAt, mapCompiledPosToDoc, squiggleRanges } from "./diagnostics-utils";
 import type { CompileErrorLocation } from "./typst-engine";
 
 function err(over: Partial<CompileErrorLocation>): CompileErrorLocation {
   return { message: "m", line: 1, col: 1, endLine: 1, endCol: 2, ...over };
 }
-
-describe("parseDiagnosticRange（0-based → 1-based 转换）", () => {
-  it("实测：'#let a = b' 中 b 报错 range '0:9-0:10' → 第 1 行 10-11 列", () => {
-    expect(parseDiagnosticRange("0:9-0:10")).toEqual({
-      line: 1,
-      col: 10,
-      endLine: 1,
-      endCol: 11,
-    });
-  });
-
-  it("实测：第 2 行错误 range '1:9-1:10' → 第 2 行", () => {
-    expect(parseDiagnosticRange("1:9-1:10")).toEqual({
-      line: 2,
-      col: 10,
-      endLine: 2,
-      endCol: 11,
-    });
-  });
-
-  it("实测：多行错误 range '2:2-2:9' → 第 3 行 3-10 列", () => {
-    expect(parseDiagnosticRange("2:2-2:9")).toEqual({
-      line: 3,
-      col: 3,
-      endLine: 3,
-      endCol: 10,
-    });
-  });
-
-  it("实测：EOF 单点错误 '0:8-0:8' → 单点 1 行 9 列", () => {
-    expect(parseDiagnosticRange("0:8-0:8")).toEqual({ line: 1, col: 9, endLine: 1, endCol: 9 });
-  });
-
-  it("无 end 形式 '2:9'：终点 = 起点", () => {
-    expect(parseDiagnosticRange("2:9")).toEqual({ line: 3, col: 10, endLine: 3, endCol: 10 });
-  });
-
-  it("带路径前缀仍可解析", () => {
-    expect(parseDiagnosticRange("main.typ:2:9-3:15")).toEqual({
-      line: 3,
-      col: 10,
-      endLine: 4,
-      endCol: 16,
-    });
-  });
-
-  it("非法格式返回 null（调用方跳过）", () => {
-    expect(parseDiagnosticRange("abc")).toBeNull();
-    expect(parseDiagnosticRange("2")).toBeNull();
-    expect(parseDiagnosticRange("2:9-")).toBeNull();
-    expect(parseDiagnosticRange("2:9-3")).toBeNull();
-    expect(parseDiagnosticRange("15-30")).toBeNull();
-    expect(parseDiagnosticRange("")).toBeNull();
-  });
-});
 
 describe("offsetAt（1-based 行列 → offset）", () => {
   // CM6 Text.of 以 "\n" 拼接：行 1 "#let a = b" 占 0-9，\n 在 10，行 2 "hello" 占 11-15
@@ -126,7 +67,7 @@ describe("squiggleRanges（编辑器波浪线区间）", () => {
   // CM6 Text.of 以 "\n" 拼接：行 1 "#let a = b" 占 0-9，\n 在 10，行 2 "hello" 占 11-15
   const doc = Text.of(["#let a = b", "hello"]);
 
-  it("第 1 行错误：区间精确覆盖出错 token（实测 '0:9-0:10' → 0-based [9,10)）", () => {
+  it("第 1 行错误：区间精确覆盖出错 token（1-based 10-11 列 → 0-based [9,10)）", () => {
     const ranges = squiggleRanges(doc, [err({ line: 1, col: 10, endLine: 1, endCol: 11 })]);
     expect(ranges).toHaveLength(1);
     expect(ranges[0].from).toBe(9);
@@ -167,6 +108,14 @@ describe("squiggleRanges（编辑器波浪线区间）", () => {
       err({ line: 2, col: 3, endLine: 2, endCol: 6, path: "/lib.typ" }),
     ]);
     expect(ranges).toEqual([]);
+  });
+
+  it("path 为空（Rust 契约：空表示主文档）：画波浪线", () => {
+    const ranges = squiggleRanges(doc, [
+      err({ line: 1, col: 10, endLine: 1, endCol: 11, path: "" }),
+    ]);
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].from).toBe(9);
   });
 
   it("path 缺失：视为主源（兼容旧数据）", () => {

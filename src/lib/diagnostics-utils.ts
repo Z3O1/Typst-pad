@@ -1,37 +1,9 @@
 // 编译诊断的纯函数工具（不依赖 wasm / tauri，可单元测试）：
-// range 解析（0-based → 1-based）、编译源 → 用户文档的位置映射、编辑器波浪线区间计算。
+// 编译源 → 用户文档的位置映射、编辑器波浪线区间计算。
+// 诊断已由 Rust 侧以结构化对象提供（1-based 行列，见 typst-engine.ts 的
+// Diagnostic），不再需要 range 字符串解析。
 import type { Text } from "@codemirror/state";
 import type { CompileErrorLocation } from "./typst-engine";
-
-/** 1-based 行列区间（起点含、终点为独占语义：endCol 指向范围后一列） */
-export interface DiagnosticSpan {
-  line: number;
-  col: number;
-  endLine: number;
-  endCol: number;
-}
-
-/**
- * 解析 typst.ts "full" 诊断的 range 字符串并转为 1-based 行列。
- * 支持 "2:9"、"2:9-3:15"、带路径前缀（"main.typ:2:9-3:15"）三种形式。
- *
- * 实测（typst.ts 0.8.0-rc3，见 PR #5 调查）：range 为 LSP 风格 0-based、
- * 终点独占——如 "#let a = b" 中 b 报错 → "0:9-0:10"。此前按 1-based 直用导致
- * 波浪线整体偏一行/偏一列，这里统一 +1 转 1-based（Editor / 错误列表 / 跳转共用）。
- * 解析失败返回 null（调用方跳过该错误）。
- */
-export function parseDiagnosticRange(range: string): DiagnosticSpan | null {
-  const m = /(\d+):(\d+)(?:-(\d+):(\d+))?$/.exec(range);
-  if (!m) return null;
-  const line = Number(m[1]) + 1;
-  const col = Number(m[2]) + 1;
-  return {
-    line,
-    col,
-    endLine: m[3] !== undefined ? Number(m[3]) + 1 : line,
-    endCol: m[4] !== undefined ? Number(m[4]) + 1 : col,
-  };
-}
 
 /** 行/列（1-based）→ 文档 offset；越界时 clamp 到文档范围内（空文档返回 0） */
 export function offsetAt(doc: Text, line: number, col: number): number {
@@ -79,7 +51,8 @@ export interface SquiggleRange {
 
 /**
  * 计算应在编辑器中画波浪线的错误区间。
- * - 非主源文件（本地 .typ 库等）的错误不在主文档内，跳过（path 缺失视为主源，兼容旧数据）；
+ * - 非主源文件（本地 .typ 库等）的错误不在主文档内，跳过（path 为空/缺失视为主源，
+ *   兼容 Rust 契约与旧数据）；
  * - prefixCode 非空时先做编译源 → 用户文档映射，前缀区错误跳过；
  * - 越界区间 clamp 到文档范围；单点/行尾错误保证至少画出 1 个字符；空文档返回空列表。
  */
@@ -87,11 +60,11 @@ export function squiggleRanges(
   doc: Text,
   diags: CompileErrorLocation[],
   prefixCode = "",
-  mainPath = "/main.typ",
+  mainPath = "main.typ",
 ): SquiggleRange[] {
   const out: SquiggleRange[] = [];
   for (const d of diags) {
-    if (d.path !== undefined && d.path !== mainPath) continue;
+    if (d.path !== undefined && d.path !== "" && d.path !== mainPath) continue;
     const start = mapCompiledPosToDoc(d.line, d.col, prefixCode);
     if (start.kind === "prefix") continue;
     let from = offsetAt(doc, start.line, start.col);

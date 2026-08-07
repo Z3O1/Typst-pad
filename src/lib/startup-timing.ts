@@ -21,7 +21,7 @@ export function getMarks(): StartMark[] {
   return marks.slice();
 }
 
-/** 输出启动报告（仅一次）：阶段表 + 关键网络资源（wasm/字体）耗时 */
+/** 输出启动报告（仅一次）：阶段表 + 页面加载阶段耗时 */
 export function reportStartup(): void {
   if (reported || marks.length === 0) return;
   reported = true;
@@ -44,17 +44,5 @@ export function reportStartup(): void {
     }
   } catch {
     // 环境不支持 navigation timing 时忽略
-  }
-  // 关键网络资源（wasm / 字体）耗时
-  try {
-    const res = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
-    const heavy = res.filter((r) => r.name.includes(".wasm") || r.name.includes("/fonts/"));
-    for (const r of heavy) {
-      console.log(
-        `[startup] resource:${r.name.split("/").pop()} t:${(r.responseEnd - r.startTime).toFixed(1)} bytes:${r.transferSize}`,
-      );
-    }
-  } catch {
-    // 环境不支持 resource timing 时忽略
   }
 }
