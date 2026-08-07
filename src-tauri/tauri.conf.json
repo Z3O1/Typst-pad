@@ -27,6 +27,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../static/fonts": "fonts/"
+    },
     "fileAssociations": [
       {
         "ext": ["typ"],

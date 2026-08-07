@@ -1,9 +1,11 @@
-// Tauri 后端：窗口 + 文件读写命令 + 文件打开（关联双击/启动参数/拖放）。
+// Tauri 后端：窗口 + 文件读写命令 + 文件打开（关联双击/启动参数/拖放）+ 内嵌 typst 编译。
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use tauri::{Emitter, Manager};
+
+mod typst_world;
 
 /// 待打开的 .typ 文件队列：首次启动参数 + 跨实例转发 + macOS 打开事件，
 /// 前端就绪后一次性取走（避免事件早于前端监听而丢失）
@@ -68,10 +70,89 @@ fn write_binary(path: String, bytes: Vec<u8>) -> Result<(), String> {
     fs::write(final_path, bytes).map_err(|e| e.to_string())
 }
 
+/// 内嵌编译状态：编译互斥锁（typst 引擎进程内串行编译，避免并发 CPU 竞争与共享状态错乱）
+/// + 字体目录（setup 时解析一次）。Arc/PathBuf 可克隆，便于 move 进 spawn_blocking。
+struct CompileState {
+    lock: std::sync::Arc<Mutex<()>>,
+    fonts_dir: PathBuf,
+}
+
+/// 编译文档为每页 SVG（compile_doc）：src 为主文档源码，document_path 为磁盘路径
+/// （None = 未保存，相对导入会报"需要先保存文档"）。
+/// 返回 CompileOutput：成功 { ok, pages }，失败 { ok, diagnostics }，成功且带警告时附加 warnings。
+/// 编译在 spawn_blocking 中执行（不阻塞 UI），内部互斥锁串行化。
+/// Err 仅用于编译任务本身异常终止（正常编译失败仍走 Ok(ok:false)）。
+#[tauri::command]
+async fn compile_doc(
+    state: tauri::State<'_, CompileState>,
+    src: String,
+    document_path: Option<String>,
+) -> Result<typst_world::CompileOutput, String> {
+    let lock = std::sync::Arc::clone(&state.lock);
+    let fonts_dir = state.fonts_dir.clone();
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        typst_world::compile(src, document_path, &fonts_dir)
+    })
+    .await
+    .unwrap_or_else(|_| typst_world::CompileOutput::internal_error("编译任务异常终止")))
+}
+
+/// 编译并导出 PDF 到 target_path（export_pdf）：
+/// 路径安全校验复用 validate_write_path（不限制扩展名、拒绝符号链接、拒绝 `..` 穿越）。
+/// Err 仅用于导出任务本身异常终止（编译失败/写入失败仍走 Ok(ok:false, error)）。
+#[tauri::command]
+async fn export_pdf(
+    state: tauri::State<'_, CompileState>,
+    src: String,
+    document_path: Option<String>,
+    target_path: String,
+) -> Result<typst_world::PdfResult, String> {
+    let final_path = match validate_write_path(&target_path) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(typst_world::PdfResult {
+                ok: false,
+                error: Some(e),
+            })
+        }
+    };
+    let lock = std::sync::Arc::clone(&state.lock);
+    let fonts_dir = state.fonts_dir.clone();
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        match typst_world::compile_to_pdf_bytes(src, document_path, &fonts_dir) {
+            Ok(bytes) => match fs::write(&final_path, bytes) {
+                Ok(()) => typst_world::PdfResult {
+                    ok: true,
+                    error: None,
+                },
+                Err(e) => typst_world::PdfResult {
+                    ok: false,
+                    error: Some(format!("写入文件失败: {e}")),
+                },
+            },
+            Err(e) => typst_world::PdfResult {
+                ok: false,
+                error: Some(e),
+            },
+        }
+    })
+    .await
+    .unwrap_or_else(|_| typst_world::PdfResult {
+        ok: false,
+        error: Some("导出任务异常终止".into()),
+    }))
+}
+
 /// 取走待打开的 .typ 文件队列（仅一次，供前端就绪后逐个加载）
 #[tauri::command]
 fn take_pending_files(state: tauri::State<'_, PendingFiles>) -> Vec<String> {
-    state.0.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    state
+        .0
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
 }
 
 /// 命令行 --debug 开关（调试日志来源之一，仅桌面构建生效）：setup 解析命令行后存入，
@@ -149,22 +230,31 @@ fn walk_typ_dir(dir: &Path, depth: usize, out: &mut Vec<String>) {
     if depth > 8 || out.len() >= 500 {
         return;
     }
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         if out.len() >= 500 {
             break;
         }
         let path = entry.path();
         // 跳过隐藏条目（名字以 `.` 开头）
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if name.starts_with('.') {
             continue;
         }
         // metadata 跟随符号链接：broken symlink 会 Err 而跳过
-        let Ok(meta) = fs::metadata(&path) else { continue };
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
         if meta.is_file() {
             if is_typ_file(&path) {
-                if let Some(s) = fs::canonicalize(&path).ok().and_then(|c| c.to_str().map(String::from)) {
+                if let Some(s) = fs::canonicalize(&path)
+                    .ok()
+                    .and_then(|c| c.to_str().map(String::from))
+                {
                     out.push(s);
                 }
             }
@@ -283,6 +373,11 @@ pub fn run() {
                     absolutize(&a, &cwd)
                 });
             app.manage(PendingFiles(Mutex::new(initial.into_iter().collect())));
+            // 内嵌编译状态：字体目录（打包后为 resource_dir/fonts，开发回退仓库 static/fonts）
+            app.manage(CompileState {
+                lock: std::sync::Arc::new(Mutex::new(())),
+                fonts_dir: typst_world::resolve_fonts_dir(app.handle()),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -291,7 +386,9 @@ pub fn run() {
             take_pending_files,
             write_binary,
             list_dir_typ,
-            get_debug_flag
+            get_debug_flag,
+            compile_doc,
+            export_pdf
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
