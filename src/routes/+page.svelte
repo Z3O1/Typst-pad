@@ -12,6 +12,7 @@
   } from "$lib/file-ops";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
@@ -85,6 +86,9 @@
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
   let showAbout = $state(false);
+  // 关于弹窗版本号：运行时经 getVersion 异步读取（tauri.conf.json 的 version），
+  // 未返回前显示占位符，避免每次发版漏更新硬编码版本号
+  let appVersion = $state("");
   let showClosePrompt = $state(false); // 关闭确认弹窗（保存/不保存/取消）
   let showSettings = $state(false); // 设置弹窗（编译前缀代码）
   let editorDiagnostics = $state<CompileErrorLocation[]>([]); // 编译错误位置（传给编辑器画波浪线）
@@ -624,6 +628,10 @@
     prefixCode = saved.prefixCode ?? "";
     mark("persist-restore");
 
+    // 关于弹窗版本号：从 Tauri 运行时读取（getVersion 返回 tauri.conf.json 的
+    // version，如 0.4.0）；失败静默忽略，弹窗显示占位符
+    getVersion().then((v) => (appVersion = v)).catch(() => {});
+
     runCompile();
     resolveTheme();
     // 系统主题变化时跟随（仅当处于“自动”态）
@@ -822,7 +830,7 @@
     >
       <div class="modal">
         <h3 class="modal-title">Typst-pad</h3>
-        <p class="modal-text">版本 0.3.1</p>
+        <p class="modal-text">版本 {appVersion || "…"}</p>
         <p class="modal-text">Typora 式布局的 Typst 桌面编辑器：左编辑 / 右实时预览。</p>
         <p class="modal-text">MIT License © 2026 Z3O1</p>
         <span
