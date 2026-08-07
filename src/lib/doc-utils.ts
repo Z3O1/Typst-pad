@@ -21,3 +21,18 @@ export function isBlankDoc(doc: string): boolean {
 export function isEffectiveDirty(dirty: boolean, doc: string): boolean {
   return dirty && !isBlankDoc(doc);
 }
+
+/**
+ * 规范化编译前缀：非空前缀且未以 `\n` 结尾时在末尾补一个换行，其余情况原样返回。
+ *
+ * 动机：编译/导出时拼接 `prefixCode + doc`，若前缀末行与用户文档首行直接相连
+ * （如前缀是 `// 注释` 且无尾换行，会把用户首行吞成注释），两段内容边界错乱；
+ * 补尾随换行后各归其行，用户文档从编译源固定第 N+1 行开始。
+ *
+ * 幂等性：空串、已以 `\n` 结尾的输入均原样返回，重复调用不改变结果——
+ * 因此可放心同时用于「实际编译源」与「Editor 的 prefixCode prop」等各处，不会互相不一致。
+ */
+export function ensureTrailingNewline(prefix: string): string {
+  if (prefix.length === 0 || prefix.endsWith("\n")) return prefix;
+  return prefix + "\n";
+}

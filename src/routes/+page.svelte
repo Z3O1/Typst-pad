@@ -16,7 +16,7 @@
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { loadState, saveState } from "$lib/persistence";
-  import { isEffectiveDirty } from "$lib/doc-utils";
+  import { isEffectiveDirty, ensureTrailingNewline } from "$lib/doc-utils";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
   import ContextMenu from "$lib/ContextMenu.svelte";
@@ -423,7 +423,8 @@
   async function handleExportPdf() {
     statusText = "导出 PDF…";
     try {
-      const source = prefixEnabled ? prefixCode + doc : doc;
+      // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行
+      const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
       const blob = await compileToPdf(source);
       const name = pdfFileName(fileTitle);
       if (isTauri()) {
@@ -483,7 +484,8 @@
     const mySeq = ++compileSeq;
     const t0 = performance.now(); // 编译耗时（调试日志用）
     // 编译期间保留旧预览，完成后直接替换（不做 loading 遮罩）
-    const source = prefixEnabled ? prefixCode + doc : doc;
+    // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行
+    const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
     const result = await compileToSvg(source);
     if (mySeq === 1) {
       // 首次编译完成 = 应用「可正常编辑/预览」就绪点，输出一次启动报告
@@ -537,6 +539,8 @@
    * - 否则：跳转编辑器对应行列。
    */
   function onErrorItemClick(item: LocatedErrorItem) {
+    // 注：isErrorLineInPrefix / prefixLineCharOffset 用未规范化的 prefixCode 草稿值即可——
+    // 追加尾换行不改变前缀区内行号与行首偏移，与规范化后的编译源语义一致
     if (prefixEnabled && isErrorLineInPrefix(item.line, prefixCode)) {
       showErrors = false;
       openSettings(); // 载入当前前缀副本到 settingsPrefixCode，点“保存”才生效
@@ -775,7 +779,7 @@
           doc={editorDoc}
           theme={resolvedTheme}
           diagnostics={editorDiagnostics}
-          prefixCode={prefixEnabled ? prefixCode : ""}
+          prefixCode={prefixEnabled ? ensureTrailingNewline(prefixCode) : ""}
           jumpTo={jumpTarget}
           onCursor={handleCursor}
           onDocChange={handleDocChange}

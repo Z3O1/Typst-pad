@@ -1,6 +1,7 @@
-// doc-utils 空文档/实际未保存修改判断纯函数单元测试（关闭确认弹窗的前置判断逻辑）
+// doc-utils 空文档/实际未保存修改判断/前缀规范化纯函数单元测试
+// （关闭确认弹窗的前置判断逻辑 + 编译前缀补尾随换行）
 import { describe, it, expect } from "vitest";
-import { isBlankDoc, isEffectiveDirty } from "./doc-utils";
+import { isBlankDoc, isEffectiveDirty, ensureTrailingNewline } from "./doc-utils";
 
 describe("isBlankDoc", () => {
   it("空字符串：视为空文档", () => {
@@ -51,5 +52,37 @@ describe("isEffectiveDirty", () => {
     expect(isEffectiveDirty(false, "")).toBe(false);
     expect(isEffectiveDirty(false, "   ")).toBe(false);
     expect(isEffectiveDirty(false, "Hello")).toBe(false);
+  });
+});
+
+describe("ensureTrailingNewline", () => {
+  it("空字符串：原样返回", () => {
+    expect(ensureTrailingNewline("")).toBe("");
+  });
+
+  it("已以 \\n 结尾：原样返回（单行/多行/纯换行）", () => {
+    expect(ensureTrailingNewline("#set text(14pt)\n")).toBe("#set text(14pt)\n");
+    expect(ensureTrailingNewline("// 注释\n#set text(14pt)\n")).toBe(
+      "// 注释\n#set text(14pt)\n",
+    );
+    expect(ensureTrailingNewline("\n")).toBe("\n");
+  });
+
+  it("不带 \\n 结尾：末尾补一个 \\n（单行）", () => {
+    expect(ensureTrailingNewline("// 注释")).toBe("// 注释\n");
+    expect(ensureTrailingNewline("#set text(14pt)")).toBe("#set text(14pt)\n");
+  });
+
+  it("多行但末尾无 \\n：只在最末补一个 \\n，不触碰中间内容", () => {
+    expect(ensureTrailingNewline("// 注释\n#set text(14pt)")).toBe(
+      "// 注释\n#set text(14pt)\n",
+    );
+  });
+
+  it("幂等性：对已规范化的输入再调用结果不变", () => {
+    const once = ensureTrailingNewline("// 注释");
+    expect(ensureTrailingNewline(once)).toBe(once);
+    expect(ensureTrailingNewline(ensureTrailingNewline(""))).toBe("");
+    expect(ensureTrailingNewline(ensureTrailingNewline("x\n"))).toBe("x\n");
   });
 });
