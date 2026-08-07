@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import Editor from "$lib/Editor.svelte";
-  import { compileToSvg, compileToPdf, DOCUMENT_PATH } from "$lib/typst-engine";
+  import { compileToSvg, compileToPdf } from "$lib/typst-engine";
   import type { CompileErrorLocation } from "$lib/typst-engine";
   import {
     openTypFile,
@@ -394,7 +394,7 @@
       const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
       // 导出流程：推导默认文件名 → 弹系统"另存为"对话框 → Rust 侧编译并直接落盘
       // （typst-engine.compileToPdf；不再经前端出 PDF 字节 + write_binary）
-      const result = await compileToPdf(source, DOCUMENT_PATH, fileTitle);
+      const result = await compileToPdf(source, filePath, fileTitle);
       if (result.ok) {
         statusText = "已导出 PDF";
       } else if (result.cancelled) {
@@ -442,9 +442,9 @@
     const t0 = performance.now(); // 编译耗时（调试日志用）
     // 编译期间保留旧预览，完成后直接替换（不做 loading 遮罩）
     // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行；
-    // documentPath 为相对文档目录的主文档路径（include 解析由 Rust 侧完成）
+    // documentPath 传当前文档绝对路径（未保存为 null），Rust 侧以其所在目录解析 include
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
-    const result = await compileToSvg(source, DOCUMENT_PATH);
+    const result = await compileToSvg(source, filePath);
     if (mySeq === 1) {
       // 首次编译完成 = 应用「可正常编辑/预览」就绪点，输出一次启动报告
       mark("first-compile-result");

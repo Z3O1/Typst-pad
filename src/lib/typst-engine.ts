@@ -6,16 +6,14 @@ import { savePdfDialog } from "./file-ops";
 import { pdfFileName } from "./pdf-export";
 import { dbg } from "./debug";
 
-/**
- * 主文档在文档目录中的相对路径（与旧 WASM 模型 "/main.typ" 语义一致：相对文档目录、
- * 无前导斜杠）。本地 .typ 库的 include 解析已移到 Rust 侧，按文档目录解析。
- */
-export const DOCUMENT_PATH = "main.typ";
-
 // ---------------------------------------------------------------------------
 // 接口契约（Rust 侧实现，见 T1 任务契约）：
 // invoke("compile_doc", { src, documentPath }) → CompileOutput
 // invoke("export_pdf", { src, documentPath, targetPath }) → { ok, error? }
+//
+// documentPath 语义（T1 联调确认）：已保存文档 → 绝对路径（Rust 以其所在目录为
+// include 解析根）；未保存新文档 → null。传相对字符串会被 Rust 以进程 CWD 为
+// include 根解析，属错误用法。
 // ---------------------------------------------------------------------------
 
 /** Rust 侧结构化诊断：1-based 行列；path 为空表示主文档 */
@@ -131,7 +129,7 @@ export function composePages(pages: string[]): string {
  */
 export async function compileToSvg(
   source: string,
-  documentPath = DOCUMENT_PATH,
+  documentPath: string | null,
 ): Promise<CompileResult> {
   try {
     const out = await invoke<CompileOutput>("compile_doc", { src: source, documentPath });
@@ -169,7 +167,7 @@ export async function compileToSvg(
  */
 export async function compileToPdf(
   source: string,
-  documentPath = DOCUMENT_PATH,
+  documentPath: string | null,
   suggestedName: string,
 ): Promise<PdfExportResult> {
   const target = await savePdfDialog(pdfFileName(suggestedName));

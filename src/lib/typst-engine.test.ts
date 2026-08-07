@@ -10,9 +10,11 @@ import {
   composePages,
   compileToSvg,
   compileToPdf,
-  DOCUMENT_PATH,
 } from "./typst-engine";
 import type { Diagnostic } from "./typst-engine";
+
+/** 已保存文档的绝对路径（契约：documentPath = 已保存文档绝对路径 / null = 未保存） */
+const SAVED_DOC_PATH = "C:\\proj\\main.typ";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -95,12 +97,12 @@ describe("compileToSvg（invoke 已 mock）", () => {
     vi.mocked(invoke).mockReset();
   });
 
-  it("成功：页序拼接为 svg、pageCount = 页数，invoke 入参含 documentPath", async () => {
+  it("成功：页序拼接为 svg、pageCount = 页数，invoke 入参含已保存文档绝对路径", async () => {
     vi.mocked(invoke).mockResolvedValue({
       ok: true,
       pages: ["<svg>p1</svg>", "<svg>p2</svg>"],
     });
-    const r = await compileToSvg("#let x = 1");
+    const r = await compileToSvg("#let x = 1", SAVED_DOC_PATH);
     expect(r).toEqual({
       ok: true,
       svg: '<svg>p1</svg><div class="page-separator"></div><svg>p2</svg>',
@@ -108,7 +110,16 @@ describe("compileToSvg（invoke 已 mock）", () => {
     });
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("compile_doc", {
       src: "#let x = 1",
-      documentPath: DOCUMENT_PATH,
+      documentPath: SAVED_DOC_PATH,
+    });
+  });
+
+  it("未保存新文档：documentPath 传 null", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ok: true, pages: ["<svg>p1</svg>"] });
+    await compileToSvg("x", null);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("compile_doc", {
+      src: "x",
+      documentPath: null,
     });
   });
 
@@ -118,7 +129,7 @@ describe("compileToSvg（invoke 已 mock）", () => {
       pages: ["<svg>p1</svg>"],
       warnings: [{ message: "w", severity: "warning", line: 1, column: 1 }],
     });
-    const r = await compileToSvg("x");
+    const r = await compileToSvg("x", SAVED_DOC_PATH);
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.warnings).toHaveLength(1);
   });
@@ -131,7 +142,7 @@ describe("compileToSvg（invoke 已 mock）", () => {
         { message: "warn", severity: "warning", line: 1, column: 1 },
       ],
     });
-    const r = await compileToSvg("#let a = b");
+    const r = await compileToSvg("#let a = b", SAVED_DOC_PATH);
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.error).toBe("boom (行 1, 列 9)");
@@ -143,7 +154,7 @@ describe("compileToSvg（invoke 已 mock）", () => {
 
   it("ok:false 且无诊断：错误消息为通用文案", async () => {
     vi.mocked(invoke).mockResolvedValue({ ok: false, diagnostics: [] });
-    const r = await compileToSvg("x");
+    const r = await compileToSvg("x", SAVED_DOC_PATH);
     if (!r.ok) {
       expect(r.error).toBe("编译失败：未生成产物");
       expect(r.errors).toEqual([]);
@@ -152,7 +163,7 @@ describe("compileToSvg（invoke 已 mock）", () => {
 
   it("invoke 抛异常：收敛为错误结果（errors 空，不向外抛）", async () => {
     vi.mocked(invoke).mockRejectedValue(new Error("IPC 失败"));
-    const r = await compileToSvg("x");
+    const r = await compileToSvg("x", SAVED_DOC_PATH);
     if (!r.ok) {
       expect(r.error).toBe("IPC 失败");
       expect(r.errors).toEqual([]);
@@ -176,21 +187,21 @@ describe("compileToPdf（invoke / dialog 已 mock）", () => {
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   });
 
-  it("选定目标路径后调用 export_pdf 直接落盘", async () => {
+  it("选定目标路径后调用 export_pdf 直接落盘（documentPath = 已保存文档绝对路径）", async () => {
     vi.mocked(save).mockResolvedValue("C:\\out\\报告.pdf");
     vi.mocked(invoke).mockResolvedValue({ ok: true });
-    const r = await compileToPdf("#let x = 1", DOCUMENT_PATH, "报告.typ");
+    const r = await compileToPdf("#let x = 1", SAVED_DOC_PATH, "报告.typ");
     expect(r).toEqual({ ok: true, targetPath: "C:\\out\\报告.pdf" });
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("export_pdf", {
       src: "#let x = 1",
-      documentPath: DOCUMENT_PATH,
+      documentPath: SAVED_DOC_PATH,
       targetPath: "C:\\out\\报告.pdf",
     });
   });
 
   it("取消对话框：不调用 export_pdf，返回 cancelled", async () => {
     vi.mocked(save).mockResolvedValue(null);
-    const r = await compileToPdf("x", DOCUMENT_PATH, "未命名.typ");
+    const r = await compileToPdf("x", null, "未命名.typ");
     expect(r).toEqual({ ok: false, cancelled: true });
     expect(vi.mocked(invoke)).not.toHaveBeenCalled();
   });
@@ -198,14 +209,14 @@ describe("compileToPdf（invoke / dialog 已 mock）", () => {
   it("导出失败：error 透传", async () => {
     vi.mocked(save).mockResolvedValue("C:\\out\\a.pdf");
     vi.mocked(invoke).mockResolvedValue({ ok: false, error: "PDF 渲染失败" });
-    const r = await compileToPdf("x", DOCUMENT_PATH, "a.typ");
+    const r = await compileToPdf("x", SAVED_DOC_PATH, "a.typ");
     expect(r).toEqual({ ok: false, cancelled: false, error: "PDF 渲染失败" });
   });
 
   it("ok:false 且无 error 字段：通用文案", async () => {
     vi.mocked(save).mockResolvedValue("C:\\out\\a.pdf");
     vi.mocked(invoke).mockResolvedValue({ ok: false });
-    const r = await compileToPdf("x", DOCUMENT_PATH, "a.typ");
+    const r = await compileToPdf("x", SAVED_DOC_PATH, "a.typ");
     expect(r.ok).toBe(false);
     if (!r.ok && !r.cancelled) expect(r.error).toBe("PDF 导出失败：未生成产物");
   });
