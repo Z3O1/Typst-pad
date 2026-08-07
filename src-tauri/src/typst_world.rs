@@ -8,10 +8,10 @@
 //! - document_path 为 None（未保存文档）时，相对导入无法解析磁盘路径，编译前先预检给出
 //!   "需要先保存文档" 的明确诊断。
 //!
-//! 接口契约（前端按此消费，serde 默认字段名即最终 JSON 键名，勿改）：
+//! 接口契约（前端按此消费，serde rename_all = "camelCase"，多词字段为 camelCase 键名）：
 //! - compile_doc -> CompileOutput { ok, pages, diagnostics, warnings }
 //! - export_pdf  -> PdfResult { ok, error }
-//! - Diagnostic  -> { message, severity, line, column, end_line, end_column, path }
+//! - Diagnostic  -> { message, severity, line, column, endLine, endColumn, path }
 //!   （行列均为 1-based，CodeMirror 波浪线直接消费）
 
 use std::collections::HashMap;
@@ -34,6 +34,7 @@ use typst_svg::SvgOptions;
 /// 空字段序列化时省略，成功分支只有 ok/pages(/warnings)，失败分支只有 ok/diagnostics，
 /// 与前端契约一致。
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompileOutput {
     pub ok: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -66,13 +67,16 @@ impl CompileOutput {
 
 /// PDF 导出结果（导出失败时 error 为人类可读信息）
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PdfResult {
     pub ok: bool,
     pub error: Option<String>,
 }
 
-/// 单条诊断：1-based 行列，CodeMirror 波浪线直接消费
+/// 单条诊断：1-based 行列，CodeMirror 波浪线直接消费。
+/// serde camelCase：end_line/end_column 序列化为 endLine/endColumn，前端直接消费。
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
     pub message: String,
     /// "error" | "warning"
@@ -683,6 +687,48 @@ hello"
             .expect("应有\"需要先保存文档\"诊断");
         assert_eq!(d.line, 1, "include 在第 1 行");
         assert!(d.column >= 1);
+    }
+
+    /// 序列化契约：JSON 键名必须是 camelCase（endLine/endColumn），前端按此消费
+    #[test]
+    fn json_keys_are_camel_case() {
+        let out = CompileOutput {
+            ok: true,
+            pages: vec!["<svg>…</svg>".to_string()],
+            diagnostics: Vec::new(),
+            warnings: vec![Diagnostic {
+                message: "警告".to_string(),
+                severity: "warning".to_string(),
+                line: 2,
+                column: 3,
+                end_line: Some(4),
+                end_column: Some(5),
+                path: Some("sub/a.typ".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(
+            json.contains("\"endLine\":4"),
+            "应输出 endLine，实际: {json}"
+        );
+        assert!(
+            json.contains("\"endColumn\":5"),
+            "应输出 endColumn，实际: {json}"
+        );
+        assert!(
+            !json.contains("end_line"),
+            "不应输出 snake_case，实际: {json}"
+        );
+        assert!(json.contains("\"ok\":true"));
+        assert!(json.contains("\"pages\""));
+
+        // 单条诊断结构：message/severity/line/column/endLine/endColumn/path
+        let pdf = PdfResult {
+            ok: false,
+            error: Some("失败".into()),
+        };
+        let json = serde_json::to_string(&pdf).unwrap();
+        assert_eq!(json, r#"{"ok":false,"error":"失败"}"#);
     }
 
     /// 字体计数辅助（供端到端测试断言）
