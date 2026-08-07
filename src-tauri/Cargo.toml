@@ -4,7 +4,7 @@ name = "typst-pad"
 # CI 的 Rust 缓存（Swatinem/rust-cache）key 基于 Cargo.lock 哈希，
 # 每次改这里都会使 Cargo.lock 变化、缓存失效（全量重编约 14 分钟）。
 # 应用/安装包版本以 tauri.conf.json 与 package.json 的 version 为准。
-version = "0.2.2"
+version = "0.4.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -27,6 +27,12 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 内嵌 Typst 编译引擎（进程内编译，替代前端 WASM 编译）
+typst = "0.15.1"
+typst-syntax = "0.15.1"
+typst-layout = "0.15.1"
+typst-svg = "0.15.1"
+typst-pdf = "0.15.1"
 
 [target.'cfg(windows)'.dependencies]
 # 禁用 WebView2 浏览器加速键（Ctrl+R 整页刷新等）：直接操作 WebView2 COM 接口
