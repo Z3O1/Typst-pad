@@ -72,14 +72,3 @@ export async function savePdfDialog(defaultName: string): Promise<string | null>
   });
   return typeof target === "string" ? target : null;
 }
-
-/** 通过 write_binary 命令写二进制文件（bytes 直接传 Uint8Array，Tauri IPC 会序列化为 JSON 数字数组） */
-export async function invokeWriteBinary(path: string, bytes: Uint8Array): Promise<void> {
-  await invoke("write_binary", { path, bytes });
-}
-
-/** 列出文档目录下全部 .typ 文件（递归，返回绝对路径；浏览器环境返回 []） */
-export async function fetchDirLibraries(dir: string): Promise<string[]> {
-  if (!isTauri()) return [];
-  return await invoke<string[]>("list_dir_typ", { dir });
-}

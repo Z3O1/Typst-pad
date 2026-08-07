@@ -12,6 +12,7 @@
   } from "$lib/file-ops";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
@@ -29,14 +30,10 @@
     type ContextMenuItemSpec,
   } from "$lib/context-menu-utils";
   import { clearState } from "$lib/persistence";
-  import { savePdfDialog, invokeWriteBinary } from "$lib/file-ops";
-  import { pdfFileName } from "$lib/pdf-export";
-  import { registerLocalLibraries } from "$lib/typst-engine";
-  import { fetchDirLibraries } from "$lib/file-ops";
-  import { dirOfPath, libraryVirtualPaths, formatCompileFailMessage } from "$lib/typst-libs";
   import {
     buildErrorListItems,
     formatErrorLoc,
+    formatCompileFailMessage,
     hasErrorToShow,
     isErrorLineInPrefix,
     prefixLineCharOffset,
@@ -48,6 +45,10 @@
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
+
+  // 浏览器 gate：已移除浏览器支持（编译走 Tauri 进程内原生命令），
+  // 非 Tauri 环境（无 __TAURI_INTERNALS__）不渲染应用 UI，仅显示提示页
+  const isDesktopApp = isTauri();
 
   // 启动打点：组件脚本求值时刻（JS chunk 加载后的首个可测点）
   mark("page-module-eval");
@@ -84,8 +85,10 @@
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
-  let beforeUnloadHandler: ((e: BeforeUnloadEvent) => void) | null = null;
   let showAbout = $state(false);
+  // 关于弹窗版本号：运行时经 getVersion 异步读取（tauri.conf.json 的 version），
+  // 未返回前显示占位符，避免每次发版漏更新硬编码版本号
+  let appVersion = $state("");
   let showClosePrompt = $state(false); // 关闭确认弹窗（保存/不保存/取消）
   let showSettings = $state(false); // 设置弹窗（编译前缀代码）
   let editorDiagnostics = $state<CompileErrorLocation[]>([]); // 编译错误位置（传给编辑器画波浪线）
@@ -160,29 +163,6 @@
     return window.confirm(message);
   }
 
-  /**
-   * 注册某目录下的本地 .typ 库（供 #import "xxx.typ" 使用）：
-   * 逐文件读取失败仅跳过该文件；整体失败返回 false（调用方仅降级提示）
-   */
-  async function registerDirLibraries(dir: string): Promise<boolean> {
-    try {
-      const paths = await fetchDirLibraries(dir);
-      const files: Array<{ path: string; content: string }> = [];
-      for (const p of paths) {
-        try {
-          const f = await readTypFile(p);
-          files.push({ path: p, content: f.content });
-        } catch {
-          /* 非 UTF-8 等读取失败的文件跳过 */
-        }
-      }
-      await registerLocalLibraries(libraryVirtualPaths(files, dir));
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   /** 按路径加载 .typ 文件到编辑器（供打开对话框/拖放/关联打开复用） */
   async function openPath(path: string): Promise<boolean> {
     if (isEffectiveDirty(dirty, doc) && filePath !== path) {
@@ -191,9 +171,6 @@
     }
     try {
       const opened = await readTypFile(path);
-      // 注册同目录下的本地 .typ 库（供 #import "xxx.typ" 使用）；
-      // 失败仅降级提示，不影响打开主文档
-      const libOk = isTauri() ? await registerDirLibraries(dirOfPath(opened.path)) : true;
       doc = opened.content;
       filePath = opened.path;
       fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
@@ -201,7 +178,7 @@
       editorDoc = opened.content; // 触发编辑器替换全文
       scheduleCompile();
       schedulePersist();
-      statusText = libOk ? "已打开" : "已打开（本地库加载失败）";
+      statusText = "已打开";
       return true;
     } catch (e) {
       statusText = "打开失败";
@@ -219,15 +196,10 @@
     try {
       const saved = await saveTypFile(filePath, doc);
       if (!saved) return null;
-      const prevDir = filePath ? dirOfPath(filePath) : null;
       filePath = saved;
       fileTitle = saved.split(/[\\/]/).pop() ?? saved;
       dirty = false;
       schedulePersist();
-      // 另存为到新目录（含首次保存）时，重注册该目录下的本地 .typ 库
-      if (isTauri() && dirOfPath(saved) !== prevDir) {
-        await registerDirLibraries(dirOfPath(saved)); // 库加载失败不影响保存
-      }
       return saved;
     } catch (e) {
       statusText = "保存失败";
@@ -246,7 +218,6 @@
     }
     try {
       const opened = await readTypFile(filePath);
-      const libOk = isTauri() ? await registerDirLibraries(dirOfPath(opened.path)) : true;
       doc = opened.content;
       filePath = opened.path;
       fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
@@ -254,7 +225,7 @@
       editorDoc = opened.content; // 触发编辑器替换全文
       scheduleCompile();
       schedulePersist();
-      statusText = libOk ? "已重新读取" : "已重新读取（本地库加载失败）";
+      statusText = "已重新读取";
     } catch {
       statusText = "重新读取失败";
     }
@@ -425,27 +396,17 @@
     try {
       // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行
       const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
-      const blob = await compileToPdf(source);
-      const name = pdfFileName(fileTitle);
-      if (isTauri()) {
-        // 桌面端：弹系统"另存为"对话框，落盘到用户选定的位置
-        const target = await savePdfDialog(name);
-        if (!target) {
-          statusText = "已取消导出";
-          return;
-        }
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        await invokeWriteBinary(target, bytes);
+      // 导出流程：推导默认文件名 → 弹系统"另存为"对话框 → Rust 侧编译并直接落盘
+      // （typst-engine.compileToPdf；不再经前端出 PDF 字节 + write_binary）
+      const result = await compileToPdf(source, filePath, fileTitle);
+      if (result.ok) {
         statusText = "已导出 PDF";
+      } else if (result.cancelled) {
+        statusText = "已取消导出";
       } else {
-        // 浏览器 dev 降级：沿用原 blob 下载
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = name;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000); // 延迟回收避免中断下载
-        statusText = "已导出 PDF";
+        statusText = "导出失败";
+        previewStatus = "error";
+        previewError = result.error;
       }
     } catch (e) {
       statusText = "导出失败";
@@ -484,9 +445,10 @@
     const mySeq = ++compileSeq;
     const t0 = performance.now(); // 编译耗时（调试日志用）
     // 编译期间保留旧预览，完成后直接替换（不做 loading 遮罩）
-    // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行
+    // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行；
+    // documentPath 传当前文档绝对路径（未保存为 null），Rust 侧以其所在目录解析 include
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
-    const result = await compileToSvg(source);
+    const result = await compileToSvg(source, filePath);
     if (mySeq === 1) {
       // 首次编译完成 = 应用「可正常编辑/预览」就绪点，输出一次启动报告
       mark("first-compile-result");
@@ -654,6 +616,8 @@
   }
 
   onMount(() => {
+    // 浏览器 gate：非 Tauri 环境（提示页）不初始化应用逻辑——编译走 Tauri 进程内命令，浏览器不可用
+    if (!isDesktopApp) return;
     mark("mount-start");
     // 每次启动都是全新会话：仅恢复主题偏好，不恢复上次编辑内容/文件
     const saved = loadState();
@@ -663,6 +627,10 @@
     prefixEnabled = saved.prefixEnabled ?? false;
     prefixCode = saved.prefixCode ?? "";
     mark("persist-restore");
+
+    // 关于弹窗版本号：从 Tauri 运行时读取（getVersion 返回 tauri.conf.json 的
+    // version，如 0.4.0）；失败静默忽略，弹窗显示占位符
+    getVersion().then((v) => (appVersion = v)).catch(() => {});
 
     runCompile();
     resolveTheme();
@@ -731,13 +699,6 @@
           })
           .catch(() => {});
       });
-    } else {
-      // 浏览器 dev：beforeunload 简单提示（无法自定义按钮）
-      // 空文档（含仅空白字符）不触发提示，与 Tauri 端行为一致
-      beforeUnloadHandler = (e: BeforeUnloadEvent) => {
-        if (isEffectiveDirty(dirty, doc)) e.preventDefault();
-      };
-      window.addEventListener("beforeunload", beforeUnloadHandler);
     }
     mark("mount-listeners-done");
     mark("mount-end");
@@ -747,10 +708,6 @@
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("contextmenu", handleContextMenu);
-      if (beforeUnloadHandler) {
-        window.removeEventListener("beforeunload", beforeUnloadHandler);
-        beforeUnloadHandler = null;
-      }
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
@@ -758,6 +715,7 @@
   });
 </script>
 
+{#if isDesktopApp}
 <div class="app" class:light={resolvedTheme === "light"}>
   <header class="toolbar">
     <MenuBar
@@ -872,7 +830,7 @@
     >
       <div class="modal">
         <h3 class="modal-title">Typst-pad</h3>
-        <p class="modal-text">版本 0.3.1</p>
+        <p class="modal-text">版本 {appVersion || "…"}</p>
         <p class="modal-text">Typora 式布局的 Typst 桌面编辑器：左编辑 / 右实时预览。</p>
         <p class="modal-text">MIT License © 2026 Z3O1</p>
         <span
@@ -932,6 +890,12 @@
     />
   {/if}
 </div>
+{:else}
+  <div class="browser-gate">
+    <p class="browser-gate-title">请使用桌面应用版本</p>
+    <p class="browser-gate-text">Typst-pad 已移除浏览器支持，请下载桌面应用后使用。</p>
+  </div>
+{/if}
 
 <style>
   :root {
@@ -1191,15 +1155,17 @@
     /* 不再模拟 A4 纸外观：页面白底由 SVG 内部自行绘制，仅保留宽度 */
   }
 
-  .preview-paper :global(svg.typst-doc) {
+  /* 每页 SVG 顶层文档（compileToSvg 按页序拼接入预览容器）：等宽铺满、高度按比例 */
+  .preview-paper > :global(svg) {
     display: block;
     width: 100%;
     height: auto;
   }
 
-  /* 页间分隔线（svg-paginate 注入的 <line class="page-separator">），随主题自适应 */
-  .preview-paper :global(line.page-separator) {
-    stroke: var(--border);
+  /* 页间分隔线（typst-engine composePages 注入的 <div class="page-separator">），随主题自适应 */
+  .preview-paper > :global(.page-separator) {
+    height: 1px;
+    background: var(--border);
   }
 
   .preview-placeholder {
@@ -1358,5 +1324,30 @@
   .error-item-generic:hover {
     border-color: transparent;
     color: var(--fg);
+  }
+
+  /* 浏览器提示页（非 Tauri 环境；已移除浏览器支持） */
+  .browser-gate {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  .browser-gate-title {
+    margin: 0;
+    font-size: 18px;
+    color: var(--accent);
+  }
+
+  .browser-gate-text {
+    margin: 0;
+    font-size: 13px;
+    color: var(--fg-dim);
   }
 </style>

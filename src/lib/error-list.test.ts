@@ -8,6 +8,7 @@ import {
   prefixLineCharOffset,
   prefixLineCount,
   isErrorLineInPrefix,
+  formatCompileFailMessage,
 } from "./error-list";
 
 /** 构造一个定位错误（1-based 行列；end 取下一字符，模拟单点错误） */
@@ -129,5 +130,25 @@ describe("prefixLineCharOffset", () => {
 
   it("空串（1 行）：第 1 行起点为 0", () => {
     expect(prefixLineCharOffset("", 1)).toBe(0);
+  });
+});
+
+describe("formatCompileFailMessage（自 typst-libs 迁移）", () => {
+  it("errorCount > 0 显示计数形式", () => {
+    expect(formatCompileFailMessage(3, "anything")).toBe("编译错误：3 处");
+  });
+
+  it("errorCount = 0 显示错误消息", () => {
+    expect(
+      formatCompileFailMessage(0, "package @preview/cetz:0.1.0 not found"),
+    ).toBe("编译错误：package @preview/cetz:0.1.0 not found");
+  });
+
+  it("长消息截断到 ~120 字符", () => {
+    const long = "x".repeat(500);
+    const msg = formatCompileFailMessage(0, long);
+    expect(msg.startsWith("编译错误：")).toBe(true);
+    expect(msg.length).toBeLessThanOrEqual("编译错误：".length + 120 + 1);
+    expect(msg.endsWith("…")).toBe(true);
   });
 });
