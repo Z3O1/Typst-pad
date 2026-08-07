@@ -539,3 +539,154 @@ fn offset_to_line_column(text: &str, offset: usize) -> (u32, u32) {
         + 1;
     (line, column)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 测试用字体目录：仓库根 static/fonts（cargo test 的 CWD 是 src-tauri，
+    /// 用 CARGO_MANIFEST_DIR 定位更稳）
+    fn fonts_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/fonts")
+    }
+
+    /// 端到端：中文 + 数学公式文档编译成功，pages 非空且每页含 <svg>
+    #[test]
+    fn compile_chinese_math_doc() {
+        let src = r#"
+= 你好，Typst
+这是中文测试文档。
+$ a^2 + b^2 = c^2 $
+"#
+        .to_string();
+        let out = compile(src, None, &fonts_dir());
+        assert!(out.ok, "编译应成功，实际诊断: {:?}", out.diagnostics);
+        assert!(!out.pages.is_empty(), "应至少有一页");
+        assert!(out.pages[0].contains("<svg"), "每页应是完整 SVG");
+        // 中文字体（思源宋体）与数学字体（NewCM）必须加载成功
+        assert!(font_count() >= 7, "static/fonts 下 7 个字体文件应全部注册");
+    }
+
+    /// 字体加载：static/fonts 下全部字体注册成功（数学 NewCM、中文思源宋体、Libertinus、DejaVu）
+    #[test]
+    fn fonts_all_registered() {
+        let (book, fonts) = load_fonts(&fonts_dir());
+        assert_eq!(fonts.len(), 7, "static/fonts 应有 7 个字体文件");
+        // FontBook 内部键为小写族名（typst 0.15 的 contains_family 不做大小写归一化）
+        for family in [
+            "new computer modern math",
+            "noto serif cjk sc",
+            "libertinus serif",
+            "dejavu sans mono",
+        ] {
+            assert!(book.contains_family(family), "字体族 {family} 应已注册");
+        }
+    }
+
+    /// 诊断转换：语法错误文档应返回 ok=false 且行列 1-based 合理
+    #[test]
+    fn syntax_error_diagnostics() {
+        let src = "#let = 3
+hello"
+            .to_string();
+        let out = compile(src, None, &fonts_dir());
+        assert!(!out.ok);
+        assert!(!out.diagnostics.is_empty(), "应有诊断");
+        let d = &out.diagnostics[0];
+        assert_eq!(d.severity, "error");
+        assert!(d.line >= 1, "行号应为 1-based，实际 {}", d.line);
+        assert!(d.column >= 1, "列号应为 1-based，实际 {}", d.column);
+        assert!(d.end_line.is_some(), "应给出结束位置");
+    }
+
+    /// 相对 include：同目录子文档 include 成功
+    #[test]
+    fn relative_include_ok() {
+        // 测试用临时目录：main.typ include 同目录的 chapter.typ
+        let dir = std::env::temp_dir().join(format!("typst-pad-test-{}-ok", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("chapter.typ"),
+            "第一章内容
+",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("main.typ"),
+            "#include \"chapter.typ\"
+主文档
+",
+        )
+        .unwrap();
+
+        let src = fs::read_to_string(dir.join("main.typ")).unwrap();
+        let doc_path = dir.join("main.typ").to_string_lossy().to_string();
+        let out = compile(src, Some(doc_path.clone()), &fonts_dir());
+        assert!(out.ok, "include 应成功，实际诊断: {:?}", out.diagnostics);
+        assert!(!out.pages.is_empty());
+
+        // PDF 导出也应成功
+        let pdf = compile_to_pdf_bytes(
+            fs::read_to_string(dir.join("main.typ")).unwrap(),
+            Some(doc_path),
+            &fonts_dir(),
+        );
+        assert!(pdf.is_ok(), "PDF 导出应成功: {:?}", pdf.err());
+        assert!(!pdf.unwrap().is_empty(), "PDF 字节不应为空");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 相对 include：不存在的文件报错且诊断带 path（include 文件路径）
+    #[test]
+    fn relative_include_missing_file() {
+        let dir =
+            std::env::temp_dir().join(format!("typst-pad-test-{}-missing", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("main.typ"),
+            "#include \"no-such.typ\"
+",
+        )
+        .unwrap();
+
+        let src = fs::read_to_string(dir.join("main.typ")).unwrap();
+        let doc_path = dir.join("main.typ").to_string_lossy().to_string();
+        let out = compile(src, Some(doc_path), &fonts_dir());
+        assert!(!out.ok);
+        let d = out
+            .diagnostics
+            .iter()
+            .find(|d| d.path.as_deref().is_some_and(|p| p.contains("no-such.typ")))
+            .expect("诊断应带 include 文件路径");
+        assert!(d.line >= 1 && d.column >= 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 未保存文档 + 相对 include：给出"需要先保存文档"明确诊断
+    #[test]
+    fn unsaved_relative_include() {
+        let out = compile(
+            "#include \"chapter.typ\"
+"
+            .to_string(),
+            None,
+            &fonts_dir(),
+        );
+        assert!(!out.ok);
+        let d = out
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("保存"))
+            .expect("应有\"需要先保存文档\"诊断");
+        assert_eq!(d.line, 1, "include 在第 1 行");
+        assert!(d.column >= 1);
+    }
+
+    /// 字体计数辅助（供端到端测试断言）
+    fn font_count() -> usize {
+        load_fonts(&fonts_dir()).1.len()
+    }
+}
