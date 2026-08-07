@@ -261,16 +261,20 @@
   }
 
   /**
-   * 窗口级右键处理：编辑器/预览区替换原生菜单为自定义菜单；
-   * 其余区域（菜单栏/状态栏/弹窗遮罩等）保持原生——这些区域无编辑内容，
-   * 且自定义菜单与 MenuBar 选中态/弹窗交互会引入不必要的复杂度。
-   * 打开前联动收起 MenuBar 下拉/选中态：右键是 contextmenu 事件而非 mousedown，
-   * 不会触发 MenuBar 的外部关闭监听，不显式收起会导致两菜单叠加。
+   * 窗口级右键处理：
+   * - 编辑器/预览区：替换原生菜单为自定义菜单；打开前联动收起 MenuBar 下拉/选中态
+   *   （右键是 contextmenu 事件而非 mousedown，不会触发 MenuBar 的外部关闭监听，
+   *   不显式收起会导致两菜单叠加）；
+   * - 菜单栏/状态栏（chrome）：preventDefault 拦截但无效果——不弹自定义菜单，
+   *   也不放行给浏览器原生，避免与 MenuBar 选中态/错误 Popover 交互冲突；
+   * - 其余区域：原样放行浏览器原生菜单。
    */
   function handleContextMenu(e: MouseEvent) {
     const zone = resolveContextZone(e.target);
     if (zone === "other") return;
     e.preventDefault();
+    // chrome（菜单栏/状态栏）无效果：无需弹自定义菜单，也无需收起 MenuBar
+    if (zone === "chrome") return;
     menuBarRef?.closeMenus();
     // enabled 依据：编辑器用 CM6 state（未聚焦也准确）；预览用原生选区（须落在预览容器内，
     // 避免把编辑器的选区误算进来）
@@ -665,7 +669,7 @@
     };
     media.addEventListener("change", onSystemThemeChange);
     window.addEventListener("keydown", handleKeydown);
-    // 自定义右键菜单：编辑器/预览区替换原生菜单（其余区域放行给浏览器原生）
+    // 自定义右键菜单：编辑器/预览区替换原生菜单（菜单栏/状态栏拦截无效果，其余区域放行给浏览器原生）
     window.addEventListener("contextmenu", handleContextMenu);
 
     // Tauri 内：支持拖放打开 / 关联双击打开 / 跨实例转发打开
