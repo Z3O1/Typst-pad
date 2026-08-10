@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 手动触发（预热缓存/验证打包）：manual 事件不经过 push，
+  # 不会被 concurrency cancel——被 cancel 的 run 保存的缓存不可信（实测教训）
+  workflow_dispatch:
 
 # 同分支连续提交时取消排队中的旧 run，避免 Actions 分钟浪费
 concurrency:
