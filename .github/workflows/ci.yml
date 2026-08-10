@@ -66,11 +66,12 @@ jobs:
       - name: Cargo check (Tauri shell)
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
-  # Windows 安装包构建：仅 main 分支触发（PR 不构建，省资源）。
+  # Windows 安装包构建：main push 或手动触发时构建（PR 不构建，省资源）。
   # 作用有二：1) 验证 Windows 上的真实构建；2) 写入 Rust/npm 缓存，
   # 供后续 tag 触发时的 release.yml 构建命中（所有 tag 都能读 main 的缓存）。
+  # 手动触发（workflow_dispatch）必须能跑 build-bundles——预热缓存专用
   build-bundles:
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
