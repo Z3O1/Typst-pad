@@ -81,8 +81,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 ### 持久化与版本
 
 - `persistence.ts`：300ms 防抖写 localStorage。**启动只恢复主题与前缀设置，不恢复上次编辑内容**（每会话全新开始）。
-- 版本号约定（0.4.0 起）：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的 `version` **三处一致**修改（Cargo.toml 参与发版）。CI Rust 缓存（Swatinem/rust-cache）key 基于 Cargo.lock 哈希——**改动依赖会使 Cargo.lock 变化、缓存失效全量重编**（引入 typst 依赖树时已付出一次）；只改版本号不动依赖时 Cargo.lock 不变，跨版本命中。
-- **Cargo.lock 根 crate（typst-pad）version 固定为 `1`（占位自然数，与真实版本解耦）**：这样发版改版本号不触碰 Cargo.lock → rust-cache 的 key 稳定 → 发版命中缓存。机制：CI 上 cargo 检测到 lock 与 Cargo.toml 不一致会自动更新工作区 lock（1→真实版本），但 rust-cache 的 key 用启动时读到的提交版 lock，不受影响；依赖 fingerprint 不含根 crate version，只重编根 crate 自身（几秒）。**约定：任何 cargo 命令都会把工作区 lock 的 version 改回真实版本（git status 显示 modified）——提交前必须还原成 `1`**；`cargo build --locked` 会因此报错（CI 未用，勿加）。
+- 版本号约定（0.4.0 起）：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的 `version` **三处一致**修改（Cargo.toml 参与发版）。CI Rust 缓存（Swatinem/rust-cache）key 基于 Cargo.lock 哈希——**改动依赖会使 Cargo.lock 变化、缓存失效全量重编**（引入 typst 依赖树时已付出一次）。**实测（2026-08-10）：rust-cache 的 key 不受根 crate 的 version 字段影响**（改 lock 根 version 为 `"1"` 后 key 不变、精确命中旧缓存）——因此只改版本号发版时缓存必然命中，无需为版本号做任何占位 hack；Cargo.lock 内 version 必须保持合法三段式 semver（写 `"1"` 会致 cargo "failed to parse lock file"，实测踩过）。
 - 关于弹窗版本号运行时读取：`getVersion()`（@tauri-apps/api/app）返回 tauri.conf.json 的 version（关于弹窗显示"版本 x.y.z"），发版改版本号后前端无需改动。
 
 ## CI / 发布约定
