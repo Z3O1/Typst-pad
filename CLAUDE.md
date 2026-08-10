@@ -86,8 +86,14 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 ## CI / 发布约定
 
-- `ci.yml`：`test` job（ubuntu）push main/PR 跑 类型检查 → 单测 → 前端构建 → `cargo check`（**首次编译 typst 依赖树较慢**，之后命中缓存）；`build-bundles`（windows）**仅 main push** 构建安装包，Rust 缓存用 `shared-key: tauri-build-windows`（必须与 `release.yml` 相同，否则 release job 读不到缓存）。
+- `ci.yml`：`test` job（ubuntu）push main/PR 跑 类型检查 → 单测 → 前端构建 → `cargo check`（**首次编译 typst 依赖树较慢**，之后命中缓存）；`build-bundles`（windows）**main push 或 workflow_dispatch 触发**（PR 不构建），Rust 缓存用 `shared-key: tauri-build-windows`（必须与 `release.yml` 相同，否则 release job 读不到缓存）。
 - `release.yml`：`v*` tag 触发，自行 checkout + 构建 + 发草稿 Release（不依赖 ci.yml 的 artifact）。发布构建吃 main 分支写入的缓存。
+- **缓存纪律（2026-08-10 事故后固化，勿回退）**：
+  - rust-cache **禁止加 `cache-on-failure`**：被 cancel 的 run 即使编译已完成，post 上传缓存仍会被截断（实测 588MB 只传了 542MB），后续 run 精确命中同 key 不覆盖 → 半成品缓存永续，每次构建重编 55 个 crate（13 分钟）。只有成功完成的 run 才允许保存缓存。
+  - **run 运行中不要 push main**：concurrency `cancel-in-progress` 会打断正在构建的 run，预热/发版构建被打断即前功尽弃。
+  - 缓存损坏后的修复流程：`gh cache delete <key>` → 用 **workflow_dispatch 手动触发**（不是 push，push 会 cancel）→ 等 run 自然完成 → 再手动触发一次验证（预期仅 2 个 Compiling、~3 分钟）。
+  - `tauri-bundle-tools` 缓存 key 含 `hashFiles('package-lock.json')`：依赖升级（tauri-cli 打包逻辑变化）自动失效重建，锁文件不变则稳定命中。
+  - 健康缓存命中时构建 ~3 分钟（2 个 Compiling），全量 ~16 分钟（78 个 Compiling）——数字异常即缓存失效信号。
 - 版本升级流程：改版本号（三处一致）→ 合并 main（自动构建）→ 打 tag → 手动发布草稿。
 
 ## 测试
