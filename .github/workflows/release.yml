@@ -49,12 +49,14 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # 缓存 Tauri 打包工具（WiX/NSIS 下载解压产物），避免每次全新下载
+      # 缓存 Tauri 打包工具（WiX/NSIS 下载解压产物），避免每次全新下载；
+      # key 含 package-lock.json 哈希：依赖升级（tauri-cli 打包逻辑变化）时自动失效重建，
+      # 锁文件不变则稳定命中（与 ci.yml 的 build-bundles 保持一致的 key 规则）
       - name: Cache Tauri bundler tools
         uses: actions/cache@v4
         with:
           path: C:\Users\runneradmin\AppData\Local\tauri
-          key: tauri-bundle-tools-${{ runner.os }}
+          key: tauri-bundle-tools-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Build installers (nsis + msi)
         run: npm run tauri build
