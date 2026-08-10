@@ -40,13 +40,13 @@ jobs:
         with:
           components: rustfmt
 
-      # Rust 缓存：cargo check 命中后只做增量检查，避免每次全量编译；
-      # 构建失败时也保存缓存，重试可增量编译
+      # Rust 缓存：cargo check 命中后只做增量检查，避免每次全量编译。
+      # 失败/中断不保存缓存（rust-cache 默认行为）：被 cancel 的 run 保存的半成品
+      # 会被后续 run 精确命中且不覆盖，坏缓存永续（踩过坑，勿加 cache-on-failure）
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: npm ci
@@ -79,15 +79,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Rust 缓存：main 分支触发时命中，避免每次全量编译；
-      # 构建失败时也保存缓存，重试可增量编译。
+      # Rust 缓存：main 分支触发时命中，避免每次全量编译。
+      # 失败/中断不保存缓存（rust-cache 默认行为）：被 cancel 的 run 保存的半成品
+      # 会被后续 run 精确命中且不覆盖，坏缓存永续（踩过坑，勿加 cache-on-failure）
       # shared-key 覆盖默认的 job 名 key，与 release.yml 的 release job 共享同一缓存
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
           shared-key: tauri-build-windows
-          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: npm ci

@@ -35,8 +35,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Rust 缓存：命中 ci.yml 的 main 分支构建写入的缓存，避免每次发版全量编译；
-      # 构建失败时也保存缓存，重试可增量编译。
+      # Rust 缓存：命中 ci.yml 的 main 分支构建写入的缓存，避免每次发版全量编译。
+      # 失败/中断不保存缓存（rust-cache 默认行为）：被 cancel 的 run 保存的半成品
+      # 会被后续 run 精确命中且不覆盖，坏缓存永续（踩过坑，勿加 cache-on-failure）
       # shared-key 必须与 ci.yml 的 build-bundles 相同（覆盖默认 job 名 key），
       # 否则 key 含 job 名（release），读不到 build-bundles 写的缓存
       - name: Cache Rust build
@@ -44,7 +45,6 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: tauri-build-windows
-          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: npm ci
