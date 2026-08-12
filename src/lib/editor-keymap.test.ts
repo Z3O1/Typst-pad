@@ -11,6 +11,7 @@ import {
   deleteLine,
   copyLineDown,
   toggleBlockComment,
+  toggleComment,
 } from "@codemirror/commands";
 import { basicSetup } from "codemirror";
 import { editorKeymap } from "./editor-keymap";
@@ -36,12 +37,13 @@ describe("editorKeymap 导出与绑定", () => {
     expect(() => EditorState.create({ extensions: editorKeymap })).not.toThrow();
   });
 
-  it("四个自定义键位齐全", () => {
+  it("五个自定义键位齐全", () => {
     const keys = new Set(allBindings().map((b) => b.key));
     expect(keys).toContain("Tab");
     expect(keys).toContain("Mod-Shift-d");
     expect(keys).toContain("Mod-d");
     expect(keys).toContain("Mod-Shift-/");
+    expect(keys).toContain("Mod-/");
   });
 
   it("各键位绑定到预期命令", () => {
@@ -51,6 +53,7 @@ describe("editorKeymap 导出与绑定", () => {
     expect(bindings.find((b) => b.key === "Mod-d")?.run).toBe(deleteLine);
     expect(bindings.find((b) => b.key === "Mod-Shift-d")?.run).toBe(copyLineDown);
     expect(bindings.find((b) => b.key === "Mod-Shift-/")?.run).toBe(toggleBlockComment);
+    expect(bindings.find((b) => b.key === "Mod-/")?.run).toBe(toggleComment);
   });
 
   it("Mod-d 优先级高于 basicSetup 的「选中下一处」（searchKeymap）", () => {
@@ -126,6 +129,19 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     // 再按一次取消注释
     press(view, { key: "?", code: "Slash", keyCode: 191, ctrlKey: true, shiftKey: true });
     expect(view.state.doc.toString()).toBe("#foo\n");
+    view.destroy();
+  });
+
+  it("Ctrl+/ 行注释（无选区时注释光标所在行）", () => {
+    const view = makeView("aaa\nbbb\n");
+    view.dispatch({ selection: { anchor: 1 } }); // 光标在 "aaa" 行内
+    // 真实浏览器中 Ctrl+/ 的 key 是 "/"，keyCode 191 对应 "/"（无 shift）
+    press(view, { key: "/", code: "Slash", keyCode: 191, ctrlKey: true });
+    expect(view.state.doc.toString()).toBe("// aaa\nbbb\n"); // 行首插入 "// "
+
+    // 再按一次取消注释
+    press(view, { key: "/", code: "Slash", keyCode: 191, ctrlKey: true });
+    expect(view.state.doc.toString()).toBe("aaa\nbbb\n");
     view.destroy();
   });
 });
