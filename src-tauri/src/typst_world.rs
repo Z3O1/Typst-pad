@@ -1,4 +1,5 @@
-//! 内嵌 Typst 编译世界：字体加载、主文档/相对 include 的磁盘解析、编译与导出（SVG/PDF）。
+//! 内嵌 Typst 编译世界：字体加载、主文档/相对 include 的磁盘解析、包（@local/@preview）
+//! 解析、编译与导出（SVG/PDF）。
 //!
 //! 整体思路参考 typst 官方 CLI（typst-cli 的 SystemWorld），但针对编辑器场景做了简化：
 //! - 字体：打包字体目录（打包后为 resource_dir/fonts，开发/测试为仓库 static/fonts）
@@ -7,8 +8,10 @@
 //!   进程内缓存（cached_fonts），每次编译复用而非重读盘；
 //! - 文件：主文档源码由前端传入（未保存即可编译）；相对 include 以 document_path 所在目录为
 //!   根从磁盘读取（与 typst 语义一致：相对路径基于引用文件所在目录解析，根为项目目录）；
+//! - 包：`@local/{name}:{version}` 从本地数据目录读取；`@preview/{name}:{version}` 从缓存
+//!   目录读取，缓存 miss 时自动下载（目录规范与下载逻辑见 packages.rs，与 typst CLI 一致）；
 //! - document_path 为 None（未保存文档）时，相对导入无法解析磁盘路径，编译前先预检给出
-//!   "需要先保存文档" 的明确诊断。
+//!   "需要先保存文档" 的明确诊断（包导入不依赖文档位置，无需保存）。
 //!
 //! 接口契约（前端按此消费，serde rename_all = "camelCase"，多词字段为 camelCase 键名）：
 //! - compile_doc -> CompileOutput { ok, pages, diagnostics, warnings }
@@ -168,7 +171,9 @@ impl TypstWorld {
         .intern()
     }
 
-    /// FileId 对应的磁盘真实路径（仅项目根内文件；包/未保存场景返回错误）
+    /// FileId 对应的磁盘真实路径（项目根内文件按根解析；包文件经 packages.rs 解析，
+    /// @preview 缓存 miss 时会在此时触发下载——source()/file() 都走这里，包内互相导入
+    /// 递归成立；下载为同步调用但编译整体在 spawn_blocking 内执行，不阻塞 UI）
     fn realize(&self, id: FileId) -> FileResult<PathBuf> {
         match id.root() {
             VirtualRoot::Project => {
@@ -179,11 +184,9 @@ impl TypstWorld {
                 })?;
                 id.vpath().realize(root).map_err(Into::into)
             }
-            // 离线内嵌引擎不支持 @preview 等包下载
-            VirtualRoot::Package(_) => Err(FileError::Other(Some(
-                "不支持 @preview 等在线包（内嵌引擎为离线编译，请把依赖文件放到文档目录后改用相对路径导入)"
-                    .into(),
-            ))),
+            // @local/@preview 包：目录解析 + 缓存 miss 下载（诊断复用引擎
+            // PackageError：404→not found，网络失败→download failed，可区分）
+            VirtualRoot::Package(spec) => crate::packages::resolve_package_path(spec, id.vpath()),
         }
     }
 
@@ -208,6 +211,11 @@ impl TypstWorld {
     pub fn path_of(&self, id: FileId) -> Option<String> {
         if id == self.main_id {
             return None;
+        }
+        // 包内文件直接给虚拟路径（@preview/name:version/...），
+        // 不走 realize——避免定位诊断时再次触发下载
+        if let VirtualRoot::Package(spec) = id.root() {
+            return Some(format!("{spec}/{}", id.vpath().get_without_slash()));
         }
         match self.realize(id) {
             Ok(path) => Some(path.to_string_lossy().to_string()),
@@ -573,7 +581,8 @@ fn fix_span_end(
 }
 
 /// 未保存文档时预检相对 include：`#include "x.typ"`（含 `/` 绝对虚拟路径）无法解析，
-/// 直接返回"需要先保存文档"诊断；`@preview/...` 包导入不在此列（编译期另行报"不支持包"）。
+/// 直接返回"需要先保存文档"诊断；`@` 开头的包导入不依赖文档位置，编译期经包解析
+/// （packages.rs）正常处理，无需保存文档，故保持跳过。
 fn check_relative_imports(src: &str) -> Option<Vec<Diagnostic>> {
     let root = typst_syntax::parse(src);
     let mut diags = Vec::new();
@@ -595,7 +604,7 @@ fn check_relative_imports(src: &str) -> Option<Vec<Diagnostic>> {
             }
             if let Some(path) = path {
                 // 以 / 开头的虚拟绝对路径也要项目根，同样需要已保存文档；
-                // @ 开头的是包导入，交给编译期报"不支持在线包"
+                // @ 开头的是包导入（@local/@preview），不依赖文档位置，交给编译期处理
                 if !path.starts_with('@') {
                     let (line, column) = offset_to_line_column(src, node.offset());
                     diags.push(Diagnostic {
@@ -859,5 +868,109 @@ hello"
     /// 字体计数辅助（供端到端测试断言）
     fn font_count() -> usize {
         load_fonts(&fonts_dir()).1.len()
+    }
+
+    /// 构造临时包目录（在 root 下 {namespace}/{name}/{version}/...）
+    fn make_pkg(root: &std::path::Path, ns: &str, name: &str, version: &str, files: &[(&str, &str)]) {
+        let dir = root.join(ns).join(name).join(version);
+        for (rel, content) in files {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+    }
+
+    /// 端到端 @local：未保存文档也能导入本地包（TYPST_PACKAGE_PATH 注入临时目录，不触用户目录）
+    #[test]
+    fn package_import_local_end_to_end() {
+        let _guard = crate::packages::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir()
+            .join(format!("typst-pad-test-{}-pkg-local", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        std::env::set_var("TYPST_PACKAGE_PATH", &root);
+        std::env::remove_var("TYPST_PACKAGE_CACHE_PATH");
+        make_pkg(
+            &root,
+            "local",
+            "mypkg",
+            "1.0.0",
+            &[
+                ("typst.toml", "[package]\nname = \"mypkg\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n"),
+                ("lib.typ", "#let hello = [来自本地包的问候]\n"),
+            ],
+        );
+
+        let src = "#import \"@local/mypkg:1.0.0\": hello\n\n#hello\n".to_string();
+        let out = compile(src, None, &fonts_dir());
+        assert!(out.ok, "@local 导入应编译成功，实际诊断: {:?}", out.diagnostics);
+        // SVG 文本按字形渲染（<use> 引用字形路径），8 个汉字对应 8 个字形
+        assert!(
+            out.pages[0].matches("<use").count() >= 8,
+            "包内内容应渲染进页面（字形数），实际 {}",
+            out.pages[0].matches("<use").count()
+        );
+        std::env::remove_var("TYPST_PACKAGE_PATH");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 端到端 @preview：缓存命中（预置伪造包目录）即可离线编译，不发网络请求
+    #[test]
+    fn package_import_preview_cache_end_to_end() {
+        let _guard = crate::packages::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir()
+            .join(format!("typst-pad-test-{}-pkg-preview", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        std::env::remove_var("TYPST_PACKAGE_PATH");
+        std::env::set_var("TYPST_PACKAGE_CACHE_PATH", &root);
+        make_pkg(
+            &root,
+            "preview",
+            "pkg",
+            "0.2.0",
+            &[
+                ("typst.toml", "[package]\nname = \"pkg\"\nversion = \"0.2.0\"\nentrypoint = \"lib.typ\"\n"),
+                ("lib.typ", "#let v = 42\n"),
+            ],
+        );
+
+        let src = "#import \"@preview/pkg:0.2.0\": v\n\n#v\n".to_string();
+        let out = compile(src, None, &fonts_dir());
+        assert!(out.ok, "@preview 缓存命中应编译成功，实际诊断: {:?}", out.diagnostics);
+        // SVG 文本按字形渲染：数字 42 对应 2 个字形
+        assert!(
+            out.pages[0].matches("<use").count() >= 2,
+            "包内变量应渲染进页面（字形数），实际 {}",
+            out.pages[0].matches("<use").count()
+        );
+        std::env::remove_var("TYPST_PACKAGE_CACHE_PATH");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 端到端诊断：@local 包不存在时给出"package not found"诊断（编译失败路径，用户可读）
+    #[test]
+    fn package_import_missing_reports_diagnostic() {
+        let _guard = crate::packages::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir()
+            .join(format!("typst-pad-test-{}-pkg-missing", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // 空目录：@local 必然 miss（@local 不下载，不发网络请求）
+        std::env::set_var("TYPST_PACKAGE_PATH", &root);
+        std::env::set_var("TYPST_PACKAGE_CACHE_PATH", &root);
+
+        let src = "#import \"@local/ghost:1.0.0\": x\n".to_string();
+        let out = compile(src, None, &fonts_dir());
+        assert!(!out.ok, "不存在的包应编译失败");
+        let d = out
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("package not found"))
+            .expect("应有 package not found 诊断");
+        assert!(d.line >= 1 && d.column >= 1, "诊断应定位到导入处");
+        std::env::remove_var("TYPST_PACKAGE_PATH");
+        std::env::remove_var("TYPST_PACKAGE_CACHE_PATH");
+        let _ = fs::remove_dir_all(&root);
     }
 }
