@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use tauri::{Emitter, Manager};
 
+mod packages;
 mod typst_world;
 
 /// 待打开的 .typ 文件队列：首次启动参数 + 跨实例转发 + macOS 打开事件，
