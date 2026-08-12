@@ -6,6 +6,7 @@ import {
   deleteLine,
   copyLineDown,
   toggleBlockComment,
+  toggleComment,
 } from "@codemirror/commands";
 
 // CM6 中同一按键的多条绑定按注册顺序执行、先返回 true 者胜出，因此把自定义键位放在
@@ -17,5 +18,6 @@ export const editorKeymap = Prec.high(
     { key: "Mod-Shift-d", run: copyLineDown, preventDefault: true }, // 复制当前行到下方（VS Code 语义）
     { key: "Mod-d", run: deleteLine, preventDefault: true }, // 删除当前行（有意覆盖 searchKeymap 的"选中下一处"）
     { key: "Mod-Shift-/", run: toggleBlockComment, preventDefault: true }, // 块注释
+    { key: "Mod-/", run: toggleComment, preventDefault: true }, // 行注释（Ctrl+/ 切换）
   ]),
 );
