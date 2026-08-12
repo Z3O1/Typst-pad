@@ -350,6 +350,8 @@ mod startup_timing {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // 窗口大小/位置/最大化状态记忆（tauri-plugin-window-state）：关闭时保存、启动时恢复
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         // 禁用浏览器加速键（Ctrl+R 不再触发整页刷新），放在 opener 之后注册
         .plugin(DisableBrowserAccelerators)
         .plugin(tauri_plugin_dialog::init())
