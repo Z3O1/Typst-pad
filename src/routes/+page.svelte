@@ -42,6 +42,7 @@
   import { mark, reportStartup } from "$lib/startup-timing";
   import { dbg, setCliDebug } from "$lib/debug";
   import { clampPopoverRect } from "$lib/popover-utils";
+  import { previewCanvasWidth, viewBoxWidthPt } from "$lib/preview-scale";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -82,6 +83,10 @@
   let pageCount = $state(0);
   let charCount = $state(0); // 字符数（状态栏右侧独立显示）
   let previewHost: HTMLElement;
+  // 预览滚动容器（ResizeObserver 观测其宽度变化）；$state 避免 bind:this 的
+  // non_reactive_update 警告（previewHost 属历史既有模式，此处新变量按新写法声明）
+  let previewBodyEl = $state<HTMLElement>();
+  let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
@@ -440,6 +445,27 @@
     showSettings = false;
   }
 
+  /**
+   * 预览画布等宽缩放：按预览容器可用宽度与页面物理宽度（pt，页 SVG 的 viewBox）计算
+   * 缩放系数，把画布宽度写入预览容器内联样式（各页 SVG width:100% 随之等宽显示）——
+   * - 字号恒定：默认字号对齐输入区（14px），窗口拉宽时画布停在自然尺寸不再放大；
+   * - 等宽显示：窗口变窄时画布等比缩小铺满容器宽度，文本不拉伸变形。
+   * 测量失败（无产物/容器不可测）时清空内联宽度，回退 CSS width: 100%。
+   */
+  function applyPreviewScale() {
+    if (!previewBodyEl || !previewHost) return;
+    const svg = previewHost.querySelector("svg");
+    if (!svg) {
+      previewHost.style.width = "";
+      return;
+    }
+    const displayWidth = previewCanvasWidth({
+      containerWidth: previewBodyEl.clientWidth,
+      pageWidthPt: viewBoxWidthPt(svg.getAttribute("viewBox") ?? ""),
+    });
+    previewHost.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
+  }
+
   async function runCompile() {
     if (compileSeq === 0) mark("compile-request");
     const mySeq = ++compileSeq;
@@ -457,6 +483,7 @@
     if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
     if (result.ok) {
       previewHost.innerHTML = result.svg;
+      applyPreviewScale(); // 新产物注入后按当前容器宽度重算画布缩放
       pageCount = result.pageCount;
       previewStatus = "ready";
       editorDiagnostics = [];
@@ -643,6 +670,10 @@
     window.addEventListener("keydown", handleKeydown);
     // 自定义右键菜单：编辑器/预览区替换原生菜单（菜单栏/状态栏拦截无效果，其余区域放行给浏览器原生）
     window.addEventListener("contextmenu", handleContextMenu);
+    // 预览画布缩放：观测预览容器宽度变化（窗口 resize / 分栏布局变化），重算画布宽度；
+    // observe 首次回调立即触发一次（覆盖挂载时已渲染的产物）
+    previewResizeObserver = new ResizeObserver(() => applyPreviewScale());
+    if (previewBodyEl) previewResizeObserver.observe(previewBodyEl); // bind:this 已在 onMount 前赋值
 
     // Tauri 内：支持拖放打开 / 关联双击打开 / 跨实例转发打开
     const unlisteners: Array<() => void> = [];
@@ -708,6 +739,7 @@
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("contextmenu", handleContextMenu);
+      previewResizeObserver?.disconnect();
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
@@ -746,7 +778,11 @@
     </section>
     <section class="pane preview-pane">
       <!-- data-context-zone：右键区域判定标记（覆盖占位/错误/预览纸张全部子区域） -->
-      <div class="pane-body preview-body" data-context-zone="preview">
+      <div
+        class="pane-body preview-body"
+        data-context-zone="preview"
+        bind:this={previewBodyEl}
+      >
         {#if previewStatus === "error"}
           <div class="preview-error">
             <div class="preview-error-title">编译错误</div>
@@ -1152,10 +1188,12 @@
 
   .preview-paper {
     width: 100%;
-    /* 不再模拟 A4 纸外观：页面白底由 SVG 内部自行绘制，仅保留宽度 */
+    /* 宽度默认铺满容器；applyPreviewScale 按容器宽度与页物理尺寸（pt）计算后
+       以内联样式覆盖为画布显示宽度（字号恒定等宽缩放），测量失败时回退本规则 */
   }
 
-  /* 每页 SVG 顶层文档（compileToSvg 按页序拼接入预览容器）：等宽铺满、高度按比例 */
+  /* 每页 SVG 顶层文档（compileToSvg 按页序拼接入预览容器）：铺满预览容器宽度
+     （容器宽度由缩放逻辑控制）、高度按比例——等宽缩放，文本不拉伸变形 */
   .preview-paper > :global(svg) {
     display: block;
     width: 100%;
