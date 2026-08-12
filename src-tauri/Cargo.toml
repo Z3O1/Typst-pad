@@ -35,6 +35,12 @@ typst-syntax = "0.15.1"
 typst-layout = "0.15.1"
 typst-svg = "0.15.1"
 typst-pdf = "0.15.1"
+# @preview 在线包：下载（ureq）/解压（tar + flate2）；包目录（dirs，与 typst CLI 同款）。
+# flate2/dirs 已在传递依赖树中（typst-pdf/tauri），直接声明不新增编译；ureq/tar 为全新依赖。
+ureq = "3"
+tar = "0.4"
+flate2 = "1"
+dirs = "6"
 
 [target.'cfg(windows)'.dependencies]
 # 禁用 WebView2 浏览器加速键（Ctrl+R 整页刷新等）：直接操作 WebView2 COM 接口
