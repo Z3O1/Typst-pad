@@ -40,7 +40,7 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 ## 测试与 CI
 
 - 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键等
-- Rust 单测（`typst_world.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）
+- Rust 单测（`typst_world.rs` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）
 - CI（GitHub Actions，`.github/workflows/ci.yml`）：
   - `test`（ubuntu）：push 到 main / PR 时跑 类型检查 → 单测 → 前端构建 → `cargo check`（首次编译 typst 依赖树较慢，之后命中 Rust 缓存）
   - `build-bundles`（windows）：仅 main push 触发，构建 .exe/.msi 安装包并 `upload-artifact`（同时写入缓存供 Release 复用）
@@ -67,7 +67,8 @@ src/
 └── lib/file-ops.ts         # 打开/保存文件（Tauri dialog + invoke）
 src-tauri/
 ├── src/lib.rs              # Rust 壳：read_file / write_file / compile_doc / export_pdf 等命令 + dialog/opener 插件
-└── src/typst_world.rs      # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 诊断转换（SVG/PDF）
+├── src/packages.rs         # 包系统：@local 读取 / @preview 自动下载缓存（与 CLI 目录规范一致）
+└── src/typst_world.rs      # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 包解析接线 / 诊断转换（SVG/PDF）
 ```
 
 ### 字体
@@ -97,7 +98,7 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 原生编译验证（中文+
 
 - 单文件编辑，无文件树 / 多标签页
 - 预览不跟随滚动（非所见即所得）
-- 内嵌引擎离线编译，不支持 `@preview` 在线包导入（请把依赖文件放到文档目录后用相对路径导入）
+- 支持 `@local` 本地包（读取 typst 数据目录）与 `@preview` 在线包（首次使用时自动下载到 typst 共享缓存目录，离线后直接命中缓存；网络不可用时给出明确诊断）——包目录规范与 typst CLI 一致，可通过 `TYPST_PACKAGE_PATH` / `TYPST_PACKAGE_CACHE_PATH` 环境变量覆盖
 - 未保存文档时相对 `include` 无法解析磁盘路径（Rust 侧给出"需要先保存文档"的明确诊断）
 - `tauri.conf.json` 的 `csp` 保持 `null`：wasm 编译管线已移除（wasm 限制解除），但 CSP 未实测启用；如需启用请在 `npm run tauri build` 后实机验证
 
