@@ -1,8 +1,10 @@
 //! 内嵌 Typst 编译世界：字体加载、主文档/相对 include 的磁盘解析、编译与导出（SVG/PDF）。
 //!
 //! 整体思路参考 typst 官方 CLI（typst-cli 的 SystemWorld），但针对编辑器场景做了简化：
-//! - 字体：从字体目录（打包后为 resource_dir/fonts，开发/测试为仓库 static/fonts）加载全部
-//!   .ttf/.otf，注册进 FontBook；
+//! - 字体：打包字体目录（打包后为 resource_dir/fonts，开发/测试为仓库 static/fonts）
+//!   与系统字体目录（见 system_font_dirs，Windows/Linux/macOS）合并加载全部 .ttf/.otf，
+//!   注册进同一个 FontBook（与 typst CLI 字体集对齐，同一文档两边字体解析一致）；
+//!   进程内缓存（cached_fonts），每次编译复用而非重读盘；
 //! - 文件：主文档源码由前端传入（未保存即可编译）；相对 include 以 document_path 所在目录为
 //!   根从磁盘读取（与 typst 语义一致：相对路径基于引用文件所在目录解析，根为项目目录）；
 //! - document_path 为 None（未保存文档）时，相对导入无法解析磁盘路径，编译前先预检给出
@@ -17,7 +19,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic};
@@ -115,9 +117,9 @@ impl TypstWorld {
     ///
     /// - `src`：主文档源码
     /// - `document_path`：主文档磁盘路径（决定项目根目录与 include 解析；None = 未保存）
-    /// - `fonts_dir`：字体目录（.ttf/.otf 全量加载）
+    /// - `fonts_dir`：打包字体目录（.ttf/.otf 全量加载；系统字体目录自动合并，进程内缓存）
     pub fn new(src: String, document_path: Option<String>, fonts_dir: &Path) -> Self {
-        let (book, fonts) = load_fonts(fonts_dir);
+        let (book, fonts) = cached_fonts(fonts_dir);
         let library = Library::default();
 
         // 项目根 = 主文档所在目录；主 FileId 的虚拟路径相对该根（盘符前缀被剥离）
@@ -275,31 +277,115 @@ fn civil_from_days(z: i64) -> (i32, u8, u8) {
     (if m <= 2 { (y + 1) as i32 } else { y as i32 }, m, d)
 }
 
-/// 从目录加载全部 .ttf/.otf 字体，返回 (FontBook, 字体列表)（与 FontBook 索引一一对应）。
-/// 目录不存在/不可读时返回空集（不影响编译，缺字体时 typst 会给出缺字诊断）。
+/// 从单个目录加载全部 .ttf/.otf 字体（含子目录递归），返回 (FontBook, 字体列表)
+/// （与 FontBook 索引一一对应）。目录不存在/不可读时返回空集（不影响编译，
+/// 缺字体时 typst 会给出缺字诊断）。
 fn load_fonts(dir: &Path) -> (FontBook, Vec<Font>) {
     let mut book = FontBook::new();
     let mut fonts = Vec::new();
+    load_fonts_from_dir(dir, &mut book, &mut fonts);
+    (book, fonts)
+}
+
+/// 打包字体目录 + 系统字体目录合并加载，全部注册进同一个 FontBook。
+/// 与 typst CLI 字体集对齐：CLI 默认加载系统全部字体，typst-pad 此前只加载打包的
+/// 7 个字体，同一文档在两边的字体解析结果可能不一致。目录不存在/不可读时静默跳过。
+fn load_fonts_with_system(bundled_dir: &Path) -> (FontBook, Vec<Font>) {
+    let (mut book, mut fonts) = load_fonts(bundled_dir);
+    for dir in system_font_dirs() {
+        load_fonts_from_dir(&dir, &mut book, &mut fonts);
+    }
+    (book, fonts)
+}
+
+/// 递归收集目录（含子目录）下全部 .ttf/.otf 并注册进 book/fonts。
+/// 目录不存在/不可读时静默跳过；符号链接目录不递归（防环，与 list_dir_typ 约定一致），
+/// broken symlink 跳过。
+fn load_fonts_from_dir(dir: &Path, book: &mut FontBook, fonts: &mut Vec<Font>) {
     let Ok(entries) = fs::read_dir(dir) else {
-        return (book, fonts);
+        return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        // 仅加载 .ttf/.otf（大小写不敏感）
-        let is_font = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"));
-        if !is_font {
-            continue;
-        }
-        let Ok(data) = fs::read(&path) else { continue };
-        if let Some(font) = Font::new(Bytes::new(data), 0) {
-            book.push(font.info().clone());
-            fonts.push(font);
+        // metadata 跟随符号链接：broken symlink 会 Err 而跳过
+        let Ok(meta) = fs::metadata(&path) else { continue };
+        if meta.is_dir() {
+            // 符号链接目录一律不递归（防环）
+            let is_symlink = fs::symlink_metadata(&path)
+                .is_ok_and(|sm| sm.file_type().is_symlink());
+            if is_symlink {
+                continue;
+            }
+            load_fonts_from_dir(&path, book, fonts);
+        } else if meta.is_file() {
+            register_font_file(&path, book, fonts);
         }
     }
-    (book, fonts)
+}
+
+/// 读取并注册单个字体文件：仅 .ttf/.otf（大小写不敏感），读盘/解析失败静默跳过。
+fn register_font_file(path: &Path, book: &mut FontBook, fonts: &mut Vec<Font>) {
+    let is_font = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"));
+    if !is_font {
+        return;
+    }
+    let Ok(data) = fs::read(path) else { return };
+    if let Some(font) = Font::new(Bytes::new(data), 0) {
+        book.push(font.info().clone());
+        fonts.push(font);
+    }
+}
+
+/// 系统字体目录候选（与 typst CLI 默认加载范围对齐），按平台返回：
+/// - Windows：`%WINDIR%\Fonts`（WINDIR 环境变量缺失时回退 `C:\Windows\Fonts`）
+/// - Linux：`/usr/share/fonts`、`/usr/local/share/fonts`、用户字体目录
+///   （`$XDG_DATA_HOME/fonts`，未设置时 `$HOME/.local/share/fonts`）
+/// - macOS：`/System/Library/Fonts`、`/Library/Fonts`、`~/Library/Fonts`
+/// 目录可能不存在/不可读，由调用方（load_fonts_with_system）静默跳过。
+fn system_font_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+        dirs.push(PathBuf::from(windir).join("Fonts"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(PathBuf::from("/System/Library/Fonts"));
+        dirs.push(PathBuf::from("/Library/Fonts"));
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join("Library/Fonts"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        dirs.push(PathBuf::from("/usr/share/fonts"));
+        dirs.push(PathBuf::from("/usr/local/share/fonts"));
+        // XDG 优先：$XDG_DATA_HOME/fonts；未设置时退回 $HOME/.local/share/fonts
+        match std::env::var("XDG_DATA_HOME").ok().filter(|s| !s.is_empty()) {
+            Some(xdg) => dirs.push(PathBuf::from(xdg).join("fonts")),
+            None => {
+                if let Some(home) = std::env::var_os("HOME") {
+                    dirs.push(PathBuf::from(home).join(".local/share/fonts"));
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// 进程级字体缓存：字体集合在进程生命周期内不变（打包字体目录在 setup 时解析一次，
+/// 系统字体目录也是静态的），首次编译时全量加载一次，此后每次编译复用克隆。
+/// 前端每次按键都会触发编译，若每次重读几百个系统字体文件将严重拖慢输入。
+/// Font 为 Arc 引用计数，FontBook/字体列表克隆廉价。
+static FONT_CACHE: OnceLock<(FontBook, Vec<Font>)> = OnceLock::new();
+
+/// 获取字体集：首次调用时从打包目录 + 系统字体目录全量加载并缓存，之后返回缓存克隆。
+fn cached_fonts(fonts_dir: &Path) -> (FontBook, Vec<Font>) {
+    FONT_CACHE.get_or_init(|| load_fonts_with_system(fonts_dir)).clone()
 }
 
 /// 解析字体目录：优先打包/构建产物 resource_dir 下的 fonts（tauri.conf.json
