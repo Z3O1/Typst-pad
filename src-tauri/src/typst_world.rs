@@ -657,12 +657,28 @@ $ a^2 + b^2 = c^2 $
         assert!(font_count() >= 7, "static/fonts 下 7 个字体文件应全部注册");
     }
 
-    /// 字体加载：static/fonts 下全部字体注册成功（数学 NewCM、中文思源宋体、Libertinus、DejaVu）
+    /// 字体加载：static/fonts 下 7 个打包字体全部注册成功（数学 NewCM、中文思源宋体、
+    /// Libertinus、DejaVu）；合并系统字体目录后这些族仍应存在。
+    /// 总字体数随系统字体变化（Windows 系统字体目录有数百个文件），不断言具体值。
     #[test]
     fn fonts_all_registered() {
+        // 打包目录单独加载：7 个字体文件全部注册
         let (book, fonts) = load_fonts(&fonts_dir());
         assert_eq!(fonts.len(), 7, "static/fonts 应有 7 个字体文件");
-        // FontBook 内部键为小写族名（typst 0.15 的 contains_family 不做大小写归一化）
+        assert_bundled_families_registered(&book);
+
+        // 合并加载（打包 + 系统字体目录）：打包族仍在，字体数不少于打包数量
+        let (merged_book, merged_fonts) = load_fonts_with_system(&fonts_dir());
+        assert_bundled_families_registered(&merged_book);
+        assert!(
+            merged_fonts.len() >= fonts.len(),
+            "合并系统字体后字体数不应少于打包数量，实际 {}",
+            merged_fonts.len()
+        );
+    }
+
+    /// 打包字体族名断言（FontBook 内部键为小写族名，typst 0.15 的 contains_family 不做大小写归一化）
+    fn assert_bundled_families_registered(book: &FontBook) {
         for family in [
             "new computer modern math",
             "noto serif cjk sc",
@@ -671,6 +687,29 @@ $ a^2 + b^2 = c^2 $
         ] {
             assert!(book.contains_family(family), "字体族 {family} 应已注册");
         }
+    }
+
+    /// 字体加载容错：系统字体目录缺省（不存在）时静默跳过——返回空集不 panic，
+    /// 编译不受影响；打包目录与系统目录走同一容错路径。
+    #[test]
+    fn fonts_missing_dir_silently_skipped() {
+        let missing = std::env::temp_dir().join(format!(
+            "typst-pad-test-{}-no-such-fonts",
+            std::process::id()
+        ));
+        // 单个不存在目录：返回空集，不 panic
+        let (book, fonts) = load_fonts(&missing);
+        assert!(fonts.is_empty(), "不存在的目录应返回空字体集");
+        assert!(!book.contains_family("noto serif cjk sc"));
+
+        // 合并路径（打包目录 + 不存在的系统目录）：不存在的目录静默跳过，打包族保留
+        let mut book = FontBook::new();
+        let mut fonts = Vec::new();
+        load_fonts_from_dir(&fonts_dir(), &mut book, &mut fonts);
+        assert_eq!(fonts.len(), 7);
+        load_fonts_from_dir(&missing, &mut book, &mut fonts);
+        assert_eq!(fonts.len(), 7, "不存在的目录不应新增任何字体");
+        assert_bundled_families_registered(&book);
     }
 
     /// 诊断转换：语法错误文档应返回 ok=false 且行列 1-based 合理
