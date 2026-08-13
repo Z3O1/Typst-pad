@@ -5,7 +5,7 @@ name = "typst-pad"
 # 注意：改动依赖会改变 Cargo.lock，使 CI 的 Rust 缓存（Swatinem/rust-cache，
 # key 基于 Cargo.lock 哈希）失效并全量重编（引入 typst 依赖树时已付出一次）；
 # 仅改版本号不动依赖时 Cargo.lock 不变，缓存可跨版本命中。
-version = "0.4.0"
+version = "0.5.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
