@@ -29,3 +29,6 @@ tauri-build.log
 Thumbs.db
 
 
+
+# 浏览器验证产物（截图 / 报告）
+.browser-check/

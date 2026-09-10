@@ -12,6 +12,22 @@
         height: 100%;
       }
     </style>
+    <script type="module">
+      // 浏览器开发模式（?browserdev=1）：在应用模块求值前安装假的 __TAURI_INTERNALS__，
+      // 让 isTauri() 为真、UI 正常渲染，编译命令返回假 SVG。
+      //
+      // 为什么守卫里不写 import.meta.env.DEV：Vite 只对 **JS 模块** 注入 import.meta.env
+      // （桩模块被服务时首行就是 `import.meta.env = {...}`），**HTML 内联脚本一律原样透传**，
+      // 写在这里是 undefined，守卫永远为假 —— 实测踩过。
+      // 因此用运行时条件：带 ?browserdev=1 才加载。桌面版（Tauri）的 webview 加载的是
+      // 不带该参数的地址，所以这段在桌面端永远不会命中；桩内部另有
+      // `"__TAURI_INTERNALS__" in window` 时的直接返回，双重保险。
+      // 本脚本在文档解析中先于 SvelteKit 的 boot 脚本出现，模块求值同步完成安装，
+      // 因此 +page.svelte 顶层 `isTauri()` 判定时桩必定已就位（无竞态）。
+      if (new URLSearchParams(location.search).has("browserdev")) {
+        import("/src/lib/browser-dev-stub.ts").then((m) => m.installBrowserDevStub());
+      }
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

@@ -1,0 +1,276 @@
+// 浏览器开发桩（仅开发用）：让 Typst-pad 前端能在普通浏览器里跑起来，用于开发
+// 纯前端功能（编辑器交互、选区、预览排版等），不依赖 Tauri 壳与 Rust 侧编译。
+//
+// 启用方式：dev server 地址后加 ?browserdev=1，例如 http://localhost:1420/?browserdev=1
+// 关闭方式：去掉该参数即恢复原行为（非 Tauri 环境显示"请使用桌面应用版本"提示页）。
+//
+// 它做两件事：
+// 1. 造一个假的 window.__TAURI_INTERNALS__（让 isTauri() 为真、应用 UI 正常渲染）；
+// 2. 让编译命令 compile_doc 返回**根据当前文档生成的**假 SVG 页（不调用 typst，
+//    也不做真实排版），于是编辑区与预览区的交互可以完整调试。
+//
+// 明确不提供的能力：真实 Typst 编译、include/包解析、字体度量、PDF 导出落盘。
+// 这些必须回到桌面版（Windows WebView2）验证 —— 见 CLAUDE.md 与 README。
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type { Diagnostic } from "./typst-engine";
+
+/** 是否以"浏览器开发模式"启动（?browserdev=1） */
+export function isBrowserDev(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("browserdev");
+}
+
+// ---------------------------------------------------------------------------
+// 假 SVG 生成：把文档按行转成 SVG 文本行；行数超过一页容量就分页。
+// 目的是让预览区有真实的多页结构（含 page-separator 分隔），便于调试滚动/缩放/分栏。
+// 注意：这只是"看起来像排版结果"，不是 Typst 的真实输出。
+// ---------------------------------------------------------------------------
+
+const PAGE_WIDTH = 595.28; // A4 宽（pt）
+const PAGE_HEIGHT = 841.89; // A4 高（pt）
+const MARGIN = 70;
+const LINE_HEIGHT = 22;
+const FONT_SIZE = 12;
+const MAX_COLUMNS = 32; // 超出按 CJK 双宽折行
+const LINES_PER_PAGE = Math.max(1, Math.floor((PAGE_HEIGHT - MARGIN * 2) / LINE_HEIGHT));
+
+/** XML 文本转义（拼进 SVG 前调用；不要对已转义结果二次调用） */
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/** CJK 字符按 2 列计宽的简单折行（仅为了假预览不横向溢出，不做真实排版） */
+function wrapLine(line: string): string[] {
+  const lines: string[] = [];
+  let current = "";
+  let columns = 0;
+  for (const ch of line) {
+    const width = /[\u2e80-\u9fff\uff00-\uffef]/.test(ch) ? 2 : 1;
+    if (columns + width > MAX_COLUMNS) {
+      lines.push(current);
+      current = "";
+      columns = 0;
+    }
+    current += ch;
+    columns += width;
+  }
+  lines.push(current);
+  return lines;
+}
+
+/** 文档 → 供假 SVG 渲染的行数组（空行保留为空白行，段落不丢失） */
+function docToLines(doc: string): string[] {
+  const out: string[] = [];
+  for (const raw of doc.split("\n")) {
+    if (raw.trim() === "") {
+      out.push("");
+      continue;
+    }
+    out.push(...wrapLine(raw));
+  }
+  if (out.length === 0) out.push("");
+  return out;
+}
+
+/** 渲染单页 SVG 字符串（结构模仿 typst 的 SVG 输出：一个 svg 根 + 一组 text） */
+function renderPage(lines: string[], pageIndex: number, pageCount: number): string {
+  const parts: string[] = [];
+  parts.push(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${PAGE_WIDTH}" height="${PAGE_HEIGHT}" viewBox="0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}">`
+  );
+  parts.push(
+    `<rect x="0" y="0" width="${PAGE_WIDTH}" height="${PAGE_HEIGHT}" fill="#ffffff"/>`
+  );
+  lines.forEach((line, i) => {
+    if (line.trim() === "") return;
+    const y = MARGIN + (i + 1) * LINE_HEIGHT;
+    parts.push(
+      `<text x="${MARGIN}" y="${y}" font-family="Noto Serif CJK SC, Songti SC, serif" font-size="${FONT_SIZE}" fill="#111111">${escapeXml(line)}</text>`
+    );
+  });
+  // 页脚页号：便于确认多页拼接与 page-separator 分隔生效
+  parts.push(
+    `<text x="${PAGE_WIDTH / 2}" y="${PAGE_HEIGHT - MARGIN / 2}" text-anchor="middle" font-family="Noto Serif CJK SC, serif" font-size="10" fill="#666666">${pageIndex + 1} / ${pageCount}</text>`
+  );
+  parts.push("</svg>");
+  return parts.join("");
+}
+
+/** 注入页面的真实公式产物（见 scripts/browser-check/wysiwyg-visual.mjs 与 Rust 的 dump_math_fixtures） */
+interface RealMathFixture {
+  body: string;
+  display: boolean;
+  svg: string;
+  widthPt: number;
+  heightPt: number;
+  baselinePt: number;
+}
+
+/** 取注入的真实公式产物（body + 风格完全匹配才算命中；没有则退回假 SVG） */
+function realMath(body: string, display: boolean): RealMathFixture | undefined {
+  const list = (window as unknown as { __DEV_MATH_FIXTURES?: RealMathFixture[] })
+    .__DEV_MATH_FIXTURES;
+  if (!Array.isArray(list)) return undefined;
+  return list.find((f) => f.body === body && f.display === display);
+}
+
+/**
+ * 假公式渲染：结构模仿 typst 的 compile_math 产物（贴边 viewBox + 透明底 + 文本），
+ * 尺寸/基线给合理量级，用于在浏览器里验证「公式内联渲染」的布局与对齐（非真实排版）。
+ */
+function fakeMath(body: string, display: boolean) {
+  const widthPt = Math.max(4, body.length * 5.2);
+  const heightPt = display ? 16 : 7.2;
+  const baselinePt = display ? 8.4 : 5.6;
+  const svg =
+    `<svg viewBox="0 0 ${widthPt} ${heightPt}" width="${widthPt}pt" height="${heightPt}pt" ` +
+    `xmlns="http://www.w3.org/2000/svg"><text x="0" y="${baselinePt}" font-size="10.5" ` +
+    `font-style="italic" font-family="New Computer Modern Math, serif" fill="#000000">` +
+    `${escapeXml(body)}</text></svg>`;
+  return { ok: true, svg, widthPt, heightPt, baselinePt };
+}
+
+/** 当前文档 → 假 SVG 页数组 */
+export function fakePages(doc: string): string[] {
+  const lines = docToLines(doc);
+  const pages: string[][] = [];
+  for (let i = 0; i < lines.length; i += LINES_PER_PAGE) {
+    pages.push(lines.slice(i, i + LINES_PER_PAGE));
+  }
+  if (pages.length === 0) pages.push([""]);
+  return pages.map((pageLines, i) => renderPage(pageLines, i, pages.length));
+}
+
+// ---------------------------------------------------------------------------
+// 假命令：只实现前端实际会调用的那几个（见 file-ops.ts / typst-engine.ts / +page.svelte）
+// ---------------------------------------------------------------------------
+
+/** 浏览器内存"文件系统"的假路径（write_file 记住它，read_file 能读回来） */
+const FAKE_PATH = "/browser-dev/未命名.typ";
+const fakeFiles = new Map<string, string>();
+
+/** 已提示过的命令（编译每次输入都会触发，只提示一次，避免刷屏） */
+const notified = new Set<string>();
+
+/** 开发期提示：把每条假命令打出来，避免"以为在跑真编译"的误判 */
+function notify(command: string): void {
+  if (notified.has(command)) return;
+  notified.add(command);
+  console.info(`[browser-dev] 假命令 <<< ${command}（未调用真实 Rust 后端，仅首次提示）`);
+}
+
+async function handleCommand(
+  command: string,
+  args: Record<string, unknown> | undefined
+): Promise<unknown> {
+  const a = args ?? {};
+  switch (command) {
+    case "compile_doc": {
+      const src = typeof a.src === "string" ? a.src : "";
+      notify(command);
+      // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
+      return { ok: true, pages: fakePages(src), warnings: [] as Diagnostic[] };
+    }
+    case "compile_math": {
+      notify(command);
+      const body = typeof a.body === "string" ? a.body : "";
+      // 记录最近一次公式渲染入参（body/display/context）：浏览器端验收要靠它断言
+      // "文档内 #let 定义确实进了编译上下文"这类纯前端管线行为（假 SVG 看不出上下文）
+      (window as unknown as Record<string, unknown>).__browserDevLastMath = {
+        body,
+        display: a.display === true,
+        context: typeof a.context === "string" ? a.context : "",
+      };
+      // 有注入的真实产物就用真实产物（浏览器里看到的是 typst 真排版，含真尺寸/真基线）。
+      // 注意补 `ok: true`：夹具 json 里没有该字段，缺了会被前端当成"渲染失败"而不渲染
+      // （实测踩过：页面里公式一直停在源码，看不出是夹具的问题）。
+      const real = realMath(body, a.display === true);
+      return real ? { ok: true, ...real } : fakeMath(body, a.display === true);
+    }
+    case "write_file": {
+      const path = typeof a.path === "string" ? a.path : FAKE_PATH;
+      fakeFiles.set(path, typeof a.content === "string" ? a.content : "");
+      notify(command);
+      return null;
+    }
+    case "read_file": {
+      notify(command);
+      return fakeFiles.get(typeof a.path === "string" ? a.path : "") ?? "";
+    }
+    case "export_pdf": {
+      notify(command);
+      return { ok: false, error: "浏览器开发模式不提供 PDF 导出（请在桌面版验证）" };
+    }
+    case "write_binary":
+    case "list_dir_typ":
+      notify(command);
+      return command === "list_dir_typ" ? [] : null;
+    case "take_pending_files":
+      return [];
+    case "get_debug_flag":
+      return false;
+    default:
+      // dialog 插件（plugin:dialog|confirm 等）与未实现命令：给出行为安全的默认值，
+      // 让 UI 不崩、也不产生"假成功"的错觉。
+      notify(command);
+      if (command === "plugin:dialog|confirm" || command === "plugin:dialog|ask") {
+        return false;
+      }
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 假 __TAURI_INTERNALS__
+// ---------------------------------------------------------------------------
+
+let installed = false;
+
+/** 安装假的 __TAURI_INTERNALS__（幂等；只在浏览器开发模式下调用） */
+export function installBrowserDevStub(): void {
+  if (installed) return;
+  if (typeof window === "undefined") return;
+  if ("__TAURI_INTERNALS__" in window) return; // 真 Tauri 环境绝不覆盖
+  installed = true;
+
+  const callbacks = new Map<number, (payload: unknown) => void>();
+  let nextCallbackId = 1;
+
+  const internals = {
+    // Tauri 2 的 JS API 走这个入口（见 node_modules/@tauri-apps/api/core.js）
+    invoke: (command: string, args?: Record<string, unknown>) => handleCommand(command, args),
+    // 事件系统（@tauri-apps/api/event）依赖的方法：注册回调并返回 id
+    transformCallback: (callback?: (payload: unknown) => void, once = false): number => {
+      const id = nextCallbackId++;
+      if (typeof callback === "function") {
+        callbacks.set(id, (payload: unknown) => {
+          if (once) callbacks.delete(id);
+          callback(payload);
+        });
+      }
+      return id;
+    },
+    unregisterCallback: (id: number): void => {
+      callbacks.delete(id);
+    },
+    convertFileSrc: (filePath: string): string => filePath,
+    metadata: {
+      currentWindow: { label: "main" },
+      currentWebview: { label: "main" },
+      currentWebviewWindow: { label: "main" },
+    },
+  };
+
+  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = internals;
+
+  // 开发信息：确认桩已生效
+  console.info(
+    "[browser-dev] 浏览器开发模式已启用：__TAURI_INTERNALS__ 为假实现，预览来自假 SVG。"
+  );
+  console.info(`[browser-dev] @tauri-apps/api 的 invoke 类型：${typeof tauriInvoke}`);
+}
