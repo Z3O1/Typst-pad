@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Typst-pad",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "identifier": "com.typst.pad",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -32,7 +32,9 @@
     },
     "fileAssociations": [
       {
-        "ext": ["typ"],
+        "ext": [
+          "typ"
+        ],
         "name": "Typst-pad.typ",
         "description": "Typst Source File",
         "role": "Editor",

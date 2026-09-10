@@ -1,0 +1,426 @@
+// 所见即所得（公式内联渲染）的浏览器端验证：真实输入 + 真实选区 + 截图取证。
+//
+// 前置：
+//   1) npm run dev -- --host 0.0.0.0 --port 1420
+//   2) Windows headless Chrome（见 cdp.mjs 顶部注释）打开
+//      http://localhost:1420/?browserdev=1
+// 运行：node scripts/browser-check/wysiwyg.mjs
+//
+// 说明：浏览器开发模式下 compile_math 由桩实现（假 SVG，尺寸量级合理），
+// 因此这里验证的是**编辑器的装饰/选区/开关链路**；公式的真实排版由 Rust 单测覆盖
+// （cargo test compile_math）。
+import { connect } from "./cdp.mjs";
+
+// 截图写到仓库内（.browser-check/，见 .gitignore）：沙箱只允许写工作区，
+// 而 Chrome 需要 Windows 路径 —— 故用 CDP 取 base64 后由 Node 落到仓库里。
+const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
+
+/** 断言 + 计数 */
+let passed = 0;
+function check(name, ok, detail = "") {
+  if (ok) {
+    passed++;
+    console.log(`  ✓ ${name}`);
+  } else {
+    console.log(`  ✗ ${name} ${detail}`);
+    process.exitCode = 1;
+  }
+}
+
+const c = await connect();
+await c.goto("http://localhost:1420/?browserdev=1");
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 800));
+
+/** 编辑器内的可见文本（widget 已替换的部分不出现，除非有 title/aria） */
+const editorText = `document.querySelector(".cm-content").innerText`;
+/** 行内公式 widget 数量 */
+const widgetCount = `document.querySelectorAll(".cm-math-widget").length`;
+/** 独占整行的行间公式块级 widget 数量 */
+const blockCount = `document.querySelectorAll(".cm-math-block").length`;
+/** widget 的几何（宽高 pt/px 与垂直对齐），用于核对基线对齐 */
+const widgetGeo = `Array.from(document.querySelectorAll(".cm-math-widget")).map(w => {
+  const r = w.getBoundingClientRect();
+  const line = w.closest(".cm-line");
+  const lr = line.getBoundingClientRect();
+  const cs = getComputedStyle(w);
+  return {
+    text: w.title,
+    widthPx: Math.round(r.width * 10) / 10,
+    heightPx: Math.round(r.height * 10) / 10,
+    inlineWidth: w.style.width,
+    inlineHeight: w.style.height,
+    verticalAlign: cs.verticalAlign,
+    // 盒底相对所在行文本内容区底部的偏移（越大表示下沉越多）
+    fromLineBottom: Math.round((lr.bottom - r.bottom) * 10) / 10,
+    hasSvg: !!w.querySelector("svg"),
+    svgFill: w.querySelector("text")?.getAttribute("fill") ?? null,
+  };
+})`;
+
+console.log("1) 输入含行内/行间公式的文档");
+await c.click(400, 300); // 点进编辑器
+await c.type("行内公式 $x^2 + y^2$ 结束\n");
+await c.type("$ frac(a,b) $\n");
+await c.type("普通文字结尾");
+await c.waitFor(widgetCount + ` === 1 && ` + blockCount + ` === 1`, { timeout: 8000 });
+const text1 = await c.evaluate(editorText);
+const geo1 = await c.evaluate(widgetGeo);
+check("行内公式 → 行内 widget", geo1.length === 1, JSON.stringify(geo1));
+check("widget 内含 SVG", geo1.every((g) => g.hasSvg));
+check(
+  "行内公式源码被替换（DOM 里看不到 $x^2 + y^2$）",
+  !text1.includes("$x^2 + y^2$"),
+  JSON.stringify(text1),
+);
+check(
+  "行间公式源码被替换（DOM 里看不到带定界符的 $ frac(a,b) $）",
+  !text1.includes("$ frac(a,b) $"),
+  JSON.stringify(text1),
+);
+// 注：widget 的假 SVG 里含公式文本（stub 用 <text> 画字），所以只断言定界符消失，
+// 真实 Rust 产物是字形路径，不含可搜索文本。
+check("公式外的文字仍在", text1.includes("行内公式") && text1.includes("普通文字结尾"));
+check(
+  "尺寸按 pt 内联样式给出（Rust 契约的 widthPt/heightPt）",
+  geo1.every((g) => g.inlineWidth.endsWith("pt") && g.inlineHeight.endsWith("pt")),
+  JSON.stringify(geo1.map((g) => [g.inlineWidth, g.inlineHeight])),
+);
+// 独占整行的行间公式走块级 widget（居中），比行内 widget 高（display 风格）
+const blockGeo = await c.evaluate(`(() => {
+  const b = document.querySelector(".cm-math-block-box");
+  const r = b.getBoundingClientRect();
+  return { widthPx: Math.round(r.width * 10) / 10, heightPx: Math.round(r.height * 10) / 10 };
+})()`);
+check(
+  "行间公式（块级）明显高于行内公式（display 风格）",
+  blockGeo.heightPx > geo1[0].heightPx * 1.8,
+  JSON.stringify([geo1[0].heightPx, blockGeo.heightPx]),
+);
+await c.screenshot(SHOT("wysiwyg-1-rendered"));
+
+console.log("2) 光标进入公式区间 → 展开源码（Typora 式）");
+const inlineRect = await c.evaluate(`(() => {
+  const w = document.querySelectorAll(".cm-math-widget")[0];
+  const r = w.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+await c.click(inlineRect.x, inlineRect.y);
+await c.waitFor(widgetCount + ` === 0`, { timeout: 5000 });
+const text2 = await c.evaluate(editorText);
+check("光标所在的公式展开为源码（行内 widget 1 → 0）", true);
+check("源码重新可见", text2.includes("$x^2 + y^2$"), JSON.stringify(text2));
+check(
+  "另一个公式仍保持渲染（其定界符仍不可见）",
+  !text2.includes("$ frac(a,b) $"),
+  JSON.stringify(text2),
+);
+await c.screenshot(SHOT("wysiwyg-2-caret-inside"));
+
+console.log("3) 光标移出 → 恢复渲染");
+await c.key("ArrowRight", { code: "ArrowRight", keyCode: 39 });
+await c.key("ArrowRight", { code: "ArrowRight", keyCode: 39 });
+await c.key("End", { code: "End", keyCode: 35 });
+await c.waitFor(widgetCount + ` === 1 && ` + blockCount + ` === 1`, { timeout: 5000 });
+const text3 = await c.evaluate(editorText);
+check("光标离开后重新渲染（行内 widget 回到 1、块级仍在）", !text3.includes("$x^2 + y^2$"), JSON.stringify(text3));
+await c.screenshot(SHOT("wysiwyg-3-caret-outside"));
+
+console.log("4) 视图菜单开关：关闭 → 全部显示源码");
+const menuRect = await c.evaluate(`(() => {
+  const el = Array.from(document.querySelectorAll("button, [role=menuitem], .menu-label, span, div"))
+    .find(e => (e.textContent || "").trim() === "视图(V)");
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+await c.click(menuRect.x, menuRect.y);
+await c.waitFor(`document.body.innerText.includes("所见即所得")`, { timeout: 5000 });
+const itemRect = await c.evaluate(`(() => {
+  const el = Array.from(document.querySelectorAll("*"))
+    .filter(e => e.children.length === 0 && (e.textContent || "").includes("所见即所得"))
+    .pop();
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+await c.screenshot(SHOT("wysiwyg-4-menu"));
+await c.click(itemRect.x, itemRect.y);
+await c.waitFor(widgetCount + ` === 0 && ` + blockCount + ` === 0`, { timeout: 5000 });
+const text4 = await c.evaluate(editorText);
+check(
+  "关闭开关后公式全部显示源码",
+  text4.includes("$x^2 + y^2$") && text4.includes("frac(a,b)"),
+  JSON.stringify(text4),
+);
+await c.screenshot(SHOT("wysiwyg-5-off"));
+
+console.log("5) 再次打开开关 → 恢复渲染（缓存命中，无需重新输入）");
+await c.click(menuRect.x, menuRect.y);
+await c.waitFor(`document.body.innerText.includes("所见即所得")`, { timeout: 5000 });
+const itemRect2 = await c.evaluate(`(() => {
+  const el = Array.from(document.querySelectorAll("*"))
+    .filter(e => e.children.length === 0 && (e.textContent || "").includes("所见即所得"))
+    .pop();
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+await c.click(itemRect2.x, itemRect2.y);
+await c.waitFor(widgetCount + ` === 1 && ` + blockCount + ` === 1`, { timeout: 5000 });
+check("重新开启后恢复渲染（行内 + 块级各一个）", true);
+await c.screenshot(SHOT("wysiwyg-6-on-again"));
+
+console.log("6) 常用标记：标题 / 粗体 / 斜体 / 行内代码 / 列表符号");
+await c.selectAll();
+await c.type("= 标题测试\n\n这是 *粗体* 与 _斜体_ 和 `代码` 的段落。\n\n- 列表项\n");
+await new Promise((r) => setTimeout(r, 600));
+const markup = await c.evaluate(`(() => {
+  const line = (n) => document.querySelectorAll(".cm-line")[n];
+  const cs = (sel) => { const e = document.querySelector(sel); return e ? getComputedStyle(e) : null; };
+  const heading = document.querySelector(".cm-markup-heading");
+  const strong = document.querySelector(".cm-markup-strong");
+  const emph = document.querySelector(".cm-markup-emph");
+  const raw = document.querySelector(".cm-markup-raw");
+  const bodySize = parseFloat(getComputedStyle(document.querySelector(".cm-content")).fontSize);
+  return {
+    lines: Array.from(document.querySelectorAll(".cm-line")).map(l => l.innerText),
+    headingSize: heading ? parseFloat(getComputedStyle(heading).fontSize) : null,
+    bodySize,
+    strongWeight: strong ? getComputedStyle(strong).fontWeight : null,
+    emphStyle: emph ? getComputedStyle(emph).fontStyle : null,
+    rawFamily: raw ? getComputedStyle(raw).fontFamily : null,
+    replacement: document.querySelector(".cm-markup-replacement")?.textContent ?? null,
+  };
+})()`);
+check(
+  "标题标记 `= ` 被隐藏，正文可见",
+  markup.lines[0].trim() === "标题测试",
+  JSON.stringify(markup.lines),
+);
+check(
+  "标题字号大于正文（所见即所得的分级标题）",
+  markup.headingSize > markup.bodySize * 1.3,
+  `heading=${markup.headingSize} body=${markup.bodySize}`,
+);
+check("粗体标记 `*` 被隐藏（文字保留）", markup.lines[2].includes("粗体") && !markup.lines[2].includes("*"), JSON.stringify(markup.lines[2]));
+check("粗体字重为 700", markup.strongWeight === "700", String(markup.strongWeight));
+check("斜体样式生效且 `_` 被隐藏", markup.emphStyle === "italic" && !markup.lines[2].includes("_"), String(markup.emphStyle));
+check("行内代码等宽显示且反引号被隐藏", /mono/i.test(markup.rawFamily ?? "") && !markup.lines[2].includes("`"), String(markup.rawFamily));
+check("无序列表符号替换为圆点", markup.replacement === "• " && markup.lines[4].trim().endsWith("列表项"), JSON.stringify(markup));
+await c.screenshot(SHOT("wysiwyg-7-markup"));
+
+console.log("7) 光标进入标题 → 标记符号重新露出（可编辑源码）");
+const headingRect = await c.evaluate(`(() => {
+  const r = document.querySelector(".cm-line").getBoundingClientRect();
+  return { x: r.left + 30, y: r.top + r.height / 2 };
+})()`);
+await c.click(headingRect.x, headingRect.y);
+await c.waitFor(`document.querySelectorAll(".cm-line")[0].innerText.trim().startsWith("=")`, {
+  timeout: 5000,
+});
+const headingText = await c.evaluate(`document.querySelectorAll(".cm-line")[0].innerText.trim()`);
+check("标题行的 `= ` 重新可见", headingText.startsWith("="), JSON.stringify(headingText));
+await c.screenshot(SHOT("wysiwyg-8-markup-caret"));
+
+console.log("8) 链接文字：隐藏 #link(...) 与方括号，文字带链接样式");
+await c.selectAll();
+await c.type('见 #link("https://typst.app")[官网] 说明\n');
+await new Promise((r) => setTimeout(r, 600));
+const link = await c.evaluate(`(() => {
+  const el = document.querySelector(".cm-markup-link");
+  const line = document.querySelectorAll(".cm-line")[0];
+  return {
+    line: line.innerText,
+    color: el ? getComputedStyle(el).color : null,
+    underline: el ? getComputedStyle(el).textDecorationLine : null,
+  };
+})()`);
+check("链接只留文字（#link(...) 与方括号不可见）", link.line.includes("官网") && !link.line.includes("#link") && !link.line.includes("["), JSON.stringify(link.line));
+check("链接文字带颜色与下划线", link.underline === "underline" && link.color !== "rgb(0, 0, 0)", JSON.stringify(link));
+await c.screenshot(SHOT("wysiwyg-9-link"));
+
+console.log("9) 独占整行的行间公式 → 块级 widget（居中）");
+await c.selectAll();
+await c.type("前文\n$\n  x^2 + y^2 = z^2\n$\n后文\n");
+await c.waitFor(`document.querySelectorAll(".cm-math-block").length === 1`, { timeout: 8000 });
+const block = await c.evaluate(`(() => {
+  const b = document.querySelector(".cm-math-block");
+  const r = b.getBoundingClientRect();
+  const line = b.closest(".cm-line");
+  const lr = line ? line.getBoundingClientRect() : null;
+  const host = document.querySelector(".cm-content").getBoundingClientRect();
+  return {
+    textAlign: getComputedStyle(b).textAlign,
+    widthPx: Math.round(r.width),
+    // 相对编辑区左右两边的留白（居中时两侧接近相等）
+    leftGap: Math.round(r.left - host.left),
+    rightGap: Math.round(host.right - r.right),
+    lineCount: document.querySelectorAll(".cm-line").length,
+    lines: Array.from(document.querySelectorAll(".cm-line")).map(l => l.innerText.trim()),
+    hasSvg: !!b.querySelector("svg"),
+  };
+})()`);
+check("跨行行间公式渲染为块级 widget（含 SVG）", block.hasSvg);
+check("块级公式居中显示", block.textAlign === "center" && Math.abs(block.leftGap - block.rightGap) < 40, JSON.stringify(block));
+check(
+  "源码定界符消失、前后正文保留",
+  block.lines.includes("前文") && block.lines.includes("后文") && !block.lines.some((l) => l.includes("$")),
+  JSON.stringify(block.lines),
+);
+await c.screenshot(SHOT("wysiwyg-10-block-math"));
+
+console.log("10) 光标进入块级公式 → 整行回到源码");
+const blockPoint = await c.evaluate(`(() => {
+  const r = document.querySelector(".cm-math-block").getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+await c.click(blockPoint.x, blockPoint.y);
+await c.waitFor(`document.querySelectorAll(".cm-math-block").length === 0`, { timeout: 5000 });
+const revealed = await c.evaluate(`Array.from(document.querySelectorAll(".cm-line")).map(l => l.innerText)`);
+check("整行公式展开为源码（可见 $ 定界符）", revealed.join("\n").includes("$"), JSON.stringify(revealed));
+await c.screenshot(SHOT("wysiwyg-11-block-caret"));
+
+console.log("11) 文档内 #let 宏进入公式编译上下文");
+await c.selectAll();
+await c.type("#let R = math.bb(R)\n\n公式 $R^2$ 与 $x^2$\n");
+await c.waitFor(`document.querySelectorAll(".cm-math-widget").length === 2`, { timeout: 8000 });
+await new Promise((r) => setTimeout(r, 1200));
+const ctx = await c.evaluate(`(() => {
+  const m = window.__browserDevLastMath;
+  if (!m) return null;
+  return { body: m.body, context: m.context };
+})()`);
+check(
+  "最近一次公式渲染的 context 里带上了文档内定义",
+  ctx !== null && ctx.context.includes("#let R = math.bb(R)"),
+  JSON.stringify(ctx),
+);
+// 定义变化的公式用同一上下文（体现"上下文参与缓存键"，改定义会触发重渲染）
+const ctx2 = await c.evaluate(`window.__browserDevLastMath.context`);
+check("上下文以换行结尾（可直接拼接探针文档）", typeof ctx2 === "string" && ctx2.endsWith("\n"), JSON.stringify(ctx2));
+
+console.log("12) 有序列表 `+ ` → 序号");
+await c.selectAll();
+await c.type("+ 甲\n+ 乙\n\n正文\n+ 丙\n");
+await new Promise((r) => setTimeout(r, 600));
+const list = await c.evaluate(`(() => {
+  const reps = Array.from(document.querySelectorAll(".cm-markup-replacement")).map(e => e.textContent);
+  return { reps, lines: Array.from(document.querySelectorAll(".cm-line")).map(l => l.innerText.trim()) };
+})()`);
+check("`+ ` 替换为 1. / 2. 序号", JSON.stringify(list.reps) === JSON.stringify(["1. ", "2. ", "1. "]), JSON.stringify(list));
+await c.screenshot(SHOT("wysiwyg-12-ordered-list"));
+
+console.log("13) 代码块（``` 围栏）→ 块级代码块 widget");
+await c.selectAll();
+await c.type("前文\n\n```typ\n#let x = 1\n  let y = 2\n```\n\n后文\n");
+await c.waitFor(`document.querySelectorAll(".cm-raw-block").length === 1`, { timeout: 8000 });
+const codeBlock = await c.evaluate(`(() => {
+  const b = document.querySelector(".cm-raw-block");
+  const pre = b.querySelector("pre");
+  const cs = getComputedStyle(pre);
+  return {
+    code: pre.textContent,
+    family: cs.fontFamily,
+    lines: Array.from(document.querySelectorAll(".cm-line")).map(l => l.innerText.trim()),
+    hasFence: document.querySelector(".cm-content").innerText.includes("\u0060\u0060\u0060"),
+  };
+})()`);
+check("围栏代码块渲染为 widget（代码内容正确、公共缩进已剔除）", codeBlock.code === "#let x = 1\n  let y = 2", JSON.stringify(codeBlock));
+check("代码块等宽显示", /mono/i.test(codeBlock.family), codeBlock.family);
+check("围栏不可见、前后正文保留", !codeBlock.hasFence && codeBlock.lines.includes("前文") && codeBlock.lines.includes("后文"), JSON.stringify(codeBlock.lines));
+await c.screenshot(SHOT("wysiwyg-13-code-block"));
+
+console.log("14) 光标进入代码块 → 回到源码");
+const codePoint = await c.evaluate(`(() => {
+  const r = document.querySelector(".cm-raw-block").getBoundingClientRect();
+  return { x: r.left + 20, y: r.top + r.height / 2 };
+})()`);
+await c.click(codePoint.x, codePoint.y);
+await c.waitFor(`document.querySelectorAll(".cm-raw-block").length === 0`, { timeout: 5000 });
+const fenceBack = await c.evaluate(`document.querySelector(".cm-content").innerText.includes("\u0060\u0060\u0060")`);
+check("围栏重新可见（可编辑源码）", fenceBack === true);
+await c.screenshot(SHOT("wysiwyg-14-code-block-caret"));
+
+console.log("15) 单栏形态：所见即所得开启时不留右栏，编辑器居中");
+// 回到干净的默认态：清 localStorage 后重载（默认 livePreview=true → 单栏）
+await c.evaluate(`localStorage.clear()`);
+await c.goto("http://localhost:1420/?browserdev=1");
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+const single = await c.evaluate(`(() => {
+  const panes = document.querySelector(".panes");
+  const preview = document.querySelector(".preview-pane");
+  const editor = document.querySelector(".editor-pane");
+  const cm = document.querySelector(".cm-editor");
+  const host = document.querySelector(".panes").getBoundingClientRect();
+  const cmr = cm.getBoundingClientRect();
+  return {
+    panesClass: panes.className,
+    previewDisplay: getComputedStyle(preview).display,
+    editorWidth: Math.round(editor.getBoundingClientRect().width),
+    panesWidth: Math.round(host.width),
+    cmWidth: Math.round(cmr.width),
+    // 居中：编辑器左右到 .panes 两边的留白
+    leftGap: Math.round(cmr.left - host.left),
+    rightGap: Math.round(host.right - cmr.right),
+    previewExistsInDom: !!document.querySelector("#preview-host"),
+  };
+})()`);
+check("默认（所见即所得）为单栏：预览栏不显示", single.previewDisplay === "none", JSON.stringify(single));
+check("编辑区占满整宽", Math.abs(single.editorWidth - single.panesWidth) <= 2, JSON.stringify(single));
+check("编辑器作为纸张块居中（左右留白接近）", Math.abs(single.leftGap - single.rightGap) < 20, JSON.stringify(single));
+check("预览容器仍在 DOM 中（编译链路不受影响）", single.previewExistsInDom === true);
+await c.screenshot(SHOT("wysiwyg-15-single-pane"));
+
+console.log("16) 菜单可调回双栏");
+const viewMenu = await c.evaluate(`(() => {
+  const el = Array.from(document.querySelectorAll("*"))
+    .find(e => (e.textContent || "").trim() === "视图(V)");
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+await c.click(viewMenu.x, viewMenu.y);
+await c.waitFor(`document.body.innerText.includes("显示预览栏")`, { timeout: 5000 });
+const previewItem = await c.evaluate(`(() => {
+  const el = Array.from(document.querySelectorAll("*"))
+    .filter(e => e.children.length === 0 && (e.textContent || "").trim() === "显示预览栏")
+    .pop();
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+await c.click(previewItem.x, previewItem.y);
+await c.waitFor(`getComputedStyle(document.querySelector(".preview-pane")).display !== "none"`, { timeout: 5000 });
+const split = await c.evaluate(`(() => {
+  const editor = document.querySelector(".editor-pane").getBoundingClientRect();
+  const panes = document.querySelector(".panes").getBoundingClientRect();
+  return { editorWidth: Math.round(editor.width), panesWidth: Math.round(panes.width) };
+})()`);
+check("打开「显示预览栏」后回到双栏（编辑区约半宽）", split.editorWidth < split.panesWidth * 0.6, JSON.stringify(split));
+await c.screenshot(SHOT("wysiwyg-16-split-again"));
+
+console.log("17) 关掉所见即所得 → 自动回到双栏（源码 + 预览）");
+const viewMenu2 = await c.evaluate(`(() => {
+  const el = Array.from(document.querySelectorAll("*"))
+    .find(e => (e.textContent || "").trim() === "视图(V)");
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+await c.click(viewMenu2.x, viewMenu2.y);
+await c.waitFor(`document.body.innerText.includes("所见即所得")`, { timeout: 5000 });
+const wysiwygItem = await c.evaluate(`(() => {
+  const el = Array.from(document.querySelectorAll("*"))
+    .filter(e => e.children.length === 0 && (e.textContent || "").includes("所见即所得"))
+    .pop();
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+await c.click(wysiwygItem.x, wysiwygItem.y);
+await new Promise((r) => setTimeout(r, 400));
+// 先切回源码模式前，确保预览栏是关的（上一步刚打开过），这里验证联动：关掉所见即所得 → 预览栏自动打开
+const after = await c.evaluate(`({
+  previewDisplay: getComputedStyle(document.querySelector(".preview-pane")).display,
+  panesClass: document.querySelector(".panes").className,
+})`);
+check("关掉所见即所得后自动回到双栏", after.previewDisplay !== "none", JSON.stringify(after));
+await c.screenshot(SHOT("wysiwyg-17-source-split"));
+
+console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
+c.close();

@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Typst-pad：Typora 式布局的 Typst 桌面编辑器（左编辑 / 右实时预览）。前端 SvelteKit SPA（adapter-static），桌面壳 Tauri 2（Rust），编译渲染用**内嵌 typst crate**（0.15.x，Rust 进程内编译，本地字体）。代码注释与 README 均为中文。
+Typst-pad：所见即所得（Typora / Obsidian Live Preview 式）的 Typst 桌面编辑器——**默认单栏**在编辑区就地排版（公式渲染成排版结果、标记符号自动收起，光标/选区进入即展开源码）；需要核对整页分页时，视图菜单可调出右侧实时预览栏（关掉所见即所得会自动回到"源码 + 预览"双栏）。前端 SvelteKit SPA（adapter-static），桌面壳 Tauri 2（Rust），编译渲染用**内嵌 typst crate**（0.15.x，Rust 进程内编译，本地字体）。代码注释与 README 均为中文。
 
 ## 常用命令
 
@@ -18,14 +18,20 @@ npm run tauri build  # 打包桌面安装程序（需 Rust）
 cargo check --manifest-path src-tauri/Cargo.toml   # 只查 Rust 壳
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（typst_world/packages：编译/字体/诊断/include/包解析下载）
 node scripts/check-fonts.mjs    # 校验 static/fonts 字体有效性
+npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
 ```
 
 ## 架构
 
 ```
 src/routes/+page.svelte     # 唯一页面：全部状态与调度中枢（菜单/文件/编译/持久化/快捷键）
-src/lib/Editor.svelte       # CodeMirror 6 封装：受控 doc、主题 Compartment、诊断波浪线
-src/lib/typst-engine.ts     # 编译引擎：Tauri invoke 包装（compile_doc/export_pdf）+ 结构化诊断
+src/lib/Editor.svelte       # CodeMirror 6 封装：受控 doc、主题 Compartment、诊断波浪线、所见即所得接线
+src/lib/typst-lex.ts        # 源码区域扫描：markup / code / raw / comment / string（标记识别的前提，纯函数）
+src/lib/math-ranges.ts      # 公式范围扫描（$...$ / $ ... $）+ 缓存键 + 选区相交判定（纯函数）
+src/lib/math-context.ts     # 公式编译上下文：前缀 + 文档内单行顶层 #let 定义（纯函数）
+src/lib/markup-ranges.ts    # 常用标记拆解（标题/粗体/斜体/行内代码/围栏代码块/列表符号/链接 → 标记 + 正文/块级范围，纯函数）
+src/lib/live-preview.ts     # 所见即所得 CM6 扩展：公式 replace widget + 标记隐藏 + 选区进出展开 + 渲染请求
+src/lib/typst-engine.ts     # 编译引擎：Tauri invoke 包装（compile_doc/compile_math/export_pdf）+ 结构化诊断
 src/lib/file-ops.ts         # Tauri dialog + invoke 封装（isTauri() 门控）
 src/lib/persistence.ts      # localStorage（key: "typst-pad:state"）
 src/lib/MenuBar.svelte      # 菜单栏（Alt 焦点切换 + 字母快捷键）
@@ -34,7 +40,7 @@ src/lib/svg-paginate.ts     # 多页 SVG 页间分隔线（类名固定 page-sep
 src/lib/diagnostics-utils.ts # 编译源位置 → 文档位置映射（mapCompiledPosToDoc）与波浪线区间（squiggleRanges）
 src/lib/doc-utils.ts        # 文档纯函数：isEffectiveDirty（空文档视为未修改）、ensureTrailingNewline（前缀末行补换行）
 src/lib/startup-timing.ts   # 启动打点：首次编译完成后输出 [startup] 报告（见"启动耗时观测"）
-src-tauri/src/lib.rs        # Rust 壳：read/write/write_binary/list_dir_typ/take_pending_files/compile_doc/export_pdf 命令 + opener/dialog 插件
+src-tauri/src/lib.rs        # Rust 壳：read/write/write_binary/list_dir_typ/take_pending_files/compile_doc/compile_math/export_pdf 命令 + opener/dialog 插件
 src-tauri/src/packages.rs   # 包系统：@local 本地包读取 / @preview 自动下载缓存（目录规范与 CLI 一致 + 安全解压）
 src-tauri/src/typst_world.rs # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 包解析接线 / 诊断转换（SVG/PDF）
 ```
@@ -49,6 +55,27 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 
 **诊断为 Rust 侧结构化对象**（`{ message, severity, line, column, endLine, endColumn, path }`，1-based 行列，`end` 为独占终点；`path` 空/缺失 = 主文档，include 文件给出其路径）——**不再有前端 range 字符串解析**（旧 `parseDiagnosticRange` 已随 wasm 编译移除）。`diagnostics-utils.ts` 现在的职责：编译源（前缀+文档）位置 → 用户文档位置映射（`mapCompiledPosToDoc`，前缀区错误跳过）与波浪线区间计算（`squiggleRanges`）。
 
+### 所见即所得（编辑器内联渲染）数据流
+
+形态 = Typora / Obsidian Live Preview：**源码仍是唯一真相**，编辑器在非选区处把可渲染范围换成渲染结果，光标/选区进入即展开源码。
+
+- **范围识别**：`typst-lex.ts` 先把文档切成 markup / code / raw / comment / string 区域（`#let a = b*c*d`、`#let s = "$5"`、`// $x$`、`` `$x$` `` 都不参与标记识别；代码里成对 `[...]` 是内容块，内部回到 markup）；`math-ranges.ts` 在 markup 区里认 `$...$`（内侧两侧空白 = 行间公式），`markup-ranges.ts` 拆标题/粗斜体/行内代码/列表符号/链接。**保守优先：宁可漏渲染，不可误渲染。**
+- **公式渲染**：`live-preview.ts` 视口内出现未缓存公式 → `onRequest` 回调父组件（`+page.svelte`）→ 去重 + 120ms 防抖 → `compileMath()` invoke **`compile_math { body, display, context, documentPath }`**（与 compile_doc 共用命令层互斥锁，一次一个）→ 结果进 `mathCache`（键 = 风格 + 前缀 + 公式文本，前缀参与键）→ `mathVersion++` → 编辑器 dispatch `refreshLivePreview` 重整装饰。
+- **渲染契约（`MathOutput`）**：`{ ok, svg, widthPt, heightPt, baselinePt, error }`。svg 是**贴边**（`#set page(width/height: auto, margin: 0pt)`）且**透明底**（`fill: none`）的单页 SVG；尺寸单位 pt。**基线**用「两页探针」测得：`page.frame.baseline()` 实测返回盒底（`has_baseline=false`），故第 2 页放同一公式 + 一个挂在基线下 100pt 的零宽盒，页高 = ascent + 100pt → `ascent = H2 - 100`；外层 `#box(...)` 不可省（行间公式不加盒时探针会另起段落，实测 ascent 由 11.75pt 变 31.67pt）。
+- **字号**：`MATH_TEXT_PT = 10.5`（Rust）/ 编辑器正文 14px = 10.5pt，故 SVG 的 pt 与编辑器 CSS 的 pt **1:1**，前端直接写 `width/height: Npt` + `vertical-align: -(height-baseline)pt`。改字号要两侧同步。
+- **暗色主题**：typst 产物是黑字透明底，暗色下看不见 → widget 带 `cm-math-dark` 类整体 `filter: invert(1)`。**不要用 `&dark` 选择器**：`EditorView.theme` 不支持该前缀（实测抛 `RangeError: Unsupported selector: &dark`，SvelteKit 会整页渲染成 500 错误页，表现为"应用没渲染"）。
+- **展开规则**：`selectionTouchesRange`（光标落在区间内含两端即展开，非空选区相交即展开）。标记类构造的展开范围必须是**标记 + 正文的并集**——标题/列表只有前导标记，只取标记范围会导致光标落在正文里时 `= ` 不露出（实测踩过）。
+- **块级 widget**：**独占整行**的行间公式（`$ ... $`，含跨行书写）整行替换为居中的块级 widget（`blockRangeFor` 判定"前后只有空白"）；```` ``` ```` 围栏代码块同样整段替换为等宽代码块 widget（`rawBlockFor`：围栏必须独占整行，代码按 typst 语义剔除公共缩进；纯文本展示，不需要编译）；与文字同行的 `$ x $` 仍走行内 widget（整行替换会把旁边正文一起盖掉）。块级/跨行替换**只能由 StateField 提供**——ViewPlugin 提供会抛 `Block decorations may not be specified via plugins`（实测确认：CM6 只对"函数型"动态装饰置 disallow 标记）。
+- **公式编译上下文**：`math-context.ts` 把「前缀」与「文档内**单行顶层** `#let` 定义」拼成 context（多行语句、含 `[...]` 内容块的语句、`=` 后无值的半截语句一律跳过——后者若拼进去会让所有公式一起编译失败）。同名定义保留最后一次。文档定义本身有错/与前缀重名 → 父组件退回「仅前缀」重试一次。
+- **性能（三处热点，都已被实测锁住，勿回退）**：
+  1. `scanNonMarkupRegions` 带**单条记忆化**：编辑器一次更新里它会被用三处（StateField 装饰重建、ViewPlugin 请求收集、`buildMathContext` 的 `#let` 提取）。加缓存前 40k 字符文档每次按键要扫三遍；返回的数组被 `Object.freeze`，调用方只读。
+  2. `markup-ranges` 的"是否与公式/代码区相交"判定用**二分**（`overlapsSorted`），不是 `some(...)` 线性扫描——区域表上千条时线性是 O(候选 × 区域)，实测一次重建 47ms，改二分后 2.6ms。
+  3. 编译上下文在**扩展内部**算（`prefix` 选项 + 当前 doc），不要挪回页面做 `$derived`：那会让每次按键多一遍全文档扫描。
+  合计：40k 字符文档一次更新 6.4ms（4k 字符 ~1.5ms）。
+- **所见即所得 = 单栏**：`showPreview` 与 `livePreview` 联动（开=单栏、关=双栏），视图菜单可单独打开预览栏；预览栏隐藏时容器仍在 DOM（`display:none`），`compile_doc` 写入链路不受影响。
+- **回退**：渲染失败 / 未就绪 / 行内跨行公式 → 不挂 widget，保持源码显示（不出现空占位、不弹错误）。
+- **持久化**：`livePreview` 与主题一起存 localStorage（旧存档缺字段时默认开启）；视图菜单提供开关。
+
 ### 启动耗时观测
 
 `startup-timing.ts`：启动关键阶段打点（O(1) 无阻塞），首次编译完成后向控制台输出 `[startup]` 报告（各阶段耗时 + navigation timing 页面加载段）；Rust 侧（**仅 debug 构建**）另有 `[startup] rust phase:*` 打点（窗口创建 → webview 就绪 → 前端加载完成）。两侧同前缀，便于统一抓取对比启动性能回归。
@@ -61,8 +88,13 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 - **字体**：`load_fonts` 从字体目录全量加载 `.ttf/.otf` 注册进 `FontBook`；目录不可读时返回空集（typst 给出缺字诊断）。`resolve_fonts_dir`：优先打包产物 `resource_dir/fonts`（`bundle.resources` 映射 `../static/fonts → fonts/`），退回仓库 `static/fonts`（开发与 cargo test 路径）。
 - **文件语义**：主文档源码由前端传入（未保存也可编译）；项目根 = `document_path` 所在目录，相对 include 从磁盘按 typst 语义解析（相对路径基于引用文件所在目录）；`document_path = None`（未保存）时 `check_relative_imports` 预检 `#include`，给出"需要先保存文档"的明确诊断。
 - **包支持（packages.rs）**：`@local/{name}:{version}` 从本地数据目录读取、`@preview/{name}:{version}` 从缓存目录读取（miss 时自动下载 packages.typst.org 的 tar.gz 并解压进缓存）——目录规范/环境变量覆盖（`TYPST_PACKAGE_PATH`/`TYPST_PACKAGE_CACHE_PATH`）/URL 格式均与 typst CLI 一致，见 `src-tauri/src/packages.rs` 模块文档；下载为同步调用但编译整体在 `spawn_blocking` 内，不阻塞 UI；404 与网络失败分别产出 `package not found` / `failed to download package` 引擎同款诊断（可区分）。
-- **接口契约**：`compile_doc → CompileOutput { ok, pages, diagnostics, warnings }`；`export_pdf → PdfResult { ok, error }`。`Err` 仅用于编译/导出任务本身异常终止（正常编译失败仍走 `Ok(ok:false)`）。
+- **接口契约**：`compile_doc → CompileOutput { ok, pages, diagnostics, warnings }`；`compile_math → MathOutput { ok, svg, widthPt, heightPt, baselinePt, error }`（所见即所得的公式渲染，见上一节）；`export_pdf → PdfResult { ok, error }`。`Err` 仅用于编译/导出任务本身异常终止（正常编译失败仍走 `Ok(ok:false)`）。
 - 无 wasm 注入/插件联动：vite 保留的 `vite-plugin-wasm` + `vite-plugin-top-level-await` 两个插件**仅为 codemirror-lang-typst 的语法高亮服务**（其 typst() 扩展是 wasm-bindgen bundler 产物，删掉插件 build 会报 "ESM integration proposal for Wasm is not supported"，勿误删）。
+- **Linux/WSLg dev 白屏根因与修复（2026-09-01 实测，勿动）**：WebKitGTK 的模块求值在模块图含**顶层 await**（vite-plugin-wasm 给 codemirror-lang-typst 生成的 wasm 胶水模块是 `const __vite__wasmModule = await __vite__initWasm(...)`）时会崩掉 SvelteKit boot——`get_navigation_result_from_branch`（kit/client.js:799）在求值完成前访问节点模块的活绑定触发 TDZ（"Cannot access 'component' before initialization"），boot 整体拒绝 → 窗口纯白（无任何 UI，外观像"应用没渲染"）。Chromium 求值顺序不同无此问题（已用 Windows 无头 Chrome 对照：同一页面正常渲染）。修复三件套（均在 `vite.config.js`，**只影响 dev**）：
+  1. `syncWasmInit` 插件（`apply: "serve"`）：把胶水的 `?url` 引入内联为 data:URL、`__vite__initWasm` helper 换成同步实例化（`new WebAssembly.Instance(new WebAssembly.Module(...))`，两引擎验证可用）→ 模块图无顶层 await。
+  2. `optimizeDeps.exclude: ["codemirror-lang-typst"]` **不可删**：依赖预构建的 esbuild 阶段只走 `load` 不走 `transform`，插件改写不到；删了会退回带 TLA 的旧 bundle 重新白屏。清 `node_modules/.vite` 可强制重新预构建。
+  3. 匹配是**按内容/字符串形状**做的（helper 是箭头函数 `export default async (opts = {}, url) =>`、胶水行尾无分号）——升级 vite-plugin-wasm 后若修复失效，先核对这两个形状。
+  - 排查 WebKit 内部问题的利器：`WEBKIT_INSPECTOR_SERVER` 在新版 WebKitGTK 已废（只剩 `inspector://` 协议，普通 HTTP/WS 连不上，都是空响应）；webview 侧日志可用临时在 `src/app.html` 里挂 `window.onerror`/`unhandledrejection` + `window.__TAURI_INTERNALS__.invoke("write_file", ...)` 把日志写到 `/tmp/xxx.typ`（write_file 要求 .typ 后缀）桥接出来，用完即删。若 WSLg 下 WebKit 仍无法用 GL（libEGL DRI3 报错、白屏但有窗口），用 `GDK_BACKEND=x11 GDK_GL=disable WEBKIT_DISABLE_DMABUF_RENDERER=1` 强制软件渲染可解。
 
 ### 字体
 
@@ -73,6 +105,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 - 前端用 `isTauri()`（检测 `__TAURI_INTERNALS__`）区分桌面/浏览器；浏览器（非 Tauri）环境只显示"请使用桌面应用版本"提示页，不渲染应用 UI。
 - Rust 侧 `validate_typ_path`：必须绝对路径、`.typ` 扩展名（大小写不敏感）、拒绝 `..` 穿越；`read_file` 先 canonicalize 复检符号链接；`write_file` 拒绝写入符号链接；`write_binary`（PDF 落盘，bytes 以 JSON 数字数组传来）与 `export_pdf` 走 `validate_write_path`——不限制扩展名，其余安全模型一致（`..`/符号链接同样拒绝）；`list_dir_typ` 递归列 `.typ`：深度 ≤ 8、最多 500 个、跳过隐藏条目、符号链接目录不递归（防环），返回 canonicalize 后路径。
 - 无 single-instance 插件（每次启动独立实例）。`.typ` 文件打开走 `PendingFiles` 队列 + `emit("open-file")`：前端**先注册监听再取队列**（`take_pending_files`），避免事件落在两者之间丢失；macOS 的 Finder "打开方式" 走 `RunEvent::Opened`。
+- **浏览器直开会看到"请使用桌面应用版本"**：这是刻意的 desktop gate（`+page.svelte` 的 `{#if isDesktopApp}` 分支）。开发模式下该页面额外给了一键入口（跳到 `?browserdev=1`），避免把"没带参数"误判成"应用坏了"（实测被反馈过一次）；生产构建不显示该入口。
 - `capabilities/default.json` 的 `windows` 覆盖 `"main"` 与 `"editor-*"`（Ctrl+N 新窗口），权限含 `core:window:allow-create/close/destroy/set-title` + opener/dialog。**新增窗口功能时需同步此文件**——曾因 capability 未覆盖新窗口导致窗口内文件功能被 ACL 拒绝（#32）。
 
 ### 安全模型
@@ -101,4 +134,12 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 - 前端 vitest + jsdom，`include: ["src/**/*.test.ts"]`；vite 的 `server.fs.allow: [".."]` 覆盖仓库上级目录（junction 场景下 node_modules 解析被拒的教训，见 #33，配置仍保留）。现有覆盖：`typst-engine`（invoke 契约映射 + 诊断转换纯函数，invoke/dialog 以 vi.mock 断言入参与消费）、`diagnostics-utils`、`error-list`、`context-menu-utils`、`doc-utils`、`editor-keymap`、`menu-keys`、`popover-utils`、`file-ops`、`persistence`、`svg-paginate`、`pdf-export`、`debug`。
 - Rust 单测（`typst_world.rs`/`packages.rs` 内 `cargo test`，用 `CARGO_MANIFEST_DIR` 定位仓库 `static/fonts`）：中文+数学文档端到端编译（每页含 `<svg>`，PDF 字节非空）、字体注册（7 个文件 + 族名断言）、语法错误诊断（1-based 行列 + endLine）、相对 include（成功 / 缺失文件诊断带 path / 未保存文档提示）、JSON 序列化契约（camelCase 键名 `endLine`/`endColumn`）、@local/@preview 包（缓存命中不下载 / miss 下载与 URL 格式 / 404 与网络失败诊断区分 / 数据目录优先 / 路径穿越与损坏归档防御 / 端到端导入编译，均用临时目录注入环境变量，不触真实用户目录与网络）。
+- 所见即所得链路测试：`typst-lex.test.ts`（区域扫描：注释/raw/字符串/代码/`[...]` 内容块）、`markup-ranges.test.ts`（标记拆解，含"代码与公式里的 `*` `_` 不算标记"、有序列表编号、围栏代码块）、`typst-scan-fuzz.test.ts`（**鲁棒性网**：120 份固定种子随机文档 + 15 组病态输入，断言不抛异常、区间有序不越界不重叠、区域无缝覆盖全文）、`math-context.test.ts`（`#let` 提取的保守规则）、`live-preview.test.ts`（jsdom 里真挂 EditorView，断言 widget 替换 / 块级 vs 行内 / 光标进出展开 / 失败回退 / 开关关闭 / 样式类）。**坑**：jsdom 下挂视图时光标默认在 offset 0，会落在构造内部而触发"展开"，测隐藏效果必须把光标放到构造之外。
 - 前端测试不接触真实编译——依赖引擎的逻辑保持"核心逻辑独立可测"（纯函数 + mock invoke）。
+- **浏览器端交互验证（无显示器环境下的验收手段）**：`scripts/browser-check/`（零依赖 CDP 驱动）
+  - `cdp.mjs`：连接 Windows headless Chrome 的 CDP（WSL 里直接跑 `/mnt/c/Program Files/Google/Chrome/Application/chrome.exe --headless=new --remote-debugging-port=9333 --remote-debugging-address=0.0.0.0 --user-data-dir=... 'http://localhost:1420/?browserdev=1'`；镜像网络下 WSL 可直连 localhost:9333）；提供 evaluate / 真实点击 / 真实输入（`Input.insertText`）/ 截图。
+  - `probe.mjs`：排障小工具（导航到页面 → 打印渲染结果/页面内错误），"页面是不是坏了"先用它看。
+  - `wysiwyg.mjs`：所见即所得的 40 项验收（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 单栏形态（预览栏不显示、编辑区占满并居中）→ 菜单切回双栏 → 关掉所见即所得自动回双栏），截图落在 `.browser-check/`（已 gitignore）。
+  - **两个实测坑**：① `Page.navigate` 对**相同 URL** 不重新加载，上一次停在 500 错误页时会一直复现 → `goto()` 先跳 `about:blank`；② 截图必须由 Node 写进**工作区**（写 `/mnt/c/...` 会被文件沙箱拒绝，报 EROFS），别交给 Chrome 写。
+  - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`，再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
+  - 浏览器开发模式（`?browserdev=1`，见 `src/lib/browser-dev-stub.ts`）里的 `compile_doc` 是假实现（假分页 SVG），`compile_math` 在没有注入夹具时也是假 SVG；文件/PDF 等 Tauri 命令同样是假的。**真实 typst 排版可用夹具链路上浏览器验证**，只有 Tauri IPC / WebView2 那一层必须桌面端（Windows）确认。

@@ -99,6 +99,29 @@ async fn compile_doc(
     .unwrap_or_else(|_| typst_world::CompileOutput::internal_error("编译任务异常终止")))
 }
 
+/// 渲染单个公式为紧致 SVG（compile_math）：编辑器内联渲染（所见即所得）用。
+/// body = 公式源码（不含定界 `$`），display = 是否行间（display 风格），
+/// context = 编译前缀（设置里的前缀代码，与整篇编译同源，宏与字体设置生效）。
+/// 与 compile_doc 同走命令层互斥锁 + spawn_blocking（一次一个编译，不阻塞 UI）。
+/// Err 仅用于任务本身异常终止（公式语法错误等正常失败走 Ok(ok:false, error)）。
+#[tauri::command]
+async fn compile_math(
+    state: tauri::State<'_, CompileState>,
+    body: String,
+    display: bool,
+    context: String,
+    document_path: Option<String>,
+) -> Result<typst_world::MathOutput, String> {
+    let lock = std::sync::Arc::clone(&state.lock);
+    let fonts_dir = state.fonts_dir.clone();
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        typst_world::compile_math(&body, display, &context, document_path, &fonts_dir)
+    })
+    .await
+    .unwrap_or_else(|_| typst_world::MathOutput::internal_error("公式渲染任务异常终止")))
+}
+
 /// 编译并导出 PDF 到 target_path（export_pdf）：
 /// 路径安全校验复用 validate_write_path（不限制扩展名、拒绝符号链接、拒绝 `..` 穿越）。
 /// Err 仅用于导出任务本身异常终止（编译失败/写入失败仍走 Ok(ok:false, error)）。
@@ -391,6 +414,7 @@ pub fn run() {
             list_dir_typ,
             get_debug_flag,
             compile_doc,
+            compile_math,
             export_pdf
         ])
         .build(tauri::generate_context!())

@@ -459,6 +459,131 @@ fn svg_for_page(page: &Page) -> String {
     typst_svg::svg(page, &SvgOptions::default())
 }
 
+// ---------------------------------------------------------------------------
+// 公式级渲染（编辑器内联渲染 = 所见即所得用）
+// ---------------------------------------------------------------------------
+
+/// 公式渲染的文本尺寸（pt）：编辑器正文是 14px，即 10.5pt（14 * 72 / 96）。
+/// 按同一尺寸编译后，SVG 的 pt 与编辑器 CSS 的 pt 可 1:1 对应，前端无需缩放换算。
+/// **改这里必须同步 src/lib/live-preview.ts 的 MATH_TEXT_PT。**
+const MATH_TEXT_PT: f64 = 10.5;
+
+/// 基线探针高度（pt）：零宽盒挂在基线下 100pt（远超任何公式的下沉量），
+/// 第二页页高 = 基线以上高度 + 100pt，据此反推基线位置。
+const BASELINE_PROBE_PT: f64 = 100.0;
+
+/// 公式渲染结果：svg 为「贴边 + 透明背景」的单页 SVG；
+/// baseline_pt 为**基线到盒顶**的距离（前端用 vertical-align: -(height - baseline) 对齐）。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MathOutput {
+    pub ok: bool,
+    pub svg: String,
+    pub width_pt: f64,
+    pub height_pt: f64,
+    pub baseline_pt: f64,
+    pub error: Option<String>,
+}
+
+impl MathOutput {
+    /// 渲染失败：前端据此**保持源码显示**（不显示空 widget，也不报错弹窗）
+    fn fail(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            svg: String::new(),
+            width_pt: 0.0,
+            height_pt: 0.0,
+            baseline_pt: 0.0,
+            error: Some(message.into()),
+        }
+    }
+
+    /// 任务异常终止（spawn_blocking panic 等），命令层使用
+    pub fn internal_error(message: impl Into<String>) -> Self {
+        Self::fail(message)
+    }
+}
+
+/// 单个公式 → 紧致 SVG + 尺寸与基线（编辑器内联渲染用）。
+///
+/// **两页探针法**（一次编译同时拿到盒与基线）：typst 的 Page 帧不带基线
+/// （`page.frame.baseline()` 实测返回盒底，has_baseline=false），所以自己造参考：
+///   第 1 页：`#box($公式$)`          → 页尺寸 = 公式紧致盒（宽 W，高 H = ascent + depth）
+///   第 2 页：同一内容 + 一个挂在基线下 `BASELINE_PROBE_PT` 的零宽盒
+///            → 页高 = ascent + PROBE，于是 ascent = H2 - PROBE，depth = H - ascent
+/// 外层 `#box(...)` 不可省：行间（display 风格）公式不加盒时，第 2 页的探针会另起一段，
+/// 段落堆叠会把基线关系算错（实测 ascent 由 11.75pt 变成 31.67pt）。
+///
+/// context 为编译前缀（用户设置里的前缀代码），与整篇编译同源：`#set font(..)`、
+/// `#let` 宏等对公式同样生效；公式字号由本函数**随后强制**为 MATH_TEXT_PT，
+/// 保证编辑器内公式与编辑器正文字号一致（前缀里的 `#set text(size:)` 不会带偏公式）。
+/// document_path 语义与 compile 一致（相对 include 的解析根；None = 未保存文档）。
+pub fn compile_math(
+    body: &str,
+    display: bool,
+    context: &str,
+    document_path: Option<String>,
+    fonts_dir: &Path,
+) -> MathOutput {
+    // 行内 `$x$`；行间 `$ x $`（首尾空格让 typst 按 display 风格排版）
+    let math = if display {
+        format!("$ {body} $")
+    } else {
+        format!("${body}$")
+    };
+    let mut src = String::with_capacity(context.len() + math.len() * 2 + 256);
+    if !context.is_empty() {
+        src.push_str(context);
+        if !context.ends_with('\n') {
+            src.push('\n');
+        }
+    }
+    // 贴边（width/height: auto, margin: 0）+ 透明背景（fill: none）→ SVG 即公式本身
+    src.push_str("#set page(width: auto, height: auto, margin: 0pt, fill: none)\n");
+    src.push_str(&format!("#set text(size: {MATH_TEXT_PT}pt)\n"));
+    src.push_str(&format!(
+        "#box({math})\n#pagebreak()\n#box({math})#box(width: 0pt, height: {BASELINE_PROBE_PT}pt, baseline: {BASELINE_PROBE_PT}pt)"
+    ));
+
+    let world = TypstWorld::new(src, document_path, fonts_dir);
+    let document = match typst::compile::<PagedDocument>(&world) {
+        typst::diag::Warned {
+            output: Ok(doc), ..
+        } => doc,
+        typst::diag::Warned {
+            output: Err(errors), ..
+        } => {
+            // 诊断位置属于内部探针文档（含前缀偏移），对用户无意义，只回消息
+            let first = errors
+                .into_iter()
+                .next()
+                .map(|d| d.message.to_string())
+                .unwrap_or_else(|| "公式编译失败".to_string());
+            return MathOutput::fail(first);
+        }
+    };
+
+    let pages = document.pages();
+    if pages.len() < 2 {
+        return MathOutput::fail("公式渲染失败：探针文档未产生两页");
+    }
+    let size = pages[0].frame.size();
+    let width_pt = size.x.to_pt();
+    let height_pt = size.y.to_pt();
+    let probe_height_pt = pages[1].frame.size().y.to_pt();
+    // 夹取到 [0, H]：探针盒比公式本身矮时（理论上不会）也不会给出越界基线
+    let baseline_pt = (probe_height_pt - BASELINE_PROBE_PT).clamp(0.0, height_pt);
+
+    MathOutput {
+        ok: true,
+        svg: svg_for_page(&pages[0]),
+        width_pt,
+        height_pt,
+        baseline_pt,
+        error: None,
+    }
+}
+
 /// 编译并导出 PDF 字节（成功返回字节，失败返回人类可读错误信息）
 pub fn compile_to_pdf_bytes(
     src: String,
@@ -648,6 +773,141 @@ mod tests {
     fn fonts_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/fonts")
     }
+
+    /// 公式渲染（compile_math）：行内公式成功，SVG 贴边且透明，
+    /// 尺寸与 SVG 根属性一致（前端按 pt 原样显示，契约不能漂）
+    #[test]
+    fn compile_math_inline_ok() {
+        let out = compile_math("x^2", false, "", None, &fonts_dir());
+        assert!(out.ok, "行内公式应渲染成功: {:?}", out.error);
+        assert!(out.svg.contains("<svg"), "产物应是 SVG");
+        assert!(out.width_pt > 0.0 && out.height_pt > 0.0, "尺寸应为正");
+        assert!(
+            out.baseline_pt >= 0.0 && out.baseline_pt <= out.height_pt + 0.001,
+            "基线应落在盒内: baseline={} height={}",
+            out.baseline_pt,
+            out.height_pt
+        );
+        // 贴边：SVG 的 width/height 与返回的 pt 尺寸一致（前端直接按 pt 显示，不再缩放）
+        assert!(
+            out.svg.contains(&format!("width=\"{:.4}pt\"", out.width_pt))
+                || out.svg.contains(&format!("width=\"{}pt\"", out.width_pt)),
+            "SVG 宽度应与 width_pt 一致：{} vs {}",
+            out.svg.chars().take(160).collect::<String>(),
+            out.width_pt
+        );
+        // 透明背景：不得带白色页底（否则内联进编辑器会出现白块）
+        assert!(!out.svg.contains("ffffff"), "公式 SVG 不应含白色背景");
+    }
+
+    /// 公式渲染：行间（display 风格）公式明显高于行内风格（分式由 a/b 变为竖排）
+    #[test]
+    fn compile_math_display_taller_than_inline() {
+        let inline = compile_math("frac(a,b)", false, "", None, &fonts_dir());
+        let display = compile_math("frac(a,b)", true, "", None, &fonts_dir());
+        assert!(inline.ok && display.ok);
+        assert!(
+            display.height_pt > inline.height_pt * 2.0,
+            "行间分式应显著更高：inline={} display={}",
+            inline.height_pt,
+            display.height_pt
+        );
+    }
+
+    /// 基线探针：有下沉部分的公式（积分）depth > 0；全在基线上方的公式（x^2）depth ≈ 0。
+    /// 这条锁住「两页探针」测得的基线（若退回 page.frame.baseline()，depth 会恒为 0）。
+    #[test]
+    fn compile_math_baseline_measures_depth() {
+        let integral = compile_math("integral_0^1 f(x) dif x", false, "", None, &fonts_dir());
+        assert!(integral.ok);
+        let depth = integral.height_pt - integral.baseline_pt;
+        assert!(depth > 0.3, "积分应有下沉深度，实际 {depth}");
+
+        let sup = compile_math("x^2", false, "", None, &fonts_dir());
+        assert!(sup.ok);
+        let sup_depth = sup.height_pt - sup.baseline_pt;
+        assert!(
+            sup_depth.abs() < 0.05,
+            "x^2 视觉上不下沉，实际 depth={sup_depth}"
+        );
+    }
+
+    /// 前缀（context）参与公式编译，但公式字号恒为编辑器字号（前缀里的 text(size) 不得带偏）
+    #[test]
+    fn compile_math_context_applies_without_changing_size() {
+        // 前缀定义的宏在公式里可用（#myX）
+        let with_let = compile_math("#myX", false, "#let myX = 42", None, &fonts_dir());
+        assert!(with_let.ok, "前缀宏应可用: {:?}", with_let.error);
+        assert!(with_let.width_pt > 0.0);
+
+        // 前缀把正文设成 30pt：公式仍按 MATH_TEXT_PT 渲染（#set 在 30pt 之后生效）
+        let plain = compile_math("x", false, "", None, &fonts_dir());
+        let with_big_prefix = compile_math("x", false, "#set text(size: 30pt)", None, &fonts_dir());
+        assert!(plain.ok && with_big_prefix.ok);
+        assert!(
+            (plain.width_pt - with_big_prefix.width_pt).abs() < 0.1,
+            "字号应由 MATH_TEXT_PT 强制：{} vs {}",
+            plain.width_pt,
+            with_big_prefix.width_pt
+        );
+    }
+
+    /// 跨行公式（行间公式多行书写）：仍能渲染成贴边 SVG（前端整行替换为块级 widget）
+    #[test]
+    fn compile_math_multiline_body() {
+        let out = compile_math("a + b \\ = c", true, "", None, &fonts_dir());
+        assert!(out.ok, "跨行公式应渲染成功: {:?}", out.error);
+        assert!(out.width_pt > 0.0 && out.height_pt > 0.0);
+        // 行间公式的盒应明显高于单行行内公式（19pt 量级 vs 7pt 量级）
+        assert!(out.height_pt > 12.0, "行间公式应更高，实际 {}", out.height_pt);
+    }
+
+    /// 按需运行的真实公式产物导出（浏览器端视觉验证用）：
+    /// `cargo test dump_math_fixtures -- --ignored --nocapture`
+    /// 每行输出 `FIXTURE:{json}`，由 scripts/browser-check 收集后注入浏览器开发模式页面，
+    /// 于是浏览器里渲染的是**真实 typst 产物**（真尺寸/真基线），而不是桩的假 SVG。
+    #[test]
+    #[ignore = "按需运行：导出浏览器视觉验证用的真实公式产物"]
+    fn dump_math_fixtures() {
+        let cases: [(&str, bool); 10] = [
+            ("x^2 + y^2 = z^2", false),
+            ("frac(a,b)", false),
+            ("integral_0^1 f(x) dif x", false),
+            ("sqrt(x^2 + y^2)", false),
+            ("sum_(i=1)^n i", false),
+            ("y_p + g_q", false),
+            ("frac(a,b)", true),
+            ("sum_(i=1)^n i", true),
+            ("mat(1, 2; 3, 4)", true),
+            ("a + b \\ = c", true),
+        ];
+        for (body, display) in cases {
+            let out = compile_math(body, display, "", None, &fonts_dir());
+            assert!(out.ok, "夹具公式应渲染成功: {body} / {:?}", out.error);
+            let json = serde_json::json!({
+                "body": body,
+                "display": display,
+                "svg": out.svg,
+                "widthPt": out.width_pt,
+                "heightPt": out.height_pt,
+                "baselinePt": out.baseline_pt,
+            });
+            println!("FIXTURE:{}", json);
+        }
+    }
+
+    /// 公式语法错误：ok=false 且带消息（前端据此保持源码显示，不显示空 widget）
+    #[test]
+    fn compile_math_syntax_error() {
+        let out = compile_math("frac(a", false, "", None, &fonts_dir());
+        assert!(!out.ok, "非法公式应失败");
+        assert!(out.svg.is_empty(), "失败时不应有产物");
+        assert!(
+            out.error.as_deref().is_some_and(|e| !e.is_empty()),
+            "失败应带错误消息"
+        );
+    }
+
 
     /// 端到端：中文 + 数学公式文档编译成功，pages 非空且每页含 <svg>
     #[test]

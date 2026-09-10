@@ -14,6 +14,10 @@ export interface PersistedState {
   prefixEnabled: boolean;
   /** 前缀代码（插入到用户代码之前） */
   prefixCode: string;
+  /** 所见即所得（编辑器内公式内联渲染）开关 */
+  livePreview: boolean;
+  /** 是否显示右侧预览栏（所见即所得形态为单栏） */
+  showPreview: boolean;
 }
 
 /** 读取持久化状态；不存在或损坏时返回空对象 */
@@ -27,6 +31,10 @@ export function loadState(): Partial<PersistedState> {
     // 兼容旧存档：新增字段缺失时补默认值
     if (state.prefixEnabled === undefined) state.prefixEnabled = false;
     if (state.prefixCode === undefined) state.prefixCode = "";
+    // 旧存档没有该字段时默认开启（与「所见即所得」的产品默认值一致）
+    if (state.livePreview === undefined) state.livePreview = true;
+    // 未记录过预览栏开关时跟随形态：所见即所得 → 单栏
+    if (state.showPreview === undefined) state.showPreview = !state.livePreview;
     return state;
   } catch {
     return {};

@@ -7,8 +7,10 @@
   import { typst } from "codemirror-lang-typst";
   import { editorKeymap } from "./editor-keymap";
   import { oneDark } from "@codemirror/theme-one-dark";
-  import type { CompileErrorLocation } from "./typst-engine";
+  import type { CompileErrorLocation, MathRender } from "./typst-engine";
   import { squiggleRanges, offsetAt } from "./diagnostics-utils";
+  import { livePreview, refreshLivePreview } from "./live-preview";
+  import type { MathRequest } from "./live-preview";
   import { mark } from "./startup-timing";
   import { dbg } from "./debug";
 
@@ -24,6 +26,14 @@
     prefixCode?: string;
     /** 跳转目标（1-based 行列；seq 变化确保重复跳同一位置也触发 effect） */
     jumpTo?: { line: number; col: number; seq: number } | null;
+    /** 所见即所得（公式内联渲染）开关 */
+    livePreviewEnabled?: boolean;
+    /** 公式渲染结果查询（父组件维护缓存；key 见 math-ranges.mathCacheKey） */
+    lookupMath?: (key: string) => MathRender | undefined;
+    /** 需要渲染的公式（父组件去重 / 防抖后调 Rust 侧 compile_math） */
+    onMathRequest?: (requests: MathRequest[]) => void;
+    /** 渲染结果代次：变化时重整装饰（父组件收到新渲染结果后自增） */
+    mathVersion?: number;
   }
 
   let {
@@ -35,6 +45,10 @@
     diagnostics,
     prefixCode = "",
     jumpTo = null,
+    livePreviewEnabled = false,
+    lookupMath,
+    onMathRequest,
+    mathVersion = 0,
   }: Props = $props();
 
   let host: HTMLElement;
@@ -45,6 +59,15 @@
   // 当前生效的编译错误与前缀代码（由 diagnostics/prefixCode prop 驱动；供波浪线与 hover 提示读取）
   let diagState: { list: CompileErrorLocation[]; prefix: string } = { list: [], prefix: "" };
 
+  /** 所见即所得扩展的实时选项：用闭包读最新 prop，避免重建扩展时丢状态 */
+  const livePreviewOptions = {
+    enabled: () => livePreviewEnabled,
+    prefix: () => prefixCode ?? "",
+    lookup: (key: string) => lookupMath?.(key),
+    onRequest: (requests: MathRequest[]) => onMathRequest?.(requests),
+    dark: () => theme === "dark",
+  };
+
   function buildExtensions() {
     return [
       basicSetup,
@@ -53,6 +76,7 @@
       themeCompartment.of(theme === "dark" ? oneDark : []),
       diagnosticsCompartment.of(diagnosticsExtensions()),
       diagTheme,
+      livePreview(livePreviewOptions), // 公式内联渲染（开关与缓存由父组件注入）
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !applyingExternal) {
           onDocChange?.(update.state.doc.toString());
@@ -103,11 +127,14 @@
     view.focus();
   });
 
-  // 主题切换：通过 Compartment 动态重配
+  // 主题切换：通过 Compartment 动态重配；同时刷新公式装饰（暗色要反色，见 live-preview）
   $effect(() => {
     if (!view) return;
     view.dispatch({
-      effects: themeCompartment.reconfigure(theme === "dark" ? oneDark : []),
+      effects: [
+        themeCompartment.reconfigure(theme === "dark" ? oneDark : []),
+        refreshLivePreview.of(null),
+      ],
     });
   });
 
@@ -122,6 +149,18 @@
     view.dispatch({
       effects: diagnosticsCompartment.reconfigure(diagnosticsExtensions()),
     });
+  });
+
+  /**
+   * 所见即所得：开关切换、渲染结果到货（mathVersion 自增）、前缀变化（缓存键变化）
+   * 时重整公式装饰。读这三个响应式值即建立依赖。
+   */
+  $effect(() => {
+    if (!view) return;
+    void livePreviewEnabled;
+    void mathVersion;
+    void prefixCode; // 前缀变化 → 编译上下文与缓存键变化，重新请求与渲染
+    view.dispatch({ effects: refreshLivePreview.of(null) });
   });
 
   /**

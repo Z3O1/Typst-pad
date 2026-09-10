@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import Editor from "$lib/Editor.svelte";
-  import { compileToSvg, compileToPdf } from "$lib/typst-engine";
-  import type { CompileErrorLocation } from "$lib/typst-engine";
+  import { compileToSvg, compileToPdf, compileMath } from "$lib/typst-engine";
+  import type { CompileErrorLocation, MathRender } from "$lib/typst-engine";
+  import type { MathRequest } from "$lib/live-preview";
   import {
     openTypFile,
     saveTypFile,
@@ -113,6 +114,22 @@
   let settingsPrefixTextarea = $state<HTMLTextAreaElement | undefined>(undefined); // 设置弹窗中的前缀代码 textarea（错误落前缀时定位）
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
   let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
+  // 所见即所得（编辑器内公式内联渲染）：默认开启，视图菜单可切换
+  let livePreview = $state(true);
+  // 是否显示右侧预览栏。所见即所得形态是**单栏**（Typora 式）：编辑区里已经是排版结果，
+  // 右栏只是为了核对分页/整页效果才需要，故默认跟着 livePreview 走（开=单栏，关=双栏），
+  // 也可以用视图菜单单独打开（例如所见即所得下仍想对照整页）。
+  let showPreview = $state(false);
+  // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
+  // Map 本身不需要响应式（变更后靠 mathVersion 代次通知编辑器重整装饰）
+  const mathCache = new Map<string, MathRender>();
+  // 已排队待渲染的 key（防止同一公式重复入队）；队列与定时器同理不需要响应式
+  const mathPending = new Set<string>();
+  let mathQueue: MathRequest[] = [];
+  let mathTimer: ReturnType<typeof setTimeout> | undefined;
+  let mathVersion = $state(0); // 渲染结果代次（自增即触发编辑器重整装饰）
+  /** 公式渲染缓存条数上限（超出按插入顺序淘汰最早的） */
+  const MATH_CACHE_LIMIT = 500;
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
   let settingsPrefixEnabled = $state(false);
   let settingsPrefixCode = $state("");
@@ -139,7 +156,16 @@
   function schedulePersist() {
     clearTimeout(persistTimer);
     persistTimer = setTimeout(() => {
-      saveState({ theme, content: doc, filePath, fileTitle, prefixEnabled, prefixCode });
+      saveState({
+        theme,
+        content: doc,
+        filePath,
+        fileTitle,
+        prefixEnabled,
+        prefixCode,
+        livePreview,
+        showPreview,
+      });
     }, 300);
   }
 
@@ -181,6 +207,7 @@
       fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
       dirty = false;
       editorDoc = opened.content; // 触发编辑器替换全文
+      resetMathCache();
       scheduleCompile();
       schedulePersist();
       statusText = "已打开";
@@ -228,6 +255,7 @@
       fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
       dirty = false;
       editorDoc = opened.content; // 触发编辑器替换全文
+      resetMathCache();
       scheduleCompile();
       schedulePersist();
       statusText = "已重新读取";
@@ -326,6 +354,7 @@
     fileTitle = "未命名.typ";
     dirty = false;
     clearState();
+    resetMathCache();
     scheduleCompile();
     statusText = "已新建";
   }
@@ -348,6 +377,21 @@
         label: "视图",
         accessKey: "V",
         items: [
+          {
+            label: "所见即所得（公式内联渲染）",
+            checked: livePreview,
+            action: () => {
+              livePreview = !livePreview;
+              // 形态联动：进入所见即所得 → 单栏（编辑区即排版结果）；退回源码 → 双栏对照
+              showPreview = !livePreview;
+              schedulePersist();
+            },
+          },
+          {
+            label: "显示预览栏",
+            checked: showPreview,
+            action: () => (showPreview = !showPreview),
+          },
           { label: "主题：自动", checked: theme === "system", action: () => (theme = "system") },
           { label: "主题：暗", checked: theme === "dark", action: () => (theme = "dark") },
           { label: "主题：明", checked: theme === "light", action: () => (theme = "light") },
@@ -420,6 +464,66 @@
     }
   }
 
+  /**
+   * 所见即所得：编辑器请求渲染公式（视口内出现未缓存的公式时触发）。
+   * 去重（已缓存 / 已在队列的 key 跳过）后进队，120ms 防抖再批量交给 Rust 侧编译——
+   * 连续输入时不会每个按键都排队，停手后一次性补齐。
+   */
+  function handleMathRequest(requests: MathRequest[]) {
+    let added = false;
+    for (const req of requests) {
+      if (mathCache.has(req.key) || mathPending.has(req.key)) continue;
+      mathPending.add(req.key);
+      mathQueue.push(req);
+      added = true;
+    }
+    if (!added) return;
+    clearTimeout(mathTimer);
+    mathTimer = setTimeout(drainMathQueue, 120);
+  }
+
+  /** 逐个渲染队列中的公式（Rust 侧编译本身串行），每完成一个就刷新装饰 */
+  async function drainMathQueue() {
+    const batch = mathQueue;
+    mathQueue = [];
+    if (batch.length === 0) return;
+    // 仅前缀的兜底上下文：文档内定义本身有错、或与前缀重名时，至少还能渲染不依赖它们的公式
+    const prefixOnly = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
+    for (const req of batch) {
+      // 用请求自带的上下文编译（与生成缓存键时一致，见 MathRequest.context 的说明）
+      let render = await compileMath(req.body, req.display, req.context, filePath);
+      if (!render.ok && prefixOnly !== req.context) {
+        const fallback = await compileMath(req.body, req.display, prefixOnly, filePath);
+        if (fallback.ok) render = fallback;
+      }
+      mathCache.set(req.key, render);
+      // 缓存上限：键按公式文本累积，长会话里可能堆很多（每条含一份 SVG）。
+      // 超限按插入顺序淘汰最早的条目；若它仍在视口内，编辑器会重新请求并渲染。
+      while (mathCache.size > MATH_CACHE_LIMIT) {
+        const oldest = mathCache.keys().next().value;
+        if (oldest === undefined) break;
+        mathCache.delete(oldest);
+      }
+      mathPending.delete(req.key);
+      // 只有渲染成功才需要重整装饰：失败的结果同样进缓存（避免反复重试），
+      // 但装饰集不变（仍显示源码），自增版本号只会白跑一次全量重建
+      if (render.ok) mathVersion++;
+      dbg.log(
+        "live-preview",
+        `math ${render.ok ? "ok" : "fail"} ${req.display ? "display" : "inline"} ${JSON.stringify(req.body)}`,
+      );
+    }
+  }
+
+  /** 文档切换（打开/新建/重读）：公式缓存作废（include 根与上下文都可能变） */
+  function resetMathCache() {
+    mathCache.clear();
+    mathPending.clear();
+    mathQueue = [];
+    clearTimeout(mathTimer);
+    mathVersion++;
+  }
+
   function scheduleCompile() {
     runCompile(); // 立即编译：内容变化后直接编译，编译完即显示（无防抖延迟）
   }
@@ -482,6 +586,7 @@
     }
     if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
     if (result.ok) {
+      if (!previewHost) return; // 预览栏未挂载（理论上隐藏时仍在 DOM，这里兜底）
       previewHost.innerHTML = result.svg;
       applyPreviewScale(); // 新产物注入后按当前容器宽度重算画布缩放
       pageCount = result.pageCount;
@@ -653,6 +758,9 @@
     }
     prefixEnabled = saved.prefixEnabled ?? false;
     prefixCode = saved.prefixCode ?? "";
+    livePreview = saved.livePreview ?? true; // 所见即所得默认开启
+    // 旧存档没有该字段：单栏与否由所见即所得开关决定（所见即所得 → 单栏）
+    showPreview = saved.showPreview ?? !livePreview;
     mark("persist-restore");
 
     // 关于弹窗版本号：从 Tauri 运行时读取（getVersion 返回 tauri.conf.json 的
@@ -742,6 +850,7 @@
       previewResizeObserver?.disconnect();
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
+      clearTimeout(mathTimer); // 停止在途公式渲染批次
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
     };
   });
@@ -757,7 +866,7 @@
     />
   </header>
 
-  <main class="panes">
+  <main class="panes" class:single={!showPreview}>
     {#if dragActive}
       <div class="drop-overlay">释放以打开 .typ 文件</div>
     {/if}
@@ -773,10 +882,14 @@
           jumpTo={jumpTarget}
           onCursor={handleCursor}
           onDocChange={handleDocChange}
+          livePreviewEnabled={livePreview}
+          lookupMath={(key) => mathCache.get(key)}
+          onMathRequest={handleMathRequest}
+          mathVersion={mathVersion}
         />
       </div>
     </section>
-    <section class="pane preview-pane">
+    <section class="pane preview-pane" class:hidden={!showPreview}>
       <!-- data-context-zone：右键区域判定标记（覆盖占位/错误/预览纸张全部子区域） -->
       <div
         class="pane-body preview-body"
@@ -927,9 +1040,28 @@
   {/if}
 </div>
 {:else}
+  <!-- 非 Tauri（浏览器直开）时的提示页。开发模式下额外给一键入口：
+       浏览器开发模式（?browserdev=1）会装假的 Tauri 环境 + 假编译，能完整调试编辑器交互
+       （所见即所得、快捷键、菜单、分栏），只是没有真实 typst 排版与文件功能。
+       不加这个入口时，裸开 http://localhost:1420/ 只会看到"请使用桌面应用版本"，
+       很容易误判成"用不了了"（实测踩过）。生产构建（非 DEV）不显示该入口。 -->
   <div class="browser-gate">
     <p class="browser-gate-title">请使用桌面应用版本</p>
     <p class="browser-gate-text">Typst-pad 已移除浏览器支持，请下载桌面应用后使用。</p>
+    {#if import.meta.env.DEV}
+      <p class="browser-gate-text browser-gate-dev">
+        开发调试可改用<strong>浏览器开发模式</strong>：带 <code>?browserdev=1</code> 打开本页
+        （假 Tauri 环境 + 假编译，可调试编辑器交互与所见即所得）。
+      </p>
+      <button
+        class="modal-btn primary"
+        onclick={() => {
+          const url = new URL(location.href);
+          url.searchParams.set("browserdev", "1");
+          location.href = url.toString();
+        }}
+      >打开浏览器开发模式</button>
+    {/if}
   </div>
 {/if}
 
@@ -1085,6 +1217,25 @@
     min-height: 0;
   }
 
+  /* 单栏（所见即所得）：编辑区占满整宽，预览栏整体不参与布局 */
+  .panes.single .preview-pane {
+    display: none;
+  }
+
+  .preview-pane.hidden {
+    display: none;
+  }
+
+  /* 单栏时把编辑器作为一个"纸张"块居中：整块（含行号槽）居中，阅读宽度约 900px */
+  .panes.single .editor-pane {
+    border-right: none;
+  }
+
+  .panes.single .editor-pane :global(.cm-editor) {
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
   .pane {
     flex: 1;
     display: flex;
@@ -1165,6 +1316,15 @@
     align-items: center;
     background: var(--bg-pane);
     overflow: auto;
+    /* 常驻滚动条槽位：修复"窄窗口下预览画布持续闪烁"（实测 2026-09-10）。
+       成因是滚动条反馈环——画布宽度写为"容器可用宽度"时：
+         画布略宽 → 出现竖滚动条 → clientWidth 少 15px → 重算变窄 → 滚动条消失 → 变宽 …
+       无限循环，DOM 里 host 内联宽度在两个值之间反复翻转，视觉上就是来回闪。
+       窗口够宽（≥ 自然缩放 840px，缩放被 natural 夹住）或全屏时不再随容器变化，
+       所以此前只在中等窗口宽度复现（实测 1040~1060px 视口下 flips=7/秒）。
+       stable 让槽位常驻，clientWidth 不再随滚动条变化，反馈环断裂。
+       实测：修复前取值 ['512px','527px'] flips=22；修复后 ['512px'] flips=0。 */
+    scrollbar-gutter: stable;
   }
 
   .drop-overlay {
@@ -1381,6 +1541,17 @@
     margin: 0;
     font-size: 18px;
     color: var(--accent);
+  }
+
+  .browser-gate-dev {
+    max-width: 520px;
+    line-height: 1.7;
+  }
+
+  .browser-gate-dev code {
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(128, 128, 128, 0.25);
   }
 
   .browser-gate-text {

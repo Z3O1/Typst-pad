@@ -2,10 +2,15 @@
 
 [![CI](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml/badge.svg)](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml)
 
-Typora 式布局的 Typst 桌面编辑器：**左侧编辑 Typst 源码，右侧实时预览**（非所见即所得）。
+Typora / Obsidian Live Preview 式的 Typst 桌面编辑器：**单栏写「所见即所得」的文档**（公式就地渲染、标记符号自动收起，编辑区即排版结果）；需要核对整页分页时，可从视图菜单调出右侧实时预览栏。
 
 ## 功能
 
+- **所见即所得编辑**（默认开启，视图菜单可关闭；默认**单栏**，需要整页对照时可打开预览栏）：
+  - 公式 `$x^2$` 在编辑区**就地渲染**成排版结果（由 Rust 侧 typst 逐公式编译为 SVG，按 pt 尺寸与基线对齐）；独占整行的行间公式 `$ … $`（含跨行书写）整行替换为**居中**排版式子；
+  - 光标 / 选区进入公式或标记范围时**自动展开源码**，可直接编辑（Typora 式）；
+  - 常用标记同样就地呈现：标题 `= ` 分级放大、`*粗体*`、`_斜体_`、行内 `` `代码` ``、```` ``` ```` 围栏代码块（整段渲染为等宽代码块、围栏自动收起）、无序列表 `- ` → `• `、有序列表 `+ ` → `1. `、链接 `#link("url")[文字]` 只显示文字；
+  - 渲染失败或还没渲染好时**保持源码显示**，不出现空占位。
 - 左侧 CodeMirror 6 编辑器：Typst 语法高亮、行号、括号匹配、光标行列状态栏
 - 右侧实时编译预览：内容变化后立即编译并显示（typst crate 内嵌原生编译），编译错误带行号/波浪线显示
 - 中文/数学公式完整支持（本地打包字体，离线可用）
@@ -39,8 +44,10 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 
 ## 测试与 CI
 
-- 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键等
-- Rust 单测（`typst_world.rs` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）
+- 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键，以及所见即所得链路（`typst-lex` 区域扫描 / `math-ranges` 公式范围 / `markup-ranges` 标记 / `live-preview` 装饰行为）
+- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`，前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
+- 浏览器端的**真实排版视觉验证**：`npm run fixtures:math` 导出 Rust 侧真实公式产物 → `node scripts/browser-check/wysiwyg-visual.mjs`。它把真实产物注入浏览器开发模式页面，实测 ① 行内公式基线与同行文字基线是否齐平（用零宽基线探针量，误差 < 1px）② 渲染尺寸是否等于真实 pt 尺寸 × 4/3 ③ 行间公式块级 widget 是否居中并独占整行 ④ 暗色主题下公式是否可见
+- Rust 单测（`typst_world.rs` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）、单公式渲染（`compile_math`：贴边 SVG、透明底、基线测量、前缀宏生效、语法错误回退）
 - CI（GitHub Actions，`.github/workflows/ci.yml`）：
   - `test`（ubuntu）：push 到 main / PR 时跑 类型检查 → 单测 → 前端构建 → `cargo check`（首次编译 typst 依赖树较慢，之后命中 Rust 缓存）
   - `build-bundles`（windows）：仅 main push 触发，构建 .exe/.msi 安装包并 `upload-artifact`（同时写入缓存供 Release 复用）
@@ -97,7 +104,10 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 原生编译验证（中文+
 ## 已知限制
 
 - 单文件编辑，无文件树 / 多标签页
-- 预览不跟随滚动（非所见即所得）
+- 预览不跟随滚动
+- 所见即所得的覆盖范围：公式（行内 + 独占整行的行间，含跨行书写）、常用标记与围栏代码块；表格/图片/引用块等块级结构仍显示源码（保持可编辑，不做块级 widget）
+- 公式渲染的编译上下文 = 「设置里的前缀代码 + 文档自身的**单行顶层** `#let` 定义」（多行定义与内容块 `[...]` 里的定义不取；取不到时退化为仅前缀）。文档定义本身有错或与前缀重名时，会退回「仅前缀」重试一次；仍失败则保持源码显示（不渲染出错位内容）
+- 前缀里若改了正文字号，编辑区公式仍按编辑器字号（14px = 10.5pt）渲染，以保证与编辑器正文对齐
 - 支持 `@local` 本地包（读取 typst 数据目录）与 `@preview` 在线包（首次使用时自动下载到 typst 共享缓存目录，离线后直接命中缓存；网络不可用时给出明确诊断）——包目录规范与 typst CLI 一致，可通过 `TYPST_PACKAGE_PATH` / `TYPST_PACKAGE_CACHE_PATH` 环境变量覆盖
 - 未保存文档时相对 `include` 无法解析磁盘路径（Rust 侧给出"需要先保存文档"的明确诊断）
 - `tauri.conf.json` 的 `csp` 保持 `null`：wasm 编译管线已移除（wasm 限制解除），但 CSP 未实测启用；如需启用请在 `npm run tauri build` 后实机验证

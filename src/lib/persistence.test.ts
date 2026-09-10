@@ -19,6 +19,8 @@ describe("persistence", () => {
       fileTitle: "doc.typ",
       prefixEnabled: true,
       prefixCode: "#set text(size: 12pt)\n",
+      livePreview: false,
+      showPreview: true,
     });
     expect(loadState()).toEqual({
       theme: "dark",
@@ -27,6 +29,8 @@ describe("persistence", () => {
       fileTitle: "doc.typ",
       prefixEnabled: true,
       prefixCode: "#set text(size: 12pt)\n",
+      livePreview: false,
+      showPreview: true,
     });
   });
 
@@ -36,13 +40,34 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "" });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: true, showPreview: false });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "" });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: true, showPreview: false });
     expect(loadState().theme).toBe("system");
+  });
+
+  it("旧存档（无 showPreview 字段）跟随形态：所见即所得 → 单栏", () => {
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: true }),
+    );
+    expect(loadState().showPreview).toBe(false);
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: false }),
+    );
+    expect(loadState().showPreview).toBe(true);
+  });
+
+  it("旧存档（无 livePreview 字段）默认开启所见即所得", () => {
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "" }),
+    );
+    expect(loadState().livePreview).toBe(true);
   });
 });

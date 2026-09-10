@@ -161,6 +161,57 @@ export async function compileToSvg(
 }
 
 /**
+ * 公式渲染结果（Rust 侧 compile_math 契约，serde camelCase）。
+ * svg 为「贴边 + 透明背景」的紧凑 SVG；尺寸与基线单位是 pt，
+ * baselinePt = 基线到盒顶的距离（编辑器据此做 vertical-align 对齐）。
+ */
+export interface MathRender {
+  ok: boolean;
+  svg: string;
+  widthPt: number;
+  heightPt: number;
+  baselinePt: number;
+  error?: string;
+}
+
+/**
+ * 渲染单个公式（编辑器内联渲染用）。失败收敛为 `{ ok: false, error }`，不抛异常
+ * （调用方保持源码显示）；invoke/IPC 异常同样收敛。
+ */
+export async function compileMath(
+  body: string,
+  display: boolean,
+  context: string,
+  documentPath: string | null,
+): Promise<MathRender> {
+  try {
+    const out = await invoke<MathRender>("compile_math", {
+      body,
+      display,
+      context,
+      documentPath,
+    });
+    return {
+      ok: out.ok,
+      svg: out.svg ?? "",
+      widthPt: out.widthPt ?? 0,
+      heightPt: out.heightPt ?? 0,
+      baselinePt: out.baselinePt ?? 0,
+      error: out.error,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      svg: "",
+      widthPt: 0,
+      heightPt: 0,
+      baselinePt: 0,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+/**
  * 导出 PDF：由建议文件名推导默认名 → 弹系统"另存为"对话框选定目标路径 →
  * invoke export_pdf 让 Rust 侧编译并直接落盘。取消对话框返回 cancelled，
  * 导出失败返回 error（调用方展示错误并保留预览）。
