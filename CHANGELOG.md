@@ -13,6 +13,7 @@
 
 - **写作模式 / 源代码模式两套 UI（仿 Typora）**：写作模式为单栏整页纸张（灰底 + 居中白纸 + 轻阴影）、衬线正文（思源宋体，与预览/PDF 输出同字体）、16px 行距 1.9、无行号；源代码模式为等宽代码编辑器 + 行号 + 右栏整页预览。`Ctrl+/` 或「视图 → 源代码模式」切换，状态栏有模式标识；格式操作走「格式」菜单 + 快捷键（无工具条，与 Typora 一致）
 - 版本号 0.6.0 → 0.7.0（package.json / tauri.conf.json / Cargo.toml 三处一致）
+- CI 的 action 全部升级到 Node 24 运行时版本（`actions/checkout@v5`、`actions/setup-node@v5`、`actions/cache@v5`、`actions/upload-artifact@v6`、`softprops/action-gh-release@v3`），消除 GitHub Actions 的 "Node.js 20 is deprecated" 告警；缓存 key 规则不变（`Swatinem/rust-cache@v2` 本身已是 node24，未动）
 
 ### Fixed
 

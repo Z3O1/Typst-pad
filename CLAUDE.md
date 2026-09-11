@@ -136,6 +136,8 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - 缓存损坏后的修复流程：`gh cache delete <key>` → 用 **workflow_dispatch 手动触发**（不是 push，push 会 cancel）→ 等 run 自然完成 → 再手动触发一次验证（预期仅 2 个 Compiling、~3 分钟）。
   - `tauri-bundle-tools` 缓存 key 含 `hashFiles('package-lock.json')`：依赖升级（tauri-cli 打包逻辑变化）自动失效重建，锁文件不变则稳定命中。
   - 健康缓存命中时构建 ~3 分钟（2 个 Compiling），全量 ~16 分钟（78 个 Compiling）——数字异常即缓存失效信号。
+  - **rust-cache 的 key 含「Rust 工具链版本哈希」**（`add-rust-environment-hash-key` 默认开）：`dtolnay/rust-toolchain@stable` 跟到新的 Rust 稳定版后 key 整片失效、全量重编（2026-09-11 实测：Rust 1.98.1 令 restore key 变为 `v0-rust-tauri-build-windows-Windows_NT-x64-2113753f`，日志 "No cache found" → 78 个 crate、30 分钟）。这是**一次性**重建、不是回归，下一次 push 即恢复 ~3 分钟；排查时先看 "Cache Rust build" 步骤里的 Restore Key 与 "No cache found"，别急着动缓存配置。
+- **action 版本约定（Node 24 运行时，2026-09-11）**：`actions/checkout@v5`、`actions/setup-node@v5`、`actions/cache@v5`、`actions/upload-artifact@v6`（v5 只是预备支持、默认仍跑 Node 20，必须 v6）、`softprops/action-gh-release@v3`，两个 workflow 保持一致——消除 GitHub 的 "Node.js 20 is deprecated（被强制跑在 Node 24 上）"告警。`Swatinem/rust-cache@v2` 已是 node24、`dtolnay/rust-toolchain` 是 composite 类型，无需升级。**升级 action 不影响任何缓存 key**（rust-cache 的 key 只由 shared-key/平台/Rust 版本/Cargo.lock 决定，见上）。
 - 版本升级流程：改版本号（三处一致）→ 合并 main（自动构建）→ 打 tag → 手动发布草稿。
 
 ## 测试

@@ -13,11 +13,20 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# action 版本约定（2026-09-11）：全部使用 **Node 24 运行时**的版本线，消除 GitHub 的
+# "Node.js 20 is deprecated（被强制跑在 Node 24 上）"告警。
+# checkout v5 / setup-node v5 / cache v5 / upload-artifact v6（upload-artifact 的 v5 只是
+# 预备支持，默认仍跑 Node 20，必须到 v6 才真正消灭告警；release.yml 另有 gh-release v3）。
+# Node 24 运行时要求 runner ≥ 2.327.1
+# （GitHub 托管 runner 早已满足；自托管需先升级 runner）。
+# Swatinem/rust-cache@v2 本身已是 node24、dtolnay/rust-toolchain 是 composite 类型，
+# 两者都没有 Node 20 问题，无需升级。升级这些 action **不影响缓存 key**
+# （rust-cache 的 key 只由 shared-key/平台/Rust 版本/Cargo.lock 决定），见 CLAUDE.md「缓存纪律」。
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Tauri v2 Linux 系统依赖（webkit2gtk 等）
       - name: Install Tauri system dependencies
@@ -34,7 +43,7 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -74,9 +83,9 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -100,7 +109,7 @@ jobs:
       # key 含 package-lock.json 哈希：依赖升级（tauri-cli 打包逻辑变化）时自动失效重建，
       # 锁文件不变则稳定命中（与 release.yml 保持一致的 key 规则）
       - name: Cache Tauri bundler tools
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: C:\Users\runneradmin\AppData\Local\tauri
           key: tauri-bundle-tools-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
@@ -112,7 +121,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bundles
           path: src-tauri/target/release/bundle/**
