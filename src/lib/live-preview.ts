@@ -18,6 +18,7 @@ import type { MarkupKind } from "./markup-ranges";
 import { scanNonMarkupRegions } from "./typst-lex";
 import type { Region } from "./typst-lex";
 import { buildMathContext } from "./math-context";
+import { MATH_SIZE_PT } from "./typst-engine";
 import type { MathRender } from "./typst-engine";
 
 /** 待渲染的公式（父组件据此调用 Rust 侧 compile_math） */
@@ -321,7 +322,7 @@ function buildMathDecorations(
   for (const range of ranges) {
     // 光标 / 选区进入 → 展开源码（含块级：光标落在公式内即整行回到源码）
     if (selectionTouchesRange(range, selections)) continue;
-    const render = opts.lookup(mathCacheKey(range.body, range.display, context));
+    const render = opts.lookup(mathCacheKey(range.body, range.display, context, MATH_SIZE_PT));
     // 未渲染 / 渲染失败 → 保持源码显示
     if (!render?.ok) continue;
     const block = blockRangeFor(state.doc, range);
@@ -400,7 +401,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         (v) => range.to >= v.from - PREFETCH_MARGIN && range.from <= v.to + PREFETCH_MARGIN,
       );
       if (!near) continue;
-      const key = mathCacheKey(range.body, range.display, context);
+      const key = mathCacheKey(range.body, range.display, context, MATH_SIZE_PT);
       if (opts.lookup(key)) continue;
       requests.push({ key, body: range.body, display: range.display, context });
     }

@@ -4,6 +4,7 @@
   import { compileToSvg, compileToPdf, compileMath } from "$lib/typst-engine";
   import type { CompileErrorLocation, MathRender } from "$lib/typst-engine";
   import type { MathRequest } from "$lib/live-preview";
+  import type { WriteCommand } from "$lib/write-commands";
   import {
     openTypFile,
     saveTypFile,
@@ -60,6 +61,8 @@
     hasSelection(): boolean;
     selectAll(): void;
     execCommand(cmd: "cut" | "copy" | "paste"): void;
+    /** 写作模式的格式命令（见 write-commands.ts） */
+    runWriteCommand(command: WriteCommand): void;
   }
 
   /** MenuBar 组件实例方法（右键菜单弹出前联动收起） */
@@ -114,8 +117,13 @@
   let settingsPrefixTextarea = $state<HTMLTextAreaElement | undefined>(undefined); // 设置弹窗中的前缀代码 textarea（错误落前缀时定位）
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
   let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
-  // 所见即所得（编辑器内公式内联渲染）：默认开启，视图菜单可切换
-  let livePreview = $state(true);
+  /**
+   * 界面模式（两套 UI）：
+   * - "write"  写作模式（仿 Typora，默认）：整页纸张、衬线正文、无行号，公式与标记就地排版；
+   * - "source" 源码模式：等宽代码编辑器 + 行号，直接编辑 Typst 源码，右栏整页预览。
+   * 视图菜单 / Ctrl+/ 切换。
+   */
+  let viewMode = $state<"write" | "source">("write");
   // 是否显示右侧预览栏。所见即所得形态是**单栏**（Typora 式）：编辑区里已经是排版结果，
   // 右栏只是为了核对分页/整页效果才需要，故默认跟着 livePreview 走（开=单栏，关=双栏），
   // 也可以用视图菜单单独打开（例如所见即所得下仍想对照整页）。
@@ -163,10 +171,29 @@
         fileTitle,
         prefixEnabled,
         prefixCode,
-        livePreview,
+        viewMode,
         showPreview,
       });
     }, 300);
+  }
+
+  /**
+   * 执行格式命令（菜单 / 快捷键）：把标记插到编辑器光标处，由编辑器侧完成事务。
+   * 焦点在输入框（设置弹窗的 textarea）时不动编辑器——否则打字会被插标记。
+   */
+  function runFormat(command: WriteCommand) {
+    const el = document.activeElement;
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return;
+    editorRef?.runWriteCommand(command);
+  }
+
+  /** 写作模式 ↔ 源码模式（仿 Typora 的"源代码模式"）：预览栏随模式联动 */
+  function toggleViewMode() {
+    viewMode = viewMode === "write" ? "source" : "write";
+    // 写作模式单栏（编辑区即排版结果）；源码模式双栏（源码 + 整页预览对照）
+    showPreview = viewMode === "source";
+    schedulePersist();
+    statusText = viewMode === "write" ? "写作模式" : "源代码模式";
   }
 
   function handleCursor(line: number, col: number) {
@@ -374,18 +401,34 @@
         ],
       },
       {
+        label: "格式",
+        accessKey: "O",
+        items: [
+          { label: "加粗", shortcut: "Ctrl+B", action: () => runFormat("bold") },
+          { label: "斜体", shortcut: "Ctrl+I", action: () => runFormat("italic") },
+          { label: "行内代码", shortcut: "Ctrl+Shift+`", action: () => runFormat("code") },
+          { label: "行内公式", shortcut: "Ctrl+M", action: () => runFormat("math-inline") },
+          { label: "公式块", shortcut: "Ctrl+Shift+M", action: () => runFormat("math-block") },
+          { label: "标题 1", shortcut: "Ctrl+1", action: () => runFormat("heading1") },
+          { label: "标题 2", shortcut: "Ctrl+2", action: () => runFormat("heading2") },
+          { label: "标题 3", shortcut: "Ctrl+3", action: () => runFormat("heading3") },
+          { label: "正文", shortcut: "Ctrl+0", action: () => runFormat("body") },
+          { label: "无序列表", shortcut: "Ctrl+Shift+]", action: () => runFormat("bullet") },
+          { label: "有序列表", shortcut: "Ctrl+Shift+[", action: () => runFormat("ordered") },
+          { label: "引用", shortcut: "Ctrl+Shift+Q", action: () => runFormat("quote") },
+          { label: "代码块", shortcut: "Ctrl+Shift+C", action: () => runFormat("code-block") },
+          { label: "链接", shortcut: "Ctrl+K", action: () => runFormat("link") },
+        ],
+      },
+      {
         label: "视图",
         accessKey: "V",
         items: [
           {
-            label: "所见即所得（公式内联渲染）",
-            checked: livePreview,
-            action: () => {
-              livePreview = !livePreview;
-              // 形态联动：进入所见即所得 → 单栏（编辑区即排版结果）；退回源码 → 双栏对照
-              showPreview = !livePreview;
-              schedulePersist();
-            },
+            label: "源代码模式",
+            shortcut: "Ctrl+/",
+            checked: viewMode === "source",
+            action: () => toggleViewMode(),
           },
           {
             label: "显示预览栏",
@@ -707,6 +750,25 @@
     const mod = e.ctrlKey || e.metaKey;
     if (!mod) return;
 
+    // Shift 组合的格式快捷键（MenuBar 的匹配器只支持「Ctrl+单键」，这些由页面处理）。
+    // 键位沿用 Typora 习惯，菜单里以同样的文字展示。
+    if (e.shiftKey) {
+      const shiftCommands: Record<string, WriteCommand> = {
+        "`": "code",
+        m: "math-block",
+        "]": "bullet",
+        "[": "ordered",
+        q: "quote",
+        c: "code-block",
+      };
+      const command = shiftCommands[key];
+      if (command) {
+        e.preventDefault();
+        runFormat(command);
+      }
+      return;
+    }
+
     // 注意：菜单项全局快捷键（Ctrl+N 新建 / Ctrl+O 打开 / Ctrl+S 保存 / Ctrl+, 设置 /
     // Ctrl+P 导出 PDF）由 MenuBar 的 window keydown 统一处理，不在此重复绑定，
     // 避免同一组合键双重触发（如保存对话框双弹）。
@@ -758,9 +820,11 @@
     }
     prefixEnabled = saved.prefixEnabled ?? false;
     prefixCode = saved.prefixCode ?? "";
-    livePreview = saved.livePreview ?? true; // 所见即所得默认开启
-    // 旧存档没有该字段：单栏与否由所见即所得开关决定（所见即所得 → 单栏）
-    showPreview = saved.showPreview ?? !livePreview;
+
+    // 旧存档迁移：只有 livePreview 字段时，按其值推断模式
+    viewMode = saved.viewMode ?? (saved.livePreview === false ? "source" : "write");
+    // 旧存档没有 showPreview：单栏与否跟随模式（写作模式单栏，源码模式双栏对照）
+    showPreview = saved.showPreview ?? viewMode === "source";
     mark("persist-restore");
 
     // 关于弹窗版本号：从 Tauri 运行时读取（getVersion 返回 tauri.conf.json 的
@@ -882,7 +946,7 @@
           jumpTo={jumpTarget}
           onCursor={handleCursor}
           onDocChange={handleDocChange}
-          livePreviewEnabled={livePreview}
+          mode={viewMode}
           lookupMath={(key) => mathCache.get(key)}
           onMathRequest={handleMathRequest}
           mathVersion={mathVersion}
@@ -965,8 +1029,11 @@
       {/if}
     </span>
     <span class="spacer"></span>
+    <span class="mode-tag">{viewMode === "write" ? "写作" : "源码"}</span>
     <span>{charCount} 字符 · {pageCount} 页</span>
-    <span>行 {cursorLine}, 列 {cursorCol}</span>
+    {#if viewMode === "source"}
+      <span>行 {cursorLine}, 列 {cursorCol}</span>
+    {/if}
   </footer>
 
   {#if showAbout}
@@ -1069,6 +1136,8 @@
   :root {
     --bg: #1e1e1e;
     --bg-pane: #252526;
+    --bg-backdrop: #1a1a1a;
+    --bg-paper: #252526;
     --bg-toolbar: #2d2d30;
     --border: #3c3c3c;
     --fg: #d4d4d4;
@@ -1077,8 +1146,11 @@
   }
 
   .app.light {
+    --typora-caret: #1a1a1a;
     --bg: #f5f5f5;
     --bg-pane: #ffffff;
+    --bg-backdrop: #e8e8e8;
+    --bg-paper: #ffffff;
     --bg-toolbar: #ececec;
     --border: #d4d4d4;
     --fg: #1f1f1f;
@@ -1217,6 +1289,27 @@
     min-height: 0;
   }
 
+  /* 写作模式（仿 Typora）：灰底 + 居中白纸 + 轻阴影；源码模式保持原来的代码编辑器观感 */
+  .panes.single .editor-pane {
+    background: var(--bg-backdrop);
+  }
+
+  .panes.single .editor-pane .pane-body {
+    background: var(--bg-paper);
+    max-width: 900px;
+    margin: 0 auto;
+    width: 100%;
+    box-shadow: 0 0 12px rgba(0, 0, 0, 0.12);
+  }
+
+  .mode-tag {
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+
   /* 单栏（所见即所得）：编辑区占满整宽，预览栏整体不参与布局 */
   .panes.single .preview-pane {
     display: none;
@@ -1226,14 +1319,9 @@
     display: none;
   }
 
-  /* 单栏时把编辑器作为一个"纸张"块居中：整块（含行号槽）居中，阅读宽度约 900px */
+  /* 单栏（写作模式）：编辑区不再与预览栏分界；纸张限宽居中由上面的 .pane-body 负责 */
   .panes.single .editor-pane {
     border-right: none;
-  }
-
-  .panes.single .editor-pane :global(.cm-editor) {
-    max-width: 900px;
-    margin: 0 auto;
   }
 
   .pane {

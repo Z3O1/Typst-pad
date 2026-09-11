@@ -146,9 +146,12 @@ export async function connect() {
       await send("Input.insertText", { text });
     },
 
-    /** 发送单个按键（key 形如 "ArrowLeft"/"End"/"Backspace"） */
-    async key(key, { code, keyCode = 0 } = {}) {
-      const base = { key, code: code ?? key, windowsVirtualKeyCode: keyCode };
+    /**
+     * 发送单个按键（key 形如 "ArrowLeft"/"End"/"Backspace"）。
+     * modifiers 为 CDP 位掩码：1=Alt 2=Ctrl 4=Meta 8=Shift（如 Ctrl+B → modifiers: 2）。
+     */
+    async key(key, { code, keyCode = 0, modifiers = 0 } = {}) {
+      const base = { key, code: code ?? key, windowsVirtualKeyCode: keyCode, modifiers };
       await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...base });
       await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
     },

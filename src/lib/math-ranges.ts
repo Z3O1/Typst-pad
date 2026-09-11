@@ -96,11 +96,17 @@ export function scanMathRanges(doc: string, precomputed?: Region[]): MathRange[]
 }
 
 /**
- * 公式渲染缓存键：同一公式（body + 风格）在同一编译前缀下渲染结果相同。
- * 前缀参与键，避免改前缀后沿用旧结果。
+ * 公式渲染缓存键：同一公式（body + 风格）在同一编译前缀与字号下渲染结果相同。
+ * 前缀与字号都参与键，避免改了前缀/字号还沿用旧产物。
  */
-export function mathCacheKey(body: string, display: boolean, context: string): string {
-  return `${display ? "D" : "I"}\u0000${context}\u0000${body}`;
+export function mathCacheKey(
+  body: string,
+  display: boolean,
+  context: string,
+  sizePt?: number,
+): string {
+  const size = sizePt === undefined ? "" : String(sizePt);
+  return `${display ? "D" : "I"}\u0000${size}\u0000${context}\u0000${body}`;
 }
 
 /** 范围 → [编辑区] 判断：选区（或光标）是否落在范围内（闭区间，含两端）。 */

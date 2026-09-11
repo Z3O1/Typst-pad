@@ -43,6 +43,10 @@ await c.send("Page.addScriptToEvaluateOnNewDocument", {
 });
 
 await c.goto("http://localhost:1420/?browserdev=1");
+// 清掉上一轮遗留的界面模式 / 主题，保证从默认态（写作模式）开始：
+// 否则上一轮若停在源码模式，页面加载后不渲染任何公式，第一条断言就会莫名超时（实测踩过）
+await c.evaluate(`localStorage.clear()`);
+await c.goto("http://localhost:1420/?browserdev=1");
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 800));
 

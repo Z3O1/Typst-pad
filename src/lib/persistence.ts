@@ -14,8 +14,10 @@ export interface PersistedState {
   prefixEnabled: boolean;
   /** 前缀代码（插入到用户代码之前） */
   prefixCode: string;
-  /** 所见即所得（编辑器内公式内联渲染）开关 */
-  livePreview: boolean;
+  /** 界面模式：写作模式（仿 Typora）/ 源码模式 */
+  viewMode: "write" | "source";
+  /** 旧字段（0.6.0 前）：仅用于迁移到 viewMode */
+  livePreview?: boolean;
   /** 是否显示右侧预览栏（所见即所得形态为单栏） */
   showPreview: boolean;
 }
@@ -31,10 +33,12 @@ export function loadState(): Partial<PersistedState> {
     // 兼容旧存档：新增字段缺失时补默认值
     if (state.prefixEnabled === undefined) state.prefixEnabled = false;
     if (state.prefixCode === undefined) state.prefixCode = "";
-    // 旧存档没有该字段时默认开启（与「所见即所得」的产品默认值一致）
-    if (state.livePreview === undefined) state.livePreview = true;
-    // 未记录过预览栏开关时跟随形态：所见即所得 → 单栏
-    if (state.showPreview === undefined) state.showPreview = !state.livePreview;
+    // 旧的 livePreview 布尔 → 模式（0.6.0 前存档）；新存档用 viewMode
+    if (state.viewMode === undefined) {
+      state.viewMode = state.livePreview === false ? "source" : "write";
+    }
+    // 未记录过预览栏开关时跟随模式：写作模式 → 单栏
+    if (state.showPreview === undefined) state.showPreview = state.viewMode === "source";
     return state;
   } catch {
     return {};

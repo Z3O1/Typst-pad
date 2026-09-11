@@ -29,6 +29,10 @@ function check(name, ok, detail = "") {
 
 const c = await connect();
 await c.goto("http://localhost:1420/?browserdev=1");
+// 清掉上一轮遗留的界面模式 / 主题，保证从默认态（写作模式）开始：
+// 否则上一轮若停在源码模式，页面加载后不渲染任何公式，第一条断言就会莫名超时（实测踩过）
+await c.evaluate(`localStorage.clear()`);
+await c.goto("http://localhost:1420/?browserdev=1");
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 800));
 
@@ -126,7 +130,7 @@ const text3 = await c.evaluate(editorText);
 check("光标离开后重新渲染（行内 widget 回到 1、块级仍在）", !text3.includes("$x^2 + y^2$"), JSON.stringify(text3));
 await c.screenshot(SHOT("wysiwyg-3-caret-outside"));
 
-console.log("4) 视图菜单开关：关闭 → 全部显示源码");
+console.log("4) 视图菜单「源代码模式」：开启 → 全部显示源码 + 右栏预览");
 const menuRect = await c.evaluate(`(() => {
   const el = Array.from(document.querySelectorAll("button, [role=menuitem], .menu-label, span, div"))
     .find(e => (e.textContent || "").trim() === "视图(V)");
@@ -134,11 +138,12 @@ const menuRect = await c.evaluate(`(() => {
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()`);
 await c.click(menuRect.x, menuRect.y);
-await c.waitFor(`document.body.innerText.includes("所见即所得")`, { timeout: 5000 });
+await c.waitFor(`document.body.innerText.includes("源代码模式")`, { timeout: 5000 });
 const itemRect = await c.evaluate(`(() => {
-  const el = Array.from(document.querySelectorAll("*"))
-    .filter(e => e.children.length === 0 && (e.textContent || "").includes("所见即所得"))
-    .pop();
+  // 只在展开的菜单下拉里找：状态栏可能显示同名的状态文字（"源代码模式"），
+  // 在全页范围内查找会点到状态栏（实测踩过）
+  const el = Array.from(document.querySelectorAll(".menu-dropdown .menu-item"))
+    .find(e => (e.textContent || "").includes("源代码模式"));
   const r = el.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()`);
@@ -147,25 +152,24 @@ await c.click(itemRect.x, itemRect.y);
 await c.waitFor(widgetCount + ` === 0 && ` + blockCount + ` === 0`, { timeout: 5000 });
 const text4 = await c.evaluate(editorText);
 check(
-  "关闭开关后公式全部显示源码",
+  "进入源代码模式后公式全部显示源码",
   text4.includes("$x^2 + y^2$") && text4.includes("frac(a,b)"),
   JSON.stringify(text4),
 );
 await c.screenshot(SHOT("wysiwyg-5-off"));
 
-console.log("5) 再次打开开关 → 恢复渲染（缓存命中，无需重新输入）");
+console.log("5) 再切回写作模式 → 恢复渲染（缓存命中，无需重新输入）");
 await c.click(menuRect.x, menuRect.y);
-await c.waitFor(`document.body.innerText.includes("所见即所得")`, { timeout: 5000 });
+await c.waitFor(`document.body.innerText.includes("源代码模式")`, { timeout: 5000 });
 const itemRect2 = await c.evaluate(`(() => {
-  const el = Array.from(document.querySelectorAll("*"))
-    .filter(e => e.children.length === 0 && (e.textContent || "").includes("所见即所得"))
-    .pop();
+  const el = Array.from(document.querySelectorAll(".menu-dropdown .menu-item"))
+    .find(e => (e.textContent || "").includes("源代码模式"));
   const r = el.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()`);
 await c.click(itemRect2.x, itemRect2.y);
 await c.waitFor(widgetCount + ` === 1 && ` + blockCount + ` === 1`, { timeout: 5000 });
-check("重新开启后恢复渲染（行内 + 块级各一个）", true);
+check("切回写作模式后恢复渲染（行内 + 块级各一个）", true);
 await c.screenshot(SHOT("wysiwyg-6-on-again"));
 
 console.log("6) 常用标记：标题 / 粗体 / 斜体 / 行内代码 / 列表符号");
@@ -339,7 +343,7 @@ const fenceBack = await c.evaluate(`document.querySelector(".cm-content").innerT
 check("围栏重新可见（可编辑源码）", fenceBack === true);
 await c.screenshot(SHOT("wysiwyg-14-code-block-caret"));
 
-console.log("15) 单栏形态：所见即所得开启时不留右栏，编辑器居中");
+console.log("15) 写作模式形态：单栏、纸张居中、无行号槽");
 // 回到干净的默认态：清 localStorage 后重载（默认 livePreview=true → 单栏）
 await c.evaluate(`localStorage.clear()`);
 await c.goto("http://localhost:1420/?browserdev=1");
@@ -364,7 +368,7 @@ const single = await c.evaluate(`(() => {
     previewExistsInDom: !!document.querySelector("#preview-host"),
   };
 })()`);
-check("默认（所见即所得）为单栏：预览栏不显示", single.previewDisplay === "none", JSON.stringify(single));
+check("默认（写作模式）为单栏：预览栏不显示", single.previewDisplay === "none", JSON.stringify(single));
 check("编辑区占满整宽", Math.abs(single.editorWidth - single.panesWidth) <= 2, JSON.stringify(single));
 check("编辑器作为纸张块居中（左右留白接近）", Math.abs(single.leftGap - single.rightGap) < 20, JSON.stringify(single));
 check("预览容器仍在 DOM 中（编译链路不受影响）", single.previewExistsInDom === true);
@@ -372,17 +376,16 @@ await c.screenshot(SHOT("wysiwyg-15-single-pane"));
 
 console.log("16) 菜单可调回双栏");
 const viewMenu = await c.evaluate(`(() => {
-  const el = Array.from(document.querySelectorAll("*"))
-    .find(e => (e.textContent || "").trim() === "视图(V)");
+  const el = Array.from(document.querySelectorAll(".menubar .menu-title"))
+    .find(e => (e.textContent || "").trim().startsWith("视图"));
   const r = el.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()`);
 await c.click(viewMenu.x, viewMenu.y);
 await c.waitFor(`document.body.innerText.includes("显示预览栏")`, { timeout: 5000 });
 const previewItem = await c.evaluate(`(() => {
-  const el = Array.from(document.querySelectorAll("*"))
-    .filter(e => e.children.length === 0 && (e.textContent || "").trim() === "显示预览栏")
-    .pop();
+  const el = Array.from(document.querySelectorAll(".menu-dropdown .menu-item"))
+    .find(e => (e.textContent || "").includes("显示预览栏"));
   const r = el.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()`);
@@ -396,19 +399,18 @@ const split = await c.evaluate(`(() => {
 check("打开「显示预览栏」后回到双栏（编辑区约半宽）", split.editorWidth < split.panesWidth * 0.6, JSON.stringify(split));
 await c.screenshot(SHOT("wysiwyg-16-split-again"));
 
-console.log("17) 关掉所见即所得 → 自动回到双栏（源码 + 预览）");
+console.log("17) 切到源代码模式 → 自动回到双栏（源码 + 预览）");
 const viewMenu2 = await c.evaluate(`(() => {
-  const el = Array.from(document.querySelectorAll("*"))
-    .find(e => (e.textContent || "").trim() === "视图(V)");
+  const el = Array.from(document.querySelectorAll(".menubar .menu-title"))
+    .find(e => (e.textContent || "").trim().startsWith("视图"));
   const r = el.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()`);
 await c.click(viewMenu2.x, viewMenu2.y);
-await c.waitFor(`document.body.innerText.includes("所见即所得")`, { timeout: 5000 });
+await c.waitFor(`document.body.innerText.includes("源代码模式")`, { timeout: 5000 });
 const wysiwygItem = await c.evaluate(`(() => {
-  const el = Array.from(document.querySelectorAll("*"))
-    .filter(e => e.children.length === 0 && (e.textContent || "").includes("所见即所得"))
-    .pop();
+  const el = Array.from(document.querySelectorAll(".menu-dropdown .menu-item"))
+    .find(e => (e.textContent || "").includes("源代码模式"));
   const r = el.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()`);
@@ -419,8 +421,60 @@ const after = await c.evaluate(`({
   previewDisplay: getComputedStyle(document.querySelector(".preview-pane")).display,
   panesClass: document.querySelector(".panes").className,
 })`);
-check("关掉所见即所得后自动回到双栏", after.previewDisplay !== "none", JSON.stringify(after));
+check("切到源代码模式后自动回到双栏", after.previewDisplay !== "none", JSON.stringify(after));
 await c.screenshot(SHOT("wysiwyg-17-source-split"));
+
+console.log("18) 仿 Typora 写作界面：纸张观感 + 格式菜单/快捷键");
+await c.evaluate(`localStorage.clear()`);
+await c.goto("http://localhost:1420/?browserdev=1");
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+const paper = await c.evaluate(`(() => {
+  const host = document.querySelector(".editor-host");
+  const cm = document.querySelector(".cm-editor");
+  const content = document.querySelector(".cm-content");
+  const body = document.querySelector(".editor-pane .pane-body");
+  const cs = getComputedStyle(content);
+  return {
+    hostHasWriteClass: host.className.includes("write"),
+    gutterDisplay: (() => { const g = document.querySelector(".cm-gutters"); return g ? getComputedStyle(g).display : null; })(),
+    fontFamily: cs.fontFamily,
+    fontSize: cs.fontSize,
+    lineHeight: cs.lineHeight,
+    paperBg: getComputedStyle(body).backgroundColor,
+    paperMaxWidth: getComputedStyle(body).maxWidth,
+    status: document.querySelector(".statusbar").innerText.split("\\n").join(" | "),
+  };
+})()`);
+check("写作模式下编辑器带 write 类", paper.hostHasWriteClass, JSON.stringify(paper));
+check("无行号槽（Typora 没有行号）", paper.gutterDisplay === "none", paper.gutterDisplay);
+check("正文是衬线字体（与预览/PDF 输出一致）", /serif|Songti|Noto Serif/i.test(paper.fontFamily), paper.fontFamily);
+check("字号/行距是写作排版（16px / ≥1.8）", parseFloat(paper.fontSize) >= 16 && parseFloat(paper.lineHeight) >= 1.8, JSON.stringify([paper.fontSize, paper.lineHeight]));
+check("整页纸张限宽居中", paper.paperMaxWidth !== "none", paper.paperMaxWidth);
+check("状态栏有模式标识且不显示行列", paper.status.includes("写作") && !paper.status.includes("行 "), paper.status);
+await c.screenshot(SHOT("wysiwyg-18-write-ui"));
+
+// 格式菜单：加粗（Ctrl+B）
+await c.click(400, 300);
+await c.selectAll();
+await c.type("要加粗的文字\n");
+await c.selectAll();
+await c.key("b", { code: "KeyB", keyCode: 66, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+const bold = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+check("Ctrl+B 加粗（插入 Typst 标记）", bold.includes("*要加粗的文字*"), JSON.stringify(bold));
+
+// 格式菜单：标题 1（Ctrl+1）
+await c.key("1", { code: "Digit1", keyCode: 49, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+const heading = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+check("Ctrl+1 标题（行首加 `= `，写作模式下立刻变大）", heading.trim().startsWith("= "), JSON.stringify(heading));
+const headingSize = await c.evaluate(`(() => {
+  const el = document.querySelector(".cm-markup-heading");
+  return el ? parseFloat(getComputedStyle(el).fontSize) : null;
+})()`);
+check("标题在写作模式下字号显著放大", headingSize !== null && headingSize > 24, String(headingSize));
+await c.screenshot(SHOT("wysiwyg-19-write-format"));
 
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

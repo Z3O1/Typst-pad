@@ -105,18 +105,28 @@ function renderPage(lines: string[], pageIndex: number, pageCount: number): stri
 interface RealMathFixture {
   body: string;
   display: boolean;
+  /** 编译字号（pt）：必须与被请求的字号一致，否则尺寸/基线都不对 */
+  sizePt?: number;
   svg: string;
   widthPt: number;
   heightPt: number;
   baselinePt: number;
 }
 
-/** 取注入的真实公式产物（body + 风格完全匹配才算命中；没有则退回假 SVG） */
-function realMath(body: string, display: boolean): RealMathFixture | undefined {
+/**
+ * 取注入的真实公式产物：body + 风格 + **字号** 三者都要对上（字号不同尺寸就不对，
+ * 宁可退回假 SVG 也不要给出尺寸错误的"真产物"）。夹具未标字号时按旧格式放行。
+ */
+function realMath(body: string, display: boolean, sizePt: number): RealMathFixture | undefined {
   const list = (window as unknown as { __DEV_MATH_FIXTURES?: RealMathFixture[] })
     .__DEV_MATH_FIXTURES;
   if (!Array.isArray(list)) return undefined;
-  return list.find((f) => f.body === body && f.display === display);
+  return list.find(
+    (f) =>
+      f.body === body &&
+      f.display === display &&
+      (f.sizePt === undefined || Math.abs(f.sizePt - sizePt) < 0.01),
+  );
 }
 
 /**
@@ -127,12 +137,28 @@ function fakeMath(body: string, display: boolean) {
   const widthPt = Math.max(4, body.length * 5.2);
   const heightPt = display ? 16 : 7.2;
   const baselinePt = display ? 8.4 : 5.6;
+  // 虚线边框 + 「dev 假渲染」标注：这个桩画的**不是** typst 排版，必须一眼看得出来，
+  // 否则很容易把假产物当成真渲染去排查（实测踩过：以为公式渲染错了）。
   const svg =
     `<svg viewBox="0 0 ${widthPt} ${heightPt}" width="${widthPt}pt" height="${heightPt}pt" ` +
-    `xmlns="http://www.w3.org/2000/svg"><text x="0" y="${baselinePt}" font-size="10.5" ` +
+    `xmlns="http://www.w3.org/2000/svg">` +
+    `<rect x="0.4" y="0.4" width="${Math.max(0, widthPt - 0.8)}" height="${Math.max(0, heightPt - 0.8)}" ` +
+    `fill="none" stroke="#e05555" stroke-width="0.8" stroke-dasharray="2 1.5"/>` +
+    `<text x="0" y="${baselinePt}" font-size="10.5" ` +
     `font-style="italic" font-family="New Computer Modern Math, serif" fill="#000000">` +
     `${escapeXml(body)}</text></svg>`;
   return { ok: true, svg, widthPt, heightPt, baselinePt };
+}
+
+/**
+ * 真产物的可用性提示：如果**真实编译未接入**（浏览器里只能假渲染），首次挂载时在控制台
+ * 明确说一次，并把提示写进页面标题，避免"假排版当成真排版"。
+ */
+export function warnFakeRendering(): void {
+  console.warn(
+    "[browser-dev] 公式与整页预览都是**桩产物**（不是 typst 排版）：仅用于调 UI 与交互。\n" +
+      "要看到真实排版，请用桌面版 `npm run tauri dev`。",
+  );
 }
 
 /** 当前文档 → 假 SVG 页数组 */
@@ -189,7 +215,8 @@ async function handleCommand(
       // 有注入的真实产物就用真实产物（浏览器里看到的是 typst 真排版，含真尺寸/真基线）。
       // 注意补 `ok: true`：夹具 json 里没有该字段，缺了会被前端当成"渲染失败"而不渲染
       // （实测踩过：页面里公式一直停在源码，看不出是夹具的问题）。
-      const real = realMath(body, a.display === true);
+      const sizePt = typeof a.sizePt === "number" ? a.sizePt : 12;
+      const real = realMath(body, a.display === true, sizePt);
       return real ? { ok: true, ...real } : fakeMath(body, a.display === true);
     }
     case "write_file": {
@@ -272,5 +299,6 @@ export function installBrowserDevStub(): void {
   console.info(
     "[browser-dev] 浏览器开发模式已启用：__TAURI_INTERNALS__ 为假实现，预览来自假 SVG。"
   );
+  warnFakeRendering();
   console.info(`[browser-dev] @tauri-apps/api 的 invoke 类型：${typeof tauriInvoke}`);
 }

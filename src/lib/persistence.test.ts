@@ -19,7 +19,7 @@ describe("persistence", () => {
       fileTitle: "doc.typ",
       prefixEnabled: true,
       prefixCode: "#set text(size: 12pt)\n",
-      livePreview: false,
+      viewMode: "source",
       showPreview: true,
     });
     expect(loadState()).toEqual({
@@ -29,7 +29,7 @@ describe("persistence", () => {
       fileTitle: "doc.typ",
       prefixEnabled: true,
       prefixCode: "#set text(size: 12pt)\n",
-      livePreview: false,
+      viewMode: "source",
       showPreview: true,
     });
   });
@@ -40,34 +40,47 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: true, showPreview: false });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: true, showPreview: false });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false });
     expect(loadState().theme).toBe("system");
   });
 
-  it("旧存档（无 showPreview 字段）跟随形态：所见即所得 → 单栏", () => {
+  it("旧存档（无 showPreview 字段）跟随模式：写作 → 单栏，源码 → 双栏", () => {
     localStorage.setItem(
       "typst-pad:state",
-      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: true }),
+      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write" }),
     );
     expect(loadState().showPreview).toBe(false);
     localStorage.setItem(
       "typst-pad:state",
-      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: false }),
+      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "source" }),
     );
     expect(loadState().showPreview).toBe(true);
   });
 
-  it("旧存档（无 livePreview 字段）默认开启所见即所得", () => {
+  it("旧存档（只有 livePreview 布尔）迁移到 viewMode", () => {
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: false }),
+    );
+    expect(loadState().viewMode).toBe("source");
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: true }),
+    );
+    expect(loadState().viewMode).toBe("write");
+  });
+
+  it("全新存档（无任何模式字段）默认写作模式", () => {
     localStorage.setItem(
       "typst-pad:state",
       JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "" }),
     );
-    expect(loadState().livePreview).toBe(true);
+    expect(loadState().viewMode).toBe("write");
   });
 });

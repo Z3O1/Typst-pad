@@ -10,6 +10,7 @@ import { EditorView } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import { livePreview } from "./live-preview";
 import { mathCacheKey } from "./math-ranges";
+import { MATH_SIZE_PT } from "./typst-engine";
 import type { MathRender } from "./typst-engine";
 
 /** 假渲染结果：真实契约里 svg 是 Rust 侧产物，这里只需区分不同公式 */
@@ -36,7 +37,7 @@ describe("livePreview 扩展", () => {
   ) {
     const enabled = opts.enabled ?? true;
     const dark = opts.dark ?? false;
-    if (opts.cache) cache.set(mathCacheKey("x^2", false, ""), render("x^2"));
+    if (opts.cache) cache.set(mathCacheKey("x^2", false, "", MATH_SIZE_PT), render("x^2"));
     view = new EditorView({
       parent: host,
       state: EditorState.create({
@@ -91,7 +92,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("渲染失败（ok:false）不显示 widget，保持源码", () => {
-    cache.set(mathCacheKey("bad", false, ""), { ...render("bad"), ok: false, error: "boom" });
+    cache.set(mathCacheKey("bad", false, "", MATH_SIZE_PT), { ...render("bad"), ok: false, error: "boom" });
     mount("$bad$");
     expect(widgetCount()).toBe(0);
     expect(text()).toContain("$bad$");
@@ -108,7 +109,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("独占整行的行间公式 → 块级 widget（居中显示）", () => {
-    cache.set(mathCacheKey("x^2", true, ""), render("x^2"));
+    cache.set(mathCacheKey("x^2", true, "", MATH_SIZE_PT), render("x^2"));
     mount("$ x^2 $\n正文");
     // 块级：DOM 里是 .cm-math-block（不是行内 .cm-math-widget）
     expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
@@ -117,7 +118,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("跨行书写的行间公式也能整行渲染成块级 widget", () => {
-    cache.set(mathCacheKey("a + b", true, ""), render("a + b"));
+    cache.set(mathCacheKey("a + b", true, "", MATH_SIZE_PT), render("a + b"));
     mount("$\n  a + b\n$\n正文");
     expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
     expect(text()).toContain("正文");
@@ -126,7 +127,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("与文字同行的 `$ x $` 不整行替换（避免吃掉旁边正文）", () => {
-    cache.set(mathCacheKey("x", true, ""), render("x"));
+    cache.set(mathCacheKey("x", true, "", MATH_SIZE_PT), render("x"));
     mount("前 $ x $ 后\n");
     expect(host.querySelectorAll(".cm-math-block").length).toBe(0);
     expect(widgetCount()).toBe(1);
@@ -135,7 +136,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("行内跨行公式保持源码（不请求、不渲染）", () => {
-    cache.set(mathCacheKey("a\nb", false, ""), render("a\nb"));
+    cache.set(mathCacheKey("a\nb", false, "", MATH_SIZE_PT), render("a\nb"));
     mount("$a\nb$\n");
     expect(widgetCount()).toBe(0);
     expect(host.querySelectorAll(".cm-math-block").length).toBe(0);
@@ -143,7 +144,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("块级 widget 随光标进入展开为源码", () => {
-    cache.set(mathCacheKey("x^2", true, ""), render("x^2"));
+    cache.set(mathCacheKey("x^2", true, "", MATH_SIZE_PT), render("x^2"));
     mount("$ x^2 $\n正文");
     expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
     view.dispatch({ selection: { anchor: 3 } }); // 落在公式内部

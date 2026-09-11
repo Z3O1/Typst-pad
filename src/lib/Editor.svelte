@@ -11,6 +11,8 @@
   import { squiggleRanges, offsetAt } from "./diagnostics-utils";
   import { livePreview, refreshLivePreview } from "./live-preview";
   import type { MathRequest } from "./live-preview";
+  import { planForCommand } from "./write-commands";
+  import type { WriteCommand } from "./write-commands";
   import { mark } from "./startup-timing";
   import { dbg } from "./debug";
 
@@ -26,8 +28,12 @@
     prefixCode?: string;
     /** 跳转目标（1-based 行列；seq 变化确保重复跳同一位置也触发 effect） */
     jumpTo?: { line: number; col: number; seq: number } | null;
-    /** 所见即所得（公式内联渲染）开关 */
-    livePreviewEnabled?: boolean;
+    /**
+     * 界面模式：
+     * - "write"  写作模式（仿 Typora）：整页纸张、衬线正文、无行号、公式/标记就地渲染；
+     * - "source" 源码模式：等宽代码编辑器 + 行号，显示 Typst 源码。
+     */
+    mode?: "write" | "source";
     /** 公式渲染结果查询（父组件维护缓存；key 见 math-ranges.mathCacheKey） */
     lookupMath?: (key: string) => MathRender | undefined;
     /** 需要渲染的公式（父组件去重 / 防抖后调 Rust 侧 compile_math） */
@@ -45,7 +51,7 @@
     diagnostics,
     prefixCode = "",
     jumpTo = null,
-    livePreviewEnabled = false,
+    mode = "source",
     lookupMath,
     onMathRequest,
     mathVersion = 0,
@@ -61,7 +67,8 @@
 
   /** 所见即所得扩展的实时选项：用闭包读最新 prop，避免重建扩展时丢状态 */
   const livePreviewOptions = {
-    enabled: () => livePreviewEnabled,
+    // 内联渲染只在写作模式开启：源码模式下要看到真正的 Typst 源码
+    enabled: () => mode === "write",
     prefix: () => prefixCode ?? "",
     lookup: (key: string) => lookupMath?.(key),
     onRequest: (requests: MathRequest[]) => onMathRequest?.(requests),
@@ -127,9 +134,13 @@
     view.focus();
   });
 
-  // 主题切换：通过 Compartment 动态重配；同时刷新公式装饰（暗色要反色，见 live-preview）
+  // 主题 / 模式切换：重配 CodeMirror 主题，并重整公式装饰
+  // （暗色要反色；写作↔源码要立刻收起/露出所有 widget，见 live-preview）
   $effect(() => {
     if (!view) return;
+    // 两种模式都要跟着主题走：**写作模式不能只靠 CSS 上色**——CodeMirror 基础主题自带
+    // 白底黑字，若暗色下不挂 oneDark，编辑器仍是白底，而公式 widget 已被 invert 成白色
+    // → 白底白字看不见（实测踩过：深色主题下公式"消失"）。
     view.dispatch({
       effects: [
         themeCompartment.reconfigure(theme === "dark" ? oneDark : []),
@@ -157,11 +168,27 @@
    */
   $effect(() => {
     if (!view) return;
-    void livePreviewEnabled;
+    void mode;
     void mathVersion;
     void prefixCode; // 前缀变化 → 编译上下文与缓存键变化，重新请求与渲染
     view.dispatch({ effects: refreshLivePreview.of(null) });
   });
+
+  /**
+   * 执行写作模式的格式命令（菜单 / 快捷键共用）：按 write-commands 的纯函数算出编辑方案，
+   * 再落成一次 CodeMirror 事务。光标落在新插入的标记内部，便于继续输入。
+   */
+  export function runWriteCommand(command: WriteCommand): void {
+    if (!view) return;
+    const { from, to } = view.state.selection.main;
+    const plan = planForCommand(view.state.doc.toString(), from, to, command);
+    view.dispatch({
+      changes: { from: plan.from, to: plan.to, insert: plan.insert },
+      selection: { anchor: plan.anchor, head: plan.head ?? plan.anchor },
+      scrollIntoView: true,
+    });
+    view.focus();
+  }
 
   /**
    * 编辑器是否存在非空选区（供右键菜单计算剪切/复制是否可点）。
@@ -260,7 +287,7 @@
   });
 </script>
 
-<div class="editor-host" bind:this={host}></div>
+<div class="editor-host" class:write={mode === "write"} bind:this={host}></div>
 
 <style>
   .editor-host {
@@ -270,6 +297,92 @@
   .editor-host :global(.cm-editor) {
     height: 100%;
     font-size: 14px;
+  }
+
+  /* ---------- 写作模式（仿 Typora）：衬线正文 + 无行号 + 宽行距 ---------- */
+  .editor-host.write :global(.cm-editor) {
+    font-size: 16px;
+  }
+
+  /*
+   * 字体必须落在 .cm-content 上：CodeMirror 的基础主题给 .cm-content 自己钉了
+   * `font-family: monospace`，只改 .cm-editor 是**不生效**的（实测：写作模式正文仍是等宽）。
+   * 字体与预览/PDF 输出一致（思源宋体），所见即所得才对得上。
+   */
+  .editor-host.write :global(.cm-content) {
+    font-family: "Noto Serif CJK SC", "Songti SC", "Source Han Serif SC", Georgia, serif;
+  }
+
+  /* 写作模式下编辑器底色/文字跟随主题变量（暗色时与纸张底色一致，不漏白底） */
+  .editor-host.write :global(.cm-editor),
+  .editor-host.write :global(.cm-scroller),
+  .editor-host.write :global(.cm-gutters) {
+    background-color: var(--bg-paper, inherit);
+  }
+
+  /* 行内原始文本 / 代码块在写作模式下仍是等宽（那是代码，不该用衬线） */
+  .editor-host.write :global(.cm-markup-raw),
+  .editor-host.write :global(.cm-raw-block-pre) {
+    font-family: Consolas, "Courier New", monospace;
+  }
+
+  /* 行号槽 / 折叠箭头：Typora 没有，写作模式下整条隐藏 */
+  .editor-host.write :global(.cm-gutters) {
+    display: none;
+  }
+
+  /* 当前行高亮（代码编辑器的味道）在写作模式下不要 */
+  .editor-host.write :global(.cm-activeLine) {
+    background: transparent;
+  }
+
+  .editor-host.write :global(.cm-content) {
+    /* 纸张内留白：左右各 48px（Typora 式的阅读边距），底部留白让末行不贴底边 */
+    padding: 40px 48px 160px;
+    line-height: 1.9;
+    caret-color: var(--typora-caret, currentColor);
+  }
+
+  /* 标题：Typora 式的字号梯度与上下留白 */
+  .editor-host.write :global(.cm-line:has(.cm-markup-heading)) {
+    padding-top: 0.6em;
+    padding-bottom: 0.2em;
+  }
+
+  .editor-host.write :global(.cm-markup-heading-1) {
+    font-size: 1.8em;
+    line-height: 1.45;
+    font-weight: 700;
+  }
+
+  .editor-host.write :global(.cm-markup-heading-2) {
+    font-size: 1.5em;
+    line-height: 1.5;
+    font-weight: 700;
+  }
+
+  .editor-host.write :global(.cm-markup-heading-3) {
+    font-size: 1.25em;
+    line-height: 1.55;
+    font-weight: 600;
+  }
+
+  .editor-host.write :global(.cm-markup-heading-4),
+  .editor-host.write :global(.cm-markup-heading-5),
+  .editor-host.write :global(.cm-markup-heading-6) {
+    font-size: 1.08em;
+    font-weight: 600;
+  }
+
+  /* 列表符号/序号：替换出来的字符与正文同色、不与正文基线错位 */
+  .editor-host.write :global(.cm-markup-replacement) {
+    color: var(--fg-dim);
+  }
+
+  /* 行内代码与公式 widget 的字号跟随正文 */
+  .editor-host.write :global(.cm-math-widget),
+  .editor-host.write :global(.cm-math-block) {
+    font-size: 1em;
   }
 
   .editor-host :global(.cm-editor.cm-focused) {

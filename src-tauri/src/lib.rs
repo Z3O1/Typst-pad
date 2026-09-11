@@ -101,7 +101,9 @@ async fn compile_doc(
 
 /// 渲染单个公式为紧致 SVG（compile_math）：编辑器内联渲染（所见即所得）用。
 /// body = 公式源码（不含定界 `$`），display = 是否行间（display 风格），
-/// context = 编译前缀（设置里的前缀代码，与整篇编译同源，宏与字体设置生效）。
+/// context = 编译前缀（设置里的前缀代码，与整篇编译同源，宏与字体设置生效），
+/// size_pt = 公式字号（pt，缺省 10.5 = 14px）；**必须与编辑器正文字号一致**，
+/// 写作模式正文 16px 时前端传 12。
 /// 与 compile_doc 同走命令层互斥锁 + spawn_blocking（一次一个编译，不阻塞 UI）。
 /// Err 仅用于任务本身异常终止（公式语法错误等正常失败走 Ok(ok:false, error)）。
 #[tauri::command]
@@ -111,12 +113,20 @@ async fn compile_math(
     display: bool,
     context: String,
     document_path: Option<String>,
+    size_pt: Option<f64>,
 ) -> Result<typst_world::MathOutput, String> {
     let lock = std::sync::Arc::clone(&state.lock);
     let fonts_dir = state.fonts_dir.clone();
     Ok(tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        typst_world::compile_math(&body, display, &context, document_path, &fonts_dir)
+        typst_world::compile_math(
+            &body,
+            display,
+            &context,
+            document_path,
+            &fonts_dir,
+            size_pt.unwrap_or(typst_world::MATH_TEXT_PT),
+        )
     })
     .await
     .unwrap_or_else(|_| typst_world::MathOutput::internal_error("公式渲染任务异常终止")))

@@ -175,6 +175,13 @@ export interface MathRender {
 }
 
 /**
+ * 公式编译字号（pt）：**必须等于编辑器正文字号**，否则公式与正文大小不匹配
+ * （曾经的 bug：写作模式正文改成 16px 后公式仍按 10.5pt 编译，公式比正文小一圈）。
+ * 16px = 16 * 72 / 96 = 12pt。
+ */
+export const MATH_SIZE_PT = 12;
+
+/**
  * 渲染单个公式（编辑器内联渲染用）。失败收敛为 `{ ok: false, error }`，不抛异常
  * （调用方保持源码显示）；invoke/IPC 异常同样收敛。
  */
@@ -183,6 +190,7 @@ export async function compileMath(
   display: boolean,
   context: string,
   documentPath: string | null,
+  sizePt: number = MATH_SIZE_PT,
 ): Promise<MathRender> {
   try {
     const out = await invoke<MathRender>("compile_math", {
@@ -190,6 +198,7 @@ export async function compileMath(
       display,
       context,
       documentPath,
+      sizePt,
     });
     return {
       ok: out.ok,

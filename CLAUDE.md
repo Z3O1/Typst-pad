@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Typst-pad：所见即所得（Typora / Obsidian Live Preview 式）的 Typst 桌面编辑器——**默认单栏**在编辑区就地排版（公式渲染成排版结果、标记符号自动收起，光标/选区进入即展开源码）；需要核对整页分页时，视图菜单可调出右侧实时预览栏（关掉所见即所得会自动回到"源码 + 预览"双栏）。前端 SvelteKit SPA（adapter-static），桌面壳 Tauri 2（Rust），编译渲染用**内嵌 typst crate**（0.15.x，Rust 进程内编译，本地字体）。代码注释与 README 均为中文。
+Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作模式」（默认，单栏整页纸张：公式与标记就地排版、光标/选区进入即展开源码、无行号）与「源代码模式」（`Ctrl+/`，双栏：等宽代码编辑器 + 右栏整页预览）。前端 SvelteKit SPA（adapter-static），桌面壳 Tauri 2（Rust），编译渲染用**内嵌 typst crate**（0.15.x，Rust 进程内编译，本地字体）。代码注释与 README 均为中文。
 
 ## 常用命令
 
@@ -72,9 +72,17 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   2. `markup-ranges` 的"是否与公式/代码区相交"判定用**二分**（`overlapsSorted`），不是 `some(...)` 线性扫描——区域表上千条时线性是 O(候选 × 区域)，实测一次重建 47ms，改二分后 2.6ms。
   3. 编译上下文在**扩展内部**算（`prefix` 选项 + 当前 doc），不要挪回页面做 `$derived`：那会让每次按键多一遍全文档扫描。
   合计：40k 字符文档一次更新 6.4ms（4k 字符 ~1.5ms）。
-- **所见即所得 = 单栏**：`showPreview` 与 `livePreview` 联动（开=单栏、关=双栏），视图菜单可单独打开预览栏；预览栏隐藏时容器仍在 DOM（`display:none`），`compile_doc` 写入链路不受影响。
+- **两套 UI（仿 Typora）**：`viewMode: "write" | "source"`（取代旧的 `livePreview` 布尔，旧存档自动迁移）。
+  - **写作模式**（默认，单栏）：灰底 + 居中纸张（`.panes.single .editor-pane .pane-body` 上用 `--bg-backdrop`/`--bg-paper`）、衬线正文（Noto Serif CJK SC，与预览/PDF 输出同字体）、16px/行距 1.9、**隐藏行号槽**与当前行高亮（都在 `Editor.svelte` 的 `.editor-host.write` 样式里）、状态栏显示「写作」且不显示行列。公式/标记就地排版。
+    - **字体必须写在 `.cm-content` 上**：CodeMirror 基础主题给 `.cm-content` 自己钉了 `font-family: monospace`，只改 `.cm-editor` 不生效（实测：写作模式正文仍是等宽）。
+    - **暗色下必须照常挂 oneDark**：CM6 基础主题自带**白底黑字**；若写作模式不挂主题，编辑器仍是白底，而公式 widget 已被 `filter: invert(1)` 反成白色 → **白底白字，公式"消失"**（实测被反馈的就是这个）。主题变量 `--bg-paper` 同时给 `.cm-editor/.cm-scroller/.cm-gutters`，避免深色纸与编辑器底色两块色。
+    - **公式字号必须等于正文字号**：写作模式 16px → `MATH_SIZE_PT = 12`（`typst-engine.ts`），随 `compile_math` 的 `size_pt` 参数传给 Rust（缺省 10.5pt = 源码模式 14px）。字号参与缓存键。曾经写死 10.5pt，写作模式下公式比正文小一圈（实测被反馈）。
+  - **源代码模式**（`Ctrl+/`，双栏）：等宽 14px + 行号 + oneDark（暗），右侧整页预览；此模式下 live-preview 整体关闭（看到的是真正的 Typst 源码）。
+  - **格式操作走菜单 + 快捷键，不做工具条**（Typora 没有工具条）。纯逻辑在 `write-commands.ts`（`planForCommand` → `EditPlan`），编辑器侧只有一个 `runWriteCommand` 把它们落成事务。**块级命令的选区语义**：无选区 → 替换光标所在行（该行内容成为块内容，不丢字）；有选区 → 只替换选区。**包装命令把选区首尾空白留在定界符外侧**：`*文字\n*` 在 Typst 里是跨行强调、我们自己的标记扫描也不识别 → 会退化成字面星号（实测：Ctrl+A 后按 Ctrl+B）。**引用必须用 `#quote(block: true)[...]`**——Typst 没有 Markdown 的 `>` 语法，写 `>` 只会留字面字符。
+  - 快捷键分两处：无 Shift 的（Ctrl+B/I/K/1/2/3/0/M）放菜单项的 `shortcut` 由 MenuBar 统一匹配；**带 Shift 的**（Ctrl+Shift+` 行内代码、Ctrl+Shift+M 公式块、Ctrl+Shift+[ / ] 列、Ctrl+Shift+Q 引用、Ctrl+Shift+C 代码块）由 `+page.svelte` 的 window keydown 处理——MenuBar 的匹配器只支持「Ctrl+单键」，这是既有约定（见 menu-keys.ts）。
+  - `showPreview` 与模式联动：写作模式单栏、源码模式双栏；预览栏隐藏时容器仍在 DOM（`display:none`），`compile_doc` 写入链路不受影响。
 - **回退**：渲染失败 / 未就绪 / 行内跨行公式 → 不挂 widget，保持源码显示（不出现空占位、不弹错误）。
-- **持久化**：`livePreview` 与主题一起存 localStorage（旧存档缺字段时默认开启）；视图菜单提供开关。
+- **持久化**：`viewMode`（+ `showPreview`）与主题一起存 localStorage；旧的 `livePreview` 布尔自动迁移为 `viewMode`；视图菜单（`Ctrl+/`）切换。
 
 ### 启动耗时观测
 
@@ -139,7 +147,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 - **浏览器端交互验证（无显示器环境下的验收手段）**：`scripts/browser-check/`（零依赖 CDP 驱动）
   - `cdp.mjs`：连接 Windows headless Chrome 的 CDP（WSL 里直接跑 `/mnt/c/Program Files/Google/Chrome/Application/chrome.exe --headless=new --remote-debugging-port=9333 --remote-debugging-address=0.0.0.0 --user-data-dir=... 'http://localhost:1420/?browserdev=1'`；镜像网络下 WSL 可直连 localhost:9333）；提供 evaluate / 真实点击 / 真实输入（`Input.insertText`）/ 截图。
   - `probe.mjs`：排障小工具（导航到页面 → 打印渲染结果/页面内错误），"页面是不是坏了"先用它看。
-  - `wysiwyg.mjs`：所见即所得的 40 项验收（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 单栏形态（预览栏不显示、编辑区占满并居中）→ 菜单切回双栏 → 关掉所见即所得自动回双栏），截图落在 `.browser-check/`（已 gitignore）。
-  - **两个实测坑**：① `Page.navigate` 对**相同 URL** 不重新加载，上一次停在 500 错误页时会一直复现 → `goto()` 先跳 `about:blank`；② 截图必须由 Node 写进**工作区**（写 `/mnt/c/...` 会被文件沙箱拒绝，报 EROFS），别交给 Chrome 写。
-  - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`，再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
+  - `wysiwyg.mjs`：所见即所得的 49 项验收（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大），截图落在 `.browser-check/`（已 gitignore）。
+  - **实测坑（都踩过）**：① `Page.navigate` 对**相同 URL** 不重新加载，上一次停在 500 错误页时会一直复现 → `goto()` 先跳 `about:blank`；② 截图必须由 Node 写进**工作区**（写 `/mnt/c/...` 会被文件沙箱拒绝，报 EROFS），别交给 Chrome 写；③ **Windows 的 headless Chrome 必须加 `--no-proxy-server`**，否则 localhost 会被系统代理吞掉、页面报"无法访问此网站"，看起来像"WSL 端口转发坏了"（判断连通性更干净的判据是 Windows 自带 `curl.exe`：`/mnt/c/Windows/System32/curl.exe -s -o NUL -w '%{http_code}' http://localhost:1420/`）；④ 验收脚本开始前**必须清 localStorage 再重新加载**，否则上一轮遗留的「源代码模式」会让页面不渲染公式，第一条断言莫名超时；⑤ 找菜单项要限定在 `.menu-dropdown .menu-item` 里，别在全页找同名文字（状态栏会显示"源代码模式"这类同名状态文字）。
+  - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`（**两种字号各一份**：12pt 写作模式 / 10.5pt 源码模式，桩按 body+display+**sizePt** 匹配，字号对不上宁可退回假 SVG），再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
   - 浏览器开发模式（`?browserdev=1`，见 `src/lib/browser-dev-stub.ts`）里的 `compile_doc` 是假实现（假分页 SVG），`compile_math` 在没有注入夹具时也是假 SVG；文件/PDF 等 Tauri 命令同样是假的。**真实 typst 排版可用夹具链路上浏览器验证**，只有 Tauri IPC / WebView2 那一层必须桌面端（Windows）确认。
