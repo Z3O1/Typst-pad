@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-11
+
 ### Added
 
 - **「启动时恢复上次内容」**（设置弹窗里的开关，默认开）：关掉应用再打开，上次未保存的正文、文件名与未保存标记原样回来——这是"内容丢了"的最后一道安全网（Editor 陈旧推送、误触重读、WebView 重载都能兜住）。关掉开关即回到「每次全新开始」（只恢复主题/前缀/界面模式）；「新建」会清掉存档，下次启动自然恢复出空文档。持久化字段随之补齐 `dirty` / `restoreSession`
@@ -11,6 +13,8 @@
 ### Changed
 
 - **字体目录从 `static/fonts/` 移到 `src-tauri/fonts/`**：字体只有 Rust 编译侧在用（`bundle.resources` → `resource_dir/fonts`），放在前端静态目录会被 SvelteKit 整份拷进前端产物（`build/fonts/`，前端从不引用），安装包内白多一份约 5.7MB。相关路径同步更新：`tauri.conf.json` 的 `resources`（改成 `fonts → fonts/`）、`resolve_fonts_dir` 的回退路径（`src-tauri/fonts`）、Rust 单测的字体目录、`scripts/check-fonts.mjs`、`scripts/download-fonts.mjs` 与若干调试脚本
+- CI 的 action 全部升级到 Node 24 运行时版本（`actions/checkout@v5`、`actions/setup-node@v5`、`actions/cache@v5`、`actions/upload-artifact@v6`、`softprops/action-gh-release@v3`），消除 GitHub Actions 的 "Node.js 20 is deprecated" 告警；缓存 key 规则不变（`Swatinem/rust-cache@v2` 本身已是 node24，未动）
+- 版本号 0.7.0 → 0.7.1（package.json / tauri.conf.json / Cargo.toml 三处一致）
 
 ### Fixed
 
@@ -29,7 +33,6 @@
 
 - **写作模式 / 源代码模式两套 UI（仿 Typora）**：写作模式为单栏整页纸张（灰底 + 居中白纸 + 轻阴影）、衬线正文（思源宋体，与预览/PDF 输出同字体）、16px 行距 1.9、无行号；源代码模式为等宽代码编辑器 + 行号 + 右栏整页预览。`Ctrl+/` 或「视图 → 源代码模式」切换，状态栏有模式标识；格式操作走「格式」菜单 + 快捷键（无工具条，与 Typora 一致）
 - 版本号 0.6.0 → 0.7.0（package.json / tauri.conf.json / Cargo.toml 三处一致）
-- CI 的 action 全部升级到 Node 24 运行时版本（`actions/checkout@v5`、`actions/setup-node@v5`、`actions/cache@v5`、`actions/upload-artifact@v6`、`softprops/action-gh-release@v3`），消除 GitHub Actions 的 "Node.js 20 is deprecated" 告警；缓存 key 规则不变（`Swatinem/rust-cache@v2` 本身已是 node24，未动）
 
 ### Fixed
 
