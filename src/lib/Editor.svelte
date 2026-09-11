@@ -110,17 +110,28 @@
     };
   });
 
-  // 外部 doc 变化（如打开文件）时替换编辑器全文
+  // 外部 doc 变化（如打开文件）时替换编辑器全文。
+  // 两条约束，缺一就会出现"切个模式，未保存的新内容退回上一版"（实测被反馈）：
+  // 1. **同一个外部值只推一次**：effect 因任何原因重跑（组件重挂载、props 重新生效）时，
+  //    已推过的值不再二次覆盖编辑器里正在编辑的内容；
+  // 2. 父组件的 doc 是**实时镜像**（见 +page.svelte 的 editorDoc），正常情况下与编辑器内容
+  //    永远相等，这里的相等判断会把绝大多数重跑变成无副作用的一次比较。
+  let appliedExternalDoc: string | undefined = undefined;
   $effect(() => {
     if (!view || doc === undefined) return;
+    if (doc === appliedExternalDoc) return;
+    appliedExternalDoc = doc;
     const current = view.state.doc.toString();
-    if (doc !== current) {
-      applyingExternal = true;
+    if (doc === current) return;
+    applyingExternal = true;
+    try {
       view.dispatch({
         changes: { from: 0, to: current.length, insert: doc },
       });
+    } finally {
       applyingExternal = false;
     }
+    dbg.log("editor", `外部文档替换 ${current.length} → ${doc.length} 字符`);
   });
 
   // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见

@@ -476,5 +476,39 @@ const headingSize = await c.evaluate(`(() => {
 check("标题在写作模式下字号显著放大", headingSize !== null && headingSize > 24, String(headingSize));
 await c.screenshot(SHOT("wysiwyg-19-write-format"));
 
+console.log("20) 模式切换不丢内容：写作 ↔ 源码 双向切换（含在源码模式里继续输入）");
+// 回归网：editorDoc 曾是"只在上次打开/新建时更新"的陈旧镜像，任何让 Editor 重挂载或让 props
+// 重新生效的情形都会把旧内容当外部文档推回去（用户反馈："切换模式时未保存内容消失了"）。
+// 这里用真实输入 + 真实快捷键把两条路径都走一遍。
+await c.evaluate(`localStorage.clear()`);
+await c.goto("http://localhost:1420/?browserdev=1");
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+await c.evaluate(`(() => { window.__cm = document.querySelector(".cm-content"); return 1; })()`);
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+await c.type("KEEP-A 写作输入\n");
+await new Promise((r) => setTimeout(r, 400));
+// Ctrl+/ 进源码模式
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 500));
+const inSource = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+check("Ctrl+/ 切到源码模式后内容仍在", inSource.includes("KEEP-A"), JSON.stringify(inSource));
+// 在源码模式里继续输入
+await c.type("KEEP-B 源码输入\n");
+await new Promise((r) => setTimeout(r, 400));
+// Ctrl+/ 切回写作模式
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 500));
+const backWrite = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+check(
+  "切回写作模式后两段输入都还在",
+  backWrite.includes("KEEP-A") && backWrite.includes("KEEP-B"),
+  JSON.stringify(backWrite),
+);
+const sameNode = await c.evaluate(`document.querySelector(".cm-content") === window.__cm`);
+check("模式切换不重挂载编辑器（同一个 .cm-content 节点）", sameNode === true, String(sameNode));
+await c.screenshot(SHOT("wysiwyg-20-mode-switch-keeps-content"));
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

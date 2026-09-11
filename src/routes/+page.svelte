@@ -80,7 +80,11 @@
 
   // $state：窗口标题 effect 依赖内容——输入过又删光后 dirty 不变，须由内容变化驱动圆点实时清除
   let doc: string = $state(SAMPLE_DOC);
-  let editorDoc = $state(SAMPLE_DOC); // 绑定给 Editor 的受控文档
+  // 编辑器文档的**镜像**：既作为"外部推送"通道（打开/新建/重读时赋新值 → 编辑器替换全文），
+  // 也随每次输入同步（handleDocChange）。**必须保持镜像同步**：若只更新 doc，editorDoc 会停在
+  // 上次打开/保存时的旧值，任何让 Editor 重挂载或让 props 重新生效的情形（窗口重载、组件树重建）
+  // 都会把旧值当成"外部文档"推回去，表现为"切个模式未保存的新内容就退回上一个版本"。
+  let editorDoc = $state(SAMPLE_DOC);
   let filePath: string | null = null;
   let previewStatus: "idle" | "ready" | "error" = $state("idle");
   let previewError = $state("");
@@ -203,6 +207,7 @@
 
   function handleDocChange(newDoc: string) {
     doc = newDoc;
+    editorDoc = newDoc; // 镜像同步（见 editorDoc 声明处）：陈旧镜像 = 切模式/重挂载时丢内容
     dirty = true;
     scheduleCompile();
     schedulePersist();
@@ -223,8 +228,16 @@
 
   /** 按路径加载 .typ 文件到编辑器（供打开对话框/拖放/关联打开复用） */
   async function openPath(path: string): Promise<boolean> {
-    if (isEffectiveDirty(dirty, doc) && filePath !== path) {
-      const ok = await confirmDiscard();
+    // 有未保存修改就必须确认——**包括打开的就是当前这个文件**：此前用 `filePath !== path`
+    // 放行同路径，拖放/关联打开同一个文件（Windows 上把 .typ 拖进窗口很常见）会静默用磁盘内容
+    // 覆盖未保存的输入，表现为"内容退回上次保存时的版本"。
+    if (isEffectiveDirty(dirty, doc)) {
+      const same = filePath === path;
+      const ok = await confirmDiscard(
+        same
+          ? `「${fileTitle}」有未保存的修改，重新打开将丢弃这些修改。仍要打开吗？`
+          : "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？",
+      );
       if (!ok) return false;
     }
     try {
@@ -938,7 +951,7 @@
       <div class="pane-body">
         <Editor
           bind:this={editorRef}
-          initialDoc={SAMPLE_DOC}
+          initialDoc={editorDoc}
           doc={editorDoc}
           theme={resolvedTheme}
           diagnostics={editorDiagnostics}

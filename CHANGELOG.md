@@ -8,6 +8,12 @@
 
 - **字体目录从 `static/fonts/` 移到 `src-tauri/fonts/`**：字体只有 Rust 编译侧在用（`bundle.resources` → `resource_dir/fonts`），放在前端静态目录会被 SvelteKit 整份拷进前端产物（`build/fonts/`，前端从不引用），安装包内白多一份约 5.7MB。相关路径同步更新：`tauri.conf.json` 的 `resources`（改成 `fonts → fonts/`）、`resolve_fonts_dir` 的回退路径（`src-tauri/fonts`）、Rust 单测的字体目录、`scripts/check-fonts.mjs`、`scripts/download-fonts.mjs` 与若干调试脚本
 
+### Fixed
+
+- **未保存的新内容会"退回上一版"**（用户反馈：切换写作/源代码模式后新输入消失）：`editorDoc` 原本只在打开/新建/重读时更新，是个**陈旧镜像**——只要 Editor 重挂载或 props 重新生效，旧值就会被当成"外部文档"推回编辑器，把新输入覆盖掉。现在 `editorDoc` 是**实时镜像**（每次输入同步），`initialDoc` 也用它（重挂载即恢复），Editor 侧再加"同一外部值只推一次"守卫与替换日志（`dbg` 的 `editor` 通道）
+- **拖放/关联打开「当前这个文件」会静默覆盖未保存修改**：`openPath` 此前用 `filePath !== path` 豁免同路径确认（把 .typ 拖进窗口最常命中的就是这个分支），现在只要有未保存修改一律确认，文案按同/异文件区分
+- 浏览器验收脚本新增 3 项回归断言（`wysiwyg.mjs` 第 20 组）：Ctrl+/ 切到源码模式内容仍在、在源码模式继续输入后切回写作模式两段都在、模式切换不重挂载编辑器
+
 ## [0.7.0] - 2026-09-10
 
 ### Added
