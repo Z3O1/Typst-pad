@@ -2,7 +2,7 @@
 //! 解析、编译与导出（SVG/PDF）。
 //!
 //! 整体思路参考 typst 官方 CLI（typst-cli 的 SystemWorld），但针对编辑器场景做了简化：
-//! - 字体：打包字体目录（打包后为 resource_dir/fonts，开发/测试为仓库 static/fonts）
+//! - 字体：打包字体目录（打包后为 resource_dir/fonts，开发/测试为 `src-tauri/fonts`）
 //!   与系统字体目录（见 system_font_dirs，Windows/Linux/macOS）合并加载全部 .ttf/.otf，
 //!   注册进同一个 FontBook（与 typst CLI 字体集对齐，同一文档两边字体解析一致）；
 //!   进程内缓存（cached_fonts），每次编译复用而非重读盘；
@@ -397,20 +397,21 @@ fn cached_fonts(fonts_dir: &Path) -> (FontBook, Vec<Font>) {
 }
 
 /// 解析字体目录：优先打包/构建产物 resource_dir 下的 fonts（tauri.conf.json
-/// bundle.resources 复制而来），退回仓库内 static/fonts（开发模式不复制资源时的兜底，
-/// 也是 cargo test 的路径）。
+/// bundle.resources 的 `"fonts": "fonts/"` 映射而来），退回仓库内 `src-tauri/fonts`
+/// （开发模式不复制资源时的兜底，也是 cargo test 的路径）。
+/// 字体目录**不放在前端静态目录**（曾经的 `static/fonts`）：那会被 SvelteKit 整份拷进前端
+/// 产物（`build/fonts/`），而前端从不引用它（无 @font-face），安装包里凭空多一份 5.7MB。
 pub fn resolve_fonts_dir(app: &tauri::AppHandle) -> PathBuf {
     use tauri::Manager;
     if let Ok(res) = app.path().resource_dir() {
-        // bundle.resources 走 map 形式 `static/fonts -> fonts/` 时落在 resource_dir/fonts
-        for candidate in [res.join("fonts"), res.join("static/fonts")] {
-            if candidate.is_dir() {
-                return candidate;
-            }
+        // bundle.resources 走 map 形式 `fonts -> fonts/` 时落在 resource_dir/fonts
+        let candidate = res.join("fonts");
+        if candidate.is_dir() {
+            return candidate;
         }
     }
-    // 开发/测试回退：CARGO_MANIFEST_DIR = src-tauri，上一级是仓库根
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/fonts")
+    // 开发/测试回退：CARGO_MANIFEST_DIR = src-tauri，字体育其同目录
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts")
 }
 
 /// 编译文档为每页 SVG（pages 按页序，含 <svg> 标签）。
@@ -779,10 +780,10 @@ fn offset_to_line_column(text: &str, offset: usize) -> (u32, u32) {
 mod tests {
     use super::*;
 
-    /// 测试用字体目录：仓库根 static/fonts（cargo test 的 CWD 是 src-tauri，
-    /// 用 CARGO_MANIFEST_DIR 定位更稳）
+    /// 测试用字体目录：`src-tauri/fonts`（与打包资源同源，见 resolve_fonts_dir；cargo test 的
+    /// CWD 是 src-tauri，用 CARGO_MANIFEST_DIR 定位更稳）
     fn fonts_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/fonts")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts")
     }
 
     /// 公式渲染（compile_math）：行内公式成功，SVG 贴边且透明，
@@ -960,17 +961,17 @@ $ a^2 + b^2 = c^2 $
         assert!(!out.pages.is_empty(), "应至少有一页");
         assert!(out.pages[0].contains("<svg"), "每页应是完整 SVG");
         // 中文字体（思源宋体）与数学字体（NewCM）必须加载成功
-        assert!(font_count() >= 7, "static/fonts 下 7 个字体文件应全部注册");
+        assert!(font_count() >= 7, "src-tauri/fonts 下 7 个字体文件应全部注册");
     }
 
-    /// 字体加载：static/fonts 下 7 个打包字体全部注册成功（数学 NewCM、中文思源宋体、
+    /// 字体加载：`src-tauri/fonts` 下 7 个打包字体全部注册成功（数学 NewCM、中文思源宋体、
     /// Libertinus、DejaVu）；合并系统字体目录后这些族仍应存在。
     /// 总字体数随系统字体变化（Windows 系统字体目录有数百个文件），不断言具体值。
     #[test]
     fn fonts_all_registered() {
         // 打包目录单独加载：7 个字体文件全部注册
         let (book, fonts) = load_fonts(&fonts_dir());
-        assert_eq!(fonts.len(), 7, "static/fonts 应有 7 个字体文件");
+        assert_eq!(fonts.len(), 7, "src-tauri/fonts 应有 7 个字体文件");
         assert_bundled_families_registered(&book);
 
         // 合并加载（打包 + 系统字体目录）：打包族仍在，字体数不少于打包数量

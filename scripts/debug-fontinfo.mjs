@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 import { createTypstFontBuilder } from "@myriaddreamin/typst.ts";
 
 const files = [
-  "static/fonts/NewCMMath-Regular.otf",
-  "static/fonts/NewCMMath-Book.otf",
-  "static/fonts/LibertinusSerif-Regular.otf",
-  "static/fonts/NotoSerifCJKsc-Regular.otf",
+  "src-tauri/fonts/NewCMMath-Regular.otf",
+  "src-tauri/fonts/NewCMMath-Book.otf",
+  "src-tauri/fonts/LibertinusSerif-Regular.otf",
+  "src-tauri/fonts/NotoSerifCJKsc-Regular.otf",
 ];
 
 const builder = createTypstFontBuilder();

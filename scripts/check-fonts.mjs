@@ -1,7 +1,7 @@
-// 检查 static/fonts 下所有字体文件的魔数是否有效
+// 检查 src-tauri/fonts 下所有字体文件的魔数是否有效
 import { readFile, readdir } from "node:fs/promises";
 
-const dir = "static/fonts";
+const dir = "src-tauri/fonts";
 const files = await readdir(dir);
 let bad = 0;
 for (const f of files) {

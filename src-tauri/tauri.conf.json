@@ -28,7 +28,7 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../static/fonts": "fonts/"
+      "fonts": "fonts/"
     },
     "fileAssociations": [
       {

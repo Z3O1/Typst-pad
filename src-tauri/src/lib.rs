@@ -409,7 +409,7 @@ pub fn run() {
                     absolutize(&a, &cwd)
                 });
             app.manage(PendingFiles(Mutex::new(initial.into_iter().collect())));
-            // 内嵌编译状态：字体目录（打包后为 resource_dir/fonts，开发回退仓库 static/fonts）
+            // 内嵌编译状态：字体目录（打包后为 resource_dir/fonts，开发回退 src-tauri/fonts）
             app.manage(CompileState {
                 lock: std::sync::Arc::new(Mutex::new(())),
                 fonts_dir: typst_world::resolve_fonts_dir(app.handle()),

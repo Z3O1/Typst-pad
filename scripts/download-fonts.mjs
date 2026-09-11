@@ -1,4 +1,4 @@
-// 下载 Typst 渲染所需字体到 static/fonts/（带重试）。
+// 下载 Typst 渲染所需字体到 src-tauri/fonts/（带重试）。
 // 用法：node scripts/download-fonts.mjs
 import { writeFile, mkdir } from "node:fs/promises";
 
@@ -15,7 +15,7 @@ const FONTS = [
   [DEV_ASSETS, "NotoSerifCJKsc-Regular.otf"],
 ];
 
-await mkdir("static/fonts", { recursive: true });
+await mkdir("src-tauri/fonts", { recursive: true });
 
 let ok = 0;
 for (const [prefix, name] of FONTS) {
@@ -26,7 +26,7 @@ for (const [prefix, name] of FONTS) {
       const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
-      await writeFile(`static/fonts/${name}`, buf);
+      await writeFile(`src-tauri/fonts/${name}`, buf);
       console.log(`✓ ${name} (${(buf.length / 1024).toFixed(0)} KB)`);
       ok++;
       break;

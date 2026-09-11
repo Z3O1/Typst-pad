@@ -49,7 +49,7 @@ npm run dev          # 仅前端 UI（无预览/文件功能；非 Tauri 环境�
 npm run tauri dev    # 桌面应用（需要 Rust）
 npm run check        # 类型检查（svelte-check）
 npm test             # 前端单元测试（vitest）
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单测（编译/字体/诊断/include，需 static/fonts）
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单测（编译/字体/诊断/include，需 src-tauri/fonts）
 npm run build        # 前端生产构建
 npm run tauri build  # 打包桌面安装程序（需要 Rust）
 ```
@@ -92,14 +92,18 @@ src-tauri/
 
 ### 字体
 
-预览渲染所需字体打包在 `static/fonts/`（约 5.7MB，离线可用，无需 CDN）：
+预览渲染所需字体打包在 `src-tauri/fonts/`（约 5.7MB，离线可用，无需 CDN）：
 
 - `NotoSerifCJKsc-Regular.otf` — 中文（思源宋体）
 - `NewCMMath-{Regular,Bold,Book}.otf` — 数学（New Computer Modern Math）
 - `LibertinusSerif-{Regular,Bold}.otf` — 正文衬线
 - `DejaVuSansMono.ttf` — 等宽
 
-字体加载在 **Rust 侧**完成：编译时读取字体目录（打包后为 `resource_dir/fonts`，开发/测试兜底仓库 `static/fonts`），把全部 `.ttf/.otf` 注册进 FontBook；目录缺失时不影响编译（typst 给出缺字诊断）。打包映射见 `tauri.conf.json` 的 `bundle.resources`（`../static/fonts` → `fonts/`）。
+字体加载在 **Rust 侧**完成：编译时读取字体目录（打包后为 `resource_dir/fonts`，开发/测试为仓库 `src-tauri/fonts`），与**系统字体目录**合并后把全部 `.ttf/.otf` 注册进 FontBook（与 typst CLI 字体集对齐）；目录缺失时不影响编译（typst 给出缺字诊断）。打包映射见 `tauri.conf.json` 的 `bundle.resources`（`fonts` → `fonts/`）。
+
+字体目录刻意**不放在前端静态目录**：放 `static/` 会被 SvelteKit 整份拷进前端产物，而前端从不引用它们（编辑器用的是系统字体栈，见下），安装包里会白多一份约 5.7MB。
+
+预览与公式的 SVG **不依赖字体**：`typst_svg` 把字形导出成矢量轮廓（`<symbol>`/`<use>`/`<path>`，无 `<text>`），所以预览在任何机器上渲染一致。编辑器自身的界面文本走系统字体栈（写作模式衬线、源码模式等宽），目前**没有** `@font-face`。
 
 ### 启动耗时观测
 
@@ -108,7 +112,7 @@ src-tauri/
 ## 验证脚本
 
 ```bash
-node scripts/check-fonts.mjs    # 校验 static/fonts 字体文件有效性（魔数）
+node scripts/check-fonts.mjs    # 校验 src-tauri/fonts 字体文件有效性（魔数）
 node scripts/download-fonts.mjs # 重新下载字体（jsDelivr，含重试）
 cargo test --manifest-path src-tauri/Cargo.toml   # 原生编译验证（中文+数学 → SVG/PDF）
 ```

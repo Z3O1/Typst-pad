@@ -17,13 +17,13 @@ $ sum_(k=1)^n k = (n(n+1)) / 2 $
 console.log("typeof DOMParser in Node:", typeof DOMParser);
 
 const fontFiles = [
-  "static/fonts/NotoSerifCJKsc-Regular.otf",
-  "static/fonts/NewCMMath-Regular.otf",
-  "static/fonts/NewCMMath-Bold.otf",
-  "static/fonts/NewCMMath-Book.otf",
-  "static/fonts/LibertinusSerif-Regular.otf",
-  "static/fonts/LibertinusSerif-Bold.otf",
-  "static/fonts/DejaVuSansMono.ttf",
+  "src-tauri/fonts/NotoSerifCJKsc-Regular.otf",
+  "src-tauri/fonts/NewCMMath-Regular.otf",
+  "src-tauri/fonts/NewCMMath-Bold.otf",
+  "src-tauri/fonts/NewCMMath-Book.otf",
+  "src-tauri/fonts/LibertinusSerif-Regular.otf",
+  "src-tauri/fonts/LibertinusSerif-Bold.otf",
+  "src-tauri/fonts/DejaVuSansMono.ttf",
 ];
 
 const compiler = createTypstCompiler();

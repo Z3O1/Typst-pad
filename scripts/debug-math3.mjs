@@ -38,8 +38,8 @@ await tryCompile("A.默认CDN text assets", null);
 
 // 方案 B：本地字节 loadFonts + assets:false
 const fontFiles = [
-  "static/fonts/NewCMMath-Regular.otf",
-  "static/fonts/LibertinusSerif-Regular.otf",
+  "src-tauri/fonts/NewCMMath-Regular.otf",
+  "src-tauri/fonts/LibertinusSerif-Regular.otf",
 ];
 const fontBytes = (await Promise.all(fontFiles.map((f) => readFile(f)))).map(
   (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength),

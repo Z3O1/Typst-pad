@@ -4,12 +4,12 @@ import { readFile } from "node:fs/promises";
 import { createTypstCompiler, loadFonts } from "@myriaddreamin/typst.ts";
 
 const fontFiles = [
-  "static/fonts/NewCMMath-Regular.otf",
-  "static/fonts/NewCMMath-Bold.otf",
-  "static/fonts/NewCMMath-Book.otf",
-  "static/fonts/LibertinusSerif-Regular.otf",
-  "static/fonts/LibertinusSerif-Bold.otf",
-  "static/fonts/NotoSerifCJKsc-Regular.otf",
+  "src-tauri/fonts/NewCMMath-Regular.otf",
+  "src-tauri/fonts/NewCMMath-Bold.otf",
+  "src-tauri/fonts/NewCMMath-Book.otf",
+  "src-tauri/fonts/LibertinusSerif-Regular.otf",
+  "src-tauri/fonts/LibertinusSerif-Bold.otf",
+  "src-tauri/fonts/NotoSerifCJKsc-Regular.otf",
 ];
 const fontBytes = (await Promise.all(fontFiles.map((f) => readFile(f)))).map(
   (b) => new Uint8Array(b.buffer, b.byteOffset, b.byteLength),

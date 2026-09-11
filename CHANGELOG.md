@@ -2,6 +2,12 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+
+- **字体目录从 `static/fonts/` 移到 `src-tauri/fonts/`**：字体只有 Rust 编译侧在用（`bundle.resources` → `resource_dir/fonts`），放在前端静态目录会被 SvelteKit 整份拷进前端产物（`build/fonts/`，前端从不引用），安装包内白多一份约 5.7MB。相关路径同步更新：`tauri.conf.json` 的 `resources`（改成 `fonts → fonts/`）、`resolve_fonts_dir` 的回退路径（`src-tauri/fonts`）、Rust 单测的字体目录、`scripts/check-fonts.mjs`、`scripts/download-fonts.mjs` 与若干调试脚本
+
 ## [0.7.0] - 2026-09-10
 
 ### Added
