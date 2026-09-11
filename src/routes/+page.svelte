@@ -145,6 +145,9 @@
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
   let settingsPrefixEnabled = $state(false);
   let settingsPrefixCode = $state("");
+  // 启动时恢复上次未保存的内容（设置弹窗里的开关，默认开；关掉即回到"每次全新开始"）
+  let restoreSession = $state(true);
+  let settingsRestoreSession = $state(true);
 
   /** 关闭弹窗：保存后关闭 */
   async function onClosePromptSave() {
@@ -177,6 +180,8 @@
         prefixCode,
         viewMode,
         showPreview,
+        dirty,
+        restoreSession,
       });
     }, 300);
   }
@@ -588,6 +593,7 @@
   function openSettings() {
     settingsPrefixEnabled = prefixEnabled;
     settingsPrefixCode = prefixCode;
+    settingsRestoreSession = restoreSession;
     showSettings = true;
   }
 
@@ -595,6 +601,7 @@
   function saveSettings() {
     prefixEnabled = settingsPrefixEnabled;
     prefixCode = settingsPrefixCode;
+    restoreSession = settingsRestoreSession;
     schedulePersist();
     showSettings = false;
     statusText = "设置已保存";
@@ -826,7 +833,8 @@
     // 浏览器 gate：非 Tauri 环境（提示页）不初始化应用逻辑——编译走 Tauri 进程内命令，浏览器不可用
     if (!isDesktopApp) return;
     mark("mount-start");
-    // 每次启动都是全新会话：仅恢复主题偏好，不恢复上次编辑内容/文件
+    // 启动恢复：主题/前缀/界面模式总是恢复；**上次未保存的内容**按设置决定（默认恢复，
+    // 见设置弹窗"启动时恢复上次内容"）——这是"内容丢了"的最后一道安全网。
     const saved = loadState();
     if (saved.theme === "system" || saved.theme === "dark" || saved.theme === "light") {
       theme = saved.theme;
@@ -838,6 +846,18 @@
     viewMode = saved.viewMode ?? (saved.livePreview === false ? "source" : "write");
     // 旧存档没有 showPreview：单栏与否跟随模式（写作模式单栏，源码模式双栏对照）
     showPreview = saved.showPreview ?? viewMode === "source";
+    restoreSession = saved.restoreSession ?? true;
+    if (restoreSession && typeof saved.content === "string" && saved.content.trim() !== "") {
+      doc = saved.content;
+      editorDoc = saved.content; // 镜像同步，见 editorDoc 声明处
+      if (saved.filePath) {
+        filePath = saved.filePath;
+        fileTitle = saved.fileTitle ?? saved.filePath.split(/[\\/]/).pop() ?? "未命名.typ";
+      }
+      // 未保存标记原样恢复：存过盘又没再改的文档恢复出来不该带"未保存"圆点
+      dirty = saved.dirty ?? false;
+      statusText = "已恢复上次内容";
+    }
     mark("persist-restore");
 
     // 关于弹窗版本号：从 Tauri 运行时读取（getVersion 返回 tauri.conf.json 的
@@ -1092,6 +1112,10 @@
       <div class="modal settings-modal">
         <h3 class="modal-title">设置</h3>
         <p class="modal-text">编译/导出时自动在代码前插入前缀代码（可配置页面、字体等全局项）。</p>
+        <label class="settings-row">
+          <input type="checkbox" bind:checked={settingsRestoreSession} />
+          <span>启动时恢复上次内容（未保存的修改不会丢）</span>
+        </label>
         <label class="settings-row">
           <input type="checkbox" bind:checked={settingsPrefixEnabled} />
           <span>启用前缀代码</span>

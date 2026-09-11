@@ -510,5 +510,47 @@ const sameNode = await c.evaluate(`document.querySelector(".cm-content") === win
 check("模式切换不重挂载编辑器（同一个 .cm-content 节点）", sameNode === true, String(sameNode));
 await c.screenshot(SHOT("wysiwyg-20-mode-switch-keeps-content"));
 
+console.log("21) 启动恢复上次内容（会话安全网）：输入 → 重载 → 内容回来；开关关闭时不恢复");
+await c.evaluate(`localStorage.clear()`);
+await c.goto("http://localhost:1420/?browserdev=1");
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+const emptyAtStart = await c.evaluate(`document.querySelector(".cm-content").innerText.trim()`);
+check("清空存档后启动是空文档", emptyAtStart === "", JSON.stringify(emptyAtStart));
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.type("RESTORE-ME 未保存内容\n");
+await new Promise((r) => setTimeout(r, 700)); // 等 300ms 防抖写 localStorage
+// 重载（不清 localStorage）：模拟"关掉再打开"
+await c.goto("http://localhost:1420/?browserdev=1");
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 900));
+const restored = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+check("重载后内容被恢复", restored.includes("RESTORE-ME"), JSON.stringify(restored));
+const restoredInfo = await c.evaluate(`(() => {
+  const s = document.querySelector(".statusbar").innerText;
+  return { status: s, chars: (document.querySelector(".cm-content").innerText || "").length };
+})()`);
+// 注意：恢复提示会很快被首次编译完成后的「就绪」覆盖（compile 是异步的），
+// 所以这里断言"内容 + 字符数"，不去赌状态栏那一瞬间的文案
+check(
+  "重载后内容与字符数都恢复",
+  restoredInfo.chars >= "RESTORE-ME 未保存内容".length,
+  JSON.stringify(restoredInfo),
+);
+await c.screenshot(SHOT("wysiwyg-21-restore-session"));
+
+// 关掉开关：清空存档 → 输入 → 重载 → 应该是空文档
+await c.evaluate(`(() => {
+  const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
+  raw.restoreSession = false;
+  localStorage.setItem("typst-pad:state", JSON.stringify(raw));
+  return 1;
+})()`);
+await c.goto("http://localhost:1420/?browserdev=1");
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 900));
+const notRestored = await c.evaluate(`document.querySelector(".cm-content").innerText.trim()`);
+check("关掉「启动时恢复」后不恢复内容", notRestored === "", JSON.stringify(notRestored));
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

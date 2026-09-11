@@ -20,6 +20,16 @@ export interface PersistedState {
   livePreview?: boolean;
   /** 是否显示右侧预览栏（所见即所得形态为单栏） */
   showPreview: boolean;
+  /**
+   * 上次会话结束时是否有未保存修改。恢复会话时据此还原脏标记：
+   * 存过盘又没再改的文档恢复出来不该显示"未保存"圆点、也不该在关闭时追问。
+   */
+  dirty: boolean;
+  /**
+   * 启动时是否恢复上次未保存的内容（设置弹窗里的开关，默认开）。
+   * 关掉后回到"每次全新开始"：只恢复主题/前缀/模式。
+   */
+  restoreSession: boolean;
 }
 
 /** 读取持久化状态；不存在或损坏时返回空对象 */
@@ -39,6 +49,9 @@ export function loadState(): Partial<PersistedState> {
     }
     // 未记录过预览栏开关时跟随模式：写作模式 → 单栏
     if (state.showPreview === undefined) state.showPreview = state.viewMode === "source";
+    // 旧存档没有这两个字段：脏标记保守取 false（内容非空的恢复逻辑会另行判定），恢复会话默认开
+    if (state.dirty === undefined) state.dirty = false;
+    if (state.restoreSession === undefined) state.restoreSession = true;
     return state;
   } catch {
     return {};

@@ -21,6 +21,8 @@ describe("persistence", () => {
       prefixCode: "#set text(size: 12pt)\n",
       viewMode: "source",
       showPreview: true,
+      dirty: true,
+      restoreSession: false,
     });
     expect(loadState()).toEqual({
       theme: "dark",
@@ -31,6 +33,8 @@ describe("persistence", () => {
       prefixCode: "#set text(size: 12pt)\n",
       viewMode: "source",
       showPreview: true,
+      dirty: true,
+      restoreSession: false,
     });
   });
 
@@ -40,13 +44,13 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true });
     expect(loadState().theme).toBe("system");
   });
 
@@ -82,5 +86,16 @@ describe("persistence", () => {
       JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "" }),
     );
     expect(loadState().viewMode).toBe("write");
+  });
+
+  it("旧存档（无 restoreSession/dirty）默认：恢复会话开启、脏标记为否", () => {
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ theme: "dark", content: "旧内容", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false }),
+    );
+    const state = loadState();
+    expect(state.restoreSession).toBe(true);
+    expect(state.dirty).toBe(false);
+    expect(state.content).toBe("旧内容");
   });
 });
