@@ -1,8 +1,8 @@
 // 浏览器开发模式的诊断小工具：导航到页面，等待/报告实际渲染结果与页面内错误。
 // 用法：node scripts/browser-check/probe.mjs [url]
-import { connect } from "./cdp.mjs";
+import { connect, DEV_URL } from "./cdp.mjs";
 
-const url = process.argv[2] ?? "http://localhost:1420/?browserdev=1";
+const url = process.argv[2] ?? DEV_URL;
 const c = await connect();
 
 // 先把错误收集器挂进页面（导航前注册 Runtime 事件）

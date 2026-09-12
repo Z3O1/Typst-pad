@@ -19,6 +19,17 @@ import { writeFileSync } from "node:fs";
 
 const PORT = process.env.CDP_PORT ?? "9333";
 
+/**
+ * 被验收页面的地址（浏览器开发模式）。默认 1420 —— **但 1420 也是 `npm run tauri dev`
+ * 的 Vite 端口**：用户自己开着桌面应用时，验收脚本要用别的端口跑，例如
+ *   BROWSER_CHECK_PORT=1425 npm run dev -- --port 1425   # 起服务
+ *   BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs
+ * （默认 1420 只为保持既有文档/命令不变，两者不要同时占同一个端口。）
+ */
+export const DEV_URL =
+  process.env.BROWSER_CHECK_URL ??
+  `http://localhost:${process.env.BROWSER_CHECK_PORT ?? "1420"}/?browserdev=1`;
+
 /** 取第一个 page 目标的 ws 地址 */
 async function pageTarget() {
   const res = await fetch(`http://localhost:${PORT}/json/list`);

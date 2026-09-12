@@ -16,7 +16,7 @@
 //   - 行间公式块级 widget 是否居中、是否占据整行
 //   - 暗色主题下公式是否可见（typst 产物是黑字，需反色）
 import { readFileSync } from "node:fs";
-import { connect } from "./cdp.mjs";
+import { connect, DEV_URL } from "./cdp.mjs";
 
 const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
 const FIXTURES = new URL("../../.browser-check/math-fixtures.json", import.meta.url).pathname;
@@ -42,11 +42,11 @@ await c.send("Page.addScriptToEvaluateOnNewDocument", {
   source: `window.__DEV_MATH_FIXTURES = ${JSON.stringify(fixtures)};`,
 });
 
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 // 清掉上一轮遗留的界面模式 / 主题，保证从默认态（写作模式）开始：
 // 否则上一轮若停在源码模式，页面加载后不渲染任何公式，第一条断言就会莫名超时（实测踩过）
 await c.evaluate(`localStorage.clear()`);
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 800));
 
@@ -172,7 +172,7 @@ await c.send("Emulation.setEmulatedMedia", {
   features: [{ name: "prefers-color-scheme", value: "dark" }],
 });
 // 触发主题重算：应用监听 prefers-color-scheme 变化（仅"自动"态跟随）
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
 await c.type("暗色下的公式 $x^2 + y^2 = z^2$ 与块级\n\n$ frac(a,b) $\n");

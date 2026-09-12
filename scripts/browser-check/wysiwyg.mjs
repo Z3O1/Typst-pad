@@ -9,7 +9,7 @@
 // 说明：浏览器开发模式下 compile_math 由桩实现（假 SVG，尺寸量级合理），
 // 因此这里验证的是**编辑器的装饰/选区/开关链路**；公式的真实排版由 Rust 单测覆盖
 // （cargo test compile_math）。
-import { connect } from "./cdp.mjs";
+import { connect, DEV_URL } from "./cdp.mjs";
 
 // 截图写到仓库内（.browser-check/，见 .gitignore）：沙箱只允许写工作区，
 // 而 Chrome 需要 Windows 路径 —— 故用 CDP 取 base64 后由 Node 落到仓库里。
@@ -28,11 +28,11 @@ function check(name, ok, detail = "") {
 }
 
 const c = await connect();
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 // 清掉上一轮遗留的界面模式 / 主题，保证从默认态（写作模式）开始：
 // 否则上一轮若停在源码模式，页面加载后不渲染任何公式，第一条断言就会莫名超时（实测踩过）
 await c.evaluate(`localStorage.clear()`);
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 800));
 
@@ -346,7 +346,7 @@ await c.screenshot(SHOT("wysiwyg-14-code-block-caret"));
 console.log("15) 写作模式形态：单栏、纸张居中、无行号槽");
 // 回到干净的默认态：清 localStorage 后重载（默认 livePreview=true → 单栏）
 await c.evaluate(`localStorage.clear()`);
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 700));
 const single = await c.evaluate(`(() => {
@@ -426,7 +426,7 @@ await c.screenshot(SHOT("wysiwyg-17-source-split"));
 
 console.log("18) 仿 Typora 写作界面：纸张观感 + 格式菜单/快捷键");
 await c.evaluate(`localStorage.clear()`);
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 700));
 const paper = await c.evaluate(`(() => {
@@ -481,7 +481,7 @@ console.log("20) 模式切换不丢内容：写作 ↔ 源码 双向切换（含
 // 重新生效的情形都会把旧内容当外部文档推回去（用户反馈："切换模式时未保存内容消失了"）。
 // 这里用真实输入 + 真实快捷键把两条路径都走一遍。
 await c.evaluate(`localStorage.clear()`);
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 700));
 await c.evaluate(`(() => { window.__cm = document.querySelector(".cm-content"); return 1; })()`);
@@ -512,7 +512,7 @@ await c.screenshot(SHOT("wysiwyg-20-mode-switch-keeps-content"));
 
 console.log("21) 启动恢复上次内容（会话安全网）：输入 → 重载 → 内容回来；开关关闭时不恢复");
 await c.evaluate(`localStorage.clear()`);
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 700));
 const emptyAtStart = await c.evaluate(`document.querySelector(".cm-content").innerText.trim()`);
@@ -521,7 +521,7 @@ await c.evaluate(`document.querySelector(".cm-content").focus()`);
 await c.type("RESTORE-ME 未保存内容\n");
 await new Promise((r) => setTimeout(r, 700)); // 等 300ms 防抖写 localStorage
 // 重载（不清 localStorage）：模拟"关掉再打开"
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 900));
 const restored = await c.evaluate(`document.querySelector(".cm-content").innerText`);
@@ -546,7 +546,7 @@ await c.evaluate(`(() => {
   localStorage.setItem("typst-pad:state", JSON.stringify(raw));
   return 1;
 })()`);
-await c.goto("http://localhost:1420/?browserdev=1");
+await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 900));
 const notRestored = await c.evaluate(`document.querySelector(".cm-content").innerText.trim()`);
