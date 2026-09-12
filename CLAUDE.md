@@ -40,10 +40,30 @@ src/lib/svg-paginate.ts     # 多页 SVG 页间分隔线（类名固定 page-sep
 src/lib/diagnostics-utils.ts # 编译源位置 → 文档位置映射（mapCompiledPosToDoc）与波浪线区间（squiggleRanges）
 src/lib/doc-utils.ts        # 文档纯函数：isEffectiveDirty（空文档视为未修改）、ensureTrailingNewline（前缀末行补换行）
 src/lib/startup-timing.ts   # 启动打点：首次编译完成后输出 [startup] 报告（见"启动耗时观测"）
+src/lib/write-commands.ts   # 写作模式格式命令的纯逻辑：planForCommand → EditPlan（不碰 CodeMirror，可单测）
+src/lib/error-list.ts       # 编译错误列表数据组装 + 前缀行定位（纯函数）
+src/lib/preview-scale.ts    # 预览画布等宽缩放：pt → px（1pt = 4/3px），字号对齐编辑区
+src/lib/context-menu-utils.ts # 右键菜单纯逻辑：区域判定 / 菜单项 enabled / 弹出位置收边
+src/lib/ContextMenu.svelte  # 自定义右键菜单 UI（命令映射在 +page.svelte）
+src/lib/menu-keys.ts        # 菜单栏按键决策纯函数（Alt / accessKey / Ctrl+单键快捷键匹配）
+src/lib/debug.ts            # 调试日志通道 dbg（dev 默认开；--debug / ?debug=1 / localStorage 可开）
+src/lib/browser-dev-stub.ts # 浏览器开发桩：假 __TAURI_INTERNALS__ + 假编译，供 ?browserdev=1 用（仅开发）
+src/routes/+layout.ts       # SPA 模式（ssr = false），配合 adapter-static 的 index.html fallback
 src-tauri/src/lib.rs        # Rust 壳：read/write/write_binary/list_dir_typ/take_pending_files/compile_doc/compile_math/export_pdf 命令 + opener/dialog 插件
 src-tauri/src/packages.rs   # 包系统：@local 本地包读取 / @preview 自动下载缓存（目录规范与 CLI 一致 + 安全解压）
 src-tauri/src/typst_world.rs # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 包解析接线 / 诊断转换（SVG/PDF）
+src-tauri/src/main.rs       # 桌面入口（调用 lib.rs 的 run）
+src-tauri/fonts/            # 打包字体（见"字体"：**不放 static/**）
 ```
+
+配置与辅助目录：
+- `vite.config.js`：SvelteKit + wasm 插件 + **dev 白屏修复三件套**（见"原生编译后端"末尾，勿动）；Tauri 开发用 `TAURI_DEV_HOST`。
+- `vitest.config.ts`：jsdom + `include: ["src/**/*.test.ts"]` + `server.fs.allow: [".."]`。
+- `svelte.config.js`：`@sveltejs/adapter-static`（SPA，`fallback: index.html`）。
+- `.github/workflows/`：`ci.yml`（test + build-bundles）、`release.yml`（tag 发草稿 Release），约定见"CI / 发布约定"。
+- `scripts/`：`check-fonts.mjs`（字体魔数校验）、`download-fonts.mjs`（重新下载字体）、`browser-check/`（CDP 验收）、`install-vs-buildtools.bat`/`verify-app.bat`（Windows 辅助）。
+  **历史遗留（wasm 时代，依赖已移除的 `@myriaddreamin/typst.ts`，跑不起来、也无人引用）**：`debug-math*.mjs`、`debug-svg.mjs`、`debug-fontinfo.mjs`、`verify-sanitize.mjs`。
+- `docs/`：`WYSIWYG-调研.md`（所见即所得的方案调研）；`CHANGELOG.md` 按 Keep a Changelog 维护；`.browser-check/` 为验收产物（已 gitignore）。
 
 ### 编译数据流（核心链路）
 
@@ -129,6 +149,14 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 - 版本号约定（0.4.0 起）：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的 `version` **三处一致**修改（Cargo.toml 参与发版）。CI Rust 缓存（Swatinem/rust-cache）key 基于 Cargo.lock 哈希——**改动依赖会使 Cargo.lock 变化、缓存失效全量重编**（引入 typst 依赖树时已付出一次）。**实测（2026-08-10）：rust-cache 的 key 不受根 crate 的 version 字段影响**（改 lock 根 version 为 `"1"` 后 key 不变、精确命中旧缓存）——因此只改版本号发版时缓存必然命中，无需为版本号做任何占位 hack；Cargo.lock 内 version 必须保持合法三段式 semver（写 `"1"` 会致 cargo "failed to parse lock file"，实测踩过）。
 - 关于弹窗版本号运行时读取：`getVersion()`（@tauri-apps/api/app）返回 tauri.conf.json 的 version（关于弹窗显示"版本 x.y.z"），发版改版本号后前端无需改动。
 
+## 环境备忘（本机 WSL）
+
+- **`git push` 走 22 端口偶发被掐**（`Connection closed by 20.205.243.166 port 22`）：改走 GitHub 的 443 入口即可 ——
+  `GIT_SSH_COMMAND="ssh -p 443" git push git@ssh.github.com:Z3O1/Typst-pad.git HEAD:main`（已实测可用；先 `ssh -T -p 443 git@ssh.github.com` 验证认证）。
+- **端口归属**：`1420` = `npm run tauri dev` / `npm run dev` 的 Vite 端口；`9333` = 验收用 headless Chrome 的 CDP 端口。
+  两者都可能被上一次没退干净的进程占着（"Port 1420 is already in use"）；查占用：WSL `ss -ltnp | grep :1420`、Windows `/mnt/c/Windows/System32/netstat.exe -ano | findstr :1420`（镜像网络下 Windows 侧监听同样会挡住 WSL 绑定）。
+- 无显示器环境：GUI 跑不了桌面端，验收一律用 `scripts/browser-check/`（Windows 的 headless Chrome + CDP）；`gh` 用 Windows 版 `/mnt/c/Program Files/GitHub CLI/gh.exe`（需 `--repo Z3O1/Typst-pad`，WSL 路径会触发 dubious ownership）。
+
 ## CI / 发布约定
 
 - `ci.yml`：`test` job（ubuntu）push main/PR 跑 类型检查 → 单测 → 前端构建 → `cargo check`（**首次编译 typst 依赖树较慢**，之后命中缓存）；`build-bundles`（windows）**main push 或 workflow_dispatch 触发**（PR 不构建），Rust 缓存用 `shared-key: tauri-build-windows`（必须与 `release.yml` 相同，否则 release job 读不到缓存）。
@@ -145,12 +173,12 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 ## 测试
 
-- 前端 vitest + jsdom，`include: ["src/**/*.test.ts"]`；vite 的 `server.fs.allow: [".."]` 覆盖仓库上级目录（junction 场景下 node_modules 解析被拒的教训，见 #33，配置仍保留）。现有覆盖：`typst-engine`（invoke 契约映射 + 诊断转换纯函数，invoke/dialog 以 vi.mock 断言入参与消费）、`diagnostics-utils`、`error-list`、`context-menu-utils`、`doc-utils`、`editor-keymap`、`menu-keys`、`popover-utils`、`file-ops`、`persistence`、`svg-paginate`、`pdf-export`、`debug`。
+- 前端 vitest + jsdom，`include: ["src/**/*.test.ts"]`；vite 的 `server.fs.allow: [".."]` 覆盖仓库上级目录（junction 场景下 node_modules 解析被拒的教训，见 #33，配置仍保留）。现有覆盖：`typst-engine`（invoke 契约映射 + 诊断转换纯函数，invoke/dialog 以 vi.mock 断言入参与消费）、`diagnostics-utils`、`error-list`、`context-menu-utils`、`doc-utils`、`editor-keymap`、`menu-keys`、`popover-utils`、`file-ops`、`persistence`、`svg-paginate`、`pdf-export`、`debug`、`preview-scale`、`write-commands`。
 - Rust 单测（`typst_world.rs`/`packages.rs` 内 `cargo test`，用 `CARGO_MANIFEST_DIR` 定位 `src-tauri/fonts`）：中文+数学文档端到端编译（每页含 `<svg>`，PDF 字节非空）、字体注册（7 个文件 + 族名断言）、语法错误诊断（1-based 行列 + endLine）、相对 include（成功 / 缺失文件诊断带 path / 未保存文档提示）、JSON 序列化契约（camelCase 键名 `endLine`/`endColumn`）、@local/@preview 包（缓存命中不下载 / miss 下载与 URL 格式 / 404 与网络失败诊断区分 / 数据目录优先 / 路径穿越与损坏归档防御 / 端到端导入编译，均用临时目录注入环境变量，不触真实用户目录与网络）。
 - 所见即所得链路测试：`typst-lex.test.ts`（区域扫描：注释/raw/字符串/代码/`[...]` 内容块）、`markup-ranges.test.ts`（标记拆解，含"代码与公式里的 `*` `_` 不算标记"、有序列表编号、围栏代码块）、`typst-scan-fuzz.test.ts`（**鲁棒性网**：120 份固定种子随机文档 + 15 组病态输入，断言不抛异常、区间有序不越界不重叠、区域无缝覆盖全文）、`math-context.test.ts`（`#let` 提取的保守规则）、`live-preview.test.ts`（jsdom 里真挂 EditorView，断言 widget 替换 / 块级 vs 行内 / 光标进出展开 / 失败回退 / 开关关闭 / 样式类）。**坑**：jsdom 下挂视图时光标默认在 offset 0，会落在构造内部而触发"展开"，测隐藏效果必须把光标放到构造之外。
 - 前端测试不接触真实编译——依赖引擎的逻辑保持"核心逻辑独立可测"（纯函数 + mock invoke）。
 - **浏览器端交互验证（无显示器环境下的验收手段）**：`scripts/browser-check/`（零依赖 CDP 驱动）
-  - **端口**：验收脚本默认打 `http://localhost:1420/?browserdev=1`，而 **1420 也是 `npm run tauri dev` 的 Vite 端口**——用户自己开着桌面应用时，验收脚本会被 "Port 1420 is already in use" 挡住（实测被反馈过）。换端口跑即可：`npm run dev -- --port 1425` 起服务 + `BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs`（`cdp.js` 导出 `DEV_URL`，可用 `BROWSER_CHECK_PORT` / `BROWSER_CHECK_URL` 覆盖；`probe.mjs` 仍可传 URL 参数）。
+  - **端口**：验收脚本默认打 `http://localhost:1420/?browserdev=1`，而 **1420 也是 `npm run tauri dev` 的 Vite 端口**——用户自己开着桌面应用时，验收脚本会被 "Port 1420 is already in use" 挡住（实测被反馈过）。换端口跑即可：`npm run dev -- --port 1425` 起服务 + `BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs`（1420 是 `vite.config.js` 里写死的 `server.port` + `strictPort: true`，CLI `--port` 可覆盖，不覆盖时宁可报错也不自动换端口；脚本侧由 `cdp.mjs` 导出的 `DEV_URL` 读取 `BROWSER_CHECK_PORT` / `BROWSER_CHECK_URL`，`probe.mjs` 仍可传 URL 参数）。
   - `cdp.mjs`：连接 Windows headless Chrome 的 CDP（WSL 里直接跑 `/mnt/c/Program Files/Google/Chrome/Application/chrome.exe --headless=new --remote-debugging-port=9333 --remote-debugging-address=0.0.0.0 --user-data-dir=... 'http://localhost:1420/?browserdev=1'`；镜像网络下 WSL 可直连 localhost:9333）；提供 evaluate / 真实点击 / 真实输入（`Input.insertText`）/ 截图。
   - `probe.mjs`：排障小工具（导航到页面 → 打印渲染结果/页面内错误），"页面是不是坏了"先用它看。
   - `wysiwyg.mjs`：所见即所得的 **56 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大），截图落在 `.browser-check/`（已 gitignore）。
