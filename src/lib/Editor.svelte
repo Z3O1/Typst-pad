@@ -347,9 +347,17 @@
     background: transparent;
   }
 
+  /* 纸张内留白：左右各 48px（Typora 式阅读边距）**必须留在 .cm-content 之外**。
+     CodeMirror 画整行选区的底色时会把 .cm-content 的左右内边距一起铺满 →
+     选个全选就比文字列两边各凸出 48px（用户反馈「两边不应该凸出来」）。
+     放到 .cm-scroller 上：内容盒 == 文字列，高亮自然对齐文字。 */
+  .editor-host.write :global(.cm-scroller) {
+    padding-left: 48px;
+    padding-right: 48px;
+  }
   .editor-host.write :global(.cm-content) {
-    /* 纸张内留白：左右各 48px（Typora 式的阅读边距），底部留白让末行不贴底边 */
-    padding: 40px 48px 160px;
+    /* 只留竖直方向：顶部呼吸感 + 底部留白（末行不贴底边） */
+    padding: 40px 0 160px;
     line-height: 1.9;
     caret-color: var(--typora-caret, currentColor);
   }

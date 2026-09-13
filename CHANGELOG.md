@@ -6,6 +6,8 @@
 
 ### Fixed
 
+- **整行选区的底色不再比文字列两边各凸出 48px**（用户反馈「两边不应该凸出来」）：写作模式的左右阅读边距原本是 `.cm-content` 的 `padding`，而 CodeMirror 画整行选区时会连内容盒的内边距一起铺满 → 一全选就是一条比文字宽 96px 的色带。现在留白移到 `.cm-scroller` 上（内容盒 == 文字列），白纸宽度 900px、文字列 804px 都保持不变；已用几何探针量过：选区矩形从"左右各凸 42~46px"变成"落在文字列内"
+
 - **根因：空正文的标记构造让 CM6 抛 `Mark decorations may not be empty`**：`== `（标题标记刚敲下、文字还没写）这类**正文长度 0** 的构造会生成 `mark(x, x)`，以前异常冒泡进 StateField 事务 → 编辑区卡死；加了 try/catch 后表现为「输入 `==` 时所有标题都被展开成源码」。现在正文为空就不加样式装饰，两条回归用例锁住（空标题 / 空粗斜体之后仍能继续输入）
 - **编辑区"卡死"（输入 `= 1 = 2` 后无法再打字/删除/换行）**：装饰重建（StateField `update`）或 widget 的 `toDOM` 一旦抛异常，会让 CodeMirror 这次事务整体失败、文档不再更新。现在 `collect()` 与三个 widget 全部 try/catch 兜底——失败就退化成源码显示（`Decoration.none` / `cm-widget-fallback`），编辑照常可用，原因写进控制台
 - **脚本错误不再静默**：新增 `window.onerror` / `unhandledrejection` 上报，状态栏直接显示「脚本错误：…」（桌面 WebView 里没有可见控制台，以前只能看到"应用坏了"）

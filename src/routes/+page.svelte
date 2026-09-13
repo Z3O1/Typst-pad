@@ -1356,6 +1356,8 @@
     max-width: 900px;
     margin: 0 auto;
     width: 100%;
+    /* 纸张内左右各 48px 阅读边距由 Editor.svelte 的 `.editor-host.write .cm-scroller` 提供
+       （**不能**放在 .cm-content 上：整行选区底色会把内边距一起铺满、两边凸出来） */
     box-shadow: 0 0 12px rgba(0, 0, 0, 0.12);
   }
 
