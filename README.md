@@ -86,7 +86,7 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 - **签名校验**：安装包由 CI 用私钥签名（生成 `.sig`），客户端用**编译进应用**的公钥（`plugins.updater.pubkey`）校验，签名不符直接拒绝安装——防的是"更新通道被换成别人的安装包"。
 - **密钥管理**：私钥与密码存在仓库 Secrets（`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）。**私钥丢了就再也发不出自动更新**（老用户只能手动下载安装包），pubkey 一旦发布也不要再换。
 - **本机打包**：`createUpdaterArtifacts` 为 true 且配置里有 pubkey 之后，任何 `tauri build` 都必须能拿到私钥（`TAURI_SIGNING_PRIVATE_KEY` 或 `TAURI_SIGNING_PRIVATE_KEY_PATH`），否则打包直接失败（Tauri 的硬约束）。
-- **第一个带自动更新的版本要手动装一次**：0.7.2 及更早版本里没有 updater，所以它们不会自己升级上来。
+- **第一个带自动更新的版本要手动装一次**：0.7.3 之前的版本（≤ 0.7.2）里没有 updater，所以它们不会自己升级上来。
 
 ## 架构
 

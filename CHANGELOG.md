@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-14
+
 ### Added
 
 - **自动更新**（`tauri-plugin-updater`）：启动后静默检查新版本（延迟约 4 秒、间隔 6 小时且跨启动记忆，设置弹窗里的「启动时自动检查更新」可关），发现新版本时状态栏出现「可更新到 vX」提示 + 弹窗确认——**不自动下载**，点「下载并安装」才下载（弹窗里显示进度），装完应用自动重启（Windows 上由 NSIS 安装器拉起）。菜单「帮助 → 检查更新…」随时手动检查：手动检查无论成功失败都在状态栏给出明确文案，自动检查失败则保持安静（只写调试日志），不打扰写作。
@@ -15,6 +17,7 @@
 ### Changed
 
 - `scripts/generate-latest-json.test.mjs` 一并进入 `npm test`（vitest 的 `include` 增加 `scripts/**/*.test.mjs`）；`npm run check` 的 svelte-check 不含它（仓库没有装 `@types/node`，脚本留在类型检查之外）。
+- 版本号 0.7.2 → 0.7.3（package.json / tauri.conf.json / Cargo.toml 三处一致，Cargo.lock 根 crate 同步）。
 
 ## [0.7.2] - 2026-09-14
 
