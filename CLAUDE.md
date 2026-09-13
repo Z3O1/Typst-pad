@@ -30,7 +30,7 @@ node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 无显示器环境下的「浏览器验收」（本仓库的主力验收手段）：**换端口跑，别跟 tauri dev 抢 1420**
 npm run dev -- --port 1425
-BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 77 项交互验收 + 截图
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 79 项交互验收 + 截图
 npm run fixtures:math
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 12 项真实排版视觉验收
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
@@ -145,7 +145,7 @@ src/lib/startup-timing.ts   # 启动打点：首次编译完成后输出 [startu
 src/lib/write-commands.ts   # 写作模式格式命令的纯逻辑：planForCommand → EditPlan（不碰 CodeMirror，可单测）
 src/lib/error-list.ts       # 编译错误列表数据组装 + 前缀行定位（纯函数）
 src/lib/preview-scale.ts    # 预览画布等宽缩放：pt → px（1pt = 4/3px），字号对齐编辑区
-src/lib/pane-ratio.ts       # 分栏比例纯逻辑：Ctrl+Shift+滚轮的档距 / 方向 / 上下限收敛（可单测）
+src/lib/pane-ratio.ts       # 分栏比例纯逻辑：Ctrl+滚轮的档距 / 方向 / 上下限收敛 / 横向位移退回（可单测）
 src/lib/context-menu-utils.ts # 右键菜单纯逻辑：区域判定 / 菜单项 enabled / 弹出位置收边
 src/lib/ContextMenu.svelte  # 自定义右键菜单 UI（命令映射在 +page.svelte）
 src/lib/menu-keys.ts        # 菜单栏按键决策纯函数（Alt / accessKey / Ctrl+单键快捷键匹配）
@@ -203,11 +203,12 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
     - **暗色下必须照常挂 oneDark**：CM6 基础主题自带**白底黑字**；若写作模式不挂主题，编辑器仍是白底，而公式 widget 已被 `filter: invert(1)` 反成白色 → **白底白字，公式"消失"**（实测被反馈的就是这个）。主题变量 `--bg-paper` 同时给 `.cm-editor/.cm-scroller/.cm-gutters`，避免深色纸与编辑器底色两块色。
     - **公式字号必须等于正文字号**：写作模式 16px → `MATH_SIZE_PT = 12`（`typst-engine.ts`），随 `compile_math` 的 `size_pt` 参数传给 Rust（缺省 10.5pt = 源码模式 14px）。字号参与缓存键。曾经写死 10.5pt，写作模式下公式比正文小一圈（实测被反馈）。
   - **源代码模式**（`Ctrl+/`，双栏）：等宽 14px + 行号 + oneDark（暗），右侧整页预览；此模式下 live-preview 整体关闭（看到的是真正的 Typst 源码）。
-  - **分栏比例（Ctrl+Shift+滚轮）**：预览区占分栏容器的宽度份额，默认 50/50、范围 **25%~75%**（`.preview-pane` 的内联 `flex: 0 0 N%`，编辑区的 `flex: 1` 拿剩下的）。纯逻辑在 `pane-ratio.ts`（可单测），页面侧只有 `handlePanesWheel` 把事件换算成比例并写状态栏 + 持久化。
-    - **只在预览栏可见时响应**：写作模式单栏时预览是 `display:none`，此时直接放行（不 preventDefault），保留系统默认行为；**只按 Ctrl（带 Shift 之外）不响应**，避免抢浏览器缩放/编辑器滚动。
-    - 命中时**必须 `preventDefault()`**：否则这次滚动会继续变成编辑器/预览区滚动，WebView 还可能顺手把页面缩放掉（浏览器验收第 24 组专门验了 dpr 与视口宽不变）。
+  - **分栏比例（Ctrl+滚轮）**：预览区占分栏容器的宽度份额，默认 50/50、范围 **25%~75%**（`.preview-pane` 的内联 `flex: 0 0 N%`，编辑区的 `flex: 1` 拿剩下的）。纯逻辑在 `pane-ratio.ts`（可单测），页面侧只有 `handlePanesWheel` 把事件换算成比例并写状态栏 + 持久化。
+    - **只在预览栏可见时响应**：写作模式单栏时预览是 `display:none`，此时**在状态栏提示「先打开预览栏」**再放行（不 preventDefault）——用户报过"按了没反应"，一句提示就能把"没这个功能"和"这里没有可调的分栏"区分开；**不带 Ctrl 的滚轮一律不响应**（留给编辑器/预览区自己的滚动）。
+    - **手势只能是无 Shift 的 Ctrl+滚轮**（实测教训）：最初写成 Ctrl+Shift+滚轮，头less 验收用 CDP 注入 `deltaY` 全绿，**真机上却完全没反应**——按着 Shift 滚轮时浏览器把纵向滚动转成横向（`deltaY = 0`、`deltaX` 有值）。现在页面侧同时读 `deltaY`/`deltaX`（`wheelResizeDelta`），两条路都留了断言。
+    - 命中时**必须 `preventDefault()`**：否则这次滚动会继续变成编辑器/预览区滚动，WebView2 里 Ctrl+滚轮还可能顺手把页面缩放掉（验收里专门断言 dpr 与视口宽不变）。若将来桌面版仍出现缩放，可在 `DisableBrowserAccelerators`（lib.rs）里补关 `IsZoomControlEnabled`——**注意那是 Windows-only 代码，本机 Linux 编不到也验不了**。
     - 滚轮"一格"的判定分三种 deltaMode（像素/行/页），像素模式按 ≈100 折算并在 `< 50` 时视为触摸板小步长（下限 0.2 档）——否则触摸板一划预览区就窜到底；单次事件最多 3 档。
-    - 到上下限后继续滚**只提示不变化**；视图菜单「重置分栏比例」回到 50%（菜单项右侧的灰字写的就是"Ctrl+Shift+滚轮"，`shortcut` 字段在这里只当提示用，MenuBar 匹配器不会命中它）。
+    - 到上下限后继续滚**只提示不变化**；视图菜单「重置分栏比例」回到 50%（菜单项右侧的灰字写的就是"Ctrl+滚轮"，`shortcut` 字段在这里只当提示用，MenuBar 匹配器不会命中它）。
     - 比例**存的是份额而不是像素宽**，并随其它界面偏好持久化（`previewRatio`）：窗口大小变化时按比例重排，窗口变小也不会把编辑区挤没。
   - **格式操作走菜单 + 快捷键，不做工具条**（Typora 没有工具条）。纯逻辑在 `write-commands.ts`（`planForCommand` → `EditPlan`），编辑器侧只有一个 `runWriteCommand` 把它们落成事务。**块级命令的选区语义**：无选区 → 替换光标所在行（该行内容成为块内容，不丢字）；有选区 → 只替换选区。**包装命令把选区首尾空白留在定界符外侧**：`*文字\n*` 在 Typst 里是跨行强调、我们自己的标记扫描也不识别 → 会退化成字面星号（实测：Ctrl+A 后按 Ctrl+B）。**引用必须用 `#quote(block: true)[...]`**——Typst 没有 Markdown 的 `>` 语法，写 `>` 只会留字面字符。
   - 快捷键分两处：无 Shift 的（Ctrl+B/I/K/1/2/3/0/M）放菜单项的 `shortcut` 由 MenuBar 统一匹配；**带 Shift 的**（Ctrl+Shift+` 行内代码、Ctrl+Shift+M 公式块、Ctrl+Shift+[ / ] 列、Ctrl+Shift+Q 引用、Ctrl+Shift+C 代码块）由 `+page.svelte` 的 window keydown 处理——MenuBar 的匹配器只支持「Ctrl+单键」，这是既有约定（见 menu-keys.ts）。
@@ -320,7 +321,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - **端口**：验收脚本默认打 `http://localhost:1420/?browserdev=1`，而 **1420 也是 `npm run tauri dev` 的 Vite 端口**——用户自己开着桌面应用时，验收脚本会被 "Port 1420 is already in use" 挡住（实测被反馈过）。换端口跑即可：`npm run dev -- --port 1425` 起服务 + `BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs`（1420 是 `vite.config.js` 里写死的 `server.port` + `strictPort: true`，CLI `--port` 可覆盖，不覆盖时宁可报错也不自动换端口；脚本侧由 `cdp.mjs` 导出的 `DEV_URL` 读取 `BROWSER_CHECK_PORT` / `BROWSER_CHECK_URL`，`probe.mjs` 仍可传 URL 参数）。
   - `cdp.mjs`：连接 Windows headless Chrome 的 CDP（WSL 里直接跑 `/mnt/c/Program Files/Google/Chrome/Application/chrome.exe --headless=new --remote-debugging-port=9333 --remote-debugging-address=0.0.0.0 --user-data-dir=... 'http://localhost:1420/?browserdev=1'`；镜像网络下 WSL 可直连 localhost:9333）；提供 evaluate / 真实点击 / 真实输入（`Input.insertText`）/ 截图。
   - `probe.mjs`：排障小工具（导航到页面 → 打印渲染结果/页面内错误），"页面是不是坏了"先用它看。
-  - `wysiwyg.mjs`：所见即所得 + 自动更新入口 + 分栏比例的 **77 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大 → 启动恢复会话 → Alt 不夺焦 → **第 23 组自动更新入口**：帮助菜单有「检查更新…」、点它后状态栏显示"已是最新版本"（桩返回无更新）、没更新时不弹窗不留状态栏提示、检查不抢焦点、设置里有「启动时自动检查更新」且默认勾选 → **第 24 组分栏比例**：源码模式默认 50/50、Ctrl+Shift+滚轮向上 5 档变宽到 60%、编辑区同步变窄、**dpr 与视口宽不变（没有顺手缩放页面）**、状态栏实时反馈、比例进存档、只按 Ctrl 滚轮不改比例、向下滚到底收敛在 25%、菜单项给出"Ctrl+Shift+滚轮"提示、重置回 50/50），截图落在 `.browser-check/`（已 gitignore）。
+  - `wysiwyg.mjs`：所见即所得 + 自动更新入口 + 分栏比例的 **79 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大 → 启动恢复会话 → Alt 不夺焦 → **第 23 组自动更新入口**：帮助菜单有「检查更新…」、点它后状态栏显示"已是最新版本"（桩返回无更新）、没更新时不弹窗不留状态栏提示、检查不抢焦点、设置里有「启动时自动检查更新」且默认勾选 → **第 24 组分栏比例**：源码模式默认 50/50、Ctrl+滚轮向上 5 档变宽到 60%、编辑区同步变窄、**dpr 与视口宽不变（没有顺手缩放页面）**、状态栏实时反馈、比例进存档、不带 Ctrl 的滚轮不改比例、**横向位移（deltaY=0 + deltaX）也能调**（Shift 滚轮的真机形态）、向下滚到底收敛在 25%、菜单项给出"Ctrl+滚轮"提示、重置回 50/50、写作模式下只提示"先打开预览栏"且不改比例），截图落在 `.browser-check/`（已 gitignore）。
   - **实测坑（都踩过）**：① `Page.navigate` 对**相同 URL** 不重新加载，上一次停在 500 错误页时会一直复现 → `goto()` 先跳 `about:blank`；② 截图必须由 Node 写进**工作区**（写 `/mnt/c/...` 会被文件沙箱拒绝，报 EROFS），别交给 Chrome 写；③ **Windows 的 headless Chrome 必须加 `--no-proxy-server`**，否则 localhost 会被系统代理吞掉、页面报"无法访问此网站"，看起来像"WSL 端口转发坏了"（判断连通性更干净的判据是 Windows 自带 `curl.exe`：`/mnt/c/Windows/System32/curl.exe -s -o NUL -w '%{http_code}' http://localhost:1420/`）；④ 验收脚本开始前**必须清 localStorage 再重新加载**，否则上一轮遗留的「源代码模式」会让页面不渲染公式，第一条断言莫名超时；⑤ 找菜单项要限定在 `.menu-dropdown .menu-item` 里，别在全页找同名文字（状态栏会显示"源代码模式"这类同名状态文字）。
   - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`（**两种字号各一份**：12pt 写作模式 / 10.5pt 源码模式，桩按 body+display+**sizePt** 匹配，字号对不上宁可退回假 SVG），再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
   - 浏览器开发模式（`?browserdev=1`，见 `src/lib/browser-dev-stub.ts`）里的 `compile_doc` 是假实现（假分页 SVG），`compile_math` 在没有注入夹具时也是假 SVG；文件/PDF 等 Tauri 命令同样是假的。**真实 typst 排版可用夹具链路上浏览器验证**，只有 Tauri IPC / WebView2 那一层必须桌面端（Windows）确认。

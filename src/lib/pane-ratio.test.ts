@@ -9,6 +9,7 @@ import {
   nextPaneRatio,
   paneRatioFlexStyle,
   paneRatioPercent,
+  wheelResizeDelta,
 } from "./pane-ratio";
 
 describe("clampPaneRatio", () => {
@@ -68,6 +69,29 @@ describe("nextPaneRatio", () => {
 
   it("起点非法时从默认值开始算（旧存档 / 脏数据不至于把分栏搞乱）", () => {
     expect(nextPaneRatio(Number.NaN, -100)).toBeCloseTo(PANE_RATIO_DEFAULT + PANE_RATIO_STEP, 6);
+  });
+});
+
+describe("wheelResizeDelta", () => {
+  it("有纵向位移就用纵向", () => {
+    expect(wheelResizeDelta(-100, 0)).toBe(-100);
+    expect(wheelResizeDelta(100, -50)).toBe(100); // 两者都有时纵向优先
+  });
+
+  it("纵向为 0 时退回横向（Shift 滚轮被浏览器转成横向的真机形态）", () => {
+    expect(wheelResizeDelta(0, 100)).toBe(100);
+    expect(wheelResizeDelta(0, -100)).toBe(-100);
+  });
+
+  it("都没有 / 非法值 → 0（不动）", () => {
+    expect(wheelResizeDelta(0, 0)).toBe(0);
+    expect(wheelResizeDelta(Number.NaN, Number.NaN)).toBe(0);
+    expect(wheelResizeDelta(Number.NaN, 100)).toBe(100);
+  });
+
+  it("配合 nextPaneRatio：横向位移同样能改比例（不再「按了没反应」）", () => {
+    const delta = wheelResizeDelta(0, -100);
+    expect(nextPaneRatio(0.5, delta)).toBeCloseTo(0.5 + PANE_RATIO_STEP, 6);
   });
 });
 

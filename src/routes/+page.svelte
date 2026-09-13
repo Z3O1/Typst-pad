@@ -65,6 +65,7 @@
     nextPaneRatio,
     paneRatioFlexStyle,
     paneRatioPercent,
+    wheelResizeDelta,
   } from "$lib/pane-ratio";
 
   // 新建时默认空白文档（不再预填示例内容）
@@ -336,15 +337,23 @@
   }
 
   /**
-   * Ctrl+Shift+滚轮：调整分栏比例（预览区宽度）。只在预览栏可见时有意义——写作模式单栏时
-   * 预览是 `display:none`，调了也看不见，因此直接放行（不 preventDefault，保留系统默认行为）。
+   * Ctrl+滚轮：调整分栏比例（预览区宽度）。
+   *
+   * 只在预览栏可见时有意义——写作模式单栏时预览是 `display:none`，此时给一句状态栏提示就放行
+   * （不 preventDefault），让用户知道"不是坏了，是这里没有可调的分栏"。
    * 滚轮向上 = 预览区变宽；到上下限后继续滚只提示，不再变化。
+   *
+   * 位移量同时看 deltaY / deltaX（见 pane-ratio.wheelResizeDelta）：按 Shift 滚轮时 Chromium 会把
+   * 纵向滚动转成横向（deltaY=0、deltaX 有值），只读 deltaY 会"按了没反应"。
    */
   function handlePanesWheel(e: WheelEvent) {
-    if (!e.ctrlKey || !e.shiftKey) return;
-    if (!showPreview) return;
+    if (!e.ctrlKey) return;
+    if (!showPreview) {
+      statusText = "分栏比例：先打开预览栏（视图 → 显示预览栏）再 Ctrl+滚轮";
+      return;
+    }
     e.preventDefault(); // 别让这次滚动继续变成编辑器/预览区滚动或 WebView 缩放
-    const next = nextPaneRatio(previewRatio, e.deltaY, e.deltaMode);
+    const next = nextPaneRatio(previewRatio, wheelResizeDelta(e.deltaY, e.deltaX), e.deltaMode);
     if (next === previewRatio) {
       statusText = `预览区宽度已是 ${paneRatioPercent(next)}%（到边界了）`;
       return;
@@ -622,8 +631,8 @@
           {
             label: "重置分栏比例",
             // 这里的 shortcut 不是真快捷键（MenuBar 的匹配器只支持「Ctrl+单键」，不会命中），
-            // 而是把操作姿势当灰字提示显示出来：Ctrl+Shift+滚轮 没法写进快捷键匹配
-            shortcut: "Ctrl+Shift+滚轮",
+            // 而是把操作姿势当灰字提示显示出来：Ctrl+滚轮 没法写进快捷键匹配
+            shortcut: "Ctrl+滚轮",
             action: resetPaneRatio,
           },
           { label: "主题：自动", checked: theme === "system", action: () => (theme = "system") },

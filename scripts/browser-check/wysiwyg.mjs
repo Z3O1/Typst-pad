@@ -662,9 +662,12 @@ await c.evaluate(
   `Array.from(document.querySelectorAll(".settings-modal .modal-btn")).find(b => (b.textContent || "").includes("关闭")).click()`,
 );
 
-console.log("24) Ctrl+Shift+滚轮调整分栏比例（源码模式预览区宽度）");
+console.log("24) Ctrl+滚轮调整分栏比例（源码模式预览区宽度）");
 // 这一组只能在这儿验：滚轮事件（含修饰键）与 flex 实际布局都跑不出来于单测，
 // 而"Ctrl+滚轮会不会顺手把页面缩放掉"更是只有真实浏览器才看得见。
+// 教训：手势最初写成 Ctrl+Shift+滚轮，头less 里用 CDP 注入 deltaY 全绿，但真机上"按了没反应"——
+// 按着 Shift 滚轮时浏览器会把纵向滚动转成横向（deltaY=0、deltaX 有值）。现在手势是 Ctrl+滚轮，
+// 且页面侧同时读 deltaY/deltaX（pane-ratio.wheelResizeDelta），下面两个方向各留一条断言。
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
@@ -705,13 +708,14 @@ check(
 );
 
 // Ctrl + Shift + 滚轮向上 ×5 → 预览区变宽（每次 2 个百分点，鼠标一格 deltaY = ±100）
+// Ctrl + 滚轮向上 ×5 → 预览区变宽（每次 2 个百分点，鼠标一格 deltaY = ±100）
 for (let i = 0; i < 5; i++) {
-  await c.wheel(before.center.x, before.center.y, -100, { modifiers: 2 | 8 });
+  await c.wheel(before.center.x, before.center.y, -100, { modifiers: 2 });
 }
 await new Promise((r) => setTimeout(r, 400));
 const wider = await c.evaluate(ratioProbe);
 check(
-  "Ctrl+Shift+滚轮向上：预览区变宽（5 档 ≈ +10%）",
+  "Ctrl+滚轮向上：预览区变宽（5 档 ≈ +10%）",
   Math.abs(wider.ratio - 0.6) < 0.02,
   `${before.ratio} → ${wider.ratio}`,
 );
@@ -721,7 +725,7 @@ check(
   JSON.stringify({ before, wider }),
 );
 check(
-  "Ctrl+Shift+滚轮没有顺手缩放页面（dpr 与视口宽不变）",
+  "Ctrl+滚轮没有顺手缩放页面（dpr 与视口宽不变）",
   wider.dpr === before.dpr && wider.innerWidth === before.innerWidth,
   JSON.stringify({ dpr: [before.dpr, wider.dpr], innerWidth: [before.innerWidth, wider.innerWidth] }),
 );
@@ -733,15 +737,29 @@ check(
 );
 await c.screenshot(SHOT("wysiwyg-24-split-wider"));
 
-// 只按 Ctrl（不带 Shift）滚轮：不该改比例（留给系统/编辑器自己的行为）
-await c.wheel(wider.center.x, wider.center.y, -100, { modifiers: 2 });
+// 裸滚轮（不带 Ctrl）：不该改比例（留给编辑器/预览区自己的滚动）
+await c.wheel(wider.center.x, wider.center.y, -100, { modifiers: 0 });
 await new Promise((r) => setTimeout(r, 300));
-const plainCtrl = await c.evaluate(ratioProbe);
-check("只按 Ctrl 滚轮不改分栏比例", Math.abs(plainCtrl.ratio - wider.ratio) < 0.001, `${wider.ratio} → ${plainCtrl.ratio}`);
+const plainWheel = await c.evaluate(ratioProbe);
+check(
+  "不带 Ctrl 的滚轮不改分栏比例",
+  Math.abs(plainWheel.ratio - wider.ratio) < 0.001,
+  `${wider.ratio} → ${plainWheel.ratio}`,
+);
+
+// Shift 把纵向滚动转成横向时（deltaY = 0、deltaX 有值）也要能调 —— 真机上就是这个形状
+await c.wheel(wider.center.x, wider.center.y, 0, { modifiers: 2, deltaX: 100 });
+await new Promise((r) => setTimeout(r, 300));
+const horizontal = await c.evaluate(ratioProbe);
+check(
+  "横向位移（deltaY=0 + deltaX）也能调比例（Shift 滚轮的真机形态）",
+  horizontal.ratio < wider.ratio - 0.01,
+  `${wider.ratio} → ${horizontal.ratio}`,
+);
 
 // 一直向下滚 → 收敛到下限 25%（不会把预览区挤没）
 for (let i = 0; i < 40; i++) {
-  await c.wheel(wider.center.x, wider.center.y, 100, { modifiers: 2 | 8 });
+  await c.wheel(wider.center.x, wider.center.y, 100, { modifiers: 2 });
 }
 await new Promise((r) => setTimeout(r, 500));
 const narrowest = await c.evaluate(ratioProbe);
@@ -756,14 +774,37 @@ await openMenu("视图");
 await c.waitFor(`document.body.innerText.includes("重置分栏比例")`, { timeout: 5000 });
 // 提示文字要在菜单还开着的时候查（点完菜单就收了）
 const hasHint = await c.evaluate(
-  `Array.from(document.querySelectorAll(".menu-dropdown .menu-item")).some(e => (e.textContent || "").includes("Ctrl+Shift+滚轮"))`,
+  `Array.from(document.querySelectorAll(".menu-dropdown .menu-item")).some(e => (e.textContent || "").includes("Ctrl+滚轮"))`,
 );
-check("菜单项给出操作姿势提示（Ctrl+Shift+滚轮）", hasHint);
+check("菜单项给出操作姿势提示（Ctrl+滚轮）", hasHint);
 await clickMenuItem("重置分栏比例");
 await new Promise((r) => setTimeout(r, 400));
 const reset = await c.evaluate(ratioProbe);
 check("「重置分栏比例」回到 50/50", Math.abs(reset.ratio - 0.5) < 0.02, `${narrowest.ratio} → ${reset.ratio}`);
 await c.screenshot(SHOT("wysiwyg-24-split-reset"));
+
+// 写作模式（单栏、预览栏隐藏）：Ctrl+滚轮 不该改比例，但要在状态栏说清原因
+// —— 「按了没反应」最容易被当成坏了，这句话就是给这种情况准备的
+await c.evaluate(`(() => {
+  const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
+  raw.viewMode = "write";
+  raw.showPreview = false;
+  localStorage.setItem("typst-pad:state", JSON.stringify(raw));
+  return 1;
+})()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+const singlePaneBefore = await c.evaluate(ratioProbe);
+await c.wheel(singlePaneBefore.center.x, singlePaneBefore.center.y, -100, { modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+const singlePaneAfter = await c.evaluate(ratioProbe);
+check(
+  "写作模式（无预览栏）：Ctrl+滚轮 不改比例，但状态栏说明原因",
+  Math.abs(singlePaneAfter.ratio - singlePaneBefore.ratio) < 0.001 &&
+    singlePaneAfter.status.includes("先打开预览栏"),
+  JSON.stringify({ status: singlePaneAfter.status, ratio: singlePaneAfter.ratio }),
+);
 
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

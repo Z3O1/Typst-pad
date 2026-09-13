@@ -62,6 +62,21 @@ export function paneRatioPercent(ratio: number | null | undefined): number {
 }
 
 /**
+ * 取本次滚动真正该用的位移量。
+ *
+ * **为什么要同时看 deltaY 与 deltaX**：按着 Shift 滚轮时，Chromium 会把纵向滚动**转成横向**
+ * （`deltaY = 0`、`deltaX = ±100`），只读 deltaY 就会"按了没反应"——这正是最初
+ * Ctrl+Shift+滚轮 在真机上不生效的原因（头less 里用 CDP 注入 deltaY 绕过了这层转换，
+ * 所以验收全绿也照样是坏的）。现在手势是 Ctrl+滚轮（不依赖 Shift），但仍按"哪个有值用哪个"
+ * 处理，免得触摸板/某些平台把纵向滚动报成横向时再次失灵。
+ */
+export function wheelResizeDelta(deltaY: number, deltaX = 0): number {
+  const y = Number.isFinite(deltaY) ? deltaY : 0;
+  if (y !== 0) return y;
+  return Number.isFinite(deltaX) ? deltaX : 0;
+}
+
+/**
  * 预览栏的内联样式：`flex: 0 0 N%`（固定基准宽度，编辑区的 `flex: 1` 拿剩下的）。
  * 用 flex-basis 而不是 width，是为了让两个 pane 的 flex 布局规则保持一致。
  */
