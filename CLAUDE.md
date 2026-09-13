@@ -34,7 +34,7 @@ src/lib/live-preview.ts     # 所见即所得 CM6 扩展：公式 replace widget
 src/lib/typst-engine.ts     # 编译引擎：Tauri invoke 包装（compile_doc/compile_math/export_pdf）+ 结构化诊断
 src/lib/file-ops.ts         # Tauri dialog + invoke 封装（isTauri() 门控）
 src/lib/persistence.ts      # localStorage（key: "typst-pad:state"）
-src/lib/MenuBar.svelte      # 菜单栏（Alt 焦点切换 + 字母快捷键）
+src/lib/MenuBar.svelte      # 菜单栏（Alt 激活 + 字母快捷键；**不夺编辑区焦点**，见下方「菜单不夺焦」）
 src/lib/pdf-export.ts       # PDF 导出文件名推导（文档标题 → "报告.pdf"，纯函数可单测）
 src/lib/svg-paginate.ts     # 多页 SVG 页间分隔线（类名固定 page-separator，可单测）
 src/lib/diagnostics-utils.ts # 编译源位置 → 文档位置映射（mapCompiledPosToDoc）与波浪线区间（squiggleRanges）
@@ -103,6 +103,7 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   - `showPreview` 与模式联动：写作模式单栏、源码模式双栏；预览栏隐藏时容器仍在 DOM（`display:none`），`compile_doc` 写入链路不受影响。
 - **编辑器文档的受控契约（丢过内容，勿回退）**：`+page.svelte` 的 `doc`（页面状态）与 `editorDoc`（传给 `Editor` 的受控文档）是**实时镜像**——`handleDocChange` 里两个一起写，`initialDoc={editorDoc}`。原因：`editorDoc` 曾经只在打开/新建/重读时更新，是个陈旧镜像，一旦 Editor 重挂载（或 props 重新生效），旧值就被当成"外部文档"推回编辑器，把未保存的新输入覆盖成上次打开/保存的版本（用户反馈的"切换模式时未保存内容消失"）。Editor 侧另加**「同一外部值只推一次」守卫**（`appliedExternalDoc`）与替换日志（`dbg` 的 `editor` 通道）。**绝不能让 `editorDoc` 落后于编辑器内容。**
 - **打开/重读的安全底线**：`openPath` 只要有未保存修改就确认（**同路径也不例外**——此前 `filePath !== path` 的豁免会让"把当前 .typ 拖进窗口"这类操作静默丢弃未保存修改）；`reloadFile`（Ctrl+R）同样确认。
+- **菜单不夺焦（用户明确要求：「不要改变当前编辑位置」）**：Alt 激活菜单栏时**不再**让编辑区失焦——失焦会让光标消失、下一个非 accessKey 字母还会被菜单吃掉。菜单栏只依赖 window 上的 keydown（accessKey / 方向键 / Esc / Enter 都照常），不需要 DOM 焦点；只有「取消选中」一侧把焦点交回编辑器（鼠标点过菜单项后焦点落在按钮上，必须还回去，见 `handleMenuFocusChange`）。**别把 `el.blur()` 加回去。**
 - **回退**：渲染失败 / 未就绪 / 行内跨行公式 → 不挂 widget，保持源码显示（不出现空占位、不弹错误）。
 - **持久化**：`viewMode`（+ `showPreview`）与主题一起存 localStorage；旧的 `livePreview` 布尔自动迁移为 `viewMode`；视图菜单（`Ctrl+/`）切换。
 
@@ -181,7 +182,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - **端口**：验收脚本默认打 `http://localhost:1420/?browserdev=1`，而 **1420 也是 `npm run tauri dev` 的 Vite 端口**——用户自己开着桌面应用时，验收脚本会被 "Port 1420 is already in use" 挡住（实测被反馈过）。换端口跑即可：`npm run dev -- --port 1425` 起服务 + `BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs`（1420 是 `vite.config.js` 里写死的 `server.port` + `strictPort: true`，CLI `--port` 可覆盖，不覆盖时宁可报错也不自动换端口；脚本侧由 `cdp.mjs` 导出的 `DEV_URL` 读取 `BROWSER_CHECK_PORT` / `BROWSER_CHECK_URL`，`probe.mjs` 仍可传 URL 参数）。
   - `cdp.mjs`：连接 Windows headless Chrome 的 CDP（WSL 里直接跑 `/mnt/c/Program Files/Google/Chrome/Application/chrome.exe --headless=new --remote-debugging-port=9333 --remote-debugging-address=0.0.0.0 --user-data-dir=... 'http://localhost:1420/?browserdev=1'`；镜像网络下 WSL 可直连 localhost:9333）；提供 evaluate / 真实点击 / 真实输入（`Input.insertText`）/ 截图。
   - `probe.mjs`：排障小工具（导航到页面 → 打印渲染结果/页面内错误），"页面是不是坏了"先用它看。
-  - `wysiwyg.mjs`：所见即所得的 **56 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大），截图落在 `.browser-check/`（已 gitignore）。
+  - `wysiwyg.mjs`：所见即所得的 **62 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大），截图落在 `.browser-check/`（已 gitignore）。
   - **实测坑（都踩过）**：① `Page.navigate` 对**相同 URL** 不重新加载，上一次停在 500 错误页时会一直复现 → `goto()` 先跳 `about:blank`；② 截图必须由 Node 写进**工作区**（写 `/mnt/c/...` 会被文件沙箱拒绝，报 EROFS），别交给 Chrome 写；③ **Windows 的 headless Chrome 必须加 `--no-proxy-server`**，否则 localhost 会被系统代理吞掉、页面报"无法访问此网站"，看起来像"WSL 端口转发坏了"（判断连通性更干净的判据是 Windows 自带 `curl.exe`：`/mnt/c/Windows/System32/curl.exe -s -o NUL -w '%{http_code}' http://localhost:1420/`）；④ 验收脚本开始前**必须清 localStorage 再重新加载**，否则上一轮遗留的「源代码模式」会让页面不渲染公式，第一条断言莫名超时；⑤ 找菜单项要限定在 `.menu-dropdown .menu-item` 里，别在全页找同名文字（状态栏会显示"源代码模式"这类同名状态文字）。
   - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`（**两种字号各一份**：12pt 写作模式 / 10.5pt 源码模式，桩按 body+display+**sizePt** 匹配，字号对不上宁可退回假 SVG），再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
   - 浏览器开发模式（`?browserdev=1`，见 `src/lib/browser-dev-stub.ts`）里的 `compile_doc` 是假实现（假分页 SVG），`compile_math` 在没有注入夹具时也是假 SVG；文件/PDF 等 Tauri 命令同样是假的。**真实 typst 排版可用夹具链路上浏览器验证**，只有 Tauri IPC / WebView2 那一层必须桌面端（Windows）确认。

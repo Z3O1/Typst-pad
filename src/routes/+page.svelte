@@ -467,19 +467,15 @@
   }
 
   /**
-   * 菜单栏选中态与编辑器焦点协调：
-   * - 菜单被选中（Alt 激活）时让编辑器失焦、隐藏光标；
-   * - 菜单取消选中时恢复编辑器光标。
+   * 菜单栏选中态与编辑器焦点协调。
+   * **激活菜单不再让编辑器失焦**（用户反馈："不要改变当前编辑位置"）：失焦会让编辑区光标消失，
+   * 之后的字母还会被菜单当成 accessKey 吃掉，光标得手动点回去。现在编辑器全程保持焦点 ——
+   * 菜单栏本身只依赖 window 上的 keydown（accessKey / 方向键 / Esc 都照常），不需要 DOM 焦点。
+   * 只有"取消选中"这一侧要把焦点交回编辑器：鼠标点过菜单项后焦点落在按钮上，必须还回去。
    */
   function handleMenuFocusChange(focused: boolean) {
-    if (focused) {
-      const el = document.activeElement;
-      if (el instanceof HTMLElement && el.closest(".cm-content")) {
-        el.blur();
-      }
-    } else {
-      document.querySelector<HTMLElement>(".editor-host .cm-content")?.focus();
-    }
+    if (focused) return; // 菜单激活：编辑器继续持有焦点，光标与滚动位置都不动
+    document.querySelector<HTMLElement>(".editor-host .cm-content")?.focus();
   }
 
   function systemPrefersDark(): boolean {

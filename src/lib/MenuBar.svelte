@@ -61,8 +61,9 @@
       case "ignored":
         return;
       case "alt-toggle": {
-        // Alt 按下：切换菜单栏选中态。未选中 → 选中第一个分类（编辑器失焦）；
-        // 已选中 → 取消选中（恢复编辑器光标）。
+        // Alt 按下：切换菜单栏选中态。未选中 → 选中第一个分类；已选中 → 取消选中。
+        // **不再让编辑器失焦**（用户反馈"不要改变当前编辑位置"）：编辑器全程保持焦点与光标，
+        // 菜单栏只靠 window 上的 keydown 工作，不需要 DOM 焦点（见 +page.svelte handleMenuFocusChange）。
         e.preventDefault();
         if (decision.selected) {
           selectedIndex = null;
@@ -121,7 +122,7 @@
       }
       case "exit": {
         // #2 退出规则：数字、标点、非 accessKey 字母等按键 → 退出选中态。
-        // 不 preventDefault：编辑器此时已失焦，事件自然结束。
+        // 不 preventDefault：编辑器保持焦点，这个按键就正常输入到文档里（不会像以前那样被吞掉）。
         selectedIndex = null;
         openIndex = null;
         onMenuFocusChange?.(false);

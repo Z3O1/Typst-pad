@@ -552,5 +552,47 @@ await new Promise((r) => setTimeout(r, 900));
 const notRestored = await c.evaluate(`document.querySelector(".cm-content").innerText.trim()`);
 check("关掉「启动时恢复」后不恢复内容", notRestored === "", JSON.stringify(notRestored));
 
+console.log("22) Alt 激活菜单栏：编辑器不失焦、光标与滚动位置不变（用户反馈「不要改变当前编辑位置」）");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+const altDoc = Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 行`).join("\n") + "\n";
+await c.type(altDoc);
+await new Promise((r) => setTimeout(r, 700));
+// 把视口滚到中间，并记住滚动位置与焦点状态
+await c.evaluate(`(() => { const sc = document.querySelector(".cm-scroller"); sc.scrollTop = Math.floor(sc.scrollHeight / 2); return 1; })()`);
+await new Promise((r) => setTimeout(r, 300));
+const probe = `(() => {
+  const sc = document.querySelector(".cm-scroller");
+  const active = document.activeElement;
+  return {
+    scrollTop: Math.round(sc.scrollTop),
+    focusInEditor: !!active && !!active.closest(".cm-content"),
+    menuSelected: !!document.querySelector(".menu-title.selected"),
+    menuActive: !!document.querySelector(".menu-title.active"),
+    text: document.querySelector(".cm-content").innerText.length,
+  };
+})()`;
+const beforeAlt = await c.evaluate(probe);
+check("起点：焦点在编辑区、菜单未激活、已滚动", beforeAlt.focusInEditor && !beforeAlt.menuSelected && beforeAlt.scrollTop > 0, JSON.stringify(beforeAlt));
+
+await c.key("Alt", { code: "AltLeft", keyCode: 18, modifiers: 1 });
+await new Promise((r) => setTimeout(r, 500));
+const afterAlt = await c.evaluate(probe);
+check("Alt 后菜单栏进入选中态", afterAlt.menuSelected, JSON.stringify(afterAlt));
+check("Alt 后编辑器**仍然**持有焦点（光标没丢）", afterAlt.focusInEditor, JSON.stringify(afterAlt));
+check("Alt 后滚动位置不变（编辑位置没被改）", afterAlt.scrollTop === beforeAlt.scrollTop, `${beforeAlt.scrollTop} → ${afterAlt.scrollTop}`);
+check("Alt 后文档内容没变", afterAlt.text === beforeAlt.text, `${beforeAlt.text} → ${afterAlt.text}`);
+await c.screenshot(SHOT("wysiwyg-22-alt-keeps-focus"));
+
+// 再按一次 Alt 取消选中：仍然保持编辑区焦点
+await c.key("Alt", { code: "AltLeft", keyCode: 18, modifiers: 1 });
+await new Promise((r) => setTimeout(r, 400));
+const afterAlt2 = await c.evaluate(probe);
+check("再按 Alt 取消选中后焦点仍在编辑区", !afterAlt2.menuSelected && afterAlt2.focusInEditor, JSON.stringify(afterAlt2));
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();
