@@ -60,6 +60,20 @@ export const refreshLivePreview = StateEffect.define<null>();
 /** 视口外多少字符范围内也提前渲染（滚动时不至于看到源码一闪） */
 const PREFETCH_MARGIN = 2000;
 
+/**
+ * widget 构造失败的兜底：退回纯文本节点。
+ * toDOM 抛异常与 StateField 抛异常同级严重 —— 它会中断 CodeMirror 这一次视图更新，
+ * 表现为「编辑区卡死、打字/删除/回车全都没反应」（用户报过）。任何 widget 都必须能
+ * 退化成源码文本，绝不允许把异常抛回渲染流程。
+ */
+function fallbackTextDom(text: string, reason: unknown): HTMLElement {
+  console.error("[live-preview] widget 渲染失败，退回源码文本：", reason);
+  const span = document.createElement("span");
+  span.className = "cm-widget-fallback";
+  span.textContent = text;
+  return span;
+}
+
 /** 列表符号替换文本用的简单文本 widget（`- ` → `• `） */
 class TextWidget extends WidgetType {
   constructor(private readonly text: string) {
@@ -100,29 +114,33 @@ class MathWidget extends WidgetType {
   }
 
   toDOM(view: EditorView): HTMLElement {
-    const wrap = document.createElement("span");
-    wrap.className = this.dark ? "cm-math-widget cm-math-dark" : "cm-math-widget";
-    // 尺寸直接用 pt：Rust 侧按编辑器字号（14px = 10.5pt）编译，故 pt 与编辑器 CSS pt 1:1
-    wrap.style.width = `${this.render.widthPt}pt`;
-    wrap.style.height = `${this.render.heightPt}pt`;
-    // 基线对齐：盒底到基线的距离 = height - baseline，整体下移这么多
-    const depth = Math.max(0, this.render.heightPt - this.render.baselinePt);
-    wrap.style.verticalAlign = `${-depth}pt`;
-    wrap.title = `$${this.range.body}$（点击编辑源码）`;
-    wrap.innerHTML = this.render.svg;
-    const svg = wrap.querySelector("svg");
-    if (svg) {
-      svg.setAttribute("width", "100%");
-      svg.setAttribute("height", "100%");
-      svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    try {
+      const wrap = document.createElement("span");
+      wrap.className = this.dark ? "cm-math-widget cm-math-dark" : "cm-math-widget";
+      // 尺寸直接用 pt：Rust 侧按编辑器字号（14px = 10.5pt）编译，故 pt 与编辑器 CSS pt 1:1
+      wrap.style.width = `${this.render.widthPt}pt`;
+      wrap.style.height = `${this.render.heightPt}pt`;
+      // 基线对齐：盒底到基线的距离 = height - baseline，整体下移这么多
+      const depth = Math.max(0, this.render.heightPt - this.render.baselinePt);
+      wrap.style.verticalAlign = `${-depth}pt`;
+      wrap.title = `$${this.range.body}$（点击编辑源码）`;
+      wrap.innerHTML = this.render.svg;
+      const svg = wrap.querySelector("svg");
+      if (svg) {
+        svg.setAttribute("width", "100%");
+        svg.setAttribute("height", "100%");
+        svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      }
+      // 点击 widget：光标落到公式源码起点 → 选区进入该区间 → 装饰撤掉，源码展开
+      wrap.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        view.dispatch({ selection: { anchor: this.range.from } });
+        view.focus();
+      });
+      return wrap;
+    } catch (e) {
+      return fallbackTextDom(`$${this.range.body}$`, e);
     }
-    // 点击 widget：光标落到公式源码起点 → 选区进入该区间 → 装饰撤掉，源码展开
-    wrap.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      view.dispatch({ selection: { anchor: this.range.from } });
-      view.focus();
-    });
-    return wrap;
   }
 
   /** 不吞事件：交给编辑器默认处理（拖选等） */
@@ -152,19 +170,23 @@ class CodeBlockWidget extends WidgetType {
   }
 
   toDOM(view: EditorView): HTMLElement {
-    const block = document.createElement("div");
-    block.className = "cm-raw-block";
-    block.title = "代码块（点击编辑源码）";
-    const pre = document.createElement("pre");
-    pre.className = "cm-raw-block-pre";
-    pre.textContent = this.code;
-    block.appendChild(pre);
-    block.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      view.dispatch({ selection: { anchor: this.range.from } });
-      view.focus();
-    });
-    return block;
+    try {
+      const block = document.createElement("div");
+      block.className = "cm-raw-block";
+      block.title = "代码块（点击编辑源码）";
+      const pre = document.createElement("pre");
+      pre.className = "cm-raw-block-pre";
+      pre.textContent = this.code;
+      block.appendChild(pre);
+      block.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        view.dispatch({ selection: { anchor: this.range.from } });
+        view.focus();
+      });
+      return block;
+    } catch (e) {
+      return fallbackTextDom(this.code, e);
+    }
   }
 
   ignoreEvent(): boolean {
@@ -267,27 +289,31 @@ class MathBlockWidget extends WidgetType {
   }
 
   toDOM(view: EditorView): HTMLElement {
-    const block = document.createElement("div");
-    block.className = this.dark ? "cm-math-block cm-math-dark" : "cm-math-block";
-    block.title = `$${this.range.body}$（点击编辑源码）`;
-    const box = document.createElement("span");
-    box.className = "cm-math-block-box";
-    box.style.width = `${this.render.widthPt}pt`;
-    box.style.height = `${this.render.heightPt}pt`;
-    box.innerHTML = this.render.svg;
-    const svg = box.querySelector("svg");
-    if (svg) {
-      svg.setAttribute("width", "100%");
-      svg.setAttribute("height", "100%");
-      svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    try {
+      const block = document.createElement("div");
+      block.className = this.dark ? "cm-math-block cm-math-dark" : "cm-math-block";
+      block.title = `$${this.range.body}$（点击编辑源码）`;
+      const box = document.createElement("span");
+      box.className = "cm-math-block-box";
+      box.style.width = `${this.render.widthPt}pt`;
+      box.style.height = `${this.render.heightPt}pt`;
+      box.innerHTML = this.render.svg;
+      const svg = box.querySelector("svg");
+      if (svg) {
+        svg.setAttribute("width", "100%");
+        svg.setAttribute("height", "100%");
+        svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      }
+      block.appendChild(box);
+      block.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        view.dispatch({ selection: { anchor: this.range.from } });
+        view.focus();
+      });
+      return block;
+    } catch (e) {
+      return fallbackTextDom(`$${this.range.body}$`, e);
     }
-    block.appendChild(box);
-    block.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      view.dispatch({ selection: { anchor: this.range.from } });
-      view.focus();
-    });
-    return block;
   }
 
   ignoreEvent(): boolean {
@@ -355,23 +381,34 @@ function buildMathDecorations(
  * 渲染请求时机：视口内（含预取边距）出现未缓存的公式。
  */
 export function livePreview(opts: LivePreviewOptions): Extension {
-  /** 公式 widget + 常用标记样式合成一个装饰集（同一 StateField 提供，一次遍历文档） */
+  /**
+   * 公式 widget + 常用标记样式合成一个装饰集（同一 StateField 提供，一次遍历文档）。
+   * **整体 try/catch**：StateField 的 update 抛异常会让这次事务整个失败——文档不再更新，
+   * 表现为"打字/删除/回车全部没反应"（用户报过：输入 `= 1 = 2` 后编辑区卡死）。
+   * 任何装饰计算出的意外都必须退化成"不挂装饰"（源码照常显示、编辑照常可用），
+   * 并把原因写进控制台，绝不冒泡到 CodeMirror 的事务里。
+   */
   const collect = (state: EditorState): DecorationSet => {
-    if (!opts.enabled()) return Decoration.none;
-    // 一次重建里 lexer 只跑一遍：区域扫描结果同时喂给公式与标记两条扫描
-    // （此前两条路径各自再扫一遍，40k 字符文档实测每次按键 ~14ms，合并后约 1/3）
-    const doc = state.doc.toString();
-    const opaque = scanNonMarkupRegions(doc);
-    const math = scanMathRanges(doc, opaque);
-    // 编译上下文与缓存键必须来自**同一次**文档快照（扩展内算，见 prefix 选项的说明）
-    const context = buildMathContext(opts.prefix(), doc);
-    const all = [
-      ...buildMathDecorations(state, opts, math, context),
-      ...buildMarkupDecorations(state, { opaque, math }),
-    ];
-    if (all.length === 0) return Decoration.none;
-    // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）
-    return Decoration.set(all, true);
+    try {
+        if (!opts.enabled()) return Decoration.none;
+        // 一次重建里 lexer 只跑一遍：区域扫描结果同时喂给公式与标记两条扫描
+        // （此前两条路径各自再扫一遍，40k 字符文档实测每次按键 ~14ms，合并后约 1/3）
+        const doc = state.doc.toString();
+        const opaque = scanNonMarkupRegions(doc);
+        const math = scanMathRanges(doc, opaque);
+        // 编译上下文与缓存键必须来自**同一次**文档快照（扩展内算，见 prefix 选项的说明）
+        const context = buildMathContext(opts.prefix(), doc);
+        const all = [
+          ...buildMathDecorations(state, opts, math, context),
+          ...buildMarkupDecorations(state, { opaque, math }),
+        ];
+        if (all.length === 0) return Decoration.none;
+        // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）
+        return Decoration.set(all, true);
+    } catch (e) {
+      console.error("[live-preview] 装饰重建失败，已退化为源码显示：", e);
+      return Decoration.none;
+    }
   };
 
   const decoField = StateField.define<DecorationSet>({
@@ -417,33 +454,33 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         // 视图刚建立时视口可能尚未测量：取不到就用全文（宁可多渲染一点）
         let visible: readonly { from: number; to: number }[] = [];
         try {
-          visible = view.visibleRanges;
-        } catch {
-          visible = [];
+            visible = view.visibleRanges;
+          } catch {
+            visible = [];
+          }
+          if (visible.length === 0) visible = [{ from: 0, to: view.state.doc.length }];
+          const doc = view.state.doc.toString();
+          collectRequests(view.state, visible, buildMathContext(opts.prefix(), doc));
         }
-        if (visible.length === 0) visible = [{ from: 0, to: view.state.doc.length }];
-        const doc = view.state.doc.toString();
-        collectRequests(view.state, visible, buildMathContext(opts.prefix(), doc));
-      }
 
-      update(update: ViewUpdate) {
-        if (!opts.enabled()) return;
-        // 触发条件：文档/视口/选区变化，或父组件刚刷新了渲染结果（此时可能还缺别的公式，
-        // 例如刚打开开关、或前缀改动导致缓存键全变）
-        const refreshed = update.transactions.some((tr) =>
-          tr.effects.some((e) => e.is(refreshLivePreview)),
-        );
-        if (!update.docChanged && !update.viewportChanged && !update.selectionSet && !refreshed) {
-          return;
+        update(update: ViewUpdate) {
+          if (!opts.enabled()) return;
+          // 触发条件：文档/视口/选区变化，或父组件刚刷新了渲染结果（此时可能还缺别的公式，
+          // 例如刚打开开关、或前缀改动导致缓存键全变）
+          const refreshed = update.transactions.some((tr) =>
+            tr.effects.some((e) => e.is(refreshLivePreview)),
+          );
+          if (!update.docChanged && !update.viewportChanged && !update.selectionSet && !refreshed) {
+            return;
+          }
+          const doc = update.state.doc.toString();
+          collectRequests(
+            update.state,
+            update.view.visibleRanges,
+            buildMathContext(opts.prefix(), doc),
+          );
         }
-        const doc = update.state.doc.toString();
-        collectRequests(
-          update.state,
-          update.view.visibleRanges,
-          buildMathContext(opts.prefix(), doc),
-        );
-      }
-    },
+      },
   );
 
   return [decoField, requester, mathWidgetTheme];
@@ -452,78 +489,78 @@ export function livePreview(opts: LivePreviewOptions): Extension {
 /** 所见即所得相关样式（公式 widget + 常用标记） */
 const mathWidgetTheme = EditorView.theme({
   ".cm-math-widget": {
-    display: "inline-block",
-    lineHeight: "0",
-    cursor: "text",
-    // 悬停时给一点反馈（与源码区分，但不抢眼）
-    borderRadius: "2px",
+      display: "inline-block",
+      lineHeight: "0",
+      cursor: "text",
+      // 悬停时给一点反馈（与源码区分，但不抢眼）
+      borderRadius: "2px",
   },
   ".cm-math-widget:hover": {
-    backgroundColor: "rgba(128, 128, 128, 0.18)",
+      backgroundColor: "rgba(128, 128, 128, 0.18)",
   },
   ".cm-math-widget svg": {
-    display: "block",
-    width: "100%",
-    height: "100%",
+      display: "block",
+      width: "100%",
+      height: "100%",
   },
   // 暗色主题：typst 产物是黑字透明底，深色背景上会看不见 → 整体反色
   // （只影响黑色笔画，透明底保持不变）。暗色标记由 Editor.svelte 按主题注入
   // （不用 `&dark` 选择器：EditorView.theme 不支持该前缀，实测抛 "Unsupported selector: &dark"）。
   ".cm-math-dark svg": {
-    filter: "invert(1)",
+      filter: "invert(1)",
   },
   // 独占整行的行间公式：居中显示（与 typst 的独立式子一致）
   ".cm-math-block": {
-    textAlign: "center",
-    padding: "4px 0",
-    cursor: "text",
-    lineHeight: "0",
+      textAlign: "center",
+      padding: "4px 0",
+      cursor: "text",
+      lineHeight: "0",
   },
   ".cm-math-block:hover": {
-    backgroundColor: "rgba(128, 128, 128, 0.12)",
+      backgroundColor: "rgba(128, 128, 128, 0.12)",
   },
   ".cm-math-block-box": {
-    display: "inline-block",
+      display: "inline-block",
   },
   // 代码块（``` 围栏）：与 typst 的块级 raw 观感一致（等宽 + 浅底 + 圆角）
   ".cm-raw-block": {
-    padding: "6px 8px",
-    backgroundColor: "rgba(128, 128, 128, 0.14)",
-    borderRadius: "4px",
-    cursor: "text",
+      padding: "6px 8px",
+      backgroundColor: "rgba(128, 128, 128, 0.14)",
+      borderRadius: "4px",
+      cursor: "text",
   },
   ".cm-raw-block-pre": {
-    margin: "0",
-    fontFamily: "Consolas, 'Courier New', monospace",
-    fontSize: "0.92em",
-    lineHeight: "1.45",
-    whiteSpace: "pre",
-    overflowX: "auto",
+      margin: "0",
+      fontFamily: "Consolas, 'Courier New', monospace",
+      fontSize: "0.92em",
+      lineHeight: "1.45",
+      whiteSpace: "pre",
+      overflowX: "auto",
   },
   // 列表符号替换文本：与正文同宽字符宽度，避免行首缩进跳动
   ".cm-markup-replacement": {
-    color: "inherit",
+      color: "inherit",
   },
   // 常用标记样式：标题按级别放大加粗；粗体/斜体/行内代码沿用编辑器前景色
   ".cm-markup-heading": {
-    fontWeight: "700",
+      fontWeight: "700",
   },
   ".cm-markup-strong": {
-    fontWeight: "700",
+      fontWeight: "700",
   },
   ".cm-markup-emph": {
-    fontStyle: "italic",
+      fontStyle: "italic",
   },
   // 链接文字：蓝色下划线（两种主题下都够醒目）
   ".cm-markup-link": {
-    color: "#3d8bfd",
-    textDecoration: "underline",
-    cursor: "pointer",
+      color: "#3d8bfd",
+      textDecoration: "underline",
+      cursor: "pointer",
   },
   ".cm-markup-raw": {
-    fontFamily: "Consolas, 'Courier New', monospace",
-    backgroundColor: "rgba(128, 128, 128, 0.18)",
-    borderRadius: "2px",
+      fontFamily: "Consolas, 'Courier New', monospace",
+      backgroundColor: "rgba(128, 128, 128, 0.18)",
+      borderRadius: "2px",
   },
   // 标题字号：级别越高越大（1.6em → 1.06em），行高随之变化是预期内的
   ".cm-markup-heading-1": { fontSize: "1.6em", lineHeight: "1.5" },

@@ -6,6 +6,9 @@
 
 ### Fixed
 
+- **编辑区"卡死"（输入 `= 1 = 2` 后无法再打字/删除/换行）**：装饰重建（StateField `update`）或 widget 的 `toDOM` 一旦抛异常，会让 CodeMirror 这次事务整体失败、文档不再更新。现在 `collect()` 与三个 widget 全部 try/catch 兜底——失败就退化成源码显示（`Decoration.none` / `cm-widget-fallback`），编辑照常可用，原因写进控制台
+- **脚本错误不再静默**：新增 `window.onerror` / `unhandledrejection` 上报，状态栏直接显示「脚本错误：…」（桌面 WebView 里没有可见控制台，以前只能看到"应用坏了"）
+
 - **Alt 激活菜单栏不再抢走编辑区焦点**（用户反馈：「不要改变当前编辑位置」）：以前按 Alt 会让编辑区 `blur()`，光标消失、下一个字母还会被菜单当 accessKey 吃掉，得手动点回编辑区。现在编辑器全程保持焦点与滚动位置，菜单栏照旧用 Alt / 字母 accessKey / 方向键 / Esc 操作；鼠标点过菜单项之后焦点仍会交还编辑器
 
 ## [0.7.1] - 2026-09-11

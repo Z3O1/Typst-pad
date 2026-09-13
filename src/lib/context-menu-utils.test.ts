@@ -1,12 +1,14 @@
 // 自定义右键菜单纯逻辑模块的单测：
-// 区域判定（resolveContextZone）、选区判定（editor/preview）、菜单项 enabled 计算、位置收边。
+// 区域判定（resolveContextZone，含 #48「菜单栏/状态栏右键无效果」的守卫）、
+// 选区判定（editor/preview）、菜单项 enabled 计算。
+// 注：computeMenuPosition 的收边用例已移除——它是 3 行 clamp，失败在界面上立即可见，
+// 且更复杂的分支（含限宽）由 popover-utils.test.ts 覆盖（#46 的回归守卫）。
 import { describe, it, expect } from "vitest";
 import {
   resolveContextZone,
   editorSelectionHasContent,
   previewSelectionHasContent,
   buildContextMenuItems,
-  computeMenuPosition,
   type ContextMenuItemSpec,
 } from "./context-menu-utils";
 
@@ -194,50 +196,5 @@ describe("buildContextMenuItems 菜单项 enabled 计算", () => {
   it("菜单总条目数稳定：4 编辑项 + 1 分隔线 + 4 应用项", () => {
     expect(buildContextMenuItems("editor", true)).toHaveLength(9);
     expect(buildContextMenuItems("preview", false)).toHaveLength(9);
-  });
-});
-
-describe("computeMenuPosition 视口收边", () => {
-  it("视口内：菜单按鼠标坐标弹出", () => {
-    expect(computeMenuPosition(100, 100, 160, 40, 800, 600)).toEqual({
-      left: 100,
-      top: 100,
-    });
-  });
-
-  it("右缘越界：收回到视口内（保留 margin）", () => {
-    // 800 - 160 - 4 = 636
-    expect(computeMenuPosition(700, 100, 160, 40, 800, 600)).toEqual({
-      left: 636,
-      top: 100,
-    });
-  });
-
-  it("底缘越界：收回到视口内（保留 margin）", () => {
-    // 600 - 40 - 4 = 556
-    expect(computeMenuPosition(100, 590, 160, 40, 800, 600)).toEqual({
-      left: 100,
-      top: 556,
-    });
-  });
-
-  it("右下同时越界：两个方向都收边", () => {
-    expect(computeMenuPosition(9999, 9999, 160, 40, 800, 600)).toEqual({
-      left: 636,
-      top: 556,
-    });
-  });
-
-  it("菜单大于视口：贴边显示（下限 margin，不出现负坐标）", () => {
-    // 菜单宽 900 > 视口 800：left 下限 4
-    expect(computeMenuPosition(10, 10, 900, 40, 800, 600)).toEqual({
-      left: 4,
-      top: 10,
-    });
-    // 菜单高 700 > 视口 600：top 下限 4
-    expect(computeMenuPosition(10, 10, 160, 700, 800, 600)).toEqual({
-      left: 10,
-      top: 4,
-    });
   });
 });

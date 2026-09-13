@@ -761,6 +761,23 @@
     };
   });
 
+  /** 脚本错误统一提示：状态栏给出可读原因 + 调试日志留完整堆栈 */
+  function reportScriptError(label: string, detail: unknown) {
+    const msg =
+      detail instanceof Error ? detail.message : typeof detail === "string" ? detail : String(detail);
+    statusText = `脚本错误：${msg}`;
+    dbg.log("error", label, detail);
+    console.error(`[script-error] ${label}`, detail);
+  }
+
+  function onWindowError(e: ErrorEvent) {
+    reportScriptError("window.onerror", e.error ?? e.message);
+  }
+
+  function onUnhandledRejection(e: PromiseRejectionEvent) {
+    reportScriptError("unhandledrejection", e.reason);
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     const key = e.key.toLowerCase();
     const mod = e.ctrlKey || e.metaKey;
@@ -869,6 +886,11 @@
     };
     media.addEventListener("change", onSystemThemeChange);
     window.addEventListener("keydown", handleKeydown);
+    // 未捕获的脚本异常 / Promise 拒绝：桌面 WebView 里没有可见控制台，错误会静默丢失，
+    // 用户只看到"应用坏了"（实测踩过：装饰重建抛异常 → 编辑区卡死，却没有任何提示）。
+    // 这里统一报到状态栏 + 调试日志，便于用户直接把原因念给我们。
+    window.addEventListener("error", onWindowError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
     // 自定义右键菜单：编辑器/预览区替换原生菜单（菜单栏/状态栏拦截无效果，其余区域放行给浏览器原生）
     window.addEventListener("contextmenu", handleContextMenu);
     // 预览画布缩放：观测预览容器宽度变化（窗口 resize / 分栏布局变化），重算画布宽度；
@@ -940,6 +962,8 @@
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("contextmenu", handleContextMenu);
+      window.removeEventListener("error", onWindowError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
       previewResizeObserver?.disconnect();
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
