@@ -45,6 +45,20 @@
   import { dbg, setCliDebug } from "$lib/debug";
   import { clampPopoverRect } from "$lib/popover-utils";
   import { previewCanvasWidth, viewBoxWidthPt } from "$lib/preview-scale";
+  import {
+    checkForUpdate,
+    downloadAndInstallUpdate,
+    closeUpdate,
+    type AvailableUpdate,
+  } from "$lib/updater";
+  import {
+    AUTO_CHECK_DELAY_MS,
+    firstLines,
+    formatBytes,
+    formatProgress,
+    isCheckDue,
+    type DownloadProgress,
+  } from "$lib/update-utils";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -149,6 +163,115 @@
   let restoreSession = $state(true);
   let settingsRestoreSession = $state(true);
 
+  // ---------------------------------------------------------------------------
+  // 自动更新（tauri-plugin-updater；端点与签名公钥在 tauri.conf.json 的 plugins.updater）
+  // ---------------------------------------------------------------------------
+  /** 启动时自动检查更新（设置弹窗开关，默认开）。只影响自动检查，菜单里的手动检查始终可用 */
+  let autoCheckUpdates = $state(true);
+  let settingsAutoCheckUpdates = $state(true);
+
+  /**
+   * 更新流程状态机。刻意做成**单个对象**而不是若干布尔量：状态栏提示、弹窗内容、
+   * 按钮可用性都由它派生，避免出现"弹窗开着但状态是 idle""下载中又是 available"这类
+   * 自相矛盾的组合（更新流程有 7 个阶段，布尔量一多必然打架）。
+   */
+  type UpdateFlow =
+    | { kind: "idle" }
+    | { kind: "checking"; manual: boolean }
+    | { kind: "latest" }
+    | { kind: "available"; version: string; currentVersion: string; notes: string }
+    | { kind: "downloading"; version: string; progress: DownloadProgress }
+    | { kind: "installing"; version: string }
+    | { kind: "error"; message: string };
+
+  let updateFlow = $state<UpdateFlow>({ kind: "idle" });
+  // 待安装的更新句柄：持有 Rust 侧资源（rid），不进响应式（模板不渲染它），换版本时 close
+  let updateHandle: AvailableUpdate | null = null;
+  let showUpdateDialog = $state(false);
+  /** 上次检查时间（持久化）：跨启动节流，反复开关应用不会每次都打网络请求 */
+  let lastUpdateCheckAt: number | null = null;
+  let startupCheckTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** 状态栏的更新提示（点击重开更新弹窗）；无提示时为 null */
+  const updateNotice = $derived.by(() => {
+    const flow = updateFlow;
+    if (flow.kind === "available") return `可更新到 v${flow.version}`;
+    if (flow.kind === "downloading") {
+      return flow.progress.percent === null
+        ? `正在下载更新 v${flow.version}（已下载 ${formatBytes(flow.progress.downloaded)}）`
+        : `正在下载更新 v${flow.version}（${flow.progress.percent}%）`;
+    }
+    return null;
+  });
+
+  /**
+   * 检查更新。manual = 用户点菜单：这类操作必须有明确反馈（"已是最新"也要说）；
+   * 自动检查（manual = false）保持安静——没更新、失败都只留调试日志，
+   * 绝不在状态栏刷"检查更新失败"打扰正在写作的人。
+   */
+  async function checkUpdates(manual: boolean) {
+    // 下载/安装中不重入（否则会丢掉手上的句柄）
+    if (updateFlow.kind === "downloading" || updateFlow.kind === "installing") return;
+    updateFlow = { kind: "checking", manual };
+    if (manual) statusText = "正在检查更新…";
+
+    const outcome = await checkForUpdate();
+    lastUpdateCheckAt = Date.now();
+    schedulePersist();
+
+    if (outcome.kind === "none") {
+      updateFlow = { kind: "latest" };
+      if (manual) statusText = "已是最新版本";
+      return;
+    }
+    if (outcome.kind === "unsupported") {
+      updateFlow = { kind: "idle" };
+      if (manual) statusText = "当前环境不支持自动更新（仅桌面版可用）";
+      return;
+    }
+    if (outcome.kind === "error") {
+      updateFlow = { kind: "error", message: outcome.message };
+      if (manual) statusText = `检查更新失败：${outcome.message}`;
+      return;
+    }
+
+    // 有可用新版本：释放上一个句柄，换成新的
+    await closeUpdate(updateHandle);
+    updateHandle = outcome.update;
+    updateFlow = {
+      kind: "available",
+      version: outcome.update.version,
+      currentVersion: outcome.update.currentVersion,
+      notes: outcome.update.notes,
+    };
+    statusText = `发现新版本 v${outcome.update.version}`;
+    // 用户选定的交互：发现新版本 → 弹窗确认（不自动下载）；关掉弹窗后状态栏仍留着入口
+    showUpdateDialog = true;
+  }
+
+  /** 下载并安装（弹窗里的「下载并安装」）。Windows 上成功后应用会自动退出并重开 */
+  async function startUpdateInstall() {
+    const handle = updateHandle;
+    if (!handle) return;
+    updateFlow = {
+      kind: "downloading",
+      version: handle.version,
+      progress: { downloaded: 0, total: 0, percent: null },
+    };
+    const result = await downloadAndInstallUpdate(handle, (progress) => {
+      // 用户可能已经点了「关闭」；只要还在下载阶段就继续更新进度
+      if (updateFlow.kind === "downloading") updateFlow = { ...updateFlow, progress };
+    });
+    if (result.ok) {
+      updateFlow = { kind: "installing", version: handle.version };
+      statusText = "更新已就绪：应用即将退出并安装新版本…";
+    } else {
+      updateFlow = { kind: "error", message: result.message };
+      statusText = `更新失败：${result.message}`;
+      showUpdateDialog = true; // 失败必须让用户看见（否则点了按钮好像什么也没发生）
+    }
+  }
+
   /** 关闭弹窗：保存后关闭 */
   async function onClosePromptSave() {
     showClosePrompt = false;
@@ -182,6 +305,8 @@
         showPreview,
         dirty,
         restoreSession,
+        autoCheckUpdates,
+        lastUpdateCheckAt,
       });
     }, 300);
   }
@@ -461,7 +586,10 @@
       {
         label: "帮助",
         accessKey: "H",
-        items: [{ label: "关于 Typst-pad", action: () => (showAbout = true) }],
+        items: [
+          { label: "检查更新…", action: () => checkUpdates(true) },
+          { label: "关于 Typst-pad", action: () => (showAbout = true) },
+        ],
       },
     ];
   }
@@ -590,6 +718,7 @@
     settingsPrefixEnabled = prefixEnabled;
     settingsPrefixCode = prefixCode;
     settingsRestoreSession = restoreSession;
+    settingsAutoCheckUpdates = autoCheckUpdates;
     showSettings = true;
   }
 
@@ -598,6 +727,7 @@
     prefixEnabled = settingsPrefixEnabled;
     prefixCode = settingsPrefixCode;
     restoreSession = settingsRestoreSession;
+    autoCheckUpdates = settingsAutoCheckUpdates;
     schedulePersist();
     showSettings = false;
     statusText = "设置已保存";
@@ -860,6 +990,8 @@
     // 旧存档没有 showPreview：单栏与否跟随模式（写作模式单栏，源码模式双栏对照）
     showPreview = saved.showPreview ?? viewMode === "source";
     restoreSession = saved.restoreSession ?? true;
+    autoCheckUpdates = saved.autoCheckUpdates ?? true;
+    lastUpdateCheckAt = typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
     if (restoreSession && typeof saved.content === "string" && saved.content.trim() !== "") {
       doc = saved.content;
       editorDoc = saved.content; // 镜像同步，见 editorDoc 声明处
@@ -955,6 +1087,13 @@
       });
     }
     mark("mount-listeners-done");
+
+    // 自动更新：启动后延迟一次静默检查（不阻塞首屏）。
+    // 节流按持久化的 lastUpdateCheckAt 判断（默认 6 小时，见 update-utils.isCheckDue）——
+    // 反复开关应用不会每次都打网络请求；关掉设置里的开关则完全不检查。
+    if (autoCheckUpdates && isCheckDue(lastUpdateCheckAt, Date.now())) {
+      startupCheckTimer = setTimeout(() => checkUpdates(false), AUTO_CHECK_DELAY_MS);
+    }
     mark("mount-end");
 
     return () => {
@@ -968,6 +1107,7 @@
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
       clearTimeout(mathTimer); // 停止在途公式渲染批次
+      clearTimeout(startupCheckTimer); // 关窗时取消还没发起的自动更新检查
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
     };
   });
@@ -1033,6 +1173,13 @@
 
   <footer class="statusbar">
     <span>{statusText}</span>
+    {#if updateNotice}
+      <button
+        class="status-update"
+        title="打开更新窗口"
+        onclick={() => (showUpdateDialog = true)}
+      >{updateNotice}</button>
+    {/if}
     <span class="error-badge-wrap" bind:this={errorWrapEl}>
       <span
         class="error-badge"
@@ -1137,6 +1284,10 @@
           <span>启动时恢复上次内容（未保存的修改不会丢）</span>
         </label>
         <label class="settings-row">
+          <input type="checkbox" bind:checked={settingsAutoCheckUpdates} />
+          <span>启动时自动检查更新（发现新版本会先询问，不会自己下载）</span>
+        </label>
+        <label class="settings-row">
           <input type="checkbox" bind:checked={settingsPrefixEnabled} />
           <span>启用前缀代码</span>
         </label>
@@ -1151,6 +1302,61 @@
           <button class="modal-btn primary" onclick={saveSettings}>保存</button>
           <button class="modal-btn" onclick={closeSettings}>关闭</button>
         </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showUpdateDialog && updateFlow.kind !== "latest" && updateFlow.kind !== "checking"}
+    <div class="modal-overlay-static">
+      <div class="modal update-modal">
+        {#if updateFlow.kind === "available"}
+          <h3 class="modal-title">发现新版本</h3>
+          <p class="modal-text">
+            当前 v{updateFlow.currentVersion} → 最新 v{updateFlow.version}
+          </p>
+          {#if updateFlow.notes}
+            <pre class="update-notes">{firstLines(updateFlow.notes)}</pre>
+          {/if}
+          <p class="modal-text update-hint">
+            下载并安装后应用会自动重启；安装包有签名校验，来源不对会被拒绝。
+          </p>
+          <div class="modal-actions">
+            <button class="modal-btn primary" onclick={startUpdateInstall}>下载并安装</button>
+            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>稍后</button>
+          </div>
+        {:else if updateFlow.kind === "downloading"}
+          <h3 class="modal-title">正在下载更新 v{updateFlow.version}</h3>
+          <div class="update-progress">
+            <div
+              class="update-progress-fill"
+              style="width: {updateFlow.progress.percent ?? 0}%"
+            ></div>
+          </div>
+          <p class="modal-text">{formatProgress(updateFlow.progress)}</p>
+          <div class="modal-actions">
+            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>
+              后台继续下载
+            </button>
+          </div>
+        {:else if updateFlow.kind === "installing"}
+          <h3 class="modal-title">更新已就绪</h3>
+          <p class="modal-text">
+            应用即将退出并安装 v{updateFlow.version}，安装完成后会自动重新打开。
+          </p>
+          <p class="modal-text update-hint">有未保存的修改请先返回保存（安装期间窗口会关闭）。</p>
+          <div class="modal-actions">
+            <!-- Windows 上安装器会自己把应用拉起来；留个关闭按钮是为了非 Windows
+                 （安装完不退出的平台）不会被一个没有按钮的弹窗卡住 -->
+            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>关闭</button>
+          </div>
+        {:else if updateFlow.kind === "error"}
+          <h3 class="modal-title">更新失败</h3>
+          <p class="modal-text">{updateFlow.message}</p>
+          <div class="modal-actions">
+            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>关闭</button>
+            <button class="modal-btn primary" onclick={() => checkUpdates(true)}>重试</button>
+          </div>
+        {/if}
       </div>
     </div>
   {/if}
@@ -1705,5 +1911,62 @@
     margin: 0;
     font-size: 13px;
     color: var(--fg-dim);
+  }
+
+  /* 状态栏的更新提示：只作文字强调（无底色块，保持状态栏干净），点击重开更新弹窗 */
+  .status-update {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    text-decoration: underline dotted;
+  }
+
+  .status-update:hover {
+    text-decoration: underline solid;
+  }
+
+  /* 更新弹窗：说明可能很长，限宽 + 内部滚动，不把弹窗撑到屏幕外 */
+  .update-modal {
+    max-width: 560px;
+  }
+
+  .update-notes {
+    margin: 8px 0 0;
+    padding: 8px 10px;
+    max-height: 240px;
+    overflow-y: auto;
+    background: var(--bg-pane);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--fg);
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: inherit;
+  }
+
+  .update-hint {
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+
+  .update-progress {
+    height: 6px;
+    margin: 12px 0 6px;
+    border-radius: 3px;
+    background: var(--bg-pane);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .update-progress-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.2s linear; /* 进度回调是分片的，平滑一点免得跳 */
   }
 </style>

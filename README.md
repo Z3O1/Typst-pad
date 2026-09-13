@@ -28,6 +28,7 @@
 - 中文/数学公式完整支持（本地打包字体，离线可用）
 - 打开 / 保存 `.typ` 文件（Tauri 桌面环境）；**Ctrl/Cmd + S** 快速保存
 - 导出 PDF（原生"另存为"对话框）
+- **自动更新**：启动时静默检查新版本（设置里可关），发现新版本时状态栏提示 + 弹窗确认，点「下载并安装」才下载安装；菜单「帮助 → 检查更新…」可随时手动检查（详见[自动更新](#自动更新)）
 - 主题三态：自动（跟随系统）/ 暗 / 明
 
 ## 技术栈
@@ -56,8 +57,8 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 
 ## 测试与 CI
 
-- 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键，以及所见即所得链路（`typst-lex` 区域扫描 / `math-ranges` 公式范围 / `markup-ranges` 标记 / `live-preview` 装饰行为）
-- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`，前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
+- 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键、自动更新的纯逻辑（`update-utils`：检查节流 / 进度换算 / 错误文案），以及所见即所得链路（`typst-lex` 区域扫描 / `math-ranges` 公式范围 / `markup-ranges` 标记 / `live-preview` 装饰行为）；发布脚本的测试在 `scripts/generate-latest-json.test.mjs`（更新清单的生成与校验）
+- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（67 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
 - 浏览器端的**真实排版视觉验证**：`npm run fixtures:math` 导出 Rust 侧真实公式产物 → `node scripts/browser-check/wysiwyg-visual.mjs`。它把真实产物注入浏览器开发模式页面，实测 ① 行内公式基线与同行文字基线是否齐平（用零宽基线探针量，误差 < 1px）② 渲染尺寸是否等于真实 pt 尺寸 × 4/3 ③ 行间公式块级 widget 是否居中并独占整行 ④ 暗色主题下公式是否可见
 - Rust 单测（`typst_world.rs` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）、单公式渲染（`compile_math`：贴边 SVG、透明底、基线测量、前缀宏生效、语法错误回退）
 - CI（GitHub Actions，`.github/workflows/ci.yml`）：
@@ -72,9 +73,20 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 2. 提交推送并合并到 `main` → CI 自动构建安装包并上传 artifact（依赖不变时命中 Rust 缓存，快速）
 3. 打 tag 触发发布：`git tag v0.x.y && git push origin v0.x.y`
 4. GitHub → Actions → **Release**：下载最新 artifact → 生成草稿 Release（自动上传安装包）
-5. Releases 页面编辑草稿 → 发布
+5. Releases 页面编辑草稿 → 发布（**必须 Publish**：草稿的资产不对外，客户端拉不到 `latest.json`，自动更新不会生效）
 
 > 缓存机制：`Swatinem/rust-cache` 的 key 基于 rust 版本 + `Cargo.lock` 哈希。依赖不变（Cargo.lock 不变）时跨版本命中；改动依赖会使缓存失效全量重编（引入 typst 依赖树时已付出过一次）。
+
+## 自动更新
+
+应用启动后**静默检查**一次更新（设置弹窗里可关；菜单「帮助 → 检查更新…」可随时手动检查）。发现新版本时状态栏出现提示、弹窗询问——**不会自动下载**，点「下载并安装」才下载并在安装完成后自动重启。自动检查有 6 小时间隔且跨启动记忆，反复开关应用不会反复请求。
+
+- **更新源**：`https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json`（配置在 `tauri.conf.json` 的 `plugins.updater.endpoints`）。它是"最新一个**已发布** Release"的资产，所以草稿（draft）Release 里的更新包客户端拿不到——**必须 Publish 之后才生效**。
+- **清单内容**：版本号 + 安装包下载地址 + 安装包签名；由 `scripts/generate-latest-json.mjs` 在构建后生成（更新说明默认取 `CHANGELOG.md` 里该版本的正文），与安装包一起作为 Release 资产上传。
+- **签名校验**：安装包由 CI 用私钥签名（生成 `.sig`），客户端用**编译进应用**的公钥（`plugins.updater.pubkey`）校验，签名不符直接拒绝安装——防的是"更新通道被换成别人的安装包"。
+- **密钥管理**：私钥与密码存在仓库 Secrets（`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）。**私钥丢了就再也发不出自动更新**（老用户只能手动下载安装包），pubkey 一旦发布也不要再换。
+- **本机打包**：`createUpdaterArtifacts` 为 true 且配置里有 pubkey 之后，任何 `tauri build` 都必须能拿到私钥（`TAURI_SIGNING_PRIVATE_KEY` 或 `TAURI_SIGNING_PRIVATE_KEY_PATH`），否则打包直接失败（Tauri 的硬约束）。
+- **第一个带自动更新的版本要手动装一次**：0.7.2 及更早版本里没有 updater，所以它们不会自己升级上来。
 
 ## 架构
 

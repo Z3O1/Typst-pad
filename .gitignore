@@ -32,3 +32,10 @@ Thumbs.db
 
 # 浏览器验证产物（截图 / 报告）
 .browser-check/
+
+# 更新签名私钥（tauri signer generate 的产物）：**绝不进 git**。
+# 生成后建议移到仓库外（如 ~/.tauri/），见 CLAUDE.md「CI / 发布约定」。
+/.updater-keys/
+
+# 沙箱内 npm 缓存（默认 ~/.npm 不可写时的替代缓存目录）
+/.npm-cache/

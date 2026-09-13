@@ -12,6 +12,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 
 - 版本 `0.7.2`，`main` 与 `origin/main` 同步，CI 绿（`test` + `build-bundles`）。
 - **发行状态：`v0.7.0` 已发布（Latest）；`v0.7.1`、`v0.7.2` 仍是草稿 Release，需要手动 Publish**（`gh release edit v0.7.2 --draft=false`，或网页点 Publish）。安装包由 tag 触发的 `release.yml` 自动构建并上传，草稿不会自动对外。
+- **自动更新已接入（未发版）**：`tauri-plugin-updater` + 更新弹窗/状态栏提示/设置开关；签名密钥已生成并设进仓库 Secrets，`latest.json` 由 CI 生成。**注意顺序**：`tauri.conf.json` 里已经有 pubkey，所以任何 `tauri build`（含 main 的 CI）都必须拿得到私钥，**不要删那两个 Secrets**；下一个带 updater 的版本仍需用户手动安装一次才进入自动更新通道。细节见「自动更新（tauri-plugin-updater）数据流」与「CI / 发布约定」。
 - 最近一轮（0.7.1→0.7.2）修的都是「写作模式」的可用性 bug：Alt 抢焦点、装饰异常导致编辑区卡死、空正文标题崩溃、整行选区底色凸出。**这些经验都在下面「改动前的红线」和各章节的"勿回退"里，动编辑器/装饰代码前先扫一遍。**
 
 **5 分钟上手**
@@ -20,13 +21,16 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端单测（18 个文件 / 272 项）
+npm test                 # 前端 + 脚本单测（20 个文件 / 313 项）
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（29 passed / 1 ignored）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
+# 本地打包需要更新签名私钥（配置里已有 pubkey → 缺私钥打包会直接失败）：
+# TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/typst-pad.key TAURI_SIGNING_PRIVATE_KEY_PASSWORD=… npm run tauri build
+
 # 无显示器环境下的「浏览器验收」（本仓库的主力验收手段）：**换端口跑，别跟 tauri dev 抢 1420**
 npm run dev -- --port 1425
-BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 62 项交互验收 + 截图
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 67 项交互验收 + 截图
 npm run fixtures:math
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 12 项真实排版视觉验收
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
@@ -42,6 +46,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 6. `src-tauri/fonts/` 不放 `static/`（会被 SvelteKit 打进前端产物，安装包白胖 5.7MB）。
 7. `vite.config.js` 的 **dev 白屏修复三件套**与 `optimizeDeps.exclude: ["codemirror-lang-typst"]` 不许删（删了 WSL/WebKit 下会白屏）。
 8. 发版纪律：版本号三处一致；**别在 CI 运行中 push main**；rust-cache 不许加 `cache-on-failure`。
+9. **自动更新的签名密钥不许动**：`tauri.conf.json` 里已有 `plugins.updater.pubkey`，所以任何 `tauri build`（含 main 的 CI）**必须**能拿到私钥——仓库 Secrets 的 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` **删了就构建不了，换了就再也发不出更新**（老用户装了带旧 pubkey 的版本，只认旧私钥签的包，换钥匙只能让他们手动重装）。本地打包同理（`TAURI_SIGNING_PRIVATE_KEY_PATH`）。
 
 **已知未决 / 可做**（都不是 bug，是留给接手人的选择）
 
@@ -51,6 +56,9 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 - `保存失败` / `打开失败` 的状态栏提示没带上 Rust 侧的具体原因（如 `仅支持 .typ 文件`、`目录无效`），可补。
 - 设置弹窗的「启动时恢复上次内容」默认开（用户当时的选择）；若不想让新用户被上次内容打扰，可改默认或加提示。
 - 没有 git tag 之外的发布脚本；发版本流程见「CI / 发布约定」末尾。
+- **自动更新只覆盖 Windows**：CI 只构建 Windows 安装包，`latest.json` 里也只有 `windows-x86_64`。要上 macOS/Linux 得先补构建 job，并给 `+page.svelte` 的安装成功分支接 `tauri-plugin-process` 的 `relaunch()`（Windows 上 NSIS 装完会自己把应用拉起来，无需 relaunch，所以现在没引这个插件）。
+- 更新弹窗里的「更新说明」是 `CHANGELOG.md` 该版本的原文（含 `### Added` 之类的一级小标题），没做 Markdown 渲染——想要更好看就在弹窗里渲染 markdown 或改用 Release notes。
+- 更新检查没有"忽略这个版本"（用户点「稍后」只是关掉弹窗，下次启动仍会提示）；要加的话得再存一个 `skippedVersion`。
 
 **和这位用户协作的偏好（上一轮的实测经验）**
 
@@ -79,6 +87,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 | 整体架构与模块清单 | 架构（含配置与辅助目录） |
 | 编译链路 / 诊断 / 导出 PDF | 编译数据流（核心链路） |
 | 所见即所得怎么实现、有哪些坑 | 所见即所得（编辑器内联渲染）数据流 |
+| 自动更新怎么工作、密钥怎么管、发版要注意什么 | 自动更新（tauri-plugin-updater）数据流、CI / 发布约定 |
 | 字体从哪来、为什么不放 static | 字体、原生编译后端 |
 | 文件操作与路径安全 | 文件操作与路径安全 |
 | 启动耗时的观测方式 | 启动耗时观测 |
@@ -93,13 +102,14 @@ npm install          # 安装依赖
 npm run dev          # 仅前端 UI（无预览/文件功能；非 Tauri 环境显示"请使用桌面应用版本"提示页）
 npm run tauri dev    # 桌面应用（需 Rust；Vite 固定端口 1420）
 npm run check        # 类型检查（svelte-kit sync + svelte-check）
-npm test             # 前端单元测试（vitest + jsdom，只跑 src/**/*.test.ts）
+npm test             # 单元测试（vitest + jsdom：src/**/*.test.ts + scripts/**/*.test.mjs）
 npm test -- src/lib/typst-engine.test.ts   # 跑单个测试文件
 npm run build        # 前端生产构建（输出 build/）
-npm run tauri build  # 打包桌面安装程序（需 Rust）
+npm run tauri build  # 打包桌面安装程序（需 Rust；**需要更新签名私钥**，见"CI / 发布约定"）
 cargo check --manifest-path src-tauri/Cargo.toml   # 只查 Rust 壳
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（typst_world/packages：编译/字体/诊断/include/包解析下载）
 node scripts/check-fonts.mjs    # 校验 src-tauri/fonts 字体有效性
+node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成更新清单（发版用，CI 里自动跑）
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
 ```
@@ -129,6 +139,8 @@ src/lib/preview-scale.ts    # 预览画布等宽缩放：pt → px（1pt = 4/3px
 src/lib/context-menu-utils.ts # 右键菜单纯逻辑：区域判定 / 菜单项 enabled / 弹出位置收边
 src/lib/ContextMenu.svelte  # 自定义右键菜单 UI（命令映射在 +page.svelte）
 src/lib/menu-keys.ts        # 菜单栏按键决策纯函数（Alt / accessKey / Ctrl+单键快捷键匹配）
+src/lib/updater.ts          # 自动更新包装层：check → 可判别结果、下载进度事件流、句柄释放（只包 Tauri）
+src/lib/update-utils.ts     # 自动更新纯逻辑：检查节流 / 进度换算 / 字节格式化 / 错误文案（可单测）
 src/lib/debug.ts            # 调试日志通道 dbg（dev 默认开；--debug / ?debug=1 / localStorage 可开）
 src/lib/browser-dev-stub.ts # 浏览器开发桩：假 __TAURI_INTERNALS__ + 假编译，供 ?browserdev=1 用（仅开发）
 src/routes/+layout.ts       # SPA 模式（ssr = false），配合 adapter-static 的 index.html fallback
@@ -141,7 +153,7 @@ src-tauri/fonts/            # 打包字体（见"字体"：**不放 static/**）
 
 配置与辅助目录：
 - `vite.config.js`：SvelteKit + wasm 插件 + **dev 白屏修复三件套**（见"原生编译后端"末尾，勿动）；Tauri 开发用 `TAURI_DEV_HOST`。
-- `vitest.config.ts`：jsdom + `include: ["src/**/*.test.ts"]` + `server.fs.allow: [".."]`。
+- `vitest.config.ts`：jsdom + `include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"]` + `server.fs.allow: [".."]`（scripts 那条是发布脚本的测试：脚本是普通 JS + node 内置模块，不参与 svelte-check，见"测试"）。
 - `svelte.config.js`：`@sveltejs/adapter-static`（SPA，`fallback: index.html`）。
 - `.github/workflows/`：`ci.yml`（test + build-bundles）、`release.yml`（tag 发草稿 Release），约定见"CI / 发布约定"。
 - `scripts/`：`check-fonts.mjs`（字体魔数校验）、`download-fonts.mjs`（重新下载字体）、`browser-check/`（CDP 验收）、`install-vs-buildtools.bat`/`verify-app.bat`（Windows 辅助）。
@@ -193,6 +205,20 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 - **装饰/widget 的异常绝不允许冒泡进 CodeMirror 的事务**：StateField 的 `update` 或 widget 的 `toDOM` 一旦抛异常，这次事务整体失败 → 文档不再更新，表现为编辑区**卡死**。所以 `collect()` 整体包了 try/catch（失败即返回 `Decoration.none`，退化成源码显示），三个 widget 的 `toDOM` 也都包了 try/catch（失败退回纯文本 + `cm-widget-fallback` 类）。**改动 live-preview 时不要在 try 之外新增可能抛异常的代码；新增 `Decoration.*.range(a, b)` 前先确认 `b > a`。**
 - **脚本错误可见**：`+page.svelte` 挂 `window.onerror` / `unhandledrejection` → 状态栏显示「脚本错误：…」+ 调试日志（桌面 WebView 没有可见控制台，否则用户只能看到"应用坏了"）。排查桌面版疑难杂症时先看状态栏这句话。
 - **持久化**：`viewMode`（+ `showPreview`）与主题一起存 localStorage；旧的 `livePreview` 布尔自动迁移为 `viewMode`；视图菜单（`Ctrl+/`）切换。
+
+### 自动更新（tauri-plugin-updater）数据流
+
+形态 = 「静默检查 + 用户确认」（不自动下载、不偷偷重启）：启动后延迟约 4 秒检查一次，发现新版本就状态栏提示 + 弹窗询问，用户点「下载并安装」才下载；菜单「帮助 → 检查更新…」随时可手动检查，设置里可关掉自动检查。
+
+- **配置在 `tauri.conf.json` 的 `plugins.updater`**：`endpoints`（默认 `https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json`）+ `pubkey`（签名公钥，**编译进应用**）+ `windows.installMode: passive`。Rust 侧只加一行 `.plugin(tauri_plugin_updater::Builder::new().build())`；前端权限 `updater:default` 在 `capabilities/default.json`。
+- **清单（latest.json）**：静态 JSON 格式 `{ version, notes, pub_date, platforms: { "windows-x86_64": { url, signature } } }`。由 `scripts/generate-latest-json.mjs` 生成（Tauri CLI 不生成它，那是 tauri-action 的活，本仓库自己发 Release 所以自己生成）：从 `bundle/nsis/*-setup.exe.sig` 读签名、按 tag 拼下载 URL、`notes` 默认取 `CHANGELOG.md` 里该版本的正文。**优先 NSIS 而不是 MSI**（Windows 上 updater 默认走 NSIS，MSI 静默装要管理员）。
+- **客户端取的是 `releases/latest/download/latest.json`** = 最新一个**已发布** Release 的资产 → **草稿 Release 不算**，必须 Publish 之后客户端才看得到（这是"发版要记得 Publish"的又一重后果）。平台键由插件自己算：`updater_os()` + `updater_arch()` → `windows-x86_64`（本仓库只发 Windows）。
+- **签名校验**：安装包由 CI 用私钥签（`TAURI_SIGNING_PRIVATE_KEY`），客户端用 `pubkey` 校验（Rust 侧 `minisign`），签名不符直接拒绝安装——这是"更新通道被换包"的唯一防线。`pub_date` 客户端按 **RFC3339** 解析（`new Date().toISOString()` 正好合规）。
+- **前端状态机（`+page.svelte` 的 `updateFlow`）**：`idle | checking | latest | available | downloading | installing | error` 七态**放在一个对象里**，状态栏提示（`updateNotice`，`$derived`）、弹窗内容、按钮都由它派生——不要拆成多个布尔量（会出"弹窗开着但状态 idle"这类自相矛盾的组合）。`updateHandle`（plugin 的 `Update`，持有 Rust 侧 rid）是**普通变量**（模板不渲染它），换版本前 `closeUpdate()` 释放。
+- **失败反馈分两种**：手动检查失败 → 状态栏写明原因（`describeUpdateError` 把英文原文翻成"网络/清单没发出来/签名不符"这类可行动的话）；**自动检查失败保持安静**（只写 `dbg` 调试日志），否则网络一断每次启动都在状态栏刷红字。
+- **节流**：`lastUpdateCheckAt` 持久化 + `isCheckDue`（默认 6 小时），反复开关应用不会反复请求；关掉设置里的「启动时自动检查更新」就完全不检查。
+- **Windows 上 `downloadAndInstall` 成功后会退出应用**（NSIS 装完自己把应用拉起来），所以那个 promise 可能不返回——`{ ok: true }` 只代表"走到安装那步之前没报错"。
+- **浏览器开发模式**：桩对 `plugin:updater|check` 返回 `null`（= 没有新版本，见 `browser-dev-stub.ts`），所以这条链路在浏览器验收里是安静走通的；**真实的下载/签名校验/装包只能在桌面版验证**。
 
 ### 启动耗时观测
 
@@ -249,6 +275,12 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 - `ci.yml`：`test` job（ubuntu）push main/PR 跑 类型检查 → 单测 → 前端构建 → `cargo check`（**首次编译 typst 依赖树较慢**，之后命中缓存）；`build-bundles`（windows）**main push 或 workflow_dispatch 触发**（PR 不构建），Rust 缓存用 `shared-key: tauri-build-windows`（必须与 `release.yml` 相同，否则 release job 读不到缓存）。
 - `release.yml`：`v*` tag 触发，自行 checkout + 构建 + 发草稿 Release（不依赖 ci.yml 的 artifact）。发布构建吃 main 分支写入的缓存。
+- **自动更新与签名密钥（2026-09-14 接入）**：
+  - 私钥/密码存在仓库 Secrets：`TAURI_SIGNING_PRIVATE_KEY`（`tauri signer generate` 的 `.key` 文件内容）+ `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。**本地备份不在仓库里**（`.updater-keys/` 已 gitignore，只在本机；丢了就再也发不出更新）。
+  - **pubkey 已写入 `tauri.conf.json` → 所有 `tauri build` 都必须有私钥**：缺了会直接失败（CLI 原文 "A public key has been found, but no private key"），所以 `ci.yml` 的 `build-bundles` 与 `release.yml` 的构建步骤都传了这两个 env。**推论：Secrets 缺失时 main 的 CI 会红**，别当成缓存问题排查；PR 不跑 `build-bundles`，fork PR 也不需要密钥。
+  - 构建后由 `node scripts/generate-latest-json.mjs` 生成 `latest.json`（`ci.yml` 里只验证"生成得出来"，`release.yml` 里与安装包一起作为 Release 资产上传）。脚本坏了要在 main 上就发现，别等到发版。
+  - 生成的清单以 **NSIS** 的 `*-setup.exe` 为更新包（`bundle/**` 里同时上传 `.sig` 签名文件）。
+  - **草稿 Release 客户端拿不到**：`releases/latest/download/latest.json` 只认已发布的最新 Release，所以"发版要 Publish"从"对外可见"升级成"自动更新能不能生效"。
 - **缓存纪律（2026-08-10 事故后固化，勿回退）**：
   - rust-cache **禁止加 `cache-on-failure`**：被 cancel 的 run 即使编译已完成，post 上传缓存仍会被截断（实测 588MB 只传了 542MB），后续 run 精确命中同 key 不覆盖 → 半成品缓存永续，每次构建重编 55 个 crate（13 分钟）。只有成功完成的 run 才允许保存缓存。
   - **run 运行中不要 push main**：concurrency `cancel-in-progress` 会打断正在构建的 run，预热/发版构建被打断即前功尽弃。
@@ -261,7 +293,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 ## 测试
 
-- 前端 vitest + jsdom，`include: ["src/**/*.test.ts"]`；vite 的 `server.fs.allow: [".."]` 覆盖仓库上级目录（junction 场景下 node_modules 解析被拒的教训，见 #33，配置仍保留）。现有覆盖：`typst-engine`（invoke 契约映射 + 诊断转换纯函数，invoke/dialog 以 vi.mock 断言入参与消费）、`diagnostics-utils`、`error-list`、`context-menu-utils`、`doc-utils`、`editor-keymap`、`menu-keys`、`popover-utils`（#46 Popover 视口溢出的回归守卫）、`persistence`、`svg-paginate`、`pdf-export`、`preview-scale`、`write-commands`。
+- 前端 vitest + jsdom，`include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"]`（第二条是发布脚本的测试：脚本是普通 JS + node 内置模块，进了 TS program 就得给每个参数写 JSDoc 或装 `@types/node`——仓库刻意没装，见 `vite.config.js` 里的 `@ts-expect-error`，所以让它们留在类型检查之外）；vite 的 `server.fs.allow: [".."]` 覆盖仓库上级目录（junction 场景下 node_modules 解析被拒的教训，见 #33，配置仍保留）。现有覆盖：`typst-engine`（invoke 契约映射 + 诊断转换纯函数，invoke/dialog 以 vi.mock 断言入参与消费）、`diagnostics-utils`、`error-list`、`context-menu-utils`、`doc-utils`、`editor-keymap`、`menu-keys`、`popover-utils`（#46 Popover 视口溢出的回归守卫）、`persistence`、`svg-paginate`、`pdf-export`、`preview-scale`、`write-commands`、`update-utils`（检查节流 / 进度换算 / 字节格式化 / 错误文案翻译），脚本侧 `scripts/generate-latest-json.test.mjs`（平台键映射、semver 校验、NSIS 优先挑选、清单结构、CHANGELOG 提取、CLI 端到端）。
   **已删除的低价值测试（勿凭"补覆盖"再加回来）**：`file-ops.test.ts`（只测 `.typ` 后缀匹配这种一眼可见的判断，真路径安全在 Rust `validate_typ_path`，留着会造成"文件安全已测"的错觉）、`debug.test.ts`（调试日志通道，坏掉无用户可见后果）、`context-menu-utils.test.ts` 的 `computeMenuPosition` 收边 5 项（3 行 clamp，失败肉眼可见；更复杂的限宽分支由 popover-utils 覆盖）。
 - Rust 单测（`typst_world.rs`/`packages.rs` 内 `cargo test`，用 `CARGO_MANIFEST_DIR` 定位 `src-tauri/fonts`）：中文+数学文档端到端编译（每页含 `<svg>`，PDF 字节非空）、字体注册（7 个文件 + 族名断言）、语法错误诊断（1-based 行列 + endLine）、相对 include（成功 / 缺失文件诊断带 path / 未保存文档提示）、JSON 序列化契约（camelCase 键名 `endLine`/`endColumn`）、@local/@preview 包（缓存命中不下载 / miss 下载与 URL 格式 / 404 与网络失败诊断区分 / 数据目录优先 / 路径穿越与损坏归档防御 / 端到端导入编译，均用临时目录注入环境变量，不触真实用户目录与网络）。
 - 所见即所得链路测试：`typst-lex.test.ts`（区域扫描：注释/raw/字符串/代码/`[...]` 内容块）、`markup-ranges.test.ts`（标记拆解，含"代码与公式里的 `*` `_` 不算标记"、有序列表编号、围栏代码块）、`typst-scan-fuzz.test.ts`（**鲁棒性网**：120 份固定种子随机文档 + 15 组病态输入，断言不抛异常、区间有序不越界不重叠、区域无缝覆盖全文）、`math-context.test.ts`（`#let` 提取的保守规则）、`live-preview.test.ts`（jsdom 里真挂 EditorView，断言 widget 替换 / 块级 vs 行内 / 光标进出展开 / 失败回退 / 开关关闭 / 样式类）。**坑**：jsdom 下挂视图时光标默认在 offset 0，会落在构造内部而触发"展开"，测隐藏效果必须把光标放到构造之外。
@@ -270,7 +302,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - **端口**：验收脚本默认打 `http://localhost:1420/?browserdev=1`，而 **1420 也是 `npm run tauri dev` 的 Vite 端口**——用户自己开着桌面应用时，验收脚本会被 "Port 1420 is already in use" 挡住（实测被反馈过）。换端口跑即可：`npm run dev -- --port 1425` 起服务 + `BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs`（1420 是 `vite.config.js` 里写死的 `server.port` + `strictPort: true`，CLI `--port` 可覆盖，不覆盖时宁可报错也不自动换端口；脚本侧由 `cdp.mjs` 导出的 `DEV_URL` 读取 `BROWSER_CHECK_PORT` / `BROWSER_CHECK_URL`，`probe.mjs` 仍可传 URL 参数）。
   - `cdp.mjs`：连接 Windows headless Chrome 的 CDP（WSL 里直接跑 `/mnt/c/Program Files/Google/Chrome/Application/chrome.exe --headless=new --remote-debugging-port=9333 --remote-debugging-address=0.0.0.0 --user-data-dir=... 'http://localhost:1420/?browserdev=1'`；镜像网络下 WSL 可直连 localhost:9333）；提供 evaluate / 真实点击 / 真实输入（`Input.insertText`）/ 截图。
   - `probe.mjs`：排障小工具（导航到页面 → 打印渲染结果/页面内错误），"页面是不是坏了"先用它看。
-  - `wysiwyg.mjs`：所见即所得的 **62 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大），截图落在 `.browser-check/`（已 gitignore）。
+  - `wysiwyg.mjs`：所见即所得 + 自动更新入口的 **67 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大 → 启动恢复会话 → Alt 不夺焦 → **第 23 组自动更新入口**：帮助菜单有「检查更新…」、点它后状态栏显示"已是最新版本"（桩返回无更新）、没更新时不弹窗不留状态栏提示、检查不抢焦点、设置里有「启动时自动检查更新」且默认勾选），截图落在 `.browser-check/`（已 gitignore）。
   - **实测坑（都踩过）**：① `Page.navigate` 对**相同 URL** 不重新加载，上一次停在 500 错误页时会一直复现 → `goto()` 先跳 `about:blank`；② 截图必须由 Node 写进**工作区**（写 `/mnt/c/...` 会被文件沙箱拒绝，报 EROFS），别交给 Chrome 写；③ **Windows 的 headless Chrome 必须加 `--no-proxy-server`**，否则 localhost 会被系统代理吞掉、页面报"无法访问此网站"，看起来像"WSL 端口转发坏了"（判断连通性更干净的判据是 Windows 自带 `curl.exe`：`/mnt/c/Windows/System32/curl.exe -s -o NUL -w '%{http_code}' http://localhost:1420/`）；④ 验收脚本开始前**必须清 localStorage 再重新加载**，否则上一轮遗留的「源代码模式」会让页面不渲染公式，第一条断言莫名超时；⑤ 找菜单项要限定在 `.menu-dropdown .menu-item` 里，别在全页找同名文字（状态栏会显示"源代码模式"这类同名状态文字）。
   - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`（**两种字号各一份**：12pt 写作模式 / 10.5pt 源码模式，桩按 body+display+**sizePt** 匹配，字号对不上宁可退回假 SVG），再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
   - 浏览器开发模式（`?browserdev=1`，见 `src/lib/browser-dev-stub.ts`）里的 `compile_doc` 是假实现（假分页 SVG），`compile_math` 在没有注入夹具时也是假 SVG；文件/PDF 等 Tauri 命令同样是假的。**真实 typst 排版可用夹具链路上浏览器验证**，只有 Tauri IPC / WebView2 那一层必须桌面端（Windows）确认。

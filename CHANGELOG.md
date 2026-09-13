@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- **自动更新**（`tauri-plugin-updater`）：启动后静默检查新版本（延迟约 4 秒、间隔 6 小时且跨启动记忆，设置弹窗里的「启动时自动检查更新」可关），发现新版本时状态栏出现「可更新到 vX」提示 + 弹窗确认——**不自动下载**，点「下载并安装」才下载（弹窗里显示进度），装完应用自动重启（Windows 上由 NSIS 安装器拉起）。菜单「帮助 → 检查更新…」随时手动检查：手动检查无论成功失败都在状态栏给出明确文案，自动检查失败则保持安静（只写调试日志），不打扰写作。
+  - 更新包经 minisign **签名校验**（公钥编译进应用 `plugins.updater.pubkey`，私钥只存 CI Secrets），更新清单与安装包一起作为 Release 资产发布；清单由新增的 `scripts/generate-latest-json.mjs` 生成（版本号 + 安装包 URL + 签名，更新说明默认取本文件里该版本的正文），清单里的平台键是 `windows-x86_64`、更新包取 NSIS 的 `*-setup.exe`。
+  - 新增 `src/lib/updater.ts`（Tauri 包装层：可判别的检查结果 / 下载进度事件流 / 句柄释放）与 `src/lib/update-utils.ts`（纯逻辑：检查节流、进度换算、字节格式化、错误文案翻译；含 21 项单测）；持久化新增 `autoCheckUpdates`（默认开）与 `lastUpdateCheckAt`。
+  - 浏览器验收新增第 23 组（帮助菜单有「检查更新…」、手动检查后状态栏显示「已是最新版本」、没更新时不弹窗不留状态栏入口、检查不抢编辑区焦点、设置里有「启动时自动检查更新」且默认勾选），合计 67 项。
+  - ⚠️ **运维影响**：`tauri.conf.json` 里填了 `pubkey` 之后，任何 `tauri build` 都必须能拿到签名私钥（`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，已设为仓库 Secrets），否则打包直接失败（CLI 原文 "A public key has been found, but no private key"）；**私钥丢失或更换会导致老用户再也收不到自动更新**。发版流程因此多一条硬要求：Release 必须 **Publish**，草稿的资产客户端拉不到。第一个带 updater 的版本仍需用户手动安装一次。
+
+### Changed
+
+- `scripts/generate-latest-json.test.mjs` 一并进入 `npm test`（vitest 的 `include` 增加 `scripts/**/*.test.mjs`）；`npm run check` 的 svelte-check 不含它（仓库没有装 `@types/node`，脚本留在类型检查之外）。
+
 ## [0.7.2] - 2026-09-14
 
 ### Fixed

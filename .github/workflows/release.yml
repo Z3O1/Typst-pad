@@ -63,13 +63,29 @@ jobs:
       - name: Build installers (nsis + msi)
         run: npm run tauri build
         env:
+          # 自动更新的签名私钥（必填）：bundle.createUpdaterArtifacts 为 true 且
+          # tauri.conf.json 里填了 pubkey 之后，**没有私钥打包直接失败**
+          # （CLI 原文：A public key has been found, but no private key）。
+          # 私钥/密码存在仓库 Secrets 里，仅本 workflow 与 ci.yml 的 build-bundles 使用。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # 生成自动更新清单 latest.json（客户端 updater 取的端点见 tauri.conf.json 的
+      # plugins.updater.endpoints，默认是 releases/latest/download/latest.json）。
+      # 内容 = 版本号 + 安装包下载地址 + 安装包签名（.sig），更新说明默认取 CHANGELOG.md
+      # 里该版本的正文。**注意**：本 Release 是草稿，草稿资产不对外 —— 清单要等手动
+      # Publish 之后客户端才拉得到（这也是"发版要记得 Publish"的又一个理由）。
+      - name: Generate updater manifest (latest.json)
+        run: node scripts/generate-latest-json.mjs --tag "${{ github.event.inputs.tag_name || github.ref_name }}" --out latest.json
 
       - name: Publish draft release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
-          files: src-tauri/target/release/bundle/**
+          # bundle/** 里除安装包外还带着它们的 .sig 签名（createUpdaterArtifacts 产生）；
+          # latest.json 里的 signature 字段就是这些 .sig 的内容
+          files: |
+            src-tauri/target/release/bundle/**
+            latest.json
           draft: true
           generate_release_notes: false

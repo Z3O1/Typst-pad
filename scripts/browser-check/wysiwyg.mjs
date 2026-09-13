@@ -594,5 +594,73 @@ await new Promise((r) => setTimeout(r, 400));
 const afterAlt2 = await c.evaluate(probe);
 check("再按 Alt 取消选中后焦点仍在编辑区", !afterAlt2.menuSelected && afterAlt2.focusInEditor, JSON.stringify(afterAlt2));
 
+console.log("23) 自动更新入口（浏览器开发模式：桩固定返回「没有新版本」）");
+// 桩对 plugin:updater|check 返回 null（见 browser-dev-stub.ts），所以这里断言的是
+// **前端链路**：菜单项在不在、手动检查有没有明确反馈、没更新时会不会乱弹窗。
+// 真实下载/安装/签名校验只能在桌面版验证（Windows NSIS），见 CLAUDE.md「测试」。
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+/** 点开菜单栏某个分类（按标签前缀找） */
+const openMenu = async (prefix) => {
+  const rect = await c.evaluate(`(() => {
+    const el = Array.from(document.querySelectorAll(".menubar .menu-title"))
+      .find(e => (e.textContent || "").trim().startsWith(${JSON.stringify(prefix)}));
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  })()`);
+  await c.click(rect.x, rect.y);
+};
+/** 点开下拉里的某个菜单项（只在 .menu-dropdown 内找，避免点到状态栏同名文字） */
+const clickMenuItem = async (text) => {
+  const rect = await c.evaluate(`(() => {
+    const el = Array.from(document.querySelectorAll(".menu-dropdown .menu-item"))
+      .find(e => (e.textContent || "").includes(${JSON.stringify(text)}));
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  })()`);
+  await c.click(rect.x, rect.y);
+};
+
+await openMenu("帮助");
+await c.waitFor(`document.body.innerText.includes("检查更新")`, { timeout: 5000 });
+const hasUpdateItem = await c.evaluate(
+  `Array.from(document.querySelectorAll(".menu-dropdown .menu-item")).some(e => (e.textContent || "").includes("检查更新"))`,
+);
+check("「帮助」菜单里有「检查更新…」", hasUpdateItem);
+
+await clickMenuItem("检查更新");
+// 手动检查必须给出明确反馈（自动检查才允许安静）
+await c.waitFor(`document.querySelector(".statusbar").innerText.includes("已是最新版本")`, {
+  timeout: 10000,
+});
+const afterCheck = await c.evaluate(`({
+  status: document.querySelector(".statusbar").innerText,
+  dialog: !!document.querySelector(".update-modal"),
+  notice: !!document.querySelector(".status-update"),
+  focusInEditor: !!document.activeElement && !!document.activeElement.closest(".cm-content"),
+})`);
+check("手动检查后状态栏显示「已是最新版本」", afterCheck.status.includes("已是最新版本"), JSON.stringify(afterCheck.status));
+check("没有新版本：不弹更新窗、状态栏也不留更新入口", !afterCheck.dialog && !afterCheck.notice, JSON.stringify(afterCheck));
+check("检查更新不抢编辑区焦点", afterCheck.focusInEditor, JSON.stringify(afterCheck));
+await c.screenshot(SHOT("wysiwyg-23-update-check"));
+
+await openMenu("文件");
+await c.waitFor(`document.body.innerText.includes("设置")`, { timeout: 5000 });
+await clickMenuItem("设置");
+await c.waitFor(`!!document.querySelector(".settings-modal")`, { timeout: 5000 });
+const autoRow = await c.evaluate(`(() => {
+  const row = Array.from(document.querySelectorAll(".settings-modal .settings-row"))
+    .find(e => (e.textContent || "").includes("自动检查更新"));
+  return row ? { checked: row.querySelector("input").checked, text: row.textContent.trim() } : null;
+})()`);
+check("设置里有「启动时自动检查更新」且默认勾选", !!autoRow && autoRow.checked, JSON.stringify(autoRow));
+await c.screenshot(SHOT("wysiwyg-23-update-settings"));
+await c.evaluate(
+  `Array.from(document.querySelectorAll(".settings-modal .modal-btn")).find(b => (b.textContent || "").includes("关闭")).click()`,
+);
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

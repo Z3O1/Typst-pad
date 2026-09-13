@@ -30,6 +30,16 @@ export interface PersistedState {
    * 关掉后回到"每次全新开始"：只恢复主题/前缀/模式。
    */
   restoreSession: boolean;
+  /**
+   * 启动时是否自动检查更新（设置弹窗里的开关，默认开）。
+   * 只影响**自动**检查；菜单「帮助 → 检查更新…」始终可用。
+   */
+  autoCheckUpdates: boolean;
+  /**
+   * 上次自动检查更新的时间戳（ms）。用来做跨启动的节流（见 update-utils.isCheckDue）：
+   * 一天里反复开关应用不会每次都打网络请求。
+   */
+  lastUpdateCheckAt: number | null;
 }
 
 /** 读取持久化状态；不存在或损坏时返回空对象 */
@@ -52,6 +62,9 @@ export function loadState(): Partial<PersistedState> {
     // 旧存档没有这两个字段：脏标记保守取 false（内容非空的恢复逻辑会另行判定），恢复会话默认开
     if (state.dirty === undefined) state.dirty = false;
     if (state.restoreSession === undefined) state.restoreSession = true;
+    // 自动更新（0.7.2 后的存档才有）：默认开；没检查过时时间戳为 null（→ 启动即检查一次）
+    if (state.autoCheckUpdates === undefined) state.autoCheckUpdates = true;
+    if (typeof state.lastUpdateCheckAt !== "number") state.lastUpdateCheckAt = null;
     return state;
   } catch {
     return {};

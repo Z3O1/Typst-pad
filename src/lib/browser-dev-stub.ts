@@ -241,6 +241,12 @@ async function handleCommand(
       return [];
     case "get_debug_flag":
       return false;
+    // 自动更新：浏览器开发模式没有真实 updater（更没有 Rust 侧的签名校验与安装器）。
+    // 返回 null = "没有可用更新"——让"启动静默检查 → 更新状态机"这条链路在验收里安静走通，
+    // 而不是刷一屏未知命令。真实更新行为只能在桌面版验证（见 CLAUDE.md「测试」）。
+    case "plugin:updater|check":
+      notify(command);
+      return null;
     default:
       // dialog 插件（plugin:dialog|confirm 等）与未实现命令：给出行为安全的默认值，
       // 让 UI 不崩、也不产生"假成功"的错觉。

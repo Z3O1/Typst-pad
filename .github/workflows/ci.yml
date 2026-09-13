@@ -117,13 +117,21 @@ jobs:
       - name: Build installers (nsis + msi)
         run: npm run tauri build
         env:
+          # 自动更新签名私钥（必填，见 release.yml 同处注释：缺了打包直接失败）
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # 在 main 上就验证"更新清单生成得出来"：脚本写错、安装包没签名（.sig 缺失）
+      # 这类问题如果只在发版时才暴露，就得重跑一次完整发版。这里只生成、不发布。
+      - name: Verify updater manifest generation
+        run: node scripts/generate-latest-json.mjs --out latest.json
 
       - name: Upload bundles
         uses: actions/upload-artifact@v6
         with:
           name: bundles
-          path: src-tauri/target/release/bundle/**
+          path: |
+            src-tauri/target/release/bundle/**
+            latest.json
           if-no-files-found: error
           retention-days: 14

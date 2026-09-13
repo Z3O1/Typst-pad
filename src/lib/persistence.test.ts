@@ -23,6 +23,8 @@ describe("persistence", () => {
       showPreview: true,
       dirty: true,
       restoreSession: false,
+      autoCheckUpdates: false,
+      lastUpdateCheckAt: 1_700_000_000_000,
     });
     expect(loadState()).toEqual({
       theme: "dark",
@@ -35,6 +37,8 @@ describe("persistence", () => {
       showPreview: true,
       dirty: true,
       restoreSession: false,
+      autoCheckUpdates: false,
+      lastUpdateCheckAt: 1_700_000_000_000,
     });
   });
 
@@ -44,13 +48,13 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null });
     expect(loadState().theme).toBe("system");
   });
 
@@ -97,5 +101,16 @@ describe("persistence", () => {
     expect(state.restoreSession).toBe(true);
     expect(state.dirty).toBe(false);
     expect(state.content).toBe("旧内容");
+    // 旧存档没有自动更新字段：默认开启，且"没检查过"（启动即检查一次，见 update-utils.isCheckDue）
+    expect(state.autoCheckUpdates).toBe(true);
+    expect(state.lastUpdateCheckAt).toBeNull();
+  });
+
+  it("lastUpdateCheckAt 损坏（字符串/NaN 之类）时不传给节流逻辑", () => {
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ lastUpdateCheckAt: "刚刚" }),
+    );
+    expect(loadState().lastUpdateCheckAt).toBeNull();
   });
 });

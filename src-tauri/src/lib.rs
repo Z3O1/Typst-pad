@@ -389,6 +389,10 @@ pub fn run() {
         // 禁用浏览器加速键（Ctrl+R 不再触发整页刷新），放在 opener 之后注册
         .plugin(DisableBrowserAccelerators)
         .plugin(tauri_plugin_dialog::init())
+        // 自动更新（tauri-plugin-updater）：检查更新 / 下载 / 安装新版本。
+        // 端点与签名公钥在 tauri.conf.json 的 plugins.updater（前端权限见 capabilities/default.json
+        // 的 updater:default）；更新包的签名校验在 Rust 侧完成，前端拿不到也改不了公钥。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // 注意：不使用 single-instance——每次启动都打开独立实例/新窗口
         .setup(|app| {
             // 打点：setup 入口（窗口创建阶段起点）
