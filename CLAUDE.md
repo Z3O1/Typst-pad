@@ -45,8 +45,10 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 5. 菜单（Alt / 鼠标）**不许夺走编辑区焦点**（用户明确要求："不要改变当前编辑位置"）。
 6. `src-tauri/fonts/` 不放 `static/`（会被 SvelteKit 打进前端产物，安装包白胖 5.7MB）。
 7. `vite.config.js` 的 **dev 白屏修复三件套**与 `optimizeDeps.exclude: ["codemirror-lang-typst"]` 不许删（删了 WSL/WebKit 下会白屏）。
-8. 发版纪律：版本号三处一致；**别在 CI 运行中 push main**；rust-cache 不许加 `cache-on-failure`。
-9. **自动更新的签名密钥不许动**：`tauri.conf.json` 里已有 `plugins.updater.pubkey`，所以任何 `tauri build`（含 main 的 CI）**必须**能拿到私钥——仓库 Secrets 的 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` **删了就构建不了，换了就再也发不出更新**（老用户装了带旧 pubkey 的版本，只认旧私钥签的包，换钥匙只能让他们手动重装）。本地打包同理（`TAURI_SIGNING_PRIVATE_KEY_PATH`）。
+8. 发版纪律：版本号三处一致；rust-cache 不许加 `cache-on-failure`。
+9. **绝不阻塞等 GitHub workflow（用户 2026-09-14 连着强调三次：「不要等 CI 测试结束再执行后面的命令」「以后不要等 github workflow 阻塞」「别等 workflow 记录一下」）**：推 main、打 tag、执行后续命令**一律不等** CI / Release 跑完；**不要**挂"等 run 结束再执行"的后台轮询任务；报告状态最多**单次**查一次 `gh run list`（单查可以，轮询不行）。
+   - 原有的「别在 CI 运行中 push main」**按用户指示作废**：`ci.yml` 的 concurrency 会 cancel 掉 main 上正在跑的 run（被 cancel 的 run 不保存 rust-cache，缓存代价仍在），但他明确接受这个代价、**不接受为它停下等 CI**。唯一保留的建议是"能一次推完的提交就一次推完"（少制造几次 cancel），不是"等"。详见「和这位用户协作的偏好」。
+10. **自动更新的签名密钥不许动**：`tauri.conf.json` 里已有 `plugins.updater.pubkey`，所以任何 `tauri build`（含 main 的 CI）**必须**能拿到私钥——仓库 Secrets 的 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` **删了就构建不了，换了就再也发不出更新**（老用户装了带旧 pubkey 的版本，只认旧私钥签的包，换钥匙只能让他们手动重装）。本地打包同理（`TAURI_SIGNING_PRIVATE_KEY_PATH`）。
 
 **已知未决 / 可做**（都不是 bug，是留给接手人的选择）
 
@@ -64,7 +66,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 
 - 他会**自己跑桌面版**验证（WSL 里 `npm run tauri dev`），反馈通常是一句话现象或一张截图；**先复现、再改**——这一轮 5 个 bug 里有 4 个是靠"复现 + 抓异常原文"定位的（Chromium 里复现不出来时，就加防御性兜底 + 让错误可见，别硬猜）。
 - **他不喜欢等慢测试**：日常改动跑 `npm run check` + 相关单测（几秒级）就够；`scripts/browser-check/` 那套（约 1 分钟）只在改到编辑器/装饰/布局这类易回归的地方才跑，而且不必每次都盯着结果等它绿。
-- **绝不阻塞等 GitHub workflow（2026-09-14 连着强调两次：「以后不要等 CI 测试结束再执行后面的命令」「以后不要等 github workflow 阻塞」）**：推 main、打 tag、接着做下一步，都**不要**等 CI / Release 跑完，也**不要**挂"等 run 结束再执行"的后台轮询任务。该做的动作直接做完，报告状态时最多**查一次** `gh run list`（单次查询可以，轮询不行）。
+- **绝不阻塞等 GitHub workflow（2026-09-14 连着强调三次，原文见红线 9）**：推 main、打 tag、接着做下一步，都**不要**等 CI / Release 跑完，也**不要**挂"等 run 结束再执行"的后台轮询任务。该做的动作直接做完，报告状态时最多**查一次** `gh run list`（单次查询可以，轮询不行）。
   - 连带效果（他知道并接受）：`ci.yml` 的 concurrency 会 **cancel 掉 main 上正在跑的 run**，被 cancel 的 run 不保存 rust-cache（红线 8 说的缓存代价仍在）。所以"推 main 可能打断正在跑的构建"**不再是推迟推送的理由**——但他要的是"别为了等 workflow 停手"，不是"鼓励反复 cancel"：能一次推完的提交就一次推完。
 - 明确的产品偏好：仿 Typora 的观感（**不要工具条**、菜单 + 快捷键）；"不要改变当前编辑位置"（Alt/菜单不许夺焦）；界面不要出现多余色块与凸出（选区底色要对齐文字列）。
 
@@ -81,7 +83,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 | `701e722` | 空正文标记构造崩溃的根因修复（`==` 时所有标题被展开） |
 | `ec0bd2e` | 整行选区底色不再比文字列凸出（阅读边距改挂 scroller） |
 | `424d3f6` | 版本号 0.7.2 |
-| `cf364f6` | 自动更新（tauri-plugin-updater）：静默检查 + 弹窗确认下载安装 + `latest.json` 发版链路（**引入签名密钥约束**，见红线 9） |
+| `cf364f6` | 自动更新（tauri-plugin-updater）：静默检查 + 弹窗确认下载安装 + `latest.json` 发版链路（**引入签名密钥约束**，见红线 10） |
 | `a43bcad` | 版本号 0.7.2 → 0.7.3（首个带自动更新的版本） |
 
 **文档地图**
