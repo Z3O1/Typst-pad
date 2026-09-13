@@ -74,6 +74,25 @@ describe("livePreview 扩展", () => {
     host.remove();
   });
 
+  // 回归：空正文的标记构造（`== ` 还没写标题文字、`**` 还没写内容）曾让 CM6 抛
+  // `Mark decorations may not be empty` —— 异常冒泡进事务会让编辑区卡死
+  // （用户报过"输入 `= 1 = 2` 后无法再输入任何东西" / "输入 `==` 所有标题都被展开"）
+  it("空正文的标题（`== `）不抛异常，且后续输入照常生效", () => {
+    mount("= 标题\n正文\n== ");
+    expect(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "x" } })).not.toThrow();
+    expect(view.state.doc.toString()).toBe("= 标题\n正文\n== x");
+    // 空正文那一行不产生样式类，正常标题仍然带样式
+    expect(host.querySelectorAll(".cm-markup-heading").length).toBeGreaterThan(0);
+  });
+
+  it("空正文的粗体/斜体标记（`**`、`__`）同样不抛异常", () => {
+    mount("前 ** 后\n__ 尾");
+    expect(() =>
+      view.dispatch({ changes: { from: view.state.doc.length, insert: "y" } }),
+    ).not.toThrow();
+    expect(view.state.doc.toString()).toContain("y");
+  });
+
   it("已缓存的公式被 widget 替换（源码里的 $ 不再出现）", () => {
     mount("前面的 $x^2$ 后面", { cache: true });
     expect(widgetCount()).toBe(1);

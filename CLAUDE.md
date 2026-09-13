@@ -105,7 +105,8 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 - **打开/重读的安全底线**：`openPath` 只要有未保存修改就确认（**同路径也不例外**——此前 `filePath !== path` 的豁免会让"把当前 .typ 拖进窗口"这类操作静默丢弃未保存修改）；`reloadFile`（Ctrl+R）同样确认。
 - **菜单不夺焦（用户明确要求：「不要改变当前编辑位置」）**：Alt 激活菜单栏时**不再**让编辑区失焦——失焦会让光标消失、下一个非 accessKey 字母还会被菜单吃掉。菜单栏只依赖 window 上的 keydown（accessKey / 方向键 / Esc / Enter 都照常），不需要 DOM 焦点；只有「取消选中」一侧把焦点交回编辑器（鼠标点过菜单项后焦点落在按钮上，必须还回去，见 `handleMenuFocusChange`）。**别把 `el.blur()` 加回去。**
 - **回退**：渲染失败 / 未就绪 / 行内跨行公式 → 不挂 widget，保持源码显示（不出现空占位、不弹错误）。
-- **装饰/widget 的异常绝不允许冒泡进 CodeMirror 的事务**（用户反馈："输入 `= 1 = 2` 后无法再输入任何东西，包括删除和换行"）：StateField 的 `update` 或 widget 的 `toDOM` 一旦抛异常，这次事务整体失败 → 文档不再更新，表现为编辑区**卡死**。所以 `collect()` 整体包了 try/catch（失败即返回 `Decoration.none`，退化成源码显示），三个 widget 的 `toDOM` 也都包了 try/catch（失败退回纯文本 + `cm-widget-fallback` 类）。**改动 live-preview 时不要在 try 之外新增可能抛异常的代码。**
+- **空正文不能建 mark 装饰（真实 bug 的根因）**：`== `（标题标记刚敲下、文字还没写）、`**` 这类**正文长度为 0** 的构造会生成 `Decoration.mark().range(x, x)`，CM6 直接抛 `RangeError: Mark decorations may not be empty`。以前它冒泡进 `StateField.update` → 事务整体失败 → 编辑区**卡死**（用户报的「输入 `= 1 = 2` 后无法再打字/删除/换行」）；加了 try/catch 兜底后则表现为「输入 `==` 时所有标题都被展开成源码」（整套装饰被丢弃）。修法：`buildMarkupDecorations` 只在 `content.to > content.from` 时加样式装饰（标记隐藏那侧本来就有 `from >= to` 守卫）。`live-preview.test.ts` 有两条回归用例。
+- **装饰/widget 的异常绝不允许冒泡进 CodeMirror 的事务**：StateField 的 `update` 或 widget 的 `toDOM` 一旦抛异常，这次事务整体失败 → 文档不再更新，表现为编辑区**卡死**。所以 `collect()` 整体包了 try/catch（失败即返回 `Decoration.none`，退化成源码显示），三个 widget 的 `toDOM` 也都包了 try/catch（失败退回纯文本 + `cm-widget-fallback` 类）。**改动 live-preview 时不要在 try 之外新增可能抛异常的代码；新增 `Decoration.*.range(a, b)` 前先确认 `b > a`。**
 - **脚本错误可见**：`+page.svelte` 挂 `window.onerror` / `unhandledrejection` → 状态栏显示「脚本错误：…」+ 调试日志（桌面 WebView 没有可见控制台，否则用户只能看到"应用坏了"）。排查桌面版疑难杂症时先看状态栏这句话。
 - **持久化**：`viewMode`（+ `showPreview`）与主题一起存 localStorage；旧的 `livePreview` 布尔自动迁移为 `viewMode`；视图菜单（`Ctrl+/`）切换。
 

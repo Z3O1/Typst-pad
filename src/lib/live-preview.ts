@@ -245,9 +245,15 @@ function buildMarkupDecorations(
       item.kind === "heading"
         ? `${MARKUP_CLASS.heading} cm-markup-heading-${item.level ?? 1}`
         : MARKUP_CLASS[item.kind];
-    decorations.push(
-      Decoration.mark({ class: cls }).range(item.content.from, item.content.to),
-    );
+    // **空正文不能建 mark 装饰**：正文长度为 0 时（刚敲下 `== ` 还没写标题文字、`**` 还没写内容）
+    // CM6 会抛 `RangeError: Mark decorations may not be empty`——异常冒泡进 StateField 的事务会让
+    // 编辑区直接卡死（用户报过"输入 `= 1 = 2` 后无法再输入"），装了 try/catch 兜底后则表现为
+    // "所有标题都被展开成源码"（整套装饰被丢弃）。这里按"没有正文就不加样式"处理。
+    if (item.content.to > item.content.from) {
+      decorations.push(
+        Decoration.mark({ class: cls }).range(item.content.from, item.content.to),
+      );
+    }
     if (reveal) continue;
     for (const marker of item.markers) {
       if (marker.from >= marker.to) continue;
