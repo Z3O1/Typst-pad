@@ -10,10 +10,10 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 
 **交接时的状态（2026-09-14）**：
 
-- 版本 `0.7.2`，`main` 与 `origin/main` 同步，CI 绿（`test` + `build-bundles`）。
-- **发行状态：`v0.7.0` 已发布（Latest）；`v0.7.1`、`v0.7.2` 仍是草稿 Release，需要手动 Publish**（`gh release edit v0.7.2 --draft=false`，或网页点 Publish）。安装包由 tag 触发的 `release.yml` 自动构建并上传，草稿不会自动对外。
-- **自动更新已接入（未发版）**：`tauri-plugin-updater` + 更新弹窗/状态栏提示/设置开关；签名密钥已生成并设进仓库 Secrets，`latest.json` 由 CI 生成。**注意顺序**：`tauri.conf.json` 里已经有 pubkey，所以任何 `tauri build`（含 main 的 CI）都必须拿得到私钥，**不要删那两个 Secrets**；下一个带 updater 的版本仍需用户手动安装一次才进入自动更新通道。细节见「自动更新（tauri-plugin-updater）数据流」与「CI / 发布约定」。
-- 最近一轮（0.7.1→0.7.2）修的都是「写作模式」的可用性 bug：Alt 抢焦点、装饰异常导致编辑区卡死、空正文标题崩溃、整行选区底色凸出。**这些经验都在下面「改动前的红线」和各章节的"勿回退"里，动编辑器/装饰代码前先扫一遍。**
+- 版本 `0.7.3`（**首个带自动更新的版本**），`main` 与 `origin/main` 同步，tag `v0.7.3` 已推（`release.yml` 构建草稿 Release）。
+- **发行状态（`gh release list` 实测 2026-09-14）：`v0.7.2` 已发布（Latest）、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）。`v0.7.3` 由 workflow 建成草稿后**必须手动 Publish**——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效（`gh release edit v0.7.3 --draft=false`，或网页点 Publish）。
+- **自动更新已接入（0.7.3）**：`tauri-plugin-updater` + 更新弹窗/状态栏提示/设置开关；签名密钥已生成并设进仓库 Secrets，`latest.json` 由 CI 生成。**注意顺序**：`tauri.conf.json` 里已经有 pubkey，所以任何 `tauri build`（含 main 的 CI）都必须拿得到私钥，**不要删那两个 Secrets**；0.7.3 之前的版本里没有 updater，**要手动装一次 0.7.3 才进入自动更新通道**（之后 0.7.4 起才能自动升）。细节见「自动更新（tauri-plugin-updater）数据流」与「CI / 发布约定」。
+- 最近两轮：0.7.2→0.7.3 加的是**自动更新**（含签名密钥约束与 `latest.json` 发版链路）；0.7.1→0.7.2 修的是「写作模式」的可用性 bug（Alt 抢焦点、装饰异常导致编辑区卡死、空正文标题崩溃、整行选区底色凸出）。**这些经验都在下面「改动前的红线」和各章节的"勿回退"里，动编辑器/装饰代码前先扫一遍。**
 
 **5 分钟上手**
 
@@ -80,6 +80,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 | `ec0bd2e` | 整行选区底色不再比文字列凸出（阅读边距改挂 scroller） |
 | `424d3f6` | 版本号 0.7.2 |
 | `cf364f6` | 自动更新（tauri-plugin-updater）：静默检查 + 弹窗确认下载安装 + `latest.json` 发版链路（**引入签名密钥约束**，见红线 9） |
+| `a43bcad` | 版本号 0.7.2 → 0.7.3（首个带自动更新的版本） |
 
 **文档地图**
 
