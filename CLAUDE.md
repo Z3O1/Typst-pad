@@ -4,6 +4,88 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作模式」（默认，单栏整页纸张：公式与标记就地排版、光标/选区进入即展开源码、无行号）与「源代码模式」（`Ctrl+/`，双栏：等宽代码编辑器 + 右栏整页预览）。前端 SvelteKit SPA（adapter-static），桌面壳 Tauri 2（Rust），编译渲染用**内嵌 typst crate**（0.15.x，Rust 进程内编译，本地字体）。代码注释与 README 均为中文。
 
+## 交接须知（新同学先读这一节）
+
+**这是什么**：仿 Typora 的 Typst 桌面编辑器 —— 「写作模式」（单栏整页纸张、公式与标记就地排版、光标进入即展开源码）与「源代码模式」（`Ctrl+/`，双栏：等宽编辑器 + 整页预览）。纯本地运行：前端 SvelteKit SPA（adapter-static），桌面壳 Tauri 2，排版引擎是**内嵌的 typst crate**（Rust 进程内编译，没有 wasm、没有网络依赖，字体随包分发）。
+
+**交接时的状态（2026-09-14）**：
+
+- 版本 `0.7.2`，`main` 与 `origin/main` 同步，CI 绿（`test` + `build-bundles`）。
+- **发行状态：`v0.7.0` 已发布（Latest）；`v0.7.1`、`v0.7.2` 仍是草稿 Release，需要手动 Publish**（`gh release edit v0.7.2 --draft=false`，或网页点 Publish）。安装包由 tag 触发的 `release.yml` 自动构建并上传，草稿不会自动对外。
+- 最近一轮（0.7.1→0.7.2）修的都是「写作模式」的可用性 bug：Alt 抢焦点、装饰异常导致编辑区卡死、空正文标题崩溃、整行选区底色凸出。**这些经验都在下面「改动前的红线」和各章节的"勿回退"里，动编辑器/装饰代码前先扫一遍。**
+
+**5 分钟上手**
+
+```bash
+npm install
+npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
+npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
+npm test                 # 前端单测（18 个文件 / 272 项）
+cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（29 passed / 1 ignored）
+node scripts/check-fonts.mjs                       # 打包字体魔数校验
+
+# 无显示器环境下的「浏览器验收」（本仓库的主力验收手段）：**换端口跑，别跟 tauri dev 抢 1420**
+npm run dev -- --port 1425
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 62 项交互验收 + 截图
+npm run fixtures:math
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 12 项真实排版视觉验收
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
+```
+
+**改动前的红线（都是踩过的，勿回退）**
+
+1. **改 `src/` 会 HMR 到正在运行的 `tauri dev`；改 `src-tauri/` 会让 Tauri 重启应用**（未保存内容靠"启动时恢复上次内容"兜住；排查"内容怎么变了"时先想这一条）。
+2. `editorDoc` 必须是编辑器内容的**实时镜像**，绝不允许落后（否则丢未保存内容）。
+3. `live-preview.ts` 里任何 `Decoration.*.range(a, b)` 都要 `b > a`；装饰计算与 widget 渲染都在 try/catch 里 —— **别把可能抛异常的代码挪到 try 之外**（抛进 CodeMirror 事务 = 编辑区卡死，用户报过）。
+4. 写作模式的左右留白必须挂 `.cm-scroller`，**不能**是 `.cm-content` 的 `padding`（否则整行选区底色比文字列两边各宽 48px）。
+5. 菜单（Alt / 鼠标）**不许夺走编辑区焦点**（用户明确要求："不要改变当前编辑位置"）。
+6. `src-tauri/fonts/` 不放 `static/`（会被 SvelteKit 打进前端产物，安装包白胖 5.7MB）。
+7. `vite.config.js` 的 **dev 白屏修复三件套**与 `optimizeDeps.exclude: ["codemirror-lang-typst"]` 不许删（删了 WSL/WebKit 下会白屏）。
+8. 发版纪律：版本号三处一致；**别在 CI 运行中 push main**；rust-cache 不许加 `cache-on-failure`。
+
+**已知未决 / 可做**（都不是 bug，是留给接手人的选择）
+
+- `scripts/` 里 5 个 wasm 时代的死脚本（`debug-math*.mjs`、`debug-svg.mjs`、`debug-fontinfo.mjs`、`verify-sanitize.mjs`）依赖已移除的 `@myriaddreamin/typst.ts`，跑不起来也没人引用 —— 可以删。
+- 浏览器开发模式（`?browserdev=1`）的编译是**假实现**（内存里的假文件系统 + 假 SVG）。想在浏览器里看真实排版走 `fixtures:math` 夹具链路；**真保存 / 导出 PDF / 系统对话框必须桌面版**。
+- 编辑器界面字体走系统字体栈（无 `@font-face`），所以写作模式正文与 PDF 用的思源宋体**并不完全一致**（打包字体只喂给 typst 编译）。要一致就加 `@font-face`。
+- `保存失败` / `打开失败` 的状态栏提示没带上 Rust 侧的具体原因（如 `仅支持 .typ 文件`、`目录无效`），可补。
+- 设置弹窗的「启动时恢复上次内容」默认开（用户当时的选择）；若不想让新用户被上次内容打扰，可改默认或加提示。
+- 没有 git tag 之外的发布脚本；发版本流程见「CI / 发布约定」末尾。
+
+**和这位用户协作的偏好（上一轮的实测经验）**
+
+- 他会**自己跑桌面版**验证（WSL 里 `npm run tauri dev`），反馈通常是一句话现象或一张截图；**先复现、再改**——这一轮 5 个 bug 里有 4 个是靠"复现 + 抓异常原文"定位的（Chromium 里复现不出来时，就加防御性兜底 + 让错误可见，别硬猜）。
+- **他不喜欢等慢测试**：日常改动跑 `npm run check` + 相关单测（几秒级）就够；`scripts/browser-check/` 那套（约 1 分钟）和 CI（约 5 分钟）只在改到编辑器/装饰/布局这类易回归的地方才跑，而且不必每次都盯着结果等它绿。
+- 明确的产品偏好：仿 Typora 的观感（**不要工具条**、菜单 + 快捷键）；"不要改变当前编辑位置"（Alt/菜单不许夺焦）；界面不要出现多余色块与凸出（选区底色要对齐文字列）。
+
+**最近的提交脉络**（想知道某处改动从哪来的，按这个顺序 `git show`）
+
+| 提交 | 内容 |
+| --- | --- |
+| `fc3ef56` | 所见即所得（编辑器内联渲染）落地 |
+| `aa6674f` | 仿 Typora 两套 UI（写作/源码）+ 公式显示修复 → 0.7.0 |
+| `816b16a` | 字体目录搬出 `static/`（安装包瘦 3.5MB） |
+| `88b258b` / `4efe8bd` | 切换模式丢未保存内容的修复 / 启动恢复上次内容 → 0.7.1 |
+| `38a5c98` | Alt 激活菜单不再夺走编辑区焦点 |
+| `1f4c5e0` | 装饰/widget 异常兜底 + 脚本错误上报到状态栏 |
+| `701e722` | 空正文标记构造崩溃的根因修复（`==` 时所有标题被展开） |
+| `ec0bd2e` | 整行选区底色不再比文字列凸出（阅读边距改挂 scroller） |
+| `424d3f6` | 版本号 0.7.2 |
+
+**文档地图**
+
+| 想了解 | 看哪节 |
+| --- | --- |
+| 整体架构与模块清单 | 架构（含配置与辅助目录） |
+| 编译链路 / 诊断 / 导出 PDF | 编译数据流（核心链路） |
+| 所见即所得怎么实现、有哪些坑 | 所见即所得（编辑器内联渲染）数据流 |
+| 字体从哪来、为什么不放 static | 字体、原生编译后端 |
+| 文件操作与路径安全 | 文件操作与路径安全 |
+| 启动耗时的观测方式 | 启动耗时观测 |
+| 怎么跑验收、验收到什么程度 | 测试 |
+| 怎么发版、缓存怎么坏、怎么修 | CI / 发布约定 |
+| 本机 WSL 特有的坑（端口、SSH、headless Chrome） | 环境备忘（本机 WSL） |
+
 ## 常用命令
 
 ```bash
@@ -19,6 +101,7 @@ cargo check --manifest-path src-tauri/Cargo.toml   # 只查 Rust 壳
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（typst_world/packages：编译/字体/诊断/include/包解析下载）
 node scripts/check-fonts.mjs    # 校验 src-tauri/fonts 字体有效性
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
 ```
 
 ## 架构
