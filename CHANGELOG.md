@@ -4,15 +4,19 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-09-14
+
 ### Fixed
 
+- **Alt 激活菜单栏不再抢走编辑区焦点**（用户反馈：「不要改变当前编辑位置」）：以前按 Alt 会让编辑区 `blur()`，光标消失、下一个字母还会被菜单当 accessKey 吃掉，得手动点回编辑区。现在编辑器全程保持焦点与滚动位置，菜单栏照旧用 Alt / 字母 accessKey / 方向键 / Esc 操作；鼠标点过菜单项之后焦点仍会交还编辑器
+- **编辑区"卡死"（输入 `= 1 = 2` 后无法再打字/删除/换行）**：装饰重建（StateField `update`）或 widget 的 `toDOM` 一旦抛异常，会让 CodeMirror 这次事务整体失败、文档不再更新。现在 `collect()` 与三个 widget 全部 try/catch 兜底——失败就退化成源码显示（`Decoration.none` / `cm-widget-fallback`），编辑照常可用，原因写进控制台
+- **根因：空正文的标记构造让 CM6 抛 `Mark decorations may not be empty`**：`== `（标题标记刚敲下、文字还没写）这类**正文长度 0** 的构造会生成 `mark(x, x)`，以前异常冒泡进 StateField 事务 → 编辑区卡死；加了 try/catch 后表现为「输入 `==` 时所有标题都被展开成源码」。现在正文为空就不加样式装饰，两条回归用例锁住（空标题 / 空粗斜体之后仍能继续输入）
+- **脚本错误不再静默**：新增 `window.onerror` / `unhandledrejection` 上报，状态栏直接显示「脚本错误：…」（桌面 WebView 里没有可见控制台，以前只能看到"应用坏了"）
 - **整行选区的底色不再比文字列两边各凸出 48px**（用户反馈「两边不应该凸出来」）：写作模式的左右阅读边距原本是 `.cm-content` 的 `padding`，而 CodeMirror 画整行选区时会连内容盒的内边距一起铺满 → 一全选就是一条比文字宽 96px 的色带。现在留白移到 `.cm-scroller` 上（内容盒 == 文字列），白纸宽度 900px、文字列 804px 都保持不变；已用几何探针量过：选区矩形从"左右各凸 42~46px"变成"落在文字列内"
 
-- **根因：空正文的标记构造让 CM6 抛 `Mark decorations may not be empty`**：`== `（标题标记刚敲下、文字还没写）这类**正文长度 0** 的构造会生成 `mark(x, x)`，以前异常冒泡进 StateField 事务 → 编辑区卡死；加了 try/catch 后表现为「输入 `==` 时所有标题都被展开成源码」。现在正文为空就不加样式装饰，两条回归用例锁住（空标题 / 空粗斜体之后仍能继续输入）
-- **编辑区"卡死"（输入 `= 1 = 2` 后无法再打字/删除/换行）**：装饰重建（StateField `update`）或 widget 的 `toDOM` 一旦抛异常，会让 CodeMirror 这次事务整体失败、文档不再更新。现在 `collect()` 与三个 widget 全部 try/catch 兜底——失败就退化成源码显示（`Decoration.none` / `cm-widget-fallback`），编辑照常可用，原因写进控制台
-- **脚本错误不再静默**：新增 `window.onerror` / `unhandledrejection` 上报，状态栏直接显示「脚本错误：…」（桌面 WebView 里没有可见控制台，以前只能看到"应用坏了"）
+### Changed
 
-- **Alt 激活菜单栏不再抢走编辑区焦点**（用户反馈：「不要改变当前编辑位置」）：以前按 Alt 会让编辑区 `blur()`，光标消失、下一个字母还会被菜单当 accessKey 吃掉，得手动点回编辑区。现在编辑器全程保持焦点与滚动位置，菜单栏照旧用 Alt / 字母 accessKey / 方向键 / Esc 操作；鼠标点过菜单项之后焦点仍会交还编辑器
+- 版本号 0.7.1 → 0.7.2（package.json / tauri.conf.json / Cargo.toml 三处一致）
 
 ## [0.7.1] - 2026-09-11
 
