@@ -21,7 +21,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（21 个文件 / 327 项）
+npm test                 # 前端 + 脚本单测（21 个文件 / 331 项）
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（29 passed / 1 ignored）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
@@ -87,7 +87,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 | `424d3f6` | 版本号 0.7.2 |
 | `cf364f6` | 自动更新（tauri-plugin-updater）：静默检查 + 弹窗确认下载安装 + `latest.json` 发版链路（**引入签名密钥约束**，见红线 10） |
 | `a43bcad` | 版本号 0.7.2 → 0.7.3（首个带自动更新的版本） |
-| `68c8df7` | Ctrl+Shift+滚轮调整分栏比例（`pane-ratio.ts` + 第 24 组验收），0.7.4 的内容 |
+| `68c8df7` / `adab021` | Ctrl+滚轮调整分栏比例（`pane-ratio.ts` + 第 24 组验收）；`adab021` 是修正：手势原写成 Ctrl+Shift+滚轮，**头less 全绿但真机没反应**（Shift 把纵向滚动转成横向），改成 Ctrl+滚轮并同时读 deltaY/deltaX。0.7.4 的内容 |
 
 **文档地图**
 
@@ -312,7 +312,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 ## 测试
 
-- 前端 vitest + jsdom，`include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"]`（第二条是发布脚本的测试：脚本是普通 JS + node 内置模块，进了 TS program 就得给每个参数写 JSDoc 或装 `@types/node`——仓库刻意没装，见 `vite.config.js` 里的 `@ts-expect-error`，所以让它们留在类型检查之外）；vite 的 `server.fs.allow: [".."]` 覆盖仓库上级目录（junction 场景下 node_modules 解析被拒的教训，见 #33，配置仍保留）。现有覆盖：`typst-engine`（invoke 契约映射 + 诊断转换纯函数，invoke/dialog 以 vi.mock 断言入参与消费）、`diagnostics-utils`、`error-list`、`context-menu-utils`、`doc-utils`、`editor-keymap`、`menu-keys`、`popover-utils`（#46 Popover 视口溢出的回归守卫）、`persistence`、`svg-paginate`、`pdf-export`、`preview-scale`、`write-commands`、`pane-ratio`（滚轮档距/方向/上下限收敛）、`update-utils`（检查节流 / 进度换算 / 字节格式化 / 错误文案翻译），脚本侧 `scripts/generate-latest-json.test.mjs`（平台键映射、semver 校验、NSIS 优先挑选、清单结构、CHANGELOG 提取、CLI 端到端）。
+- 前端 vitest + jsdom，`include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"]`（第二条是发布脚本的测试：脚本是普通 JS + node 内置模块，进了 TS program 就得给每个参数写 JSDoc 或装 `@types/node`——仓库刻意没装，见 `vite.config.js` 里的 `@ts-expect-error`，所以让它们留在类型检查之外）；vite 的 `server.fs.allow: [".."]` 覆盖仓库上级目录（junction 场景下 node_modules 解析被拒的教训，见 #33，配置仍保留）。现有覆盖：`typst-engine`（invoke 契约映射 + 诊断转换纯函数，invoke/dialog 以 vi.mock 断言入参与消费）、`diagnostics-utils`、`error-list`、`context-menu-utils`、`doc-utils`、`editor-keymap`、`menu-keys`、`popover-utils`（#46 Popover 视口溢出的回归守卫）、`persistence`、`svg-paginate`、`pdf-export`、`preview-scale`、`write-commands`、`pane-ratio`（滚轮档距/方向/上下限收敛/横向位移退回）、`update-utils`（检查节流 / 进度换算 / 字节格式化 / 错误文案翻译），脚本侧 `scripts/generate-latest-json.test.mjs`（平台键映射、semver 校验、NSIS 优先挑选、清单结构、CHANGELOG 提取、CLI 端到端）。
   **已删除的低价值测试（勿凭"补覆盖"再加回来）**：`file-ops.test.ts`（只测 `.typ` 后缀匹配这种一眼可见的判断，真路径安全在 Rust `validate_typ_path`，留着会造成"文件安全已测"的错觉）、`debug.test.ts`（调试日志通道，坏掉无用户可见后果）、`context-menu-utils.test.ts` 的 `computeMenuPosition` 收边 5 项（3 行 clamp，失败肉眼可见；更复杂的限宽分支由 popover-utils 覆盖）。
 - Rust 单测（`typst_world.rs`/`packages.rs` 内 `cargo test`，用 `CARGO_MANIFEST_DIR` 定位 `src-tauri/fonts`）：中文+数学文档端到端编译（每页含 `<svg>`，PDF 字节非空）、字体注册（7 个文件 + 族名断言）、语法错误诊断（1-based 行列 + endLine）、相对 include（成功 / 缺失文件诊断带 path / 未保存文档提示）、JSON 序列化契约（camelCase 键名 `endLine`/`endColumn`）、@local/@preview 包（缓存命中不下载 / miss 下载与 URL 格式 / 404 与网络失败诊断区分 / 数据目录优先 / 路径穿越与损坏归档防御 / 端到端导入编译，均用临时目录注入环境变量，不触真实用户目录与网络）。
 - 所见即所得链路测试：`typst-lex.test.ts`（区域扫描：注释/raw/字符串/代码/`[...]` 内容块）、`markup-ranges.test.ts`（标记拆解，含"代码与公式里的 `*` `_` 不算标记"、有序列表编号、围栏代码块）、`typst-scan-fuzz.test.ts`（**鲁棒性网**：120 份固定种子随机文档 + 15 组病态输入，断言不抛异常、区间有序不越界不重叠、区域无缝覆盖全文）、`math-context.test.ts`（`#let` 提取的保守规则）、`live-preview.test.ts`（jsdom 里真挂 EditorView，断言 widget 替换 / 块级 vs 行内 / 光标进出展开 / 失败回退 / 开关关闭 / 样式类）。**坑**：jsdom 下挂视图时光标默认在 offset 0，会落在构造内部而触发"展开"，测隐藏效果必须把光标放到构造之外。
