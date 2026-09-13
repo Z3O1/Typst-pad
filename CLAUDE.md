@@ -48,6 +48,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 8. 发版纪律：版本号三处一致；rust-cache 不许加 `cache-on-failure`。
 9. **绝不阻塞等 GitHub workflow（用户 2026-09-14 连着强调三次：「不要等 CI 测试结束再执行后面的命令」「以后不要等 github workflow 阻塞」「别等 workflow 记录一下」）**：推 main、打 tag、执行后续命令**一律不等** CI / Release 跑完；**不要**挂"等 run 结束再执行"的后台轮询任务；报告状态最多**单次**查一次 `gh run list`（单查可以，轮询不行）。
    - 原有的「别在 CI 运行中 push main」**按用户指示作废**：`ci.yml` 的 concurrency 会 cancel 掉 main 上正在跑的 run（被 cancel 的 run 不保存 rust-cache，缓存代价仍在），但他明确接受这个代价、**不接受为它停下等 CI**。唯一保留的建议是"能一次推完的提交就一次推完"（少制造几次 cancel），不是"等"。详见「和这位用户协作的偏好」。
+   - 边界：禁止的是**阻塞我的回合**与**轮询循环**（`while ... gh run list` 那种）；**一次性延时动作可以**——例如"构建完成后把草稿 Release 直接 Publish"这类一条命令的补发（见「CI / 发布约定」的版本升级流程）。
 10. **自动更新的签名密钥不许动**：`tauri.conf.json` 里已有 `plugins.updater.pubkey`，所以任何 `tauri build`（含 main 的 CI）**必须**能拿到私钥——仓库 Secrets 的 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` **删了就构建不了，换了就再也发不出更新**（老用户装了带旧 pubkey 的版本，只认旧私钥签的包，换钥匙只能让他们手动重装）。本地打包同理（`TAURI_SIGNING_PRIVATE_KEY_PATH`）。
 
 **已知未决 / 可做**（都不是 bug，是留给接手人的选择）
@@ -68,6 +69,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 - **他不喜欢等慢测试**：日常改动跑 `npm run check` + 相关单测（几秒级）就够；`scripts/browser-check/` 那套（约 1 分钟）只在改到编辑器/装饰/布局这类易回归的地方才跑，而且不必每次都盯着结果等它绿。
 - **绝不阻塞等 GitHub workflow（2026-09-14 连着强调三次，原文见红线 9）**：推 main、打 tag、接着做下一步，都**不要**等 CI / Release 跑完，也**不要**挂"等 run 结束再执行"的后台轮询任务。该做的动作直接做完，报告状态时最多**查一次** `gh run list`（单次查询可以，轮询不行）。
   - 连带效果（他知道并接受）：`ci.yml` 的 concurrency 会 **cancel 掉 main 上正在跑的 run**，被 cancel 的 run 不保存 rust-cache（红线 8 说的缓存代价仍在）。所以"推 main 可能打断正在跑的构建"**不再是推迟推送的理由**——但他要的是"别为了等 workflow 停手"，不是"鼓励反复 cancel"：能一次推完的提交就一次推完。
+- **发版：草稿 Release 建好就直接 Publish，不用先问**（2026-09-14：「草稿 Release 好了直接 Publish」）。理由：草稿资产客户端拿不到，自动更新等于没上线。细节见「CI / 发布约定」末尾。
 - 明确的产品偏好：仿 Typora 的观感（**不要工具条**、菜单 + 快捷键）；"不要改变当前编辑位置"（Alt/菜单不许夺焦）；界面不要出现多余色块与凸出（选区底色要对齐文字列）。
 
 **最近的提交脉络**（想知道某处改动从哪来的，按这个顺序 `git show`）
@@ -295,7 +297,9 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - 健康缓存命中时构建 ~3 分钟（2 个 Compiling），全量 ~16 分钟（78 个 Compiling）——数字异常即缓存失效信号。
   - **rust-cache 的 key 含「Rust 工具链版本哈希」**（`add-rust-environment-hash-key` 默认开）：`dtolnay/rust-toolchain@stable` 跟到新的 Rust 稳定版后 key 整片失效、全量重编（2026-09-11 实测：Rust 1.98.1 令 restore key 变为 `v0-rust-tauri-build-windows-Windows_NT-x64-2113753f`，日志 "No cache found" → 78 个 crate、30 分钟）。这是**一次性**重建、不是回归，下一次 push 即恢复 ~3 分钟；排查时先看 "Cache Rust build" 步骤里的 Restore Key 与 "No cache found"，别急着动缓存配置。
 - **action 版本约定（Node 24 运行时，2026-09-11）**：`actions/checkout@v5`、`actions/setup-node@v5`、`actions/cache@v5`、`actions/upload-artifact@v6`（v5 只是预备支持、默认仍跑 Node 20，必须 v6）、`softprops/action-gh-release@v3`，两个 workflow 保持一致——消除 GitHub 的 "Node.js 20 is deprecated（被强制跑在 Node 24 上）"告警。`Swatinem/rust-cache@v2` 已是 node24、`dtolnay/rust-toolchain` 是 composite 类型，无需升级。**升级 action 不影响任何缓存 key**（rust-cache 的 key 只由 shared-key/平台/Rust 版本/Cargo.lock 决定，见上）。
-- 版本升级流程：改版本号（三处一致）→ 合并 main（自动构建）→ 打 tag → 手动发布草稿。
+- 版本升级流程：改版本号（三处一致）→ 合并 main（自动构建）→ 打 tag → **草稿 Release 一建好就直接 Publish，不必先问用户**（`gh release edit v<版本> --draft=false`）。
+  - 依据（2026-09-14 用户原话）：「草稿 Release 好了直接 Publish」。Publish 是自动更新生效的**前提**——草稿资产客户端拉不到 `latest.json`（见上一条），所以留在草稿等于这版没上线。
+  - 需要"等构建完再发"时用**一次性延时动作**（睡一会儿 → 查一次 → 有草稿就发），不要写轮询循环（红线 9）。
 
 ## 测试
 
