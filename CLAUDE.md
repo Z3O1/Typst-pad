@@ -11,7 +11,8 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 **交接时的状态（2026-09-14）**：
 
 - 版本 `0.7.3`（**首个带自动更新的版本**），`main` 与 `origin/main` 同步，tag `v0.7.3` 已推（`release.yml` 构建草稿 Release）。
-- **发行状态（`gh release list` 实测 2026-09-14）：`v0.7.2` 已发布（Latest）、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）。`v0.7.3` 由 workflow 建成草稿后**必须手动 Publish**——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效（`gh release edit v0.7.3 --draft=false`，或网页点 Publish）。
+- **发行状态（2026-09-14 实测）：`v0.7.3` 已发布并标记 Latest（首个带自动更新的版本，资产含 `latest.json` + 安装包 + `.sig`）；`v0.7.2`、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）。发版时 `release.yml` 建的仍是**草稿**，**必须手动 Publish**（或按下方约定直接发）——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效。
+  - 发布后建议验一次：`gh api repos/Z3O1/Typst-pad/releases/latest --jq .tag_name` 应为新 tag；清单内容用 `gh api repos/Z3O1/Typst-pad/releases/assets/<latest.json 的 id> -H "Accept: application/octet-stream"` 取回核对（version / url / signature）。**注意本机 curl 访问 github.com 一律 404（网络过滤，连仓库首页也 404），别据此判断发布有问题**。
 - **自动更新已接入（0.7.3）**：`tauri-plugin-updater` + 更新弹窗/状态栏提示/设置开关；签名密钥已生成并设进仓库 Secrets，`latest.json` 由 CI 生成。**注意顺序**：`tauri.conf.json` 里已经有 pubkey，所以任何 `tauri build`（含 main 的 CI）都必须拿得到私钥，**不要删那两个 Secrets**；0.7.3 之前的版本里没有 updater，**要手动装一次 0.7.3 才进入自动更新通道**（之后 0.7.4 起才能自动升）。细节见「自动更新（tauri-plugin-updater）数据流」与「CI / 发布约定」。
 - 最近两轮：0.7.2→0.7.3 加的是**自动更新**（含签名密钥约束与 `latest.json` 发版链路）；0.7.1→0.7.2 修的是「写作模式」的可用性 bug（Alt 抢焦点、装饰异常导致编辑区卡死、空正文标题崩溃、整行选区底色凸出）。**这些经验都在下面「改动前的红线」和各章节的"勿回退"里，动编辑器/装饰代码前先扫一遍。**
 
