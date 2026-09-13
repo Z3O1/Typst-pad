@@ -87,6 +87,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 | `424d3f6` | 版本号 0.7.2 |
 | `cf364f6` | 自动更新（tauri-plugin-updater）：静默检查 + 弹窗确认下载安装 + `latest.json` 发版链路（**引入签名密钥约束**，见红线 10） |
 | `a43bcad` | 版本号 0.7.2 → 0.7.3（首个带自动更新的版本） |
+| `68c8df7` | Ctrl+Shift+滚轮调整分栏比例（`pane-ratio.ts` + 第 24 组验收），0.7.4 的内容 |
 
 **文档地图**
 
