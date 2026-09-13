@@ -79,6 +79,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 | `701e722` | 空正文标记构造崩溃的根因修复（`==` 时所有标题被展开） |
 | `ec0bd2e` | 整行选区底色不再比文字列凸出（阅读边距改挂 scroller） |
 | `424d3f6` | 版本号 0.7.2 |
+| `cf364f6` | 自动更新（tauri-plugin-updater）：静默检查 + 弹窗确认下载安装 + `latest.json` 发版链路（**引入签名密钥约束**，见红线 9） |
 
 **文档地图**
 
