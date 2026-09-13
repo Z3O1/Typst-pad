@@ -59,6 +59,13 @@
     isCheckDue,
     type DownloadProgress,
   } from "$lib/update-utils";
+  import {
+    PANE_RATIO_DEFAULT,
+    clampPaneRatio,
+    nextPaneRatio,
+    paneRatioFlexStyle,
+    paneRatioPercent,
+  } from "$lib/pane-ratio";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -146,6 +153,12 @@
   // 右栏只是为了核对分页/整页效果才需要，故默认跟着 livePreview 走（开=单栏，关=双栏），
   // 也可以用视图菜单单独打开（例如所见即所得下仍想对照整页）。
   let showPreview = $state(false);
+  /**
+   * 分栏比例 = **预览区**占分栏容器的宽度份额（0.25~0.75，默认 50/50），Ctrl+Shift+滚轮调
+   * （见 handlePanesWheel）。存**比例**而不是像素宽度：窗口大小变化时按比例重排，
+   * 窗口变小也不会把编辑区挤没。
+   */
+  let previewRatio = $state(PANE_RATIO_DEFAULT);
   // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
   // Map 本身不需要响应式（变更后靠 mathVersion 代次通知编辑器重整装饰）
   const mathCache = new Map<string, MathRender>();
@@ -307,6 +320,7 @@
         restoreSession,
         autoCheckUpdates,
         lastUpdateCheckAt,
+        previewRatio,
       });
     }, 300);
   }
@@ -319,6 +333,33 @@
     const el = document.activeElement;
     if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return;
     editorRef?.runWriteCommand(command);
+  }
+
+  /**
+   * Ctrl+Shift+滚轮：调整分栏比例（预览区宽度）。只在预览栏可见时有意义——写作模式单栏时
+   * 预览是 `display:none`，调了也看不见，因此直接放行（不 preventDefault，保留系统默认行为）。
+   * 滚轮向上 = 预览区变宽；到上下限后继续滚只提示，不再变化。
+   */
+  function handlePanesWheel(e: WheelEvent) {
+    if (!e.ctrlKey || !e.shiftKey) return;
+    if (!showPreview) return;
+    e.preventDefault(); // 别让这次滚动继续变成编辑器/预览区滚动或 WebView 缩放
+    const next = nextPaneRatio(previewRatio, e.deltaY, e.deltaMode);
+    if (next === previewRatio) {
+      statusText = `预览区宽度已是 ${paneRatioPercent(next)}%（到边界了）`;
+      return;
+    }
+    previewRatio = next;
+    // 状态栏给出实时反馈：滚轮改的是"看不见的比例"，没有数字反馈会不知道调了多少
+    statusText = `预览区宽度 ${paneRatioPercent(next)}%`;
+    schedulePersist();
+  }
+
+  /** 分栏比例复位 50/50（视图菜单；没有滚轮 / 想要确定的默认值时的出口） */
+  function resetPaneRatio() {
+    previewRatio = PANE_RATIO_DEFAULT;
+    statusText = "分栏比例已复位 50%";
+    schedulePersist();
   }
 
   /** 写作模式 ↔ 源码模式（仿 Typora 的"源代码模式"）：预览栏随模式联动 */
@@ -577,6 +618,13 @@
             label: "显示预览栏",
             checked: showPreview,
             action: () => (showPreview = !showPreview),
+          },
+          {
+            label: "重置分栏比例",
+            // 这里的 shortcut 不是真快捷键（MenuBar 的匹配器只支持「Ctrl+单键」，不会命中），
+            // 而是把操作姿势当灰字提示显示出来：Ctrl+Shift+滚轮 没法写进快捷键匹配
+            shortcut: "Ctrl+Shift+滚轮",
+            action: resetPaneRatio,
           },
           { label: "主题：自动", checked: theme === "system", action: () => (theme = "system") },
           { label: "主题：暗", checked: theme === "dark", action: () => (theme = "dark") },
@@ -992,6 +1040,8 @@
     restoreSession = saved.restoreSession ?? true;
     autoCheckUpdates = saved.autoCheckUpdates ?? true;
     lastUpdateCheckAt = typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
+    // 分栏比例：旧存档没有该字段 → 默认 50/50；越界/脏数据由 clampPaneRatio 收敛
+    previewRatio = clampPaneRatio(saved.previewRatio);
     if (restoreSession && typeof saved.content === "string" && saved.content.trim() !== "") {
       doc = saved.content;
       editorDoc = saved.content; // 镜像同步，见 editorDoc 声明处
@@ -1123,7 +1173,7 @@
     />
   </header>
 
-  <main class="panes" class:single={!showPreview}>
+  <main class="panes" class:single={!showPreview} onwheel={handlePanesWheel}>
     {#if dragActive}
       <div class="drop-overlay">释放以打开 .typ 文件</div>
     {/if}
@@ -1146,7 +1196,11 @@
         />
       </div>
     </section>
-    <section class="pane preview-pane" class:hidden={!showPreview}>
+    <section
+      class="pane preview-pane"
+      class:hidden={!showPreview}
+      style={paneRatioFlexStyle(previewRatio)}
+    >
       <!-- data-context-zone：右键区域判定标记（覆盖占位/错误/预览纸张全部子区域） -->
       <div
         class="pane-body preview-body"

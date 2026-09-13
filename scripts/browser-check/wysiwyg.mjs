@@ -662,5 +662,108 @@ await c.evaluate(
   `Array.from(document.querySelectorAll(".settings-modal .modal-btn")).find(b => (b.textContent || "").includes("关闭")).click()`,
 );
 
+console.log("24) Ctrl+Shift+滚轮调整分栏比例（源码模式预览区宽度）");
+// 这一组只能在这儿验：滚轮事件（含修饰键）与 flex 实际布局都跑不出来于单测，
+// 而"Ctrl+滚轮会不会顺手把页面缩放掉"更是只有真实浏览器才看得见。
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+/** 分栏比例探针：预览宽 / 容器宽，顺带取 dpr 与视口宽（用于确认没触发页面缩放） */
+const ratioProbe = `(() => {
+  const panes = document.querySelector(".panes").getBoundingClientRect();
+  const preview = document.querySelector(".preview-pane").getBoundingClientRect();
+  const editor = document.querySelector(".editor-pane").getBoundingClientRect();
+  const center = { x: Math.round(editor.left + editor.width / 2), y: Math.round(editor.top + editor.height / 2) };
+  return {
+    ratio: Math.round((preview.width / panes.width) * 1000) / 1000,
+    previewWidth: Math.round(preview.width),
+    editorWidth: Math.round(editor.width),
+    dpr: window.devicePixelRatio,
+    innerWidth: window.innerWidth,
+    center,
+    saved: JSON.parse(localStorage.getItem("typst-pad:state") || "{}").previewRatio ?? null,
+    status: document.querySelector(".statusbar").innerText,
+  };
+})()`;
+
+// 切到源码模式 → 双栏（预览区可见）
+await openMenu("视图");
+await c.waitFor(`document.body.innerText.includes("源代码模式")`, { timeout: 5000 });
+await clickMenuItem("源代码模式");
+await c.waitFor(`getComputedStyle(document.querySelector(".preview-pane")).display !== "none"`, {
+  timeout: 5000,
+});
+await new Promise((r) => setTimeout(r, 500));
+
+const before = await c.evaluate(ratioProbe);
+check(
+  "源码模式默认 50/50 分栏",
+  Math.abs(before.ratio - 0.5) < 0.02,
+  JSON.stringify(before),
+);
+
+// Ctrl + Shift + 滚轮向上 ×5 → 预览区变宽（每次 2 个百分点，鼠标一格 deltaY = ±100）
+for (let i = 0; i < 5; i++) {
+  await c.wheel(before.center.x, before.center.y, -100, { modifiers: 2 | 8 });
+}
+await new Promise((r) => setTimeout(r, 400));
+const wider = await c.evaluate(ratioProbe);
+check(
+  "Ctrl+Shift+滚轮向上：预览区变宽（5 档 ≈ +10%）",
+  Math.abs(wider.ratio - 0.6) < 0.02,
+  `${before.ratio} → ${wider.ratio}`,
+);
+check(
+  "编辑区同步变窄（预览变宽不是覆盖上去）",
+  wider.editorWidth < before.editorWidth && wider.previewWidth > before.previewWidth,
+  JSON.stringify({ before, wider }),
+);
+check(
+  "Ctrl+Shift+滚轮没有顺手缩放页面（dpr 与视口宽不变）",
+  wider.dpr === before.dpr && wider.innerWidth === before.innerWidth,
+  JSON.stringify({ dpr: [before.dpr, wider.dpr], innerWidth: [before.innerWidth, wider.innerWidth] }),
+);
+check("状态栏给出实时反馈", wider.status.includes("预览区宽度"), JSON.stringify(wider.status));
+check(
+  "比例写进存档（重启后保持）",
+  typeof wider.saved === "number" && Math.abs(wider.saved - 0.6) < 0.01,
+  String(wider.saved),
+);
+await c.screenshot(SHOT("wysiwyg-24-split-wider"));
+
+// 只按 Ctrl（不带 Shift）滚轮：不该改比例（留给系统/编辑器自己的行为）
+await c.wheel(wider.center.x, wider.center.y, -100, { modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+const plainCtrl = await c.evaluate(ratioProbe);
+check("只按 Ctrl 滚轮不改分栏比例", Math.abs(plainCtrl.ratio - wider.ratio) < 0.001, `${wider.ratio} → ${plainCtrl.ratio}`);
+
+// 一直向下滚 → 收敛到下限 25%（不会把预览区挤没）
+for (let i = 0; i < 40; i++) {
+  await c.wheel(wider.center.x, wider.center.y, 100, { modifiers: 2 | 8 });
+}
+await new Promise((r) => setTimeout(r, 500));
+const narrowest = await c.evaluate(ratioProbe);
+check(
+  "向下滚到底收敛在 25%（编辑区保住 75%）",
+  Math.abs(narrowest.ratio - 0.25) < 0.02,
+  JSON.stringify({ ratio: narrowest.ratio, editor: narrowest.editorWidth, preview: narrowest.previewWidth }),
+);
+
+// 视图菜单：重置分栏比例 → 回到 50/50
+await openMenu("视图");
+await c.waitFor(`document.body.innerText.includes("重置分栏比例")`, { timeout: 5000 });
+// 提示文字要在菜单还开着的时候查（点完菜单就收了）
+const hasHint = await c.evaluate(
+  `Array.from(document.querySelectorAll(".menu-dropdown .menu-item")).some(e => (e.textContent || "").includes("Ctrl+Shift+滚轮"))`,
+);
+check("菜单项给出操作姿势提示（Ctrl+Shift+滚轮）", hasHint);
+await clickMenuItem("重置分栏比例");
+await new Promise((r) => setTimeout(r, 400));
+const reset = await c.evaluate(ratioProbe);
+check("「重置分栏比例」回到 50/50", Math.abs(reset.ratio - 0.5) < 0.02, `${narrowest.ratio} → ${reset.ratio}`);
+await c.screenshot(SHOT("wysiwyg-24-split-reset"));
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

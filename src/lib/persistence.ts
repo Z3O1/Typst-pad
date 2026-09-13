@@ -40,6 +40,11 @@ export interface PersistedState {
    * 一天里反复开关应用不会每次都打网络请求。
    */
   lastUpdateCheckAt: number | null;
+  /**
+   * 分栏比例：**预览区**占分栏容器的宽度份额（0.25~0.75，默认 0.5）。
+   * Ctrl+Shift+滚轮调整（见 pane-ratio.ts）；存比例而不是像素宽度，窗口变化时按比例重排。
+   */
+  previewRatio: number;
 }
 
 /** 读取持久化状态；不存在或损坏时返回空对象 */
@@ -65,6 +70,10 @@ export function loadState(): Partial<PersistedState> {
     // 自动更新（0.7.2 后的存档才有）：默认开；没检查过时时间戳为 null（→ 启动即检查一次）
     if (state.autoCheckUpdates === undefined) state.autoCheckUpdates = true;
     if (typeof state.lastUpdateCheckAt !== "number") state.lastUpdateCheckAt = null;
+    // 分栏比例（旧存档没有）：默认 50/50；只认数字，越界值交给调用方 clamp（读档方用 pane-ratio）
+    if (typeof state.previewRatio !== "number" || !Number.isFinite(state.previewRatio)) {
+      state.previewRatio = 0.5;
+    }
     return state;
   } catch {
     return {};

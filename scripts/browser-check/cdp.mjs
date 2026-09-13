@@ -166,5 +166,22 @@ export async function connect() {
       await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...base });
       await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
     },
+
+    /**
+     * 在视口坐标处滚一次滚轮（真实鼠标滚轮事件路径）。
+     * deltaY 负数 = 向上滚；modifiers 同上（Ctrl+Shift = 2 | 8 = 10）。
+     * 注意：Ctrl+滚轮在 WebView 里是页面缩放，所以带修饰键的用例必须验证页面缩放没被触发
+     * （见 wysiwyg.mjs 第 24 组的分栏比例断言）。
+     */
+    async wheel(x, y, deltaY, { modifiers = 0, deltaX = 0 } = {}) {
+      await send("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x,
+        y,
+        deltaX,
+        deltaY,
+        modifiers,
+      });
+    },
   };
 }

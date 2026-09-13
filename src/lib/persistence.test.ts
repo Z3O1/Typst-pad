@@ -25,6 +25,7 @@ describe("persistence", () => {
       restoreSession: false,
       autoCheckUpdates: false,
       lastUpdateCheckAt: 1_700_000_000_000,
+      previewRatio: 0.65,
     });
     expect(loadState()).toEqual({
       theme: "dark",
@@ -39,6 +40,7 @@ describe("persistence", () => {
       restoreSession: false,
       autoCheckUpdates: false,
       lastUpdateCheckAt: 1_700_000_000_000,
+      previewRatio: 0.65,
     });
   });
 
@@ -48,13 +50,13 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, previewRatio: 0.5 });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, previewRatio: 0.5 });
     expect(loadState().theme).toBe("system");
   });
 
@@ -104,6 +106,13 @@ describe("persistence", () => {
     // 旧存档没有自动更新字段：默认开启，且"没检查过"（启动即检查一次，见 update-utils.isCheckDue）
     expect(state.autoCheckUpdates).toBe(true);
     expect(state.lastUpdateCheckAt).toBeNull();
+    // 分栏比例也是新增字段：旧存档读出来是默认 50/50
+    expect(state.previewRatio).toBe(0.5);
+  });
+
+  it("previewRatio 损坏（字符串）时回落默认，不让脏数据把分栏搞乱", () => {
+    localStorage.setItem("typst-pad:state", JSON.stringify({ previewRatio: "一半" }));
+    expect(loadState().previewRatio).toBe(0.5);
   });
 
   it("lastUpdateCheckAt 损坏（字符串/NaN 之类）时不传给节流逻辑", () => {
