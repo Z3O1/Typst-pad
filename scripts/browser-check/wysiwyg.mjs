@@ -913,5 +913,59 @@ check(
 );
 await c.screenshot(SHOT("wysiwyg-25-font-warning"));
 
+// ---------------------------------------------------------------------------
+// 第 26 组：更新说明的 Markdown 渲染（用户反馈：「更新说明无法渲染」）
+// 背景：弹窗里的说明是 latest.json 的 notes = CHANGELOG.md 的 Markdown 原文，以前直接塞进
+// <pre>，用户看到的是 `### Fixed`、`**中文…**` 这种原文。现在由 update-notes.ts 渲染成受控
+// 子集的安全 HTML（先整体转义，再只生成自己那几种标签）。
+// 浏览器开发模式下桩默认返回"没有新版本"（第 23 组验的就是那个安静路径），所以这里用
+// `&fakeupdate=1` 让桩返回一个假的可用更新，把弹窗真正打开（真实下载/装包仍只能在桌面版验）。
+// ---------------------------------------------------------------------------
+console.log("26) 更新说明的 Markdown 渲染");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(`${DEV_URL}&fakeupdate=1`);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+await openMenu("帮助");
+await c.waitFor(`document.body.innerText.includes("检查更新")`, { timeout: 5000 });
+await clickMenuItem("检查更新");
+await c.waitFor(`!!document.querySelector(".update-modal .update-notes")`, { timeout: 10000 });
+
+const notes = await c.evaluate(`(() => {
+  const box = document.querySelector(".update-modal .update-notes");
+  const tag = (sel) => Array.from(box.querySelectorAll(sel)).map(e => e.textContent.trim());
+  return {
+    text: box.innerText,
+    headings: tag("h4"),
+    bullets: box.querySelectorAll("li").length,
+    nested: box.querySelectorAll("ul ul li").length,
+    strongs: tag("strong"),
+    codes: tag("code"),
+    // XSS 样本：notes 里的 <img onerror=...> 必须只有文本，不能真的造出元素
+    imgs: box.querySelectorAll("img").length,
+    html: box.innerHTML,
+  };
+})()`);
+
+check(
+  "更新说明里的小标题渲染成标题元素（不是 `### Fixed` 原文）",
+  notes.headings.includes("Fixed") && notes.headings.includes("Added"),
+  JSON.stringify(notes.headings),
+);
+check("说明里不再出现 `###` 原文", !notes.text.includes("###"), notes.text.slice(0, 60));
+check("说明里不再出现 `**` 原文（粗体渲染成 strong）", !notes.text.includes("**") && notes.strongs.length > 0, JSON.stringify(notes.strongs));
+check("行内代码渲染成 code 元素", notes.codes.some((t) => t.includes("font-warnings.ts")), JSON.stringify(notes.codes));
+check("列表渲染成 li，且两空格缩进形成嵌套列表", notes.bullets >= 3 && notes.nested >= 1, `li=${notes.bullets} nested=${notes.nested}`);
+check(
+  "说明里的 HTML 只当文本显示（转义，不注入元素）",
+  notes.imgs === 0 && notes.text.includes("<img"),
+  `imgs=${notes.imgs} 片段=${notes.text.slice(0, 40)}`,
+);
+await c.screenshot(SHOT("wysiwyg-26-update-notes"));
+await c.evaluate(
+  `Array.from(document.querySelectorAll(".update-modal .modal-btn")).find(b => (b.textContent || "").includes("稍后")).click()`,
+);
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

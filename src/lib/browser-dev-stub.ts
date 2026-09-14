@@ -20,6 +20,34 @@ export function isBrowserDev(): boolean {
   return new URLSearchParams(window.location.search).has("browserdev");
 }
 
+/** 是否额外开启"假的可更新版本"（?browserdev=1&fakeupdate=1）——只给验收脚本用 */
+function isFakeUpdateEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("fakeupdate");
+}
+
+// 假的可用更新（形状与 @tauri-apps/plugin-updater 的 Update 元数据一致：
+// rid / currentVersion / version / date / body）。body 就是 latest.json 的 notes，
+// 即 CHANGELOG 该版本的 Markdown 原文；这里刻意混进一条 HTML 注入样本，
+// 让「更新说明必须转义后渲染」这件事在验收里有断言（见 wysiwyg.mjs 第 26 组）。
+const FAKE_UPDATE = {
+  rid: 9001,
+  currentVersion: "0.7.3",
+  version: "0.7.4",
+  date: new Date().toISOString(),
+  body: [
+    "### Fixed",
+    "",
+    "- **中文不再被渲染成楷体**：typst 默认正文字体不含汉字，中文全走自动回退。",
+    "  - 现在由 Rust 侧注入默认字体族，`font-warnings.ts` 负责提示族名写错的情况。",
+    "- <img src=x onerror=\"alert(1)\"> 这段必须原样显示成文本，不能被当标签解析。",
+    "",
+    "### Added",
+    "",
+    "- 界面缩放（Ctrl+滚轮）与正文字体设置。",
+  ].join("\n"),
+};
+
 // ---------------------------------------------------------------------------
 // 假 SVG 生成：把文档按行转成 SVG 文本行；行数超过一页容量就分页。
 // 目的是让预览区有真实的多页结构（含 page-separator 分隔），便于调试滚动/缩放/分栏。
@@ -301,9 +329,11 @@ async function handleCommand(
     // 自动更新：浏览器开发模式没有真实 updater（更没有 Rust 侧的签名校验与安装器）。
     // 返回 null = "没有可用更新"——让"启动静默检查 → 更新状态机"这条链路在验收里安静走通，
     // 而不是刷一屏未知命令。真实更新行为只能在桌面版验证（见 CLAUDE.md「测试」）。
+    // 例外：`?browserdev=1&fakeupdate=1` 时返回一个**假的可用更新**，让"发现新版本"弹窗
+    // （含更新说明的 Markdown 渲染）也能被验收覆盖——否则这条 UI 只有真发版时才看得到。
     case "plugin:updater|check":
       notify(command);
-      return null;
+      return isFakeUpdateEnabled() ? FAKE_UPDATE : null;
     // 界面缩放（Ctrl+滚轮）：浏览器开发模式没有 Tauri 的 webview 缩放，但**记录请求的系数**，
     // 让浏览器验收能断言"确实按一档 10% 请求了缩放"（真实缩放效果只能在桌面版看）。
     case "plugin:webview|set_webview_zoom": {

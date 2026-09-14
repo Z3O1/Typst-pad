@@ -64,12 +64,12 @@
   } from "$lib/updater";
   import {
     AUTO_CHECK_DELAY_MS,
-    firstLines,
     formatBytes,
     formatProgress,
     isCheckDue,
     type DownloadProgress,
   } from "$lib/update-utils";
+  import { renderUpdateNotes } from "$lib/update-notes";
   import {
     ZOOM_DEFAULT,
     clampZoom,
@@ -1618,7 +1618,9 @@
             当前 v{updateFlow.currentVersion} → 最新 v{updateFlow.version}
           </p>
           {#if updateFlow.notes}
-            <pre class="update-notes">{firstLines(updateFlow.notes)}</pre>
+            <!-- 更新说明是 CHANGELOG 的 Markdown 原文（见 generate-latest-json.mjs）：
+                 交给 update-notes.ts 渲染成受控子集的安全 HTML，别再退回 <pre> 显示原文 -->
+            <div class="update-notes">{@html renderUpdateNotes(updateFlow.notes)}</div>
           {/if}
           <p class="modal-text update-hint">
             下载并安装后应用会自动重启；安装包有签名校验，来源不对会被拒绝。
@@ -2293,25 +2295,69 @@
     text-decoration: underline solid;
   }
 
-  /* 更新弹窗：说明可能很长，限宽 + 内部滚动，不把弹窗撑到屏幕外 */
+  /* 更新弹窗：说明可能很长，限宽 + 内部滚动，不把弹窗撑到屏幕外。
+     内容是 update-notes.ts 渲染的受控 HTML（标题/列表/粗体/行内代码），不是 <pre> 原文 */
   .update-modal {
     max-width: 560px;
   }
 
   .update-notes {
     margin: 8px 0 0;
-    padding: 8px 10px;
-    max-height: 240px;
+    padding: 8px 12px;
+    max-height: 260px;
     overflow-y: auto;
     background: var(--bg-pane);
     border: 1px solid var(--border);
     border-radius: 6px;
     color: var(--fg);
-    font-size: 12px;
-    line-height: 1.6;
-    white-space: pre-wrap;
+    font-size: 12.5px;
+    line-height: 1.7;
     word-break: break-word;
-    font-family: inherit;
+  }
+
+  .update-notes :global(h4),
+  .update-notes :global(h5) {
+    margin: 10px 0 4px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg);
+  }
+
+  /* 第一节的小标题不需要上边距，免得贴着一片空白 */
+  .update-notes :global(:first-child) {
+    margin-top: 0;
+  }
+
+  .update-notes :global(p) {
+    margin: 0 0 6px;
+  }
+
+  .update-notes :global(ul),
+  .update-notes :global(ol) {
+    margin: 0 0 6px;
+    padding-left: 20px;
+  }
+
+  .update-notes :global(li) {
+    margin: 2px 0;
+  }
+
+  .update-notes :global(strong) {
+    font-weight: 600;
+  }
+
+  .update-notes :global(code) {
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--bg-hover, rgba(128, 128, 128, 0.16));
+    font-family: var(--mono-font, ui-monospace, monospace);
+    font-size: 11.5px;
+  }
+
+  .update-notes :global(hr) {
+    margin: 8px 0;
+    border: none;
+    border-top: 1px solid var(--border);
   }
 
   .update-hint {

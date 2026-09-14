@@ -84,7 +84,7 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 
 - **更新源**：`https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json`（配置在 `tauri.conf.json` 的 `plugins.updater.endpoints`）。它是"最新一个**已发布** Release"的资产，所以草稿（draft）Release 里的更新包客户端拿不到——**必须 Publish 之后才生效**。
 - **仓库必须是公开的**：更新检查是**匿名请求**（不带任何 GitHub 凭据），私有仓库对匿名一律 404，结果是"检查更新失败：没有取到更新清单（latest.json）"（插件对非 2xx 只记日志，最后统一报 `Could not fetch a valid release JSON from the remote`）。判断顺序：先看 `gh api repos/Z3O1/Typst-pad --jq .private` 是不是 `false`，再确认 Release 已 Publish，最后才怀疑网络。验证匿名可达性：`curl -sIL -o /dev/null -w '%{http_code}' https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json` 应为 `200`。
-- **清单内容**：版本号 + 安装包下载地址 + 安装包签名；由 `scripts/generate-latest-json.mjs` 在构建后生成（更新说明默认取 `CHANGELOG.md` 里该版本的正文），与安装包一起作为 Release 资产上传。
+- **清单内容**：版本号 + 安装包下载地址 + 安装包签名；由 `scripts/generate-latest-json.mjs` 在构建后生成（更新说明默认取 `CHANGELOG.md` 里该版本的正文），与安装包一起作为 Release 资产上传。弹窗里这份说明会**渲染成排版文本**（标题 / 列表 / 粗体 / 行内代码，见 `src/lib/update-notes.ts`——先整体 HTML 转义再生成白名单标签，说明里即使带 HTML 也只当文本显示）。
 - **签名校验**：安装包由 CI 用私钥签名（生成 `.sig`），客户端用**编译进应用**的公钥（`plugins.updater.pubkey`）校验，签名不符直接拒绝安装——防的是"更新通道被换成别人的安装包"。
 - **密钥管理**：私钥与密码存在仓库 Secrets（`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）。**私钥丢了就再也发不出自动更新**（老用户只能手动下载安装包），pubkey 一旦发布也不要再换。
 - **本机打包**：`createUpdaterArtifacts` 为 true 且配置里有 pubkey 之后，任何 `tauri build` 都必须能拿到私钥（`TAURI_SIGNING_PRIVATE_KEY` 或 `TAURI_SIGNING_PRIVATE_KEY_PATH`），否则打包直接失败（Tauri 的硬约束）。

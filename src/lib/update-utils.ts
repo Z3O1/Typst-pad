@@ -71,16 +71,6 @@ export function formatProgress(progress: DownloadProgress): string {
   return `已下载 ${progress.percent}%（${formatBytes(progress.downloaded)} / ${formatBytes(progress.total)}）`;
 }
 
-/** 把更新说明裁到前 maxLines 行（更新日志常常整段 CHANGELOG，弹窗里滚不完） */
-export function firstLines(text: string, maxLines = 12): string {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  if (lines.length <= maxLines) return text.trim();
-  // 截断时明说还有内容，避免用户以为更新说明就这么短
-  return `${lines.slice(0, maxLines).join("\n").trimEnd()}\n…（更新说明较长，已省略后续 ${
-    lines.length - maxLines
-  } 行）`;
-}
-
 /**
  * 更新相关报错 → 用户能看懂的一句话。
  * 原文照抄进日志，但状态栏/弹窗只给可行动的解释：这些错误几乎都发生在

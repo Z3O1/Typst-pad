@@ -7,7 +7,6 @@ import {
   formatBytes,
   progressFrom,
   formatProgress,
-  firstLines,
   describeUpdateError,
   AUTO_CHECK_MIN_INTERVAL_MS,
 } from "./update-utils";
@@ -92,24 +91,6 @@ describe("formatProgress", () => {
     expect(formatProgress(progressFrom(1024 * 1024, 4 * 1024 * 1024))).toBe(
       "已下载 25%（1.0 MB / 4.0 MB）",
     );
-  });
-});
-
-describe("firstLines", () => {
-  it("行数不超限时原样返回（只去首尾空白）", () => {
-    expect(firstLines("  a\nb  ")).toBe("a\nb");
-  });
-
-  it("超限时截断并注明省略行数", () => {
-    const text = Array.from({ length: 20 }, (_, i) => `第 ${i + 1} 行`).join("\n");
-    const out = firstLines(text, 12);
-    expect(out.split("\n")[0]).toBe("第 1 行");
-    expect(out).toContain("已省略后续 8 行");
-    expect(out).not.toContain("第 13 行");
-  });
-
-  it("CRLF 也按行处理", () => {
-    expect(firstLines("a\r\nb\r\nc", 2)).toContain("已省略后续 1 行");
   });
 });
 
