@@ -172,8 +172,8 @@
   /**
    * 源码模式的**自动换行**（Alt+Z 切换，VS Code 同款手势）。
    * 打开时长行折行显示（CodeMirror 的 `cm-lineWrapping`：`white-space: break-spaces` + 断词），
-   * 不再需要横向滚动看完整行。默认关（保持原有观感），随存档持久化。
-   * 只作用于源码模式：写作模式是"整页纸张"形态，换行属于排版语义，不在这个开关范围内。
+   * 不再需要横向滚动看完整行。默认关（保持代码编辑器原有的"长行横向滚动"观感），随存档持久化。
+   * 只作用于源码模式：**写作模式始终折行**（文档形态，见 toggleEditorWrap 的注释），不读这个开关。
    */
   let editorWrap = $state(false);
   /**
@@ -589,9 +589,11 @@
   /**
    * 源码模式的自动换行开关（**Alt+Z**，VS Code 同款手势；菜单「视图 → 自动换行」同一入口）。
    *
-   * 只作用于**源码模式**（传给 Editor 的 `wrap` 是 `viewMode === "source" && editorWrap`）：
-   * 写作模式是"整页纸张、按原文排版"的形态，长行折行与否属于排版语义，不在这个手动开关的
-   * 范围内。写作模式下按 Alt+Z 只给提示、不改状态——说了不生效的原因，免得看起来像没响应。
+   * 只作用于**源码模式**（传给 Editor 的 `wrap` 是 `viewMode === "source" ? editorWrap : true`）。
+   * 写作模式**始终折行、不设开关**（2026-09-14 用户要求「预览模式和文档模式的内容不应该有横向
+   * 拖动，而是自动换行，Alt+Z 只对代码起效」）——它是"整页纸张"的文档形态，正文长行必须像
+   * Typora 那样自动折行；实测改前一条长行会给写作模式带来 2855px 的横向滚动。
+   * 所以写作模式下按 Alt+Z 不改任何状态，只说明这条规则。
    */
   function toggleEditorWrap() {
     if (viewMode !== "source") {
@@ -1135,11 +1137,10 @@
    * - 字号恒定：默认字号对齐输入区（14px），窗口拉宽时画布停在自然尺寸不再放大；
    * - 等宽显示：窗口变窄时画布等比缩小铺满容器宽度，文本不拉伸变形。
    *
-   * **必须把界面缩放（uiZoom）一起传进去**（2026-09-14 修「代码模式预览框的缩放还是无效」）：
-   * 界面缩放走 webview `setZoom`，预览栏的 CSS 宽度会跟着变小，直接拿它算"铺满"会把画布
-   * 缩回原样、与引擎的放大正好抵消 —— 表现为"变了但立刻弹回原样"。传 uiZoom 后按缩放**前**
-   * 的栏宽算，画布的 CSS 宽度保持在 100% 时的值，由引擎把它真正放大（超出栏宽则横向滚动）。
-   * 依据是实测：1040px 窗口下 100%→150% 时画布物理尺寸比只有 0.983（等于没变）。
+   * **只用实测栏宽，不许乘界面缩放**（2026-09-14 用户要求「预览模式和文档模式的内容不应该有
+   * 横向拖动」，试过一版乘 uiZoom 又撤回）：预览是固定版心的排版结果，塞不进栏宽只能横向滚动，
+   * 所以"永不横向拖动"与"预览跟着缩放变大"二选一 —— 选了前者。乘 uiZoom 的版本在 250% 缩放下
+   * 会让预览栏横向溢出 166px（实测），正是用户不要的样子。详见 preview-scale.ts 的注释。
    * 测量失败（无产物/容器不可测）时清空内联宽度，回退 CSS width: 100%。
    */
   function applyPreviewScale() {
@@ -1152,7 +1153,6 @@
     const displayWidth = previewCanvasWidth({
       containerWidth: previewBodyEl.clientWidth,
       pageWidthPt: viewBoxWidthPt(svg.getAttribute("viewBox") ?? ""),
-      uiZoom,
     });
     previewHost.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
   }
@@ -1596,7 +1596,7 @@
           onCursor={handleCursor}
           onDocChange={handleDocChange}
           mode={viewMode}
-          wrap={viewMode === "source" && editorWrap}
+          wrap={viewMode === "source" ? editorWrap : true}
           lookupMath={(key) => mathCache.get(key)}
           onMathRequest={handleMathRequest}
           mathVersion={mathVersion}

@@ -51,8 +51,8 @@ describe("文案", () => {
     expect(wrapNotice(false)).toBe("自动换行：关");
   });
 
-  it("写作模式下的提示点明只作用于源码模式并给出切换键", () => {
+  it("写作模式下的提示点明「写作模式本来就折行、Alt+Z 只管源码模式」", () => {
+    expect(WRAP_SOURCE_ONLY_NOTICE).toContain("始终自动换行");
     expect(WRAP_SOURCE_ONLY_NOTICE).toContain("源代码模式");
-    expect(WRAP_SOURCE_ONLY_NOTICE).toContain("Ctrl+/");
   });
 });

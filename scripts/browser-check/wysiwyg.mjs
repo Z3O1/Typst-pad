@@ -1176,6 +1176,7 @@ const wrapProbe = `(() => {
     overflowX: Math.round(scroller.scrollWidth - scroller.clientWidth),
     lineHeight: Math.round(line.getBoundingClientRect().height),
     saved: raw.editorWrap ?? null,
+    mode: document.querySelector(".statusbar .mode-tag")?.textContent ?? "",
     status: document.querySelector(".statusbar").innerText.replace(/\\n/g, " ⏎ ").slice(0, 90),
   };
 })()`;
@@ -1240,50 +1241,55 @@ check(
   JSON.stringify(wrapOff),
 );
 
-// 写作模式下 Alt+Z 不改状态，只说明原因
+// 写作模式（文档模式）：**始终自动折行**，不需要 Alt+Z
+// 用户要求（2026-09-14）：「预览模式和文档模式的内容不应该有横向拖动，而是自动换行，
+// Alt+Z 只对代码起效」——实测改前一条长行会给写作模式带来 2855px 的横向滚动。
 await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
+const writeAuto = await c.evaluate(wrapProbe);
+check(
+  "写作模式默认就折行（文档形态，不靠 Alt+Z）",
+  writeAuto.mode.includes("写作") && writeAuto.wrapping === true && writeAuto.overflowX <= 2,
+  JSON.stringify(writeAuto),
+);
+
+// 写作模式下按 Alt+Z 不改任何状态，只说明规则
 await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
 await new Promise((r) => setTimeout(r, 400));
 const inWrite = await c.evaluate(wrapProbe);
 check(
-  "写作模式下 Alt+Z 不改状态，且说明只在源码模式生效",
-  inWrite.wrapping === false && inWrite.saved === false && inWrite.status.includes("只在源代码模式"),
+  "写作模式下 Alt+Z 不改状态（没动源码模式那个开关），并说明规则",
+  inWrite.wrapping === true && inWrite.saved === false && inWrite.status.includes("始终自动换行"),
   JSON.stringify(inWrite),
 );
-// 换个方向再验一次"只作用于源码模式"：在源码模式打开换行后切到写作模式，
-// 写作模式的编辑器**不能**跟着折行（那是"整页纸张、按原文排"的形态）。
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
-await new Promise((r) => setTimeout(r, 400));
-await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
-await new Promise((r) => setTimeout(r, 400));
+
+// 回源码模式：换行开关仍是关（两个模式互不影响）
 await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
-const writeWithWrapOn = await c.evaluate(wrapProbe);
+const backToSource = await c.evaluate(wrapProbe);
 check(
-  "源码模式打开的换行不影响写作模式（开关只作用于源码模式）",
-  writeWithWrapOn.wrapping === false && writeWithWrapOn.saved === true,
-  JSON.stringify(writeWithWrapOn),
+  "切回源码模式仍是不折行（写作模式的自动折行不会写进这个开关）",
+  backToSource.mode.includes("源码") &&
+    backToSource.wrapping === false &&
+    backToSource.overflowX > 20 &&
+    backToSource.saved === false,
+  JSON.stringify(backToSource),
 );
-// 收尾：回源码模式并关掉换行（下一轮从默认态开始）
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
-await new Promise((r) => setTimeout(r, 400));
-await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
-await new Promise((r) => setTimeout(r, 300));
 
 // ---------------------------------------------------------------------------
-// 第 30 组：界面缩放要**真的**带动预览画布（用户反馈：「代码模式预览框的缩放还是无效」
-// 「Ctrl+滚轮 变了但立刻弹回原样」）
-// 根因：界面缩放走 webview `setZoom`，它把 CSS 视口一起缩小 —— 预览栏的 CSS 宽度也从 505
-// 变成 331；而预览画布的"铺满容器"分支正是拿这个**已缩小**的宽度算的，于是画布缩回原样，
-// 引擎再放大一次恰好抵消。编辑区没事（字号是 CSS px，被引擎放大），只有自适应的预览被吃掉。
-// 复现（本组跑的就是这个）：1040px 窗口下 100%→150%，画布物理尺寸比只有 0.983（等于没变）。
-// 修法：拟合用**缩放前**的栏宽（previewScale 收 uiZoom）。
-// 无头环境怎么造 150%：CDP `Emulation.setDeviceMetricsOverride` 把 CSS 视口压到「窗口宽 ÷ 1.5」
-// 在布局上等价于 webview 缩放，配合预置的 uiZoom=1.5，画布的物理尺寸 = 画布 CSS 宽度 × 1.5
-// （webview 缩放发生在 CSS 层之下，量到的 rect 仍是未放大的 px）。
+// 第 30 组：预览栏**永不横向拖动**（用户要求：「预览模式和文档模式的内容不应该有横向拖动，
+// 而是自动换行，Alt+Z 只对代码起效」）
+// 背景（2026-09-14 的两次反馈，方向刚好相反，最终以"不许横向拖动"为准）：
+//   ① 「代码模式预览框的缩放还是无效 / 变了但立刻弹回原样」——预览是自适应铺满的，而界面缩放
+//      走 webview setZoom（CSS 视口一起缩小），拿缩小后的栏宽算铺满就把画布缩回原样。
+//   ② 于是改成"按缩放前的栏宽拟合"，缩放真的放大了预览 —— 但固定版心的页面塞不进栏宽只能
+//      横向滚动（实测 250% 时预览栏溢出 166px），用户明确否掉。
+// 结论：预览是固定版心的排版结果，"永不横向拖动"与"预览跟着界面缩放变大"只能二选一，
+// 用户选前者 —— 拟合**永远只用实测栏宽**（画布宽度恒 ≤ 栏宽）。本组就是这条规则的回归网。
+// 无头环境怎么造缩放：CDP `Emulation.setDeviceMetricsOverride` 把 CSS 视口压到「窗口宽 ÷ 缩放」，
+// 这在布局上等价于 webview 缩放（预览栏 CSS 宽度一起变小）。
 // ---------------------------------------------------------------------------
-console.log("30) 界面缩放带动预览画布（模拟 150% 的 CSS 视口）");
+console.log("30) 预览栏永不横向拖动（100% / 150% / 250%）");
 const previewProbe = `(() => {
   const body = document.querySelector(".preview-body");
   const host = document.querySelector("#preview-host");
@@ -1294,8 +1300,9 @@ const previewProbe = `(() => {
     z,
     container: body ? body.clientWidth : null,
     canvasCss: rect ? Math.round(rect.width * 10) / 10 : null,
-    canvasPhys: rect ? Math.round(rect.width * z * 10) / 10 : null,
+    inlineWidth: host?.style.width ?? "",
     overflowX: body ? body.scrollWidth - body.clientWidth : null,
+    pages: document.querySelectorAll("#preview-host > svg").length,
   };
 })()`;
 
@@ -1320,35 +1327,35 @@ async function loadPreviewAt(viewportW, uiZoom) {
   return c.evaluate(previewProbe);
 }
 
-// 1040px 窗口：100% 时栏宽比自然尺寸窄，所以 100% 走"铺满"分支（正是被吃掉的那一支）
-const WIN = 1040;
-const preview100 = await loadPreviewAt(WIN, 1);
-check(
-  "100% 时画布铺满预览栏（窄栏的自适应行为照旧）",
-  preview100.canvasCss !== null &&
-    Math.abs(preview100.canvasCss - preview100.container) <= 2 &&
-    preview100.overflowX <= 1,
-  JSON.stringify(preview100),
-);
+const WIN = 1040; // 中等窗口：100% 时预览栏就比页面的自然尺寸窄，走"铺满"分支
+const shots = [
+  { label: "100%", viewport: WIN, uiZoom: 1 },
+  { label: "150%", viewport: Math.round(WIN / 1.5), uiZoom: 1.5 },
+  { label: "250%", viewport: Math.round(WIN / 2.5), uiZoom: 2.5 },
+];
 
-const preview150 = await loadPreviewAt(Math.round(WIN / 1.5), 1.5);
-const physRatio = preview150.canvasPhys / preview100.canvasPhys;
+const previewAt = {};
+for (const shot of shots) {
+  const m = await loadPreviewAt(shot.viewport, shot.uiZoom);
+  previewAt[shot.label] = m;
+  check(
+    `${shot.label} 缩放下预览栏不出现横向拖动（画布 ≤ 栏宽、无横向溢出）`,
+    m.canvasCss !== null &&
+      m.canvasCss <= m.container + 1 &&
+      m.overflowX <= 1 &&
+      m.pages >= 1,
+    `栏宽 ${m.container}，画布 ${m.canvasCss}（内联 ${m.inlineWidth}），横向溢出 ${m.overflowX}`,
+  );
+}
+
+// 极窄栏（250%）也要"铺满且不溢出"：画布跟栏宽走，而不是保持 100% 时的宽度
 check(
-  "150% 时画布的物理尺寸真的放大 1.5 倍（不再被自适应缩回去）",
-  physRatio > 1.4,
-  `物理 ${preview100.canvasPhys} → ${preview150.canvasPhys}（比 ${physRatio.toFixed(3)}）`,
+  "缩放到 250% 时画布跟着变窄的栏宽走（不再比栏宽大）",
+  previewAt["250%"].canvasCss <= previewAt["250%"].container + 1 &&
+    previewAt["250%"].canvasCss < previewAt["100%"].canvasCss,
+  `100% 画布 ${previewAt["100%"].canvasCss} → 250% 画布 ${previewAt["250%"].canvasCss}（栏宽 ${previewAt["250%"].container}）`,
 );
-check(
-  "150% 时画布的 CSS 宽度不再跟着窄栏缩水（就是「弹回原样」那条）",
-  preview150.canvasCss >= preview100.canvasCss * 0.95,
-  `CSS ${preview100.canvasCss} → ${preview150.canvasCss}，栏宽 ${preview100.container} → ${preview150.container}`,
-);
-check(
-  "放大后画布比栏宽大（超出部分靠横向滚动看，而不是被裁掉）",
-  preview150.overflowX > 0,
-  `横向溢出 ${preview150.overflowX}px`,
-);
-await c.screenshot(SHOT("wysiwyg-30-preview-zoom"));
+await c.screenshot(SHOT("wysiwyg-30-preview-no-hscroll"));
 await c.send("Emulation.clearDeviceMetricsOverride");
 
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
