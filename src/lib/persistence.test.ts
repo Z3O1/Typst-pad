@@ -21,6 +21,7 @@ describe("persistence", () => {
       prefixCode: "#set text(size: 12pt)\n",
       viewMode: "source",
       showPreview: true,
+      editorWrap: true,
       dirty: true,
       restoreSession: false,
       autoCheckUpdates: false,
@@ -38,6 +39,7 @@ describe("persistence", () => {
       prefixCode: "#set text(size: 12pt)\n",
       viewMode: "source",
       showPreview: true,
+      editorWrap: true,
       dirty: true,
       restoreSession: false,
       autoCheckUpdates: false,
@@ -54,13 +56,13 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, editorWrap: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, editorWrap: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
     expect(loadState().theme).toBe("system");
   });
 
@@ -88,6 +90,14 @@ describe("persistence", () => {
       JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: true }),
     );
     expect(loadState().viewMode).toBe("write");
+  });
+
+  it("旧存档（无 editorWrap）自动换行默认关", () => {
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "source", showPreview: true }),
+    );
+    expect(loadState().editorWrap).toBe(false);
   });
 
   it("全新存档（无任何模式字段）默认写作模式", () => {

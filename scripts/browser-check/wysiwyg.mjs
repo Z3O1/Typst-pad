@@ -1138,5 +1138,138 @@ check(
 await c.screenshot(SHOT("wysiwyg-28-narrow-statusbar"));
 await c.send("Emulation.clearDeviceMetricsOverride");
 
+// ---------------------------------------------------------------------------
+// 第 29 组：源码模式 Alt+Z 自动换行（用户要求：VS Code 同款手势）
+// 背景：源码模式是"源码 + 预览"双栏，编辑区窄，而 CodeMirror 默认**不折行** —— 长行必须横向滚动
+// 才看得到行尾。现在 Alt+Z 切换自动换行（`EditorView.lineWrapping`，经 Compartment 重配，
+// 不重建 EditorView，所以撤销历史与光标都不丢），状态随存档持久化。
+// 这里除正路之外还锁两条容易踩的边界：
+//   ① **不许抢 Ctrl+Z**（撤销）——Alt+Z 的判定必须排除 Ctrl/Meta（见 word-wrap.isWrapToggleKey）；
+//   ② 写作模式是按原文排版的"整页纸张"，Alt+Z 不该悄悄改它 —— 只给提示。
+// ---------------------------------------------------------------------------
+console.log("29) 源码模式 Alt+Z 自动换行");
+// 源码模式 + 双栏（编辑区最窄的情形），并清掉上轮遗留的换行开关
+await c.evaluate(`(() => {
+  const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
+  raw.viewMode = "source";
+  raw.showPreview = true;
+  delete raw.editorWrap;
+  localStorage.setItem("typst-pad:state", JSON.stringify(raw));
+})()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+await c.click(400, 300);
+await c.selectAll();
+// 一条远宽于编辑区的长行（中文按 2 字宽算，足够撑出横向滚动）
+await c.type("= 自动换行测试 " + "一二三四五六七八九十".repeat(12));
+await new Promise((r) => setTimeout(r, 400));
+
+/** 换行状态 + 几何：cm-lineWrapping 类、横向溢出量、首行实际高度、存档值、状态栏文案 */
+const wrapProbe = `(() => {
+  const content = document.querySelector(".cm-content");
+  const scroller = document.querySelector(".cm-scroller");
+  const line = document.querySelector(".cm-line");
+  const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
+  return {
+    wrapping: content.classList.contains("cm-lineWrapping"),
+    overflowX: Math.round(scroller.scrollWidth - scroller.clientWidth),
+    lineHeight: Math.round(line.getBoundingClientRect().height),
+    saved: raw.editorWrap ?? null,
+    status: document.querySelector(".statusbar").innerText.replace(/\\n/g, " ⏎ ").slice(0, 90),
+  };
+})()`;
+
+const beforeWrap = await c.evaluate(wrapProbe);
+check(
+  "默认不折行：长行横向溢出（这就是要 Alt+Z 的原因）",
+  beforeWrap.wrapping === false && beforeWrap.overflowX > 20,
+  JSON.stringify(beforeWrap),
+);
+const singleLineHeight = beforeWrap.lineHeight;
+
+// Alt+Z 打开
+await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
+await new Promise((r) => setTimeout(r, 400));
+const wrapped = await c.evaluate(wrapProbe);
+check("Alt+Z 打开自动换行（cm-lineWrapping 生效）", wrapped.wrapping === true, JSON.stringify(wrapped));
+check(
+  "长行折行显示、横向溢出消失",
+  wrapped.overflowX <= 2 && wrapped.lineHeight > singleLineHeight + 10,
+  `溢出 ${wrapped.overflowX}px，行高 ${singleLineHeight} → ${wrapped.lineHeight}`,
+);
+check("状态栏说明开关状态", wrapped.status.includes("自动换行：开"), JSON.stringify(wrapped.status));
+check("换行开关写进存档（下次启动仍是开的）", wrapped.saved === true, JSON.stringify(wrapped.saved));
+await c.screenshot(SHOT("wysiwyg-29-wrap-on"));
+
+// 刷新后仍然折行（持久化真的生效，而不只是内存里的一次重配）
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+const reloadedWrap = await c.evaluate(wrapProbe);
+check(
+  "重新加载后仍然自动换行（存档恢复）",
+  reloadedWrap.wrapping === true && reloadedWrap.overflowX <= 2,
+  JSON.stringify(reloadedWrap),
+);
+
+// Ctrl+Z 绝不能被 Alt+Z 抢走：先输入一个字符，撤销后它必须消失
+await c.click(400, 300);
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.key("End", { code: "End", keyCode: 35 });
+await c.type("Z");
+await new Promise((r) => setTimeout(r, 300));
+const typed = await c.evaluate(`document.querySelector(".cm-content").innerText.length`);
+await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 400));
+const afterUndo = await c.evaluate(wrapProbe);
+const undoneLen = await c.evaluate(`document.querySelector(".cm-content").innerText.length`);
+check(
+  "Ctrl+Z 仍是撤销（没被 Alt+Z 抢走）",
+  undoneLen === typed - 1 && afterUndo.wrapping === true,
+  `长度 ${typed} → ${undoneLen}，换行 ${afterUndo.wrapping}`,
+);
+
+// Alt+Z 关：回到不折行
+await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
+await new Promise((r) => setTimeout(r, 400));
+const wrapOff = await c.evaluate(wrapProbe);
+check(
+  "再按一次 Alt+Z 关闭（回到横向滚动）",
+  wrapOff.wrapping === false && wrapOff.overflowX > 20 && wrapOff.saved === false,
+  JSON.stringify(wrapOff),
+);
+
+// 写作模式下 Alt+Z 不改状态，只说明原因
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 500));
+await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
+await new Promise((r) => setTimeout(r, 400));
+const inWrite = await c.evaluate(wrapProbe);
+check(
+  "写作模式下 Alt+Z 不改状态，且说明只在源码模式生效",
+  inWrite.wrapping === false && inWrite.saved === false && inWrite.status.includes("只在源代码模式"),
+  JSON.stringify(inWrite),
+);
+// 换个方向再验一次"只作用于源码模式"：在源码模式打开换行后切到写作模式，
+// 写作模式的编辑器**不能**跟着折行（那是"整页纸张、按原文排"的形态）。
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 400));
+await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
+await new Promise((r) => setTimeout(r, 400));
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 500));
+const writeWithWrapOn = await c.evaluate(wrapProbe);
+check(
+  "源码模式打开的换行不影响写作模式（开关只作用于源码模式）",
+  writeWithWrapOn.wrapping === false && writeWithWrapOn.saved === true,
+  JSON.stringify(writeWithWrapOn),
+);
+// 收尾：回源码模式并关掉换行（下一轮从默认态开始）
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 400));
+await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
+await new Promise((r) => setTimeout(r, 300));
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

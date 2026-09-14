@@ -80,6 +80,7 @@
     ZOOM_CONFIRM_DELAY_MS,
     ZOOM_MIN,
   } from "$lib/zoom";
+  import { WRAP_SOURCE_ONLY_NOTICE, isWrapToggleKey, wrapNotice } from "$lib/word-wrap";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -168,6 +169,13 @@
   // 右栏只是为了核对分页/整页效果才需要，故默认跟着 livePreview 走（开=单栏，关=双栏），
   // 也可以用视图菜单单独打开（例如所见即所得下仍想对照整页）。
   let showPreview = $state(false);
+  /**
+   * 源码模式的**自动换行**（Alt+Z 切换，VS Code 同款手势）。
+   * 打开时长行折行显示（CodeMirror 的 `cm-lineWrapping`：`white-space: break-spaces` + 断词），
+   * 不再需要横向滚动看完整行。默认关（保持原有观感），随存档持久化。
+   * 只作用于源码模式：写作模式是"整页纸张"形态，换行属于排版语义，不在这个开关范围内。
+   */
+  let editorWrap = $state(false);
   /**
    * 界面缩放系数（0.5~2.5，默认 1 = 100%），**Ctrl+滚轮**调（见 handleZoomWheel）。
    * 走 Tauri 的 webview 缩放（`setZoom`），效果等于浏览器 Ctrl+滚轮缩放：编辑区、预览、
@@ -366,6 +374,7 @@
         prefixCode,
         viewMode,
         showPreview,
+        editorWrap,
         dirty,
         restoreSession,
         autoCheckUpdates,
@@ -575,6 +584,23 @@
     showPreview = viewMode === "source";
     schedulePersist();
     statusText = viewMode === "write" ? "写作模式" : "源代码模式";
+  }
+
+  /**
+   * 源码模式的自动换行开关（**Alt+Z**，VS Code 同款手势；菜单「视图 → 自动换行」同一入口）。
+   *
+   * 只作用于**源码模式**（传给 Editor 的 `wrap` 是 `viewMode === "source" && editorWrap`）：
+   * 写作模式是"整页纸张、按原文排版"的形态，长行折行与否属于排版语义，不在这个手动开关的
+   * 范围内。写作模式下按 Alt+Z 只给提示、不改状态——说了不生效的原因，免得看起来像没响应。
+   */
+  function toggleEditorWrap() {
+    if (viewMode !== "source") {
+      statusText = WRAP_SOURCE_ONLY_NOTICE;
+      return;
+    }
+    editorWrap = !editorWrap;
+    schedulePersist();
+    statusText = wrapNotice(editorWrap);
   }
 
   function handleCursor(line: number, col: number) {
@@ -824,6 +850,14 @@
             label: "显示预览栏",
             checked: showPreview,
             action: () => (showPreview = !showPreview),
+          },
+          {
+            label: "自动换行",
+            // 同样只是灰字提示（MenuBar 的匹配器只认「Ctrl+单键」，不会命中 Alt+Z）；
+            // 真正的触发在 +page.svelte 的 handleKeydown 里
+            shortcut: "Alt+Z",
+            checked: editorWrap,
+            action: () => toggleEditorWrap(),
           },
           {
             label: "放大",
@@ -1292,6 +1326,16 @@
   function handleKeydown(e: KeyboardEvent) {
     const key = e.key.toLowerCase();
     const mod = e.ctrlKey || e.metaKey;
+
+    // Alt+Z：源码模式的自动换行开关（VS Code 同款手势）。它没有 Ctrl/Meta 修饰，
+    // 所以必须放在下面那句 `if (!mod) return` **之前**。判定见 word-wrap.isWrapToggleKey
+    // （排除 Ctrl+Z 撤销与 Alt+Shift+Z，理由在那边的注释里）。
+    if (isWrapToggleKey(e)) {
+      e.preventDefault();
+      toggleEditorWrap();
+      return;
+    }
+
     if (!mod) return;
 
     // Shift 组合的格式快捷键（MenuBar 的匹配器只支持「Ctrl+单键」，这些由页面处理）。
@@ -1372,6 +1416,8 @@
     viewMode = saved.viewMode ?? (saved.livePreview === false ? "source" : "write");
     // 旧存档没有 showPreview：单栏与否跟随模式（写作模式单栏，源码模式双栏对照）
     showPreview = saved.showPreview ?? viewMode === "source";
+    // 源码模式自动换行（旧存档没有）：默认关，保持"高亮一格不折行"的原有观感
+    editorWrap = saved.editorWrap ?? false;
     restoreSession = saved.restoreSession ?? true;
     autoCheckUpdates = saved.autoCheckUpdates ?? true;
     lastUpdateCheckAt = typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
@@ -1543,6 +1589,7 @@
           onCursor={handleCursor}
           onDocChange={handleDocChange}
           mode={viewMode}
+          wrap={viewMode === "source" && editorWrap}
           lookupMath={(key) => mathCache.get(key)}
           onMathRequest={handleMathRequest}
           mathVersion={mathVersion}

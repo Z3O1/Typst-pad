@@ -40,6 +40,12 @@
     onMathRequest?: (requests: MathRequest[]) => void;
     /** 渲染结果代次：变化时重整装饰（父组件收到新渲染结果后自增） */
     mathVersion?: number;
+    /**
+     * 自动换行（源码模式 Alt+Z 切换，状态与持久化由父组件持有）。
+     * 打开时给内容加 CodeMirror 的 `cm-lineWrapping`（`white-space: break-spaces` + 断词），
+     * 长行折行显示、不再需要横向滚动。
+     */
+    wrap?: boolean;
   }
 
   let {
@@ -55,12 +61,18 @@
     lookupMath,
     onMathRequest,
     mathVersion = 0,
+    wrap = false,
   }: Props = $props();
 
   let host: HTMLElement;
   let view: EditorView;
   let themeCompartment = new Compartment();
   let diagnosticsCompartment = new Compartment();
+  let wrapCompartment = new Compartment();
+  // 已应用的换行开关：初值在 onMount 里跟 buildExtensions 一起写入（见两处注释），
+  // 避免 wrap 的 $effect 首跑再做一次等价重配。不在此处读 prop：顶层读 prop 会被
+  // svelte-check 判为"只捕获初值"的误用告警（state_referenced_locally）。
+  let appliedWrap = false;
   let applyingExternal = false; // 外部 doc 同步时抑制 onDocChange，避免误标脏
   // 当前生效的编译错误与前缀代码（由 diagnostics/prefixCode prop 驱动；供波浪线与 hover 提示读取）
   let diagState: { list: CompileErrorLocation[]; prefix: string } = { list: [], prefix: "" };
@@ -82,6 +94,7 @@
       typst(),
       themeCompartment.of(theme === "dark" ? oneDark : []),
       diagnosticsCompartment.of(diagnosticsExtensions()),
+      wrapCompartment.of(wrap ? EditorView.lineWrapping : []),
       diagTheme,
       livePreview(livePreviewOptions), // 公式内联渲染（开关与缓存由父组件注入）
       EditorView.updateListener.of((update) => {
@@ -99,6 +112,8 @@
     mark("editor-mount-start");
     // 先写入初始诊断，再创建 view：buildExtensions 会按当时 diagState 生成装饰
     diagState = { list: diagnostics ?? [], prefix: prefixCode ?? "" };
+    // 同理：换行开关的初值也由 buildExtensions 按当时的 wrap 建好，这里标记为"已应用"
+    appliedWrap = wrap === true;
     view = new EditorView({
       parent: host,
       state: EditorState.create({ doc: initialDoc, extensions: buildExtensions() }),
@@ -157,6 +172,20 @@
         themeCompartment.reconfigure(theme === "dark" ? oneDark : []),
         refreshLivePreview.of(null),
       ],
+    });
+  });
+
+  /**
+   * 自动换行开关（源码模式 Alt+Z）：只重配这一条扩展，不动文档、选区与滚动锚点。
+   * 用 Compartment 而不是重建 EditorView —— 重建会丢掉撤销历史与光标位置。
+   */
+  $effect(() => {
+    if (!view) return;
+    const on = wrap === true;
+    if (on === appliedWrap) return;
+    appliedWrap = on;
+    view.dispatch({
+      effects: wrapCompartment.reconfigure(on ? EditorView.lineWrapping : []),
     });
   });
 

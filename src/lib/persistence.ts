@@ -21,6 +21,11 @@ export interface PersistedState {
   /** 是否显示右侧预览栏（所见即所得形态为单栏） */
   showPreview: boolean;
   /**
+   * 源码模式的自动换行开关（Alt+Z 切换，见 word-wrap.ts）。
+   * 与"是否显示预览栏"同属视图偏好，所以一起持久化；默认关（保持长行不折行的原有观感）。
+   */
+  editorWrap: boolean;
+  /**
    * 上次会话结束时是否有未保存修改。恢复会话时据此还原脏标记：
    * 存过盘又没再改的文档恢复出来不该显示"未保存"圆点、也不该在关闭时追问。
    */
@@ -72,6 +77,8 @@ export function loadState(): Partial<PersistedState> {
     }
     // 未记录过预览栏开关时跟随模式：写作模式 → 单栏
     if (state.showPreview === undefined) state.showPreview = state.viewMode === "source";
+    // 源码模式自动换行（0.7.6 后的存档才有）：默认关
+    if (state.editorWrap === undefined) state.editorWrap = false;
     // 旧存档没有这两个字段：脏标记保守取 false（内容非空的恢复逻辑会另行判定），恢复会话默认开
     if (state.dirty === undefined) state.dirty = false;
     if (state.restoreSession === undefined) state.restoreSession = true;
