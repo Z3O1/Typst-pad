@@ -94,3 +94,35 @@ export function zoomIn(current: number | null | undefined, times = 1): number {
 export function zoomOut(current: number | null | undefined, times = 1): number {
   return clampZoom(clampZoom(current) - times * ZOOM_STEP);
 }
+
+// ---------------------------------------------------------------------------
+// 「引擎到底接受了多少缩放」——用 **CSS 视口宽度** 反推（2026-09-14 用户第三次反馈
+// 「缩放到最大后无法从 Ctrl+滚轮缩小」后换的判据）
+//
+// 旧判据读 `devicePixelRatio`（dpr = 显示器缩放 × 页面缩放）：真机上它可能不跟随宿主设的
+// ZoomFactor，于是代码把整个复核关掉（fail-open）—— 复核一关，`uiZoom` 就会一路涨到 250%
+// 而引擎其实停在更低的档位，用户往下滚要滚十几档才有反应，看到的正是「最大后无法缩小」。
+//
+// 页面缩放的定义就是"CSS 视口按比例缩小"（WebView2 的 ZoomFactor 也一样：预览栏 CSS 宽度
+// 505 → 331 就是这么来的），所以**宽度比是精确信号**，与显示器缩放、dpr 是否跟随都无关：
+//     引擎实际接受的缩放 = 100% 时的布局宽度 ÷ 当前布局宽度
+// 基准（100% 时的布局宽度）在启动校准里量一次；每次改档/窗口尺寸变化后按"当前档位 × 当前宽度"
+// 再校一遍，所以它既不会被缩放带偏，也不会被用户拖窗口带偏。
+// 引擎接受了请求值时它恰好等于请求值；引擎拒绝时它停在引擎给的档位上 —— 前端据此把状态拉回。
+// ---------------------------------------------------------------------------
+
+/**
+ * 由布局宽度反推引擎实际接受的缩放：`widthAt100` = 100% 时的 CSS 布局宽度。
+ * 宽度非法（0 / 负数 / NaN）时给 null＝本次不判定（**绝不拿坏读数去改用户的状态**）。
+ */
+export function zoomFromWidths(widthAt100: number, currentWidth: number): number | null {
+  if (!(widthAt100 > 0) || !(currentWidth > 0)) return null;
+  if (!Number.isFinite(widthAt100) || !Number.isFinite(currentWidth)) return null;
+  return widthAt100 / currentWidth;
+}
+
+/** 引擎接受的档位是否就是请求值（容差 2%，比一档 10% 小得多，够区分"接受/拒绝"） */
+export function zoomApplied(target: number, observed: number | null, tolerance = 0.02): boolean {
+  if (observed === null || !Number.isFinite(observed)) return false;
+  return Math.abs(observed - target) <= tolerance;
+}

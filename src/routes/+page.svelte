@@ -79,13 +79,14 @@
   import { renderUpdateNotes } from "$lib/update-notes";
   import {
     ZOOM_DEFAULT,
+    ZOOM_CONFIRM_DELAY_MS,
+    zoomFromWidths,
     clampZoom,
     nextZoom,
+    zoomApplied,
     zoomIn,
     zoomLabel,
     zoomOut,
-    ZOOM_CONFIRM_DELAY_MS,
-    ZOOM_MIN,
   } from "$lib/zoom";
   import { WRAP_SOURCE_ONLY_NOTICE, isWrapToggleKey, wrapNotice } from "$lib/word-wrap";
 
@@ -210,12 +211,17 @@
   let uiZoom = $state(ZOOM_DEFAULT);
   /** 缩放的"再确认一次"定时器（见 applyUiZoom / scheduleZoomConfirm） */
   let zoomConfirmTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 100% 时的 devicePixelRatio（≈ 显示器缩放），首次应用缩放前校准一次（见 ensureZoomCalibration） */
-  let dprAtZoom100: number | null = null;
+  /**
+   * 我们对"引擎实际接受了多少缩放"的最佳估计（见 zoom.ts 的 zoomFromWidths）。
+   * 启动校准（先设 100%）后为 1；每次调档都按 CSS 布局宽度重新估一遍。
+   */
+  let appliedZoom = 1;
+  /** 100% 时的 CSS 布局宽度（视口宽度判据的基准）；改档/窗口尺寸变化后按当前档位再校一遍 */
+  let zoomBaseline100 = 0;
+  /** 正在设一次缩放并测量（期间不接受 resize 事件改基准——那是缩放自己引起的） */
+  let zoomStepInFlight = false;
   /** 校准只做一次；并发调用共用同一个 promise */
   let zoomCalibration: Promise<void> | null = null;
-  /** dpr 读数是否可信（null = 还没验证过，见 probeDprTracksZoom） */
-  let zoomDprTrusted: boolean | null = null;
   // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
   // Map 本身不需要响应式（变更后靠 mathVersion 代次通知编辑器重整装饰）
   const mathCache = new Map<string, MathRender>();
@@ -510,9 +516,8 @@
   }
 
   /**
-   * 启动后校准一次 100% 基线：先设 100% 再读 `devicePixelRatio`，这样 dpr 就等于
-   * 显示器缩放本身（顺便排掉 WebView2"记住上次站点缩放"的干扰）。有了它就能把任意时刻的
-   * dpr 换算成**引擎实际接受的缩放**（Chromium 的 dpr = 显示器缩放 × 页面缩放）。
+   * 启动后校准一次：先把引擎设到 100%（顺便排掉 WebView2"记住上次站点缩放"的干扰），
+   * 记下此时的 **CSS 布局宽度** 作为基准。100% 是恒等档，任何引擎都会接受，所以这个基准可靠。
    */
   function ensureZoomCalibration(): Promise<void> {
     if (zoomCalibration === null) {
@@ -520,75 +525,74 @@
         try {
           await getCurrentWebview().setZoom(ZOOM_DEFAULT);
           await new Promise((r) => setTimeout(r, 90));
-          const dpr = window.devicePixelRatio;
-          if (Number.isFinite(dpr) && dpr > 0) {
-            dprAtZoom100 = dpr;
-            dbg.log("zoom", `校准 100% 基线：devicePixelRatio=${dpr}`);
+          const width = document.documentElement.clientWidth;
+          if (width > 0) {
+            zoomBaseline100 = width;
+            appliedZoom = ZOOM_DEFAULT;
           }
+          dbg.log("zoom", `校准：100% 布局宽度 ${width}px`);
         } catch (e) {
-          dbg.log("zoom", "缩放校准失败（跳过复核）", e);
+          dbg.log("zoom", "缩放校准失败（本次不判定引擎档位）", e);
         }
       })();
     }
     return zoomCalibration;
   }
 
-  /** 引擎**实际接受**的缩放系数；读不到（没校准 / 已判定 dpr 不可信）时给 null */
-  function engineZoom(): number | null {
-    if (zoomDprTrusted === false) return null;
-    if (dprAtZoom100 === null || dprAtZoom100 <= 0) return null;
-    return window.devicePixelRatio / dprAtZoom100;
+  /** 按"当前档位 × 当前宽度"重校基准：缩放与用户拖窗口之后都要校，否则判据会失真 */
+  function rebaselineZoom() {
+    const width = document.documentElement.clientWidth;
+    if (width > 0 && appliedZoom > 0) zoomBaseline100 = width * appliedZoom;
   }
 
-  /**
-   * 反证 dpr 到底跟不跟缩放走：临时设到下限 50%（真机上"缩小"是有效的），看 dpr 有没有按比例变，
-   * 然后还原。只在**首次发现"请求了缩放但 dpr 不动"**时做一次——如果 dpr 根本不跟随（换平台/换引擎
-   * 都可能），就把复核整体关掉，避免用不可信的读数去改用户的状态。
-   */
-  async function probeDprTracksZoom(): Promise<boolean> {
-    const base = dprAtZoom100;
-    if (base === null) return false;
-    try {
-      await getCurrentWebview().setZoom(ZOOM_MIN);
-      await new Promise((r) => setTimeout(r, 120));
-      const dpr = window.devicePixelRatio;
-      const tracks = Math.abs(dpr / base - ZOOM_MIN) < 0.05;
-      await getCurrentWebview().setZoom(clampZoom(uiZoom)); // 还原
-      dbg.log("zoom", `dpr 是否跟随缩放：${tracks}（50% 档 dpr=${dpr}，基线 ${base}）`);
-      return tracks;
-    } catch (e) {
-      dbg.log("zoom", "dpr 反证失败", e);
-      return false;
-    }
+  /** 引擎**实际接受**的档位（读 CSS 布局宽度；量不到时 null＝本次不判定） */
+  function engineZoomNow(): number | null {
+    return zoomFromWidths(zoomBaseline100, document.documentElement.clientWidth);
   }
 
   /**
    * 复核 webview 到底有没有接受这个系数，**没接受就把界面状态拉回引擎给的档位**。
    *
-   * 为什么必须拉回来（2026-09-14 两次实机反馈串起来看）：真机上引擎没接受"放大"，而 uiZoom 照旧
+   * 为什么必须拉回来（2026-09-14 三次实机反馈串起来看）：真机上引擎没接受"放大"，而 uiZoom 照旧
    * 一路涨到上限 250%，于是从 250% 往下滚要滚十几档才有反应——用户看到的就是「放大根本没用，
-   * 缩小有用」，接着是「最大后无法用滚轮缩小」。让状态永远等于引擎实际接受的档位，滚轮就再也不会
-   * 掉进这种死区：放大被拒时档位原地不动（界面与状态都保持一致，并在状态栏说明原因），缩小立刻有效。
+   * 缩小有用」，接着是「最大后无法用滚轮缩小」，第三次仍是「缩放到最大后无法从 Ctrl+滚轮缩小」。
+   * 让状态永远等于引擎实际接受的档位，滚轮就再也不会掉进这种死区：放大被拒时档位原地不动
+   * （界面与状态都保持一致，并在状态栏说明原因），缩小立刻有效。
+   *
+   * **判据是 CSS 布局宽度不是 devicePixelRatio**（0.7.8 之后换的）：dpr 依赖显示器缩放、真机上
+   * 可能不跟随宿主设的 ZoomFactor，那时旧代码会把复核整体关掉（fail-open）→ 状态又开始一路涨。
+   * 布局宽度比是页面缩放的定义本身，精确且与显示器无关。详见 zoom.ts 的 zoomFromWidths。
    */
   async function verifyZoomApplied(target: number) {
     if (zoomIsFaked()) return;
-    const applied = engineZoom();
-    if (applied === null) return;
-    if (Math.abs(applied - target) <= 0.02) return; // 引擎接受了，正常路径
-    if (zoomDprTrusted === null) {
-      zoomDprTrusted = await probeDprTracksZoom();
-      if (!zoomDprTrusted) {
-        dbg.log("zoom", "devicePixelRatio 不跟随缩放，本次会话不再复核");
-        return;
-      }
-      const afterProbe = engineZoom();
-      if (afterProbe === null || Math.abs(afterProbe - target) <= 0.02) return;
+    if (zoomCalibration === null) return; // 还没校准过（正常路径一定先经过 applyUiZoom）
+    let observed: number | null = null;
+    zoomStepInFlight = true;
+    try {
+      await getCurrentWebview().setZoom(target); // 顺带把这一档再设一遍（兜底重试）
+      // 等引擎把布局重排完再量：一帧 + 一小段余量（校准那边用的是 90ms，同一量级）
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+      await new Promise((r) => setTimeout(r, 60));
+      observed = engineZoomNow();
+    } catch (e) {
+      dbg.log("zoom", "复核时 setZoom 失败", e);
+      return;
+    } finally {
+      zoomStepInFlight = false;
     }
-    const snapped = clampZoom(engineZoom() ?? target);
+    if (observed === null) return; // 量不到：不判定、不改状态（绝不拿坏读数动用户的状态）
+    if (zoomApplied(target, observed)) {
+      appliedZoom = clampZoom(target);
+      rebaselineZoom(); // 测量刚做完，此刻"宽度 × 档位"就是 100% 基准
+      return; // 引擎接受了，正常路径
+    }
+    const snapped = clampZoom(observed);
+    appliedZoom = snapped;
+    rebaselineZoom();
     if (snapped === clampZoom(uiZoom)) return; // 状态已经在引擎给的档位上了
     dbg.log(
       "zoom",
-      `引擎未接受 ${zoomLabel(target)}（实际 ${engineZoom()?.toFixed(3)}），状态拉回 ${zoomLabel(snapped)}`,
+      `引擎未接受 ${zoomLabel(target)}（实测 ${observed.toFixed(3)}），状态拉回 ${zoomLabel(snapped)}`,
     );
     uiZoom = snapped; // 触发 $effect → 再把引擎对齐到这个档位（已经是了，等价空操作）
     schedulePersist();
@@ -1591,6 +1595,13 @@
     window.addEventListener("contextmenu", handleContextMenu);
     // Ctrl+滚轮缩放：挂 window 捕获阶段 + 显式 passive: false（见 handleZoomWheel 的注解）
     window.addEventListener("wheel", handleZoomWheel, { capture: true, passive: false });
+    // 用户拖动窗口会改变布局宽度 → 视口判据的 100% 基准要跟着校（见 rebaselineZoom）。
+    // 缩放本身也会引起 resize：那种情况由测量那边自己校准，这里用 zoomStepInFlight 让开。
+    const onWindowResize = () => {
+      if (zoomStepInFlight) return;
+      rebaselineZoom();
+    };
+    window.addEventListener("resize", onWindowResize);
     // 预览画布缩放：观测预览容器宽度变化（窗口 resize / 分栏布局变化），重算画布宽度；
     // observe 首次回调立即触发一次（覆盖挂载时已渲染的产物）
     // 回调里把工作推到下一帧：applyPreviewScale 会改预览画布宽度 → 又改容器布局，
@@ -1681,6 +1692,7 @@
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("contextmenu", handleContextMenu);
       window.removeEventListener("wheel", handleZoomWheel, { capture: true });
+      window.removeEventListener("resize", onWindowResize);
       if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);

@@ -40,20 +40,42 @@ function isFakeUpdateEnabled(): boolean {
 /** 模拟的"显示器缩放"：故意用非整数，确保换算不是靠 1:1 蒙对的 */
 const ZOOM_SIM_BASE_DPR = 1.25;
 
+/**
+ * `?browserdev=1&zoomsim=1` 的档位上限模拟：
+ * - `&zoomcap=1`：引擎**只肯缩小**，放大一律按 100% 处理（最极端的那台机器）；
+ * - `&zoommax=2.1`：引擎能放大，但**只到 2.1**（2026-09-14 用户报「缩放到最大后无法从
+ *   Ctrl+滚轮缩小」就是这台机器的形状：状态冲过引擎上限 → 往下滚要滚十几档才有反应）。
+ */
 function zoomSimMode(): { sim: boolean; cap: number | null } {
   if (typeof window === "undefined") return { sim: false, cap: null };
   const params = new URLSearchParams(window.location.search);
   const sim = params.has("zoomsim");
-  const cap = sim && params.has("zoomcap") ? 1 : null;
-  return { sim, cap };
+  if (!sim) return { sim: false, cap: null };
+  if (params.has("zoomcap")) return { sim: true, cap: 1 };
+  const max = Number(params.get("zoommax"));
+  return { sim: true, cap: Number.isFinite(max) && max > 0 ? max : null };
 }
 
-/** 装上"假 dpr"：dpr = 基准 × 引擎实际接受的缩放 */
+/**
+ * 装上"假引擎"：dpr = 基准 × 引擎实际接受的缩放（旧判据用的信号），
+ * 并且把 **CSS 视口宽度** 也按引擎实际接受的缩放等比缩小
+ * （`clientWidth = 基准宽 ÷ 缩放`）——页面现在用这个宽度比来判定"引擎到底接受了多少"
+ * （见 zoom.ts 的 zoomFromWidths）。基准宽在第一次读取时取，那时浏览器没有真实缩放，
+ * 量到的就是 100% 下的布局宽度。
+ */
 function installFakeDevicePixelRatio(initialZoom: number): (zoom: number) => void {
   let applied = initialZoom;
+  let baseWidth: number | null = null;
   Object.defineProperty(window, "devicePixelRatio", {
     configurable: true,
     get: () => ZOOM_SIM_BASE_DPR * applied,
+  });
+  Object.defineProperty(document.documentElement, "clientWidth", {
+    configurable: true,
+    get: () => {
+      if (baseWidth === null) baseWidth = document.documentElement.getBoundingClientRect().width;
+      return baseWidth > 0 ? baseWidth / applied : baseWidth;
+    },
   });
   return (zoom: number) => {
     applied = zoom;
@@ -62,7 +84,8 @@ function installFakeDevicePixelRatio(initialZoom: number): (zoom: number) => voi
 
 /** 模拟引擎缩放的状态（见"模拟 webview 缩放"一节的说明） */
 let zoomSimEnabled = false;
-let capAt100 = false;
+/** 模拟引擎的档位上限（null = 照单全收；见 zoomSimMode） */
+let zoomSimCap: number | null = null;
 let zoomSimState: ((zoom: number) => void) | null = null;
 
 // 假的可用更新（形状与 @tauri-apps/plugin-updater 的 Update 元数据一致：
@@ -409,7 +432,7 @@ async function handleCommand(
       w.__browserDevLastZoom = value;
       if (zoomSimState !== null && value !== null) {
         // 模拟引擎：默认照单全收；`&zoomcap=1` 时模拟"放大一律不接受"的真机
-        zoomSimState(capAt100 ? Math.min(value, 1) : value);
+        zoomSimState(zoomSimCap === null ? value : Math.min(value, zoomSimCap));
       }
       // 调用次数：界面缩放会"设一次 + 手势停下后再确认一次"（见 +page.svelte 的
       // applyUiZoom/scheduleZoomConfirm），验收据此锁定那个兜底重试确实发出去了。
@@ -461,7 +484,7 @@ export function installBrowserDevStub(): void {
   // 模拟引擎缩放的接线（见文件开头的说明）：装假 dpr + 记住"引擎接受的系数"写入口
   const simMode = zoomSimMode();
   zoomSimEnabled = simMode.sim;
-  capAt100 = simMode.cap !== null;
+  zoomSimCap = simMode.cap;
   if (simMode.sim) {
     // 初始 100%（界面启动时就是 100%，页面侧随后会校准/恢复档位）
     const applySimulatedZoom = installFakeDevicePixelRatio(1);

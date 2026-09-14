@@ -1131,6 +1131,31 @@ check(
   JSON.stringify(afterOut),
 );
 
+// C) 引擎能放大、但**只到 210%**（2026-09-14 用户第三次反馈「缩放到最大后无法从 Ctrl+滚轮缩小」
+// 的那台机器：状态冲过引擎上限 → 往下滚要滚十几档才有反应，看着就是"缩不回去"）。
+// 这一版把判据从 devicePixelRatio 换成 **CSS 视口宽度比**（真机上 dpr 不跟随 ZoomFactor，旧代码
+// 会把复核整体关掉 → 状态又开始冲上限）；`&zoommax=2.1` 让桩模拟这台机器。
+await gotoSim("&zoomsim=1&zoommax=2.1");
+await wheelOverEditor(-100, 12); // 1.0 → 请求 2.2，引擎只给 2.1
+const capped210 = await c.evaluate(zoomProbe2);
+check(
+  "引擎上限 210%：档位被拉回 210%，不会冲到 250%（「往下滚没反应」的根因）",
+  Math.abs((capped210.saved ?? 0) - 2.1) < 0.011 && Math.abs((capped210.engine ?? 0) - 2.1) < 0.011,
+  JSON.stringify(capped210),
+);
+check(
+  "状态栏说明是引擎把它限制在 210%",
+  capped210.status.includes("未生效") && capped210.status.includes("限制在 210%"),
+  JSON.stringify(capped210.status),
+);
+await wheelOverEditor(100, 1);
+const afterDown210 = await c.evaluate(zoomProbe2);
+check(
+  "被 210% 上限挡住后，**往下滚一档立刻见效**（用户报的症状）",
+  Math.abs((afterDown210.saved ?? 0) - 2.0) < 0.011 && Math.abs((afterDown210.engine ?? 0) - 2.0) < 0.02,
+  JSON.stringify(afterDown210),
+);
+
 // ---------------------------------------------------------------------------
 // 第 28 组：缩放到很大时状态栏不能"长高"（用户截图里的样子）
 // 背景（2026-09-14）：用户把界面放大到 190%（等价于 CSS 视口只剩 ~660px）后，状态栏里那条很长的

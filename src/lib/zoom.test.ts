@@ -12,6 +12,8 @@ import {
   zoomLabel,
   zoomOut,
   zoomPercent,
+  zoomFromWidths,
+  zoomApplied,
 } from "./zoom";
 
 describe("clampZoom", () => {
@@ -117,5 +119,47 @@ describe("zoomPercent / zoomLabel", () => {
     expect(zoomPercent(1.25)).toBe(130); // 1.25 圆整到 1.3
     expect(zoomPercent(9)).toBe(250);
     expect(zoomLabel(Number.NaN)).toBe("100%");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 「引擎接受了多少」用 CSS 视口宽度反推（真机上 dpr 判据不可靠，见 zoom.ts 的注解）：
+// 引擎实际接受的缩放 = 100% 时的布局宽度 ÷ 当前布局宽度
+// ---------------------------------------------------------------------------
+describe("zoomFromWidths（布局宽度 → 引擎接受的缩放）", () => {
+  it("100%：宽度不变 → 1", () => {
+    expect(zoomFromWidths(1200, 1200)).toBeCloseTo(1, 6);
+  });
+
+  it("引擎接受了 150%：宽度缩到 800 → 反推 1.5", () => {
+    expect(zoomFromWidths(1200, 800)).toBeCloseTo(1.5, 6);
+  });
+
+  it("引擎只给到 210%（拒绝了 220%）：反推值就是引擎给的档位", () => {
+    expect(zoomFromWidths(1200, 1200 / 2.1)).toBeCloseTo(2.1, 6);
+  });
+
+  it("非法输入（0 / 负数 / NaN）→ null（本次不判定）", () => {
+    expect(zoomFromWidths(0, 800)).toBeNull();
+    expect(zoomFromWidths(1200, 0)).toBeNull();
+    expect(zoomFromWidths(Number.NaN, 800)).toBeNull();
+    expect(zoomFromWidths(1200, Number.NaN)).toBeNull();
+  });
+});
+
+describe("zoomApplied（引擎接受的档位是不是请求值）", () => {
+  it("一致（2% 容差内，覆盖浮点与测量噪声）→ true", () => {
+    expect(zoomApplied(1.5, 1.5)).toBe(true);
+    expect(zoomApplied(1.5, 1.51)).toBe(true);
+    expect(zoomApplied(1.5, 1.49)).toBe(true);
+  });
+
+  it("差一档（10%）或更多 → false（引擎没接受）", () => {
+    expect(zoomApplied(1.5, 1.4)).toBe(false);
+    expect(zoomApplied(2.2, 2.1)).toBe(false);
+  });
+
+  it("量不到（null）→ false（调用方据此不改状态）", () => {
+    expect(zoomApplied(1.5, null)).toBe(false);
   });
 });
