@@ -58,7 +58,9 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 9. **绝不阻塞等 GitHub workflow（用户 2026-09-14 连着强调三次：「不要等 CI 测试结束再执行后面的命令」「以后不要等 github workflow 阻塞」「别等 workflow 记录一下」）**：推 main、打 tag、执行后续命令**一律不等** CI / Release 跑完；**不要**挂"等 run 结束再执行"的后台轮询任务；报告状态最多**单次**查一次 `gh run list`（单查可以，轮询不行）。
    - 原有的「别在 CI 运行中 push main」**按用户指示作废**：`ci.yml` 的 concurrency 会 cancel 掉 main 上正在跑的 run（被 cancel 的 run 不保存 rust-cache，缓存代价仍在），但他明确接受这个代价、**不接受为它停下等 CI**。唯一保留的建议是"能一次推完的提交就一次推完"（少制造几次 cancel），不是"等"。详见「和这位用户协作的偏好」。
    - 边界：禁止的是**阻塞我的回合**与**轮询循环**（`while ... gh run list` 那种）；**一次性延时动作可以**——例如"构建完成后把草稿 Release 直接 Publish"这类一条命令的补发（见「CI / 发布约定」的版本升级流程）。
+   - **2026-09-14 又犯一次（用户第二次为同一件事发火）**：我用后台 job 查构建结果时带了 `wait: true`（`job_output(job_id, { wait: true, timeout_ms: 600000 })`）——**这就是阻塞**，跟 `gh run watch`、跟轮询没区别。**凡是要"等 CI/Release 跑完才能继续"的取值/确认动作，一律不许放在回合里**：后台 job 自己跑它的（它完成时系统会通知我），我该干活就干活、该收尾就收尾，最多在用户问起时**单次**查一次 `gh run list` / `gh release view`。判断标准很简单：**这一步会让我的回合停在"等外部流程"上 → 不许做**。
 10. **自动更新的签名密钥不许动**：`tauri.conf.json` 里已有 `plugins.updater.pubkey`，所以任何 `tauri build`（含 main 的 CI）**必须**能拿到私钥——仓库 Secrets 的 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` **删了就构建不了，换了就再也发不出更新**（老用户装了带旧 pubkey 的版本，只认旧私钥签的包，换钥匙只能让他们手动重装）。本地打包同理（`TAURI_SIGNING_PRIVATE_KEY_PATH`）。
+11. **发版权在用户手里：不许自行开新版本（2026-09-14 用户原话「等我说过了才能开新版本」）**。改版本号三处、更新 CHANGELOG 的版本段、打 tag、建/发 Release —— **这四件事都只在用户明确说"发 X.Y.Z"之后才做**；"这版攒了几个修复，我觉得该发了"**不是**可以自己动手的理由。他可能想先自己跑一跑、想攒更多改动、或想换个版本号。（红线 9 那条"草稿好了直接 Publish"只覆盖**他已经决定要发的这个版本**的 Publish 动作，不等于我可以决定要不要发。）拿不准时**问一句**（"要不要我现在发 0.7.6？"），比先斩后奏强。
 
 **已知未决 / 可做**（都不是 bug，是留给接手人的选择）
 
@@ -77,7 +79,8 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 - **他不喜欢等慢测试**：日常改动跑 `npm run check` + 相关单测（几秒级）就够；`scripts/browser-check/` 那套（约 1 分钟）只在改到编辑器/装饰/布局这类易回归的地方才跑，而且不必每次都盯着结果等它绿。
 - **绝不阻塞等 GitHub workflow（2026-09-14 连着强调三次，原文见红线 9）**：推 main、打 tag、接着做下一步，都**不要**等 CI / Release 跑完，也**不要**挂"等 run 结束再执行"的后台轮询任务。该做的动作直接做完，报告状态时最多**查一次** `gh run list`（单次查询可以，轮询不行）。
   - 连带效果（他知道并接受）：`ci.yml` 的 concurrency 会 **cancel 掉 main 上正在跑的 run**，被 cancel 的 run 不保存 rust-cache（红线 8 说的缓存代价仍在）。所以"推 main 可能打断正在跑的构建"**不再是推迟推送的理由**——但他要的是"别为了等 workflow 停手"，不是"鼓励反复 cancel"：能一次推完的提交就一次推完。
-- **发版：草稿 Release 建好就直接 Publish，不用先问**（2026-09-14：「草稿 Release 好了直接 Publish」）。理由：草稿资产客户端拿不到，自动更新等于没上线。细节见「CI / 发布约定」末尾。
+- **发版两步要分清（2026-09-14 他先后说了两句，别只记前半句）**：① **要不要发、发哪个版本号，由他说**（「等我说过了才能开新版本」——我自行把 0.7.5 发出去那次他很不满）；② 一旦他说了要发，**草稿 Release 一建好就直接 Publish，不用再问**（「草稿 Release 好了直接 Publish」，理由是草稿资产客户端拿不到、自动更新等于没上线）。
+- **"不要阻塞"包括一切"等外部流程"的等待（2026-09-14 他为同一件事第二次发火）**：不光是别写轮询循环，`job_output(wait: true)` 等 CI/Release、`gh run watch`、"等构建完再看结果"都不行。后台 job 就让它自己在后台跑，我继续干别的；**不许让回合停在等 workflow 上**。
 - **他要的是"能直推 main"（2026-09-14）**：转公开后 ruleset 逼着走 PR，他选了「只保留禁 force push / 禁删分支」——**保留保护意图，但不要给日常推送加流程**。所以：发现推送被规则拦住时，先问一句"是要放宽规则还是走 PR"，别默认改成 PR 工作流，也别偷偷绕。
 - **他的机器上有他自己的东西：清理现场时只动自己创建的对象**（2026-09-14：我用 `taskkill /IM chrome.exe /F` 收尾，把他在 Windows 上开着的所有 Chrome 窗口一起杀了，他立刻发火）。收尾只杀自己启动的进程（记 PID），只删自己建的文件，别碰用户正在用的程序、窗口、端口与编辑器会话。
 - **重大外部动作先问一句、机械动作别问**：仓库从私有转公开、放宽分支规则这类**不可逆或改仓库设置**的事他都希望先确认（他两次都选了推荐的稳妥项）；而"打完 tag 后把草稿 Publish""删掉临时文件"这类**由既有约定覆盖**的动作直接做，不要回来问。
@@ -343,7 +346,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - 仓库已是**公开**（`gh api repos/Z3O1/Typst-pad --jq .private` → `false`）——这是自动更新能工作的前提，别改回私有（一改回去客户端立刻全部「检查更新失败」）。
   - 仓库上有一条 ruleset「protect main」（id `20191962`，`~DEFAULT_BRANCH`）：**私有 + 免费账户时它不生效**（所以 2026-08-02 建了以后一直能直推 main），转公开那天被强制生效，直推 main 报 `GH013 … Changes must be made through a pull request`。按用户选择**已改成只保留 `deletion` + `non_fast_forward`**（禁删分支 / 禁 force push，不要求走 PR）→ 直推 main 恢复正常。
   - 万一将来又冒出「必须走 PR」类规则：要么按用户偏好再放宽该 ruleset，要么走 `git push HEAD:refs/heads/<分支>` → `gh pr create` → `gh pr merge --squash --delete-branch`（实测三条命令即可，零审核要求）。**不要**为了绕开它去 force push 或改 remote。
-- 版本升级流程：改版本号（三处一致）→ 合并 main（自动构建）→ 打 tag → **草稿 Release 一建好就直接 Publish，不必先问用户**（`gh release edit v<版本> --draft=false`）。
+- 版本升级流程：**先得到用户的明确指令（"发 0.7.6"之类）**——见红线 11，不许自行开新版本；他点头之后：改版本号（三处一致）→ 合并 main（自动构建）→ 打 tag → **草稿 Release 一建好就直接 Publish，这一步不必再问**（`gh release edit v<版本> --draft=false`）。
   - 依据（2026-09-14 用户原话）：「草稿 Release 好了直接 Publish」。Publish 是自动更新生效的**前提**——草稿资产客户端拉不到 `latest.json`（见上一条），所以留在草稿等于这版没上线。
   - 需要"等构建完再发"时用**一次性延时动作**（睡一会儿 → 查一次 → 有草稿就发），不要写轮询循环（红线 9）。实现上挂成**后台 job**（有界重试：每 ~40s 查一次 `gh release view <tag> --json isDraft`，看到 `true` 就 `gh release edit --draft=false`，上限 45 次）——它不占回合，构建好了自动补发，超时则自己结束并留一行说明。
 
