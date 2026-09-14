@@ -11,7 +11,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 **交接时的状态（2026-09-14）**：
 
 - 版本 `0.7.8`（0.7.7 之后的**自动更新通道**版：**打开应用就会自己发现新版本**（去掉 6 小时节流）+ **点过「稍后」就不再自动打扰，直到手动检查** + 状态栏错误/警告计数照参照图定序与重画图标）。回看：**0.7.4 是"自动更新真的能生效"的第一个版本**（0.7.3 引入 updater 但仓库当时私有，客户端拉不到清单；仓库公开 + 0.7.4 发布之后这条链路才第一次跑通）。`main` 与 `origin/main` 同步；每次打 tag 后 `release.yml` 建草稿 Release，**由后台一次性任务自动 Publish**（不必等、不必问）。**发版后的验收就照这两条 curl 做**（见下）。
-- **发行状态（2026-09-14 实测）：`v0.7.7`、`v0.7.6`、`v0.7.5`、`v0.7.4`、`v0.7.3`、`v0.7.2`、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）；`v0.7.8` 是本轮新打的 tag，草稿由后台任务 Publish。发版时 `release.yml` 建的仍是**草稿**，**必须手动 Publish**（或按下方约定直接发）——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效。
+- **发行状态（2026-09-14 实测）：`v0.7.8`、`v0.7.7`、`v0.7.6`、`v0.7.5`、`v0.7.4`、`v0.7.3`、`v0.7.2`、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）。0.7.8 已匿名验证过：`latest.json` 200 / `version: 0.7.8` / 安装包 200（16760946 字节）/ **签名与配置里的公钥验签通过**（keyid 一致 + ed25519 verify）。发版时 `release.yml` 建的仍是**草稿**，**必须手动 Publish**（或按下方约定直接发）——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效。
   - 发布后建议验一次：`gh api repos/Z3O1/Typst-pad/releases/latest --jq .tag_name` 应为新 tag；清单内容用 `gh api repos/Z3O1/Typst-pad/releases/assets/<latest.json 的 id> -H "Accept: application/octet-stream"` 取回核对（version / url / signature）。**匿名可达性是自动更新的硬前提，验这条最直接**：
     ```bash
     /mnt/c/Windows/System32/curl.exe -sL -o NUL -w '%{http_code}\n' https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json   # 期望 200
@@ -399,7 +399,10 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - 万一将来又冒出「必须走 PR」类规则：要么按用户偏好再放宽该 ruleset，要么走 `git push HEAD:refs/heads/<分支>` → `gh pr create` → `gh pr merge --squash --delete-branch`（实测三条命令即可，零审核要求）。**不要**为了绕开它去 force push 或改 remote。
 - 版本升级流程：**先得到用户的明确指令（"发 0.7.6"之类）**——见红线 11，不许自行开新版本；他点头之后：改版本号（三处一致）→ 合并 main（自动构建）→ 打 tag → **草稿 Release 一建好就直接 Publish，这一步不必再问**（`gh release edit v<版本> --draft=false`）。
   - 依据（2026-09-14 用户原话）：「草稿 Release 好了直接 Publish」。Publish 是自动更新生效的**前提**——草稿资产客户端拉不到 `latest.json`（见上一条），所以留在草稿等于这版没上线。
-  - 需要"等构建完再发"时用**一次性延时动作**（睡一会儿 → 查一次 → 有草稿就发），不要写轮询循环（红线 9）。实现上挂成**后台 job**（有界重试：每 ~40s 查一次 `gh release view <tag> --json isDraft`，看到 `true` 就 `gh release edit --draft=false`，上限 45 次）——它不占回合，构建好了自动补发，超时则自己结束并留一行说明。
+  - 需要"等构建完再发"时用**一次性延时动作**（睡一会儿 → 查一次 → 有草稿就发），不要写轮询循环（红线 9）。实现上挂成**后台 job**（有界重试：每 ~30s 查一次，看到草稿且资产齐了就 `gh release edit --draft=false`，上限 ~45 分钟）——它不占回合，构建好了自动补发，超时则自己结束并留一行说明。
+  - **探"草稿建好了没"必须用 `gh release view <tag> --json isDraft,assets` 或 `gh api 'repos/Z3O1/Typst-pad/releases?per_page=1'`**；`gh api repos/.../releases/tags/<tag>` 对**草稿一律返回 404**（那个接口看不见 draft）。2026-09-14 发 0.7.8 时我用后者当探针，脚本把 404 的 JSON 体当成"草稿已建"，**90 次循环全空转约 40 分钟**，最后靠查 `releases?per_page=1` 才发现草稿和 5 个资产早就齐了。判断条件也要写严：只在 `.draft == true` 时才 Publish，取不到值时算"还没好"而不是"已建"。
+  - **发布前确认资产齐了再 Publish**（`latest.json` + `Typst-pad_<版本>_x64-setup.exe` + 它的 `.sig`，缺一个客户端就会下到 404）。
+  - **Publish 之后别立刻断言"没生效"**：`releases/latest/download/...` 的重定向走 CDN，实测 0.7.8 **约 1 分半**才从旧 tag 切到新 tag（这段时间 `releases/latest` API 已经报新 tag，但下载重定向还指旧 tag）。等 1~2 分钟再验，别把它当成发布失败。
 
 ## 测试
 
