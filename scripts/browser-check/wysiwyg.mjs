@@ -2280,6 +2280,106 @@ check(
   JSON.stringify(afterEscUpdate),
 );
 
+console.log("36) 回车换行继承上一行缩进（用户要求「换行时应该和上一行缩进一样」）");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+await c.click(400, 300);
+
+/** 清空重来：全选 + 退格，再输入新内容（每小条独立，避免互相污染） */
+async function retype(text, arrowsLeft = 0) {
+  await c.selectAll();
+  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+  await new Promise((r) => setTimeout(r, 150));
+  await c.type(text);
+  for (let i = 0; i < arrowsLeft; i++) await c.key("ArrowLeft", { code: "ArrowLeft", keyCode: 37 });
+  // 等到落盘（防抖 300ms）：后面有的断言是"回车**之前**的存档"，读早了会读到上一条的残留
+  await new Promise((r) => setTimeout(r, 500));
+}
+/** 真按回车（走 keymap，不是 insertText），并等落盘（防抖 300ms） */
+async function enter(times = 1) {
+  for (let i = 0; i < times; i++) await c.key("Enter", { code: "Enter", keyCode: 13 });
+  await new Promise((r) => setTimeout(r, 600));
+}
+
+// ① 两空格缩进：行尾回车，新行与上一行缩进一致
+await retype("前文\n  缩进行");
+await enter();
+check(
+  "缩进行行尾回车 → 新行缩进与上一行一样（`  `）",
+  (await c.evaluate(savedContent)) === "前文\n  缩进行\n  ",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ② 四空格也照抄（CM 默认那条时灵时不灵：两空格能抄到、四空格抄不到）
+await retype("前文\n    深缩进");
+await enter();
+check(
+  "四空格缩进同样照抄（不再出现「两空格行能继承、四空格行不能」的随机感）",
+  (await c.evaluate(savedContent)) === "前文\n    深缩进\n    ",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ③ 光标停在正文中间：拆出来的下半行也带上同一缩进
+await retype("  abcdef", 3);
+await enter();
+check(
+  "行中间回车：下半行对齐整行缩进（`  abc` / `  def`）",
+  (await c.evaluate(savedContent)) === "  abc\n  def",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ④ 纯空白行再按回车：清掉残留空白，不留一串"带缩进的空行"
+await retype("前文\n  缩进行");
+await enter(2);
+check(
+  "在「带缩进的空行」上再按回车：残留空白被清掉（连按回车不堆空缩进行）",
+  (await c.evaluate(savedContent)) === "前文\n  缩进行\n\n",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ⑤ 没有缩进 → 普通换行，不多插空格
+await retype("普通文本");
+await enter();
+check(
+  "无缩进行回车就是普通换行（不凭空多出空格）",
+  (await c.evaluate(savedContent)) === "普通文本\n",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ⑥ Tab 缩进也算缩进
+await retype("前文\n\tTab 缩进");
+await enter();
+check(
+  "制表符缩进照抄（`\\t` 不算成空格）",
+  (await c.evaluate(savedContent)) === "前文\n\tTab 缩进\n\t",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ⑦ 代码围栏内部：继续写同一层代码
+await retype("```\n  let a = 1");
+await enter();
+check(
+  "围栏代码块内部回车也继承缩进（接着写同层代码）",
+  (await c.evaluate(savedContent)) === "```\n  let a = 1\n  ",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ⑧ 这次换行要能被 Ctrl+Z 整体撤销（事务仍是可撤销的 input）
+await retype("  缩进");
+const indentBeforeUndo = await c.evaluate(savedContent);
+await enter();
+await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 }); // Ctrl+Z
+await new Promise((r) => setTimeout(r, 600));
+const indentAfterUndo = await c.evaluate(savedContent);
+check(
+  "回车+缩进这一笔可以一次 Ctrl+Z 撤销（撤销历史没被打断）",
+  indentBeforeUndo === "  缩进" && indentAfterUndo === indentBeforeUndo,
+  `${JSON.stringify(indentBeforeUndo)} → ${JSON.stringify(indentAfterUndo)}`,
+);
+await c.screenshot(SHOT("wysiwyg-36-auto-indent"));
+
 // 收尾：清回空文档并回写作模式
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });

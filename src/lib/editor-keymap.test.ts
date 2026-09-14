@@ -37,8 +37,11 @@ describe("editorKeymap 导出与绑定", () => {
     expect(() => EditorState.create({ extensions: editorKeymap })).not.toThrow();
   });
 
-  it("五个自定义键位齐全", () => {
+  it("自定义键位齐全（Enter / Shift-Enter 也在其中）", () => {
     const keys = new Set(allBindings().map((b) => b.key));
+    expect(keys).toContain("Enter");
+    expect(keys).toContain("Shift-Enter");
+    expect(keys).toContain("Backspace");
     expect(keys).toContain("Tab");
     expect(keys).toContain("Mod-Shift-d");
     expect(keys).toContain("Mod-d");
@@ -54,6 +57,14 @@ describe("editorKeymap 导出与绑定", () => {
     expect(bindings.find((b) => b.key === "Mod-Shift-d")?.run).toBe(copyLineDown);
     expect(bindings.find((b) => b.key === "Mod-Shift-/")?.run).toBe(toggleBlockComment);
     expect(bindings.find((b) => b.key === "Mod-/")?.run).toBe(toggleComment);
+    // Enter 必须换成我们那条：CM 默认的 insertNewlineAndIndent 拿语言服务的缩进，
+    // 在 typst 文档里时灵时不灵（用户报「换行时应该和上一行缩进一样」）。
+    // 注意 Enter 上还有 autocomplete 的 acceptCompletion（Prec.highest，缺省键位就在），
+    // 补全面板开着时它先返回 true —— 那是既有行为，只要我们的命令确实挂在 Enter 上即可。
+    const shiftEnter = bindings.find((b) => b.key === "Shift-Enter")?.run;
+    const enterRuns = bindings.filter((b) => b.key === "Enter").map((b) => b.run);
+    expect(shiftEnter).toBeTruthy();
+    expect(enterRuns).toContain(shiftEnter);
   });
 
   it("Mod-d 优先级高于 basicSetup 的「选中下一处」（searchKeymap）", () => {
@@ -100,6 +111,36 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     // Shift+Tab 反缩进一层
     press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
     expect(view.state.doc.toString()).toBe("#foo\n");
+    view.destroy();
+  });
+
+  it("Enter 换行继承上一行缩进（行尾 / 行中间 / 纯空白行 / Shift+Enter）", () => {
+    // 行尾回车：新行照抄缩进
+    let view = makeView("前文\n  缩进行");
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("前文\n  缩进行\n  ");
+    view.destroy();
+
+    // 光标停在正文中间：换行后的下半行也带上同一缩进
+    view = makeView("  abcdef");
+    view.dispatch({ selection: { anchor: 5 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("  abc\n  def");
+    view.destroy();
+
+    // 纯空白行：清掉残留空白、新行不缩进（连按回车不堆缩进空行）
+    view = makeView("前文\n  ");
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("前文\n\n");
+    view.destroy();
+
+    // Shift+Enter 与 Enter 同义（CM 默认键位里两者也是同一条命令）
+    view = makeView("  缩进");
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("  缩进\n  ");
     view.destroy();
   });
 
