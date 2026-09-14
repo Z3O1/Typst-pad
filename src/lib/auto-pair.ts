@@ -63,6 +63,7 @@ function insideMath(doc: string, pos: number, opaque: ReturnType<typeof scanNonM
  *    闭合符——按本仓库"宁可漏配对，不可误配对"的取向，这个代价可以接受；
  *    （raw 的右边界不受此限：```` ``` ```` 之后回到 markup，那里该配对。）
  * 3. 已有公式**内部**（`$a + |b$`）——用户这时要的是闭合公式，补一对会插出 `$a + $|$b$` 这种垃圾；
+ *    **但这一条排在「右侧已有闭合 `$`」之后**，见下面 skip 那段的说明；
  * 4. 前面是反斜杠（`\$`）——转义的字面美元号。
  */
 export function planDollarInput(doc: string, pos: number): DollarPlan {
@@ -70,13 +71,20 @@ export function planDollarInput(doc: string, pos: number): DollarPlan {
   const opaque = scanNonMarkupRegions(doc);
   if (regionAt(opaque, pos)) return { kind: "none" };
   if (pos > 0 && regionAt(opaque, pos - 1)?.kind === "code") return { kind: "none" };
-  if (insideMath(doc, pos, opaque)) return { kind: "none" };
   if (doc[pos - 1] === "\\") return { kind: "none" };
 
-  // 右侧（跳过同行空白）已经有 `$`：把光标移过去。没有这条的话，`$  $` 里再按一次 `$`
-  // 会插出 `$ $|$  $` 这种垃圾（实测过），而连按两下 `$` 是很容易发生的手势。
+  // 右侧（跳过同行空白）已经有 `$`：把光标移过去，**不再插任何字符**。
+  //
+  // 这条必须排在 `insideMath` **之前**（2026-09-14 用户报的 bug：「依次按 $ 1 $ 后会得到 $1$$」）：
+  // 配对是 `$|$` 起手，敲完 `1` 是 `$1|$` —— 那时光标正好在已有公式**内部**，而下面那条
+  // "公式内部不配对"会返回 none（原样插一个 `$`），于是得到 `$1$$`：一个多出来的、永远不闭合的
+  // `$`（typst 会报未闭合）。而行间脚手架更难看：`$ 1 $` 里再按 `$` 变成 `$ 1$ $`。
+  // 用户的意图很清楚——**他按的 `$` 就是那个已经存在的闭合符**，所以正确的动作是"跨过去"。
+  // 下面那条 `insideMath`（`$a + |b$`：右边不是 `$` 而是公式内容）依然照旧返回 none。
   const next = nextDollarOnLine(doc, pos);
   if (next !== -1) return { kind: "skip", caret: next + 1 - pos };
+
+  if (insideMath(doc, pos, opaque)) return { kind: "none" };
 
   // 独占一行 → 行间公式脚手架（内侧两侧留白才是 typst 的 display 公式）；
   // 行内（同行还有别的字）→ 普通配对。

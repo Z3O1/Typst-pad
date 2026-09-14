@@ -1661,6 +1661,39 @@ await new Promise((r) => setTimeout(r, 400));
 const codeCase = await c.evaluate(cmText);
 check("代码区里不配对（只插入一个 `$`）", codeCase === "#let s = 1$", JSON.stringify(codeCase));
 
+// ⑥ **公式内部但右侧就是闭合符 → 跨过去，不再插一个**（用户 2026-09-14 报的 bug：「依次按按键
+// $ 1 $ 后会得到 $1$$」）。配对是 `$|$` 起手，敲完 `1` 是 `$1|$` —— 那时光标在公式**内部**，而
+// "公式内部不配对"若排在"右侧已有 `$`"之前就会原样再插一个 `$`，得到永远不闭合的 `$1$$`。
+// 手打序列必须是**三次独立的 `$` 输入**：`c.type` 走 Input.insertText，整串插进去不会触发配对
+// （这正是本组前面几条都分开敲的原因）。
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await c.type("前文 ");
+await c.type("$");
+await c.type("1");
+await c.type("$");
+await new Promise((r) => setTimeout(r, 400));
+const inlineThirdDollar = await c.evaluate(cmText);
+check(
+  "行内公式里按第三个 `$` 跨过已有闭合符（不会得到 `前文 $1$$`）",
+  inlineThirdDollar === "前文 $1$",
+  JSON.stringify(inlineThirdDollar),
+);
+
+// 行间脚手架同理：`$ 1 $` 里再按 `$` → 跨过闭合符，不得到 `$ 1$ $`
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await c.type("$");
+await c.type("1");
+await c.type("$");
+await new Promise((r) => setTimeout(r, 400));
+const blockThirdDollar = await c.evaluate(cmText);
+check(
+  "行间公式里按第三个 `$` 同样跨过闭合符（不会得到 `$ 1$ $`）",
+  blockThirdDollar === "$ 1 $",
+  JSON.stringify(blockThirdDollar),
+);
+
 // 收尾：清回空文档
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
