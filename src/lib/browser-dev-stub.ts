@@ -81,6 +81,14 @@ function installFakeDevicePixelRatio(
   const commit = (zoom: number) => {
     applied = zoom;
     onApplied?.(zoom);
+    // **真引擎改档位会连带改 `window.innerWidth`，浏览器随即派发一次 `resize`**
+    // （WebView2 参考文档 get_ZoomFactor 原话："Changing zoom factor may cause
+    // `window.innerWidth`, `window.innerHeight`, both, and page layout to change."）。
+    // 假引擎必须照做：页面里有一条 resize → 重校 100% 基准的逻辑（rebaselineZoom），
+    // 少了这次派发，验收就永远碰不到"缩放自己引发的 resize"这条路径 ——
+    // 2026-09-14 用户第五次反馈「还是会出现界面缩放未生效」正是它（见 +page.svelte 的
+    // zoomSettlingUntil）。
+    setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
   };
   Object.defineProperty(window, "devicePixelRatio", {
     configurable: true,

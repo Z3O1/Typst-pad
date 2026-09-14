@@ -4,9 +4,11 @@ import {
   ZOOM_DEFAULT,
   ZOOM_MAX,
   ZOOM_MIN,
+  ZOOM_SETTLE_MAX_MS,
   ZOOM_STEP,
   clampZoom,
   nextZoom,
+  shouldRebaselineZoom,
   wheelZoomSteps,
   zoomIn,
   zoomLabel,
@@ -196,7 +198,11 @@ describe("zoomProbeVerdict（这次读数要不要再等）", () => {
 // ---------------------------------------------------------------------------
 describe("zoomRejectedNotice（状态栏文案）", () => {
   it("宽度没变 → 明说没变（=引擎压根没动），带上次数与 dpr", () => {
-    const s = zoomRejectedNotice(1.5, 1, 4, { baseline: 1379, current: 1379.4 }, 1.5);
+    const s = zoomRejectedNotice(1.5, 1, {
+      measurements: 4,
+      widths: { baseline: 1379, current: 1379.4 },
+      dpr: 1.5,
+    });
     expect(s).toContain("界面缩放未生效");
     expect(s).toContain("限制在 100%");
     expect(s).toContain("量了 4 次");
@@ -205,13 +211,82 @@ describe("zoomRejectedNotice（状态栏文案）", () => {
   });
 
   it("宽度变了 → 写出前后值（=引擎动过又回去）", () => {
-    const s = zoomRejectedNotice(1.5, 1, 3, { baseline: 1379, current: 919 }, 1.5);
+    const s = zoomRejectedNotice(1.5, 1, {
+      measurements: 3,
+      widths: { baseline: 1379, current: 919 },
+      dpr: 1.5,
+    });
     expect(s).toContain("布局宽度 1379→919px");
   });
 
+  it("带上 dpr 判据的交叉验证（宽度说 1.00、dpr 说 1.50 → 我们自己量歪了）", () => {
+    const s = zoomRejectedNotice(1.5, 1, {
+      measurements: 4,
+      widths: { baseline: 1379, current: 1379 },
+      dpr: 1.5,
+      dprFactor: 1.5,
+    });
+    expect(s).toContain("布局宽度没变（1379px）");
+    expect(s).toContain("dpr 判据给 150%");
+  });
+
+  it("dpr 判据也读不到时就不写那一段", () => {
+    const s = zoomRejectedNotice(1.5, 1, {
+      measurements: 2,
+      widths: { baseline: 1379, current: 1379 },
+      dprFactor: Number.NaN,
+    });
+    expect(s).not.toContain("dpr 判据");
+  });
+
   it("dpr 读不到时不写这一段（别写 NaN）", () => {
-    const s = zoomRejectedNotice(2.2, 2.1, 1, { baseline: 1200, current: 545 }, Number.NaN);
+    const s = zoomRejectedNotice(2.2, 2.1, {
+      measurements: 1,
+      widths: { baseline: 1200, current: 545 },
+      dpr: Number.NaN,
+    });
     expect(s).toContain("限制在 210%");
     expect(s).not.toContain("dpr");
+  });
+});
+
+describe("shouldRebaselineZoom（这次 resize 要不要重校 100% 基准）", () => {
+  it("沉降窗口内 → 不校（缩放自己引发的 resize；一校就把基准压低成新宽度）", () => {
+    expect(
+      shouldRebaselineZoom({ now: 1000, settlingUntil: 3000, verifyInFlight: false }),
+    ).toBe(false);
+    // 窗口刚过（now == settlingUntil）就算结束
+    expect(
+      shouldRebaselineZoom({ now: 3000, settlingUntil: 3000, verifyInFlight: false }),
+    ).toBe(true);
+  });
+
+  it("复核在跑 → 一律不校（测量期间任何重校都会带偏读数）", () => {
+    expect(
+      shouldRebaselineZoom({ now: 9000, settlingUntil: 0, verifyInFlight: true }),
+    ).toBe(false);
+    expect(
+      shouldRebaselineZoom({ now: 9000, settlingUntil: 8000, verifyInFlight: true }),
+    ).toBe(false);
+  });
+
+  it("窗口外、也没复核在跑 → 该校（用户拖窗口就是这条路径）", () => {
+    expect(
+      shouldRebaselineZoom({ now: 5000, settlingUntil: 3000, verifyInFlight: false }),
+    ).toBe(true);
+    expect(
+      shouldRebaselineZoom({ now: 5000, settlingUntil: 0, verifyInFlight: false }),
+    ).toBe(true);
+  });
+
+  it("沉降窗口是兜底长度（复核正常 1s 内收尾，窗口给 2s 足够）", () => {
+    expect(ZOOM_SETTLE_MAX_MS).toBeGreaterThanOrEqual(1000);
+    expect(
+      shouldRebaselineZoom({
+        now: 1,
+        settlingUntil: 1 + ZOOM_SETTLE_MAX_MS - 1,
+        verifyInFlight: false,
+      }),
+    ).toBe(false);
   });
 });

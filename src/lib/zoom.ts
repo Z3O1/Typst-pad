@@ -177,19 +177,69 @@ export function zoomProbeVerdict(
  * 能读到的通道。所以文案里带上"量了几次 / 布局宽度变了没有 / dpr"，一张截图就能判断是
  * 「引擎把档位丢了」（宽度变过又回来）还是「引擎压根没动」（宽度一模一样，dpr 也不动）。
  */
+/** 「未生效」文案要带的实测数据（都是给"下一次截图"用的，见上方注解） */
+export interface ZoomRejectDetail {
+  /** 复核量了几次读数 */
+  measurements: number;
+  /** 100% 基准宽度与当时的布局宽度 */
+  widths: { baseline: number; current: number };
+  /** 当时的 devicePixelRatio */
+  dpr?: number;
+  /**
+   * 用 dpr 反推的引擎档位（第二条独立判据，只作交叉验证）。
+   * 宽度判据说 1.00、它说 1.50 → 是我们自己量歪了；两条都说 1.00 → 引擎真没动。
+   */
+  dprFactor?: number | null;
+}
+
 export function zoomRejectedNotice(
   target: number,
   observed: number,
-  measurements: number,
-  widths: { baseline: number; current: number },
-  dpr?: number,
+  detail0: ZoomRejectDetail,
 ): string {
-  const detail = [`量了 ${measurements} 次`];
-  const base = Math.round(widths.baseline);
-  const now = Math.round(widths.current);
+  const detail = [`量了 ${detail0.measurements} 次`];
+  const base = Math.round(detail0.widths.baseline);
+  const now = Math.round(detail0.widths.current);
   detail.push(base === now ? `布局宽度没变（${now}px）` : `布局宽度 ${base}→${now}px`);
+  const dpr = detail0.dpr;
   if (typeof dpr === "number" && Number.isFinite(dpr) && dpr > 0) {
     detail.push(`dpr ${dpr.toFixed(2)}`);
   }
+  const dprFactor = detail0.dprFactor;
+  if (typeof dprFactor === "number" && Number.isFinite(dprFactor) && dprFactor > 0) {
+    detail.push(`dpr 判据给 ${zoomLabel(dprFactor)}`);
+  }
   return `界面缩放未生效：引擎把 ${zoomLabel(target)} 限制在 ${zoomLabel(observed)}（${detail.join("；")}）`;
+}
+
+// ---------------------------------------------------------------------------
+// 「缩放沉降窗口」——**缩放自己引发的 resize 不许重校 100% 基准**
+// （2026-09-14 用户第五次反馈「还是会出现界面缩放未生效的 BUG」的根因，前端自己的锅）
+//
+// 链路：改档 → 引擎接受 → `window.innerWidth` 变了（WebView2 参考文档原话："Changing zoom
+// factor may cause window.innerWidth, window.innerHeight, both, and page layout to change"）
+// → 浏览器派发一次 `resize` → 页面里"用户拖窗口 → 重校 100% 基准"那条监听被触发，
+// 而它用的是**改档前**的 `appliedZoom`：
+//     新基准 = 新宽度 × 旧档位 = (100%宽 ÷ 新档位) × 旧档位
+// 于是基准被压低成"新宽度"，复核再量就是 `基准 ÷ 当前宽度 = 1.0` —— 引擎明明接受了，却被读成
+// 「引擎把 130% 限制在 100%（布局宽度没变）」，档位随即被拉回、界面真的弹回 100%。
+// **只要引擎改档会引发 resize，这条误判就是必然的**（不是那台机器特殊）。
+//
+// 修法：从"我们让引擎改档"这一刻起到复核结束，收到的 resize 一律当作缩放自己引发的，
+// 不重校基准（复核结束时由它自己按"当时的宽度 × 已知档位"校一遍，两个量都新鲜）。
+// 用户真的拖窗口时：不在沉降窗口内 → 照常重校；正好撞进窗口内 → 由下一次复核重校，代价只是
+// 这一次的读数偏一点（且窗口最多 ZOOM_SETTLE_MAX_MS）。
+// ---------------------------------------------------------------------------
+
+/** 改档后的沉降窗口长度：这期间的 resize 都算缩放自己引发的（复核正常在 1s 内结束，这只是兜底） */
+export const ZOOM_SETTLE_MAX_MS = 2000;
+
+/** 这次 resize 该不该重校 100% 基准（不在沉降窗口、也没有复核在跑 → 该） */
+export function shouldRebaselineZoom(state: {
+  now: number;
+  settlingUntil: number;
+  verifyInFlight: boolean;
+}): boolean {
+  if (state.verifyInFlight) return false;
+  return !(state.now < state.settlingUntil);
 }

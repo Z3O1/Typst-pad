@@ -1111,6 +1111,29 @@ check(
   simOk.status.includes("缩放 130%") && !simOk.status.includes("未生效"),
   JSON.stringify(simOk.status),
 );
+// 回归（2026-09-14 用户第五次反馈「还是会出现界面缩放未生效的 BUG」的根因）：
+// 引擎改档会让 `window.innerWidth` 跟着变、浏览器随即派发一次 resize（WebView2 参考文档原话），
+// 而页面里"拖窗口 → 重校 100% 基准"那条监听当时用的是**改档前**的档位，于是基准被压低成
+// "新宽度"，复核把"引擎明明接受了"读成"引擎没动"、档位随即被拉回 100%。
+// 假引擎现在照真引擎那样在 commit 后派发 resize（见 browser-dev-stub），所以这条路径在
+// 验收里跑得到：**连续放大两档都必须落在请求值**——第一档若把基准带偏，第二档立刻露馅。
+await wheelOverEditor(-100, 1);
+const simSecond = await c.evaluate(zoomProbe2);
+check(
+  "缩放自己引发的 resize 没把 100% 基准带偏：紧接着再放大一档仍生效（1.3 → 1.4）",
+  Math.abs((simSecond.requested ?? 0) - 1.4) < 0.001 &&
+    Math.abs((simSecond.saved ?? 0) - 1.4) < 0.001 &&
+    !simSecond.status.includes("未生效"),
+  JSON.stringify(simSecond),
+);
+// 反方向也要立刻见效（同一根因的顺带表现：基准被带偏时往下滚也判不出档位）
+await wheelOverEditor(100, 1);
+const simDown = await c.evaluate(zoomProbe2);
+check(
+  "接上一步往下滚一档也立刻生效（1.4 → 1.3，基准没被自己带偏）",
+  Math.abs((simDown.saved ?? 0) - 1.3) < 0.001 && !simDown.status.includes("未生效"),
+  JSON.stringify(simDown),
+);
 
 // B) 引擎只肯缩小（放大一律按 100% 处理）：档位必须停在引擎给的 100%，缩小立刻有效
 await gotoSim("&zoomsim=1&zoomcap=1");
@@ -1133,6 +1156,14 @@ check(
   capped.status.includes("量了") &&
     capped.status.includes("布局宽度") &&
     capped.status.includes("dpr"),
+  JSON.stringify(capped.status),
+);
+// 交叉验证（2026-09-14 第五次反馈后加）：宽度判据与 dpr 判据**互相印证**才敢说"引擎真没动"。
+// 这台模拟机器上假 dpr 跟着假引擎走，两条判据都该说 100%——下次真机上若出现"宽度 100%、
+// dpr 150%"，一张截图就能看出是**我们自己量歪了**，而不是引擎拒绝。
+check(
+  "文案里有第二条判据的交叉验证（dpr 判据也给出它读到的档位）",
+  capped.status.includes("dpr 判据给 100%"),
   JSON.stringify(capped.status),
 );
 // 关键：接着往下滚必须立刻见效（这就是「最大后无法用滚轮缩小」那条反馈）

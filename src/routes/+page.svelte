@@ -85,9 +85,11 @@
     ZOOM_MEASURE_SETTLE_MS,
     ZOOM_VERIFY_RESET_DELAY_MS,
     ZOOM_VERIFY_WAITS_MS,
+    ZOOM_SETTLE_MAX_MS,
     zoomFromWidths,
     clampZoom,
     nextZoom,
+    shouldRebaselineZoom,
     zoomApplied,
     zoomIn,
     zoomLabel,
@@ -259,6 +261,15 @@
   let zoomBaseline100 = 0;
   /** 正在设一次缩放并测量（期间不接受 resize 事件改基准——那是缩放自己引起的） */
   let zoomStepInFlight = false;
+  /**
+   * 缩放沉降窗口的截止时间戳（见 zoom.ts 的注解）：从"我们让引擎改档"起算，到复核结束为止。
+   * 这期间收到的 `resize` **不许**重校 100% 基准 —— 引擎改档本身就会引发一次 resize，
+   * 而那时 `appliedZoom` 还是旧档位，一校就把基准压低成"新宽度"，复核随即把"引擎接受了"
+   * 读成"引擎没动"（2026-09-14 用户第五次反馈「还是会出现界面缩放未生效」的根因）。
+   */
+  let zoomSettlingUntil = 0;
+  /** 校准（100%）时的 devicePixelRatio：dpr 判据的基准（只作交叉验证，见 dprEngineZoomNow） */
+  let zoomDprAt100 = 0;
   /** 复核的代次令牌：新的复核一开始，旧的立刻作废（否则旧复核会把新档位拉回引擎的旧读数） */
   let zoomVerifySeq = 0;
   /** 校准只做一次；并发调用共用同一个 promise */
@@ -524,8 +535,18 @@
   async function applyUiZoom(zoom: number) {
     if (!isTauri()) return;
     const target = clampZoom(zoom);
-    // 先校准 100% 基线（只做一次），后面才能把 devicePixelRatio 换算成"引擎实际接受的档位"
+    // 先校准 100% 基线（只做一次），后面才能把视口宽度换算成"引擎实际接受的档位"
     await ensureZoomCalibration();
+    // 改档前若处于"已沉降"状态，先把基准按**当前档位**校一遍：沉降窗口里被跳过的 resize
+    // （用户拖了窗口）在这里自愈。连滚多档时不校 —— 那时的档位估计可能还没跟上真实值，
+    // 校了反而会把基准带偏（这正是用户第五次反馈的那条误判链路）。
+    const settled = shouldRebaselineZoom({
+      now: Date.now(),
+      settlingUntil: zoomSettlingUntil,
+      verifyInFlight: zoomStepInFlight,
+    });
+    if (settled) rebaselineZoom();
+    markZoomSettling();
     try {
       await getCurrentWebview().setZoom(target);
       dbg.log("zoom", `set ${zoomLabel(target)}`);
@@ -536,12 +557,21 @@
     scheduleZoomConfirm();
   }
 
+  /**
+   * 记下"我们刚让引擎改档"：从这一刻起到复核结束，`resize` 一律当作缩放自己引发的，
+   * 不重校 100% 基准（见 zoom.ts 的「缩放沉降窗口」注解）。重复调用只是把窗口往后推。
+   */
+  function markZoomSettling() {
+    zoomSettlingUntil = Date.now() + ZOOM_SETTLE_MAX_MS;
+  }
+
   /** 手势/连续调档停止后再确认一次缩放（见 applyUiZoom 的注解）；重复调用只保留最后一次 */
   function scheduleZoomConfirm() {
     if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
     zoomConfirmTimer = setTimeout(() => {
       zoomConfirmTimer = null;
       const target = clampZoom(uiZoom);
+      markZoomSettling();
       void getCurrentWebview()
         .setZoom(target)
         .then(() => {
@@ -569,6 +599,7 @@
     if (zoomCalibration === null) {
       zoomCalibration = (async () => {
         try {
+          markZoomSettling(); // 校准本身也是一次改档（这一步引发的 resize 同样不该改基准）
           await getCurrentWebview().setZoom(ZOOM_DEFAULT);
           await new Promise((r) => setTimeout(r, 90));
           const width = document.documentElement.clientWidth;
@@ -576,7 +607,11 @@
             zoomBaseline100 = width;
             appliedZoom = ZOOM_DEFAULT;
           }
-          dbg.log("zoom", `校准：100% 布局宽度 ${width}px`);
+          // 100% 时的 dpr（= 显示器缩放 × 1）：它是**独立的第二条判据**，用来交叉验证宽度判据
+          // ——两条都读不出来时才是真的"量不到"（见 dprEngineZoomNow 与状态栏文案）。
+          const dpr = window.devicePixelRatio;
+          if (Number.isFinite(dpr) && dpr > 0) zoomDprAt100 = dpr;
+          dbg.log("zoom", `校准：100% 布局宽度 ${width}px，dpr ${dpr}`);
         } catch (e) {
           dbg.log("zoom", "缩放校准失败（本次不判定引擎档位）", e);
         }
@@ -594,6 +629,19 @@
   /** 引擎**实际接受**的档位（读 CSS 布局宽度；量不到时 null＝本次不判定） */
   function engineZoomNow(): number | null {
     return zoomFromWidths(zoomBaseline100, document.documentElement.clientWidth);
+  }
+
+  /**
+   * 用 `devicePixelRatio` 反推的引擎档位（`dpr = 显示器缩放 × 页面缩放`，所以比值就是档位）。
+   *
+   * **它是第二条独立判据，只用于交叉验证，不参与判定**（2026-09-14 的教训：真机上 dpr 不一定
+   * 跟随宿主设的 ZoomFactor，所以判据换成了布局宽度）。但两条一起写进"未生效"的状态栏文案，
+   * 一张截图就能分清"引擎真没动"（两条都说 1.00）与"我们自己量歪了"（宽度说 1.00、dpr 说 1.50）。
+   */
+  function dprEngineZoomNow(): number | null {
+    const dpr = window.devicePixelRatio;
+    if (!(zoomDprAt100 > 0) || !(dpr > 0) || !Number.isFinite(dpr)) return null;
+    return dpr / zoomDprAt100;
   }
 
   /** setTimeout 的 Promise 版（复核的等待节奏用） */
@@ -633,6 +681,7 @@
     let observed: number | null = null;
     let measurements = 0;
     zoomStepInFlight = true;
+    markZoomSettling();
     try {
       await getCurrentWebview().setZoom(target); // 顺带把这一档再设一遍（兜底重试）
       for (const wait of ZOOM_VERIFY_WAITS_MS) {
@@ -656,7 +705,10 @@
       return;
     } finally {
       // 只有"最新那次复核"才有资格解除测量标记（期间可能有更新的复核接手）
-      if (mySeq === zoomVerifySeq) zoomStepInFlight = false;
+      if (mySeq === zoomVerifySeq) {
+        zoomStepInFlight = false;
+        zoomSettlingUntil = 0; // 复核收尾：之后引擎再触发 resize 就是用户拖窗口，照常重校基准
+      }
     }
     if (mySeq !== zoomVerifySeq) return;
     const currentWidth = document.documentElement.clientWidth;
@@ -677,13 +729,12 @@
     );
     uiZoom = snapped; // 触发 $effect → 再把引擎对齐到这个档位（已经是了，等价空操作）
     schedulePersist();
-    statusText = zoomRejectedNotice(
-      target,
-      observed,
+    statusText = zoomRejectedNotice(target, observed, {
       measurements,
-      { baseline: zoomBaseline100, current: currentWidth },
-      window.devicePixelRatio,
-    );
+      widths: { baseline: zoomBaseline100, current: currentWidth },
+      dpr: window.devicePixelRatio,
+      dprFactor: dprEngineZoomNow(),
+    });
   }
 
   /** 改缩放并反馈（滚轮 / 菜单共用）；值没变时提示"已到边界"，不重复写存档 */
@@ -1787,9 +1838,20 @@
     // Ctrl+滚轮缩放：挂 window 捕获阶段 + 显式 passive: false（见 handleZoomWheel 的注解）
     window.addEventListener("wheel", handleZoomWheel, { capture: true, passive: false });
     // 用户拖动窗口会改变布局宽度 → 视口判据的 100% 基准要跟着校（见 rebaselineZoom）。
-    // 缩放本身也会引起 resize：那种情况由测量那边自己校准，这里用 zoomStepInFlight 让开。
+    // **但缩放自己引发的 resize 必须让开**：引擎改档会让 `window.innerWidth` 跟着变，浏览器
+    // 随即派发一次 resize，而此刻 `appliedZoom` 还是旧档位，一校就把基准压低成"新宽度"，
+    // 复核就会把"引擎接受了"读成"引擎没动"（用户第五次反馈的「界面缩放未生效」就是这个）。
+    // 所以判据交给纯函数 shouldRebaselineZoom：复核在跑、或还在沉降窗口内 → 不校。
     const onWindowResize = () => {
-      if (zoomStepInFlight) return;
+      const allowed = shouldRebaselineZoom({
+        now: Date.now(),
+        settlingUntil: zoomSettlingUntil,
+        verifyInFlight: zoomStepInFlight,
+      });
+      if (!allowed) {
+        dbg.log("zoom", "resize（缩放沉降窗口内，跳过基准重校）");
+        return;
+      }
       rebaselineZoom();
     };
     window.addEventListener("resize", onWindowResize);
