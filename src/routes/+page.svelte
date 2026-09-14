@@ -1137,10 +1137,17 @@
    * - 字号恒定：默认字号对齐输入区（14px），窗口拉宽时画布停在自然尺寸不再放大；
    * - 等宽显示：窗口变窄时画布等比缩小铺满容器宽度，文本不拉伸变形。
    *
-   * **只用实测栏宽，不许乘界面缩放**（2026-09-14 用户要求「预览模式和文档模式的内容不应该有
-   * 横向拖动」，试过一版乘 uiZoom 又撤回）：预览是固定版心的排版结果，塞不进栏宽只能横向滚动，
-   * 所以"永不横向拖动"与"预览跟着缩放变大"二选一 —— 选了前者。乘 uiZoom 的版本在 250% 缩放下
-   * 会让预览栏横向溢出 166px（实测），正是用户不要的样子。详见 preview-scale.ts 的注释。
+   * **必须把界面缩放（uiZoom）一起传进去**（用户两次反馈「预览框大小还是没变」「预览框里面的字
+   * 的大小还是没变」）：界面缩放走 webview `setZoom`，预览栏的 CSS 宽度会跟着变小，直接拿它算
+   * "铺满"会把画布缩回原样、与引擎的放大正好抵消 —— 表现为"预览一点没变"。传 uiZoom 后按缩放
+   * **前**的栏宽算，画布的 CSS 宽度保持在 100% 时的值，由引擎把它真正放大（1.5 档就是 1.5 倍，
+   * 页面和里面的字一起变大）。依据是实测：1040px 窗口下 100%→150% 时画布物理尺寸比只有 0.983。
+   *
+   * **代价与配套**：预览是固定版心的排版结果，放大到超过栏宽时预览栏会出现横向滚动条（"跟着缩放
+   * 变大"与"永不横向滚动"对固定版心的页面只能二选一，用户选了前者）。所以 `.preview-paper`
+   * 用 `margin-inline: auto` 居中而不是容器 `align-items: center` —— 后者在溢出时会把页面左缘顶到
+   * 滚动区之外（scrollLeft 不能为负，那部分永远看不到），auto 外边距在负剩余空间下退化成 0，
+   * 于是"装得下就居中、装不下就左对齐"。
    * 测量失败（无产物/容器不可测）时清空内联宽度，回退 CSS width: 100%。
    */
   function applyPreviewScale() {
@@ -1153,6 +1160,7 @@
     const displayWidth = previewCanvasWidth({
       containerWidth: previewBodyEl.clientWidth,
       pageWidthPt: viewBoxWidthPt(svg.getAttribute("viewBox") ?? ""),
+      uiZoom,
     });
     previewHost.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
   }
@@ -2279,6 +2287,8 @@
   .preview-body {
     display: flex;
     flex-direction: column;
+    /* 交叉轴（水平）居中只作用于"装得下"的元素（错误框/占位符）；
+       画布自己用 margin-inline: auto，溢出时退化成左对齐（见 .preview-paper） */
     align-items: center;
     background: var(--bg-pane);
     overflow: auto;
@@ -2316,6 +2326,11 @@
     width: 100%;
     /* 宽度默认铺满容器；applyPreviewScale 按容器宽度与页物理尺寸（pt）计算后
        以内联样式覆盖为画布显示宽度（字号恒定等宽缩放），测量失败时回退本规则 */
+    /* 居中用**自身的 auto 外边距**，不用容器上的 align-items: center：
+       界面缩放放大后画布会比栏宽宽，此时 auto 外边距退化为 0（负剩余空间）→ 页面左对齐、
+       横向滚动条能真正滚到左缘；若靠容器居中，溢出的左半部分会被顶到滚动区之外，
+       scrollLeft 又不能为负 → 那部分永远看不到（实测踩过）。 */
+    margin-inline: auto;
   }
 
   /* 每页 SVG 顶层文档（compileToSvg 按页序拼接入预览容器）：铺满预览容器宽度

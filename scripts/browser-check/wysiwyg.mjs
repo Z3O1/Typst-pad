@@ -1277,19 +1277,23 @@ check(
 );
 
 // ---------------------------------------------------------------------------
-// 第 30 组：预览栏**永不横向拖动**（用户要求：「预览模式和文档模式的内容不应该有横向拖动，
-// 而是自动换行，Alt+Z 只对代码起效」）
-// 背景（2026-09-14 的两次反馈，方向刚好相反，最终以"不许横向拖动"为准）：
-//   ① 「代码模式预览框的缩放还是无效 / 变了但立刻弹回原样」——预览是自适应铺满的，而界面缩放
-//      走 webview setZoom（CSS 视口一起缩小），拿缩小后的栏宽算铺满就把画布缩回原样。
-//   ② 于是改成"按缩放前的栏宽拟合"，缩放真的放大了预览 —— 但固定版心的页面塞不进栏宽只能
-//      横向滚动（实测 250% 时预览栏溢出 166px），用户明确否掉。
-// 结论：预览是固定版心的排版结果，"永不横向拖动"与"预览跟着界面缩放变大"只能二选一，
-// 用户选前者 —— 拟合**永远只用实测栏宽**（画布宽度恒 ≤ 栏宽）。本组就是这条规则的回归网。
-// 无头环境怎么造缩放：CDP `Emulation.setDeviceMetricsOverride` 把 CSS 视口压到「窗口宽 ÷ 缩放」，
-// 这在布局上等价于 webview 缩放（预览栏 CSS 宽度一起变小）。
 // ---------------------------------------------------------------------------
-console.log("30) 预览栏永不横向拖动（100% / 150% / 250%）");
+// 第 30 组：预览**跟着界面缩放一起变大**（用户两次反馈「预览框大小还是没变」
+// 「预览框里面的字的大小还是没变」）
+// 背景：预览画布是自适应铺满的（applyPreviewScale → preview-scale.ts），而界面缩放走 webview
+// `setZoom`，它把 CSS 视口一起缩小（预览栏 CSS 宽度 505 → 331）。拿这个**缩小后**的栏宽算
+// "铺满"，画布就缩回原样、与引擎的放大正好抵消 → 缩放对编辑区有效、对预览无效。
+// 实测（不修）：1040px 窗口下 100%→150% 画布**物理尺寸比 0.983**（等于没变）。
+// 修法：拟合按**缩放前**的栏宽算（previewScale 收 uiZoom），画布 CSS 宽度保持 100% 时的值，
+// 由引擎把它真正放大。代价也一起锁住：
+//   - 放大到超过栏宽时预览栏**会出现横向滚动条**（固定版心的页面二选一：跟着变大 or 永不横滚，
+//     用户选了跟着变大）；
+//   - 溢出时**左缘必须可达**（`.preview-paper { margin-inline: auto }`：负剩余空间下 auto 外边距
+//     退化成 0 → 左对齐；靠容器 align-items:center 会把左半部分顶出滚动区，永远看不到）。
+// 无头环境怎么造缩放：CDP `Emulation.setDeviceMetricsOverride` 把 CSS 视口压到「窗口宽 ÷ 缩放」，
+// 布局上等价于 webview 缩放；画布的物理尺寸 = 画布 CSS 宽度 × 缩放（量的 rect 仍是未放大的 px）。
+// ---------------------------------------------------------------------------
+console.log("30) 预览跟着界面缩放变大（100% / 150% / 250%）");
 const previewProbe = `(() => {
   const body = document.querySelector(".preview-body");
   const host = document.querySelector("#preview-host");
@@ -1300,8 +1304,11 @@ const previewProbe = `(() => {
     z,
     container: body ? body.clientWidth : null,
     canvasCss: rect ? Math.round(rect.width * 10) / 10 : null,
-    inlineWidth: host?.style.width ?? "",
+    canvasPhys: rect ? Math.round(rect.width * z * 10) / 10 : null,
     overflowX: body ? body.scrollWidth - body.clientWidth : null,
+    scrollLeft: body ? body.scrollLeft : null,
+    // 左缘可达性：滚动到最左时，页面左缘不能跑到容器左边之外（否则那部分永远看不到）
+    leftGap: rect && body ? Math.round(rect.left - body.getBoundingClientRect().left) : null,
     pages: document.querySelectorAll("#preview-host > svg").length,
   };
 })()`;
@@ -1327,35 +1334,38 @@ async function loadPreviewAt(viewportW, uiZoom) {
   return c.evaluate(previewProbe);
 }
 
-const WIN = 1040; // 中等窗口：100% 时预览栏就比页面的自然尺寸窄，走"铺满"分支
-const shots = [
-  { label: "100%", viewport: WIN, uiZoom: 1 },
-  { label: "150%", viewport: Math.round(WIN / 1.5), uiZoom: 1.5 },
-  { label: "250%", viewport: Math.round(WIN / 2.5), uiZoom: 2.5 },
-];
-
-const previewAt = {};
-for (const shot of shots) {
-  const m = await loadPreviewAt(shot.viewport, shot.uiZoom);
-  previewAt[shot.label] = m;
-  check(
-    `${shot.label} 缩放下预览栏不出现横向拖动（画布 ≤ 栏宽、无横向溢出）`,
-    m.canvasCss !== null &&
-      m.canvasCss <= m.container + 1 &&
-      m.overflowX <= 1 &&
-      m.pages >= 1,
-    `栏宽 ${m.container}，画布 ${m.canvasCss}（内联 ${m.inlineWidth}），横向溢出 ${m.overflowX}`,
-  );
-}
-
-// 极窄栏（250%）也要"铺满且不溢出"：画布跟栏宽走，而不是保持 100% 时的宽度
+const WIN = 1040; // 中等窗口：100% 时预览栏就比页面自然尺寸窄，走"铺满"分支（正是被吃掉的那一支）
+const base = await loadPreviewAt(WIN, 1);
 check(
-  "缩放到 250% 时画布跟着变窄的栏宽走（不再比栏宽大）",
-  previewAt["250%"].canvasCss <= previewAt["250%"].container + 1 &&
-    previewAt["250%"].canvasCss < previewAt["100%"].canvasCss,
-  `100% 画布 ${previewAt["100%"].canvasCss} → 250% 画布 ${previewAt["250%"].canvasCss}（栏宽 ${previewAt["250%"].container}）`,
+  "100% 时画布铺满预览栏（窄栏自适应照旧）",
+  base.canvasCss !== null && Math.abs(base.canvasCss - base.container) <= 2 && base.overflowX <= 1,
+  JSON.stringify(base),
 );
-await c.screenshot(SHOT("wysiwyg-30-preview-no-hscroll"));
+
+const zoom150 = await loadPreviewAt(Math.round(WIN / 1.5), 1.5);
+check(
+  "150%：画布物理尺寸放大 1.5 倍（预览框和里面的字都变大了）",
+  zoom150.canvasPhys / base.canvasPhys > 1.4,
+  `物理 ${base.canvasPhys} → ${zoom150.canvasPhys}（比 ${(zoom150.canvasPhys / base.canvasPhys).toFixed(3)}）`,
+);
+check(
+  "150%：画布 CSS 宽度不再跟着窄栏缩水（就是「预览一点没变」那条）",
+  zoom150.canvasCss >= base.canvasCss * 0.95,
+  `CSS ${base.canvasCss} → ${zoom150.canvasCss}，栏宽 ${base.container} → ${zoom150.container}`,
+);
+
+const zoom250 = await loadPreviewAt(Math.round(WIN / 2.5), 2.5);
+check(
+  "250%：物理尺寸继续跟着放大（≈2.5 倍），且比栏宽大（这就是要横向滚的那部分）",
+  zoom250.canvasPhys / base.canvasPhys > 2.2 && zoom250.overflowX > 0,
+  `物理比 ${(zoom250.canvasPhys / base.canvasPhys).toFixed(3)}，横向溢出 ${zoom250.overflowX}px`,
+);
+check(
+  "放大溢出时页面左缘仍然可达（margin-inline: auto 在负剩余空间下退化成左对齐）",
+  zoom250.leftGap >= -1 && zoom250.scrollLeft === 0,
+  `左缘偏移 ${zoom250.leftGap}px（≥0 = 没被顶出滚动区），scrollLeft=${zoom250.scrollLeft}`,
+);
+await c.screenshot(SHOT("wysiwyg-30-preview-zoom"));
 await c.send("Emulation.clearDeviceMetricsOverride");
 
 // ---------------------------------------------------------------------------

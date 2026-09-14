@@ -5,6 +5,7 @@ import {
   TYPST_DEFAULT_TEXT_PT,
   EDITOR_FONT_PX,
   naturalScale,
+  normalizeUiZoom,
   previewScale,
   previewCanvasWidth,
   viewBoxWidthPt,
@@ -86,24 +87,68 @@ describe("previewCanvasWidth（画布显示宽度）", () => {
   });
 });
 
-describe("永不横向溢出（预览栏不许出现横向拖动，2026-09-14 用户要求）", () => {
-  // 用户原话：「预览模式和文档模式的内容不应该有横向拖动，而是自动换行，Alt+Z 只对代码起效」。
-  // 预览是固定版心的排版结果，塞不进去只能横向滚动 —— 所以画布宽度必须**恒 ≤ 实测栏宽**。
-  // 这一组是回归网：曾经把界面缩放乘进 containerWidth（想让预览跟着 zoom 变大），
-  // 实测 250% 缩放下预览栏横向溢出 166px，被用户否掉，已改回。
-  it("各种栏宽（含极窄）下画布都不超过栏宽", () => {
-    for (const containerWidth of [120, 236, 331, 404, 505, 614, 800, 1200, 2400]) {
-      const width = previewCanvasWidth({ containerWidth, pageWidthPt: A4_WIDTH_PT });
-      expect(width).toBeLessThanOrEqual(containerWidth + 1e-9);
+describe("界面缩放（uiZoom）：预览必须跟着变大", () => {
+  // 背景（2026-09-14 用户先后两次反馈「预览框大小还是没变」「预览框里面的字的大小还是没变」）：
+  // 界面缩放走 webview setZoom，预览栏的 CSS 宽度会一起变小；若拿这个变小后的宽度算"铺满"，
+  // 画布就缩回原样，引擎再放大一次正好抵消 —— 缩放对编辑区有效、对预览无效。
+  // 传 uiZoom 后按缩放前的栏宽算，画布 CSS 宽度保持 100% 时的值，由引擎把它真正放大（1.5 档大 1.5 倍）。
+  // 代价：页面是固定版心，放大到超过栏宽时预览栏出现横向滚动条（"跟着变大"与"永不横向滚动"只能二选一，
+  // 用户选了前者；配套的"左缘可达"见 +page.svelte 的 .preview-paper { margin-inline: auto }）。
+
+  it("150%：画布 CSS 宽度保持 100% 时的值，物理尺寸由引擎放大 1.5 倍", () => {
+    const zoomedContainer = 331; // 1040px 窗口在 150% 下量到的栏宽
+    const at100 = previewCanvasWidth({ containerWidth: 505, pageWidthPt: A4_WIDTH_PT });
+    const zoomed = previewCanvasWidth({
+      containerWidth: zoomedContainer,
+      pageWidthPt: A4_WIDTH_PT,
+      uiZoom: 1.5,
+    });
+    // 不传 uiZoom 会缩回 331（这就是"预览没变"的现场）；传了之后与 100% 时的 505 基本一致
+    expect(previewCanvasWidth({ containerWidth: zoomedContainer, pageWidthPt: A4_WIDTH_PT })).toBeCloseTo(331, 10);
+    expect(zoomed).toBeCloseTo(zoomedContainer * 1.5, 10);
+    expect(Math.abs(zoomed - at100) / at100).toBeLessThan(0.05);
+    // 物理尺寸（CSS × 缩放）真的变大 —— 用户要的就是这个
+    expect((zoomed * 1.5) / at100).toBeGreaterThan(1.4);
+  });
+
+  it("缩放 200% 且栏宽换算后超过自然尺寸：仍被自然系数夹住（字号仍与编辑区一致）", () => {
+    const naturalWidth = A4_WIDTH_PT * naturalScale(EDITOR_FONT_PX);
+    const width = previewCanvasWidth({
+      containerWidth: 600,
+      pageWidthPt: A4_WIDTH_PT,
+      uiZoom: 2,
+    });
+    expect(width).toBeCloseTo(naturalWidth, 10);
+  });
+
+  it("缩小到 50%：铺满分支按缩放前的栏宽算（引擎再把它缩一半）", () => {
+    // 50% 缩放时 CSS 视口是窗口的两倍宽：量到的栏宽 800 → 换算回未缩放的 400，
+    // 等价于"100% 时这栏只有 400px"；物理尺寸 = 400 × 0.5 = 200（正好一半）。
+    const width = previewCanvasWidth({
+      containerWidth: 800,
+      pageWidthPt: A4_WIDTH_PT,
+      uiZoom: 0.5,
+    });
+    expect(width).toBeCloseTo(400, 10);
+  });
+
+  it("uiZoom 缺省 / 非法值：按 1 处理（老调用方行为不变）", () => {
+    const base = previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT });
+    for (const uiZoom of [undefined, 0, -1, NaN, Infinity]) {
+      expect(previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT, uiZoom })).toBeCloseTo(
+        base,
+        10,
+      );
     }
   });
 
-  it("宽栏时画布等于自然尺寸、比栏宽小 —— 这是「字号恒定」的设计，不是溢出", () => {
-    const naturalWidth = A4_WIDTH_PT * naturalScale(EDITOR_FONT_PX);
-    expect(previewCanvasWidth({ containerWidth: 1200, pageWidthPt: A4_WIDTH_PT })).toBeCloseTo(
-      naturalWidth,
-      10,
-    );
+  it("normalizeUiZoom：只认有限正数", () => {
+    expect(normalizeUiZoom(1.3)).toBe(1.3);
+    expect(normalizeUiZoom(undefined)).toBe(1);
+    expect(normalizeUiZoom(0)).toBe(1);
+    expect(normalizeUiZoom(-2)).toBe(1);
+    expect(normalizeUiZoom(NaN)).toBe(1);
+    expect(normalizeUiZoom(Infinity)).toBe(1);
   });
 });
 
