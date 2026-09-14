@@ -1358,5 +1358,112 @@ check(
 await c.screenshot(SHOT("wysiwyg-30-preview-no-hscroll"));
 await c.send("Emulation.clearDeviceMetricsOverride");
 
+// ---------------------------------------------------------------------------
+// 第 31 组：输入 `$` 自动配对（用户要求「加入功能：自动补全 $$」）
+// 形态：独占一行 → 补出 `$  $`（**行间**公式脚手架，内侧两侧留白才是 typst 的 display 公式），
+// 光标落在中间，敲字直接得到 `$ x $`；行内（同行还有别的字）→ 补 `$$`，敲字得到 `$x$`；
+// 右侧已有闭合 `$` → 只把光标移过去（连按两下 `$` 不会插出 `$ $|$  $` 这种垃圾）。
+// 判定与边界（公式内部 / 代码区 / 注释 / raw / 字符串 / `\$` / 退格整对删）都在
+// auto-pair.test.ts 里用纯函数锁住，这里验的是"真的敲进去、DOM 里长什么样"。
+// ---------------------------------------------------------------------------
+console.log("31) 输入 $ 自动配对");
+await c.evaluate(`localStorage.clear()`); // 回到默认写作模式（live-preview 开着，能看见块级公式）
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+await c.click(400, 300);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 300));
+
+const cmText = `document.querySelector(".cm-content").innerText`;
+
+// ① 空行：行间公式脚手架
+await c.type("$");
+await new Promise((r) => setTimeout(r, 300));
+const scaffold = await c.evaluate(cmText);
+check("空行输入 $ 自动补出 `$  $`（行间公式脚手架）", scaffold === "$  $", JSON.stringify(scaffold));
+
+await c.type("x");
+await new Promise((r) => setTimeout(r, 300));
+const scaffoldTyped = await c.evaluate(cmText);
+check("光标在中间：接着敲字直接得到 `$ x $`", scaffoldTyped === "$ x $", JSON.stringify(scaffoldTyped));
+
+// 光标移开（End 之后还要换行：光标停在公式末端时算"碰到公式"，按设计仍展开源码）看渲染
+await c.key("End", { code: "End", keyCode: 35 });
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+await new Promise((r) => setTimeout(r, 900));
+const scaffoldRender = await c.evaluate(`(() => {
+  const raw = window.__browserDevLastMath;
+  return {
+    blocks: document.querySelectorAll(".cm-math-block").length,
+    inline: document.querySelectorAll(".cm-math-widget").length,
+    lastMath: raw ? { body: raw.body, display: raw.display } : null,
+  };
+})()`);
+check(
+  "脚手架补出来的是**行间**公式（渲染成块级 widget，桩收到 display:true）",
+  scaffoldRender.blocks === 1 &&
+    scaffoldRender.inline === 0 &&
+    scaffoldRender.lastMath?.display === true,
+  JSON.stringify(scaffoldRender),
+);
+await c.screenshot(SHOT("wysiwyg-31-autopair-display"));
+
+// ② 行内：同行还有别的字
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await c.type("前文 ");
+await c.type("$");
+await c.type("y");
+await new Promise((r) => setTimeout(r, 400));
+const inlineTyped = await c.evaluate(cmText);
+check("行内有别的字时补的是行内配对，敲字得到 `前文 $y$`", inlineTyped === "前文 $y$", JSON.stringify(inlineTyped));
+
+// ③ 连按两下 `$`：右侧已有闭合符 → 跳过，不插垃圾
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await c.type("$");
+await new Promise((r) => setTimeout(r, 300));
+const beforeSecond = await c.evaluate(cmText);
+await c.type("$");
+await new Promise((r) => setTimeout(r, 300));
+const afterSecond = await c.evaluate(cmText);
+check(
+  "连按两下 $ 只得到一对（第二下是跳过闭合符，不产生 `$ $|$  $`）",
+  beforeSecond === "$  $" && afterSecond === beforeSecond,
+  `${JSON.stringify(beforeSecond)} → ${JSON.stringify(afterSecond)}`,
+);
+
+// ④ 退格：空配对一次删干净（先把光标放回配对中间：清空重来，否则上一拍的"跳过"把光标留在闭合符之后）
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await c.type("$");
+await new Promise((r) => setTimeout(r, 300));
+const beforePairDelete = await c.evaluate(cmText);
+check("重来一次仍是 `$  $`（脚手架与光标位置稳定）", beforePairDelete === "$  $", JSON.stringify(beforePairDelete));
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 300));
+const afterBackspace = await c.evaluate(cmText);
+check(
+  "在空配对里退格一次就整对删掉（不留 `$ $`）",
+  afterBackspace.trim() === "",
+  JSON.stringify(afterBackspace),
+);
+
+// ⑤ 代码区不配对（`#let s = 1` 末尾还在写代码）
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await c.type("#let s = 1");
+await c.type("$");
+await new Promise((r) => setTimeout(r, 400));
+const codeCase = await c.evaluate(cmText);
+check("代码区里不配对（只插入一个 `$`）", codeCase === "#let s = 1$", JSON.stringify(codeCase));
+
+// 收尾：清回空文档
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 200));
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();
