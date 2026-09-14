@@ -14,7 +14,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 - **发行状态（2026-09-14 实测）：`v0.7.3` 已发布并标记 Latest（首个带自动更新的版本，资产含 `latest.json` + 安装包 + `.sig`）；`v0.7.2`、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）。发版时 `release.yml` 建的仍是**草稿**，**必须手动 Publish**（或按下方约定直接发）——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效。
   - 发布后建议验一次：`gh api repos/Z3O1/Typst-pad/releases/latest --jq .tag_name` 应为新 tag；清单内容用 `gh api repos/Z3O1/Typst-pad/releases/assets/<latest.json 的 id> -H "Accept: application/octet-stream"` 取回核对（version / url / signature）。**注意本机 curl 访问 github.com 一律 404（网络过滤，连仓库首页也 404），别据此判断发布有问题**。
 - **自动更新已接入（0.7.3）**：`tauri-plugin-updater` + 更新弹窗/状态栏提示/设置开关；签名密钥已生成并设进仓库 Secrets，`latest.json` 由 CI 生成。**注意顺序**：`tauri.conf.json` 里已经有 pubkey，所以任何 `tauri build`（含 main 的 CI）都必须拿得到私钥，**不要删那两个 Secrets**；0.7.3 之前的版本里没有 updater，**要手动装一次 0.7.3 才进入自动更新通道**（之后 0.7.4 起才能自动升）。细节见「自动更新（tauri-plugin-updater）数据流」与「CI / 发布约定」。
-- 最近两轮：0.7.2→0.7.3 加的是**自动更新**（含签名密钥约束与 `latest.json` 发版链路）；0.7.1→0.7.2 修的是「写作模式」的可用性 bug（Alt 抢焦点、装饰异常导致编辑区卡死、空正文标题崩溃、整行选区底色凸出）。**这些经验都在下面「改动前的红线」和各章节的"勿回退"里，动编辑器/装饰代码前先扫一遍。**
+- 最近几轮（都在 0.7.3 之后、**未发版**）：**界面缩放**（Ctrl+滚轮，`zoom.ts` + webview `setZoom`）与**正文字体设置**（含额外字体目录、中文回退修复）；0.7.2→0.7.3 是**自动更新**（含签名密钥约束与 `latest.json` 发版链路）；0.7.1→0.7.2 修的是「写作模式」的可用性 bug（Alt 抢焦点、装饰异常导致编辑区卡死、空正文标题崩溃、整行选区底色凸出）。**这些经验都在下面「改动前的红线」和各章节的"勿回退"里，动编辑器/装饰代码前先扫一遍。**
 
 **5 分钟上手**
 
@@ -89,6 +89,8 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 | `cf364f6` | 自动更新（tauri-plugin-updater）：静默检查 + 弹窗确认下载安装 + `latest.json` 发版链路（**引入签名密钥约束**，见红线 10） |
 | `a43bcad` | 版本号 0.7.2 → 0.7.3（首个带自动更新的版本） |
 | `68c8df7` / `adab021` | Ctrl+滚轮调整分栏比例（`pane-ratio.ts` + 第 24 组验收）；`adab021` 是修正：手势原写成 Ctrl+Shift+滚轮，**头less 全绿但真机没反应**（Shift 把纵向滚动转成横向），改成 Ctrl+滚轮并同时读 deltaY/deltaX。0.7.4 的内容 |
+| `f2d6e17` | 正文字体 / 额外字体目录设置 + 中文回退修复（**上一轮会话遗留的未提交改动**，本轮原样收进一个独立提交；要回退 revert 它即可） |
+| `400be1f` | **Ctrl+滚轮 改成缩放整个界面**（`zoom.ts` + webview `setZoom`；第 24 组验收重写为缩放，92 项）。上一轮理解错了需求：做成了"改分栏宽度"（`68c8df7`/`adab021`），而用户要的是「字太小 → 字变大」，`pane-ratio.ts` 随之删除 |
 
 **文档地图**
 
