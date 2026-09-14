@@ -1556,6 +1556,13 @@
    * label 用时间戳保证唯一（Tauri 要求 label 唯一，重名会创建失败），前缀 `editor-` 必须与
    * capabilities/default.json 的 `windows: ["main", "editor-*"]` 对得上 —— 否则新窗口里的
    * 文件读写会在 ACL 层被拒（0.2.x 踩过，见提交 b187118）。
+   *
+   * **另外还得有 create 的权限**：`new WebviewWindow()` 走的是 `plugin:webview|create_webview_window`，
+   * 需要在 capabilities/default.json 里显式写 `core:webview:allow-create-webview-window` ——
+   * `core:webview:default`（我们引的 `core:default` 里含它）**没有**这一条，缺了就在**运行时**被拒：
+   * 状态栏原文「新建窗口失败：Command plugin:webview|create_webview_window not allowed by ACL」
+   * （0.7.9 就是这样发出去的）。这类 ACL 拒绝浏览器验收碰不到，所以另加了
+   * `scripts/capabilities.test.mjs` 做静态体检：改这里的 Tauri 调用后，去那张表里补一行。
    */
   function openNewWindow() {
     if (!isTauri()) return; // 浏览器预览没有多窗口（应用本身也只在桌面版渲染）

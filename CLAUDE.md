@@ -10,7 +10,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 
 **交接时的状态（2026-09-14）**：
 
-- 版本 `0.7.9`（**界面与快捷键的收尾版**：`Esc` 关弹窗、`Ctrl+Shift+N` 新建窗口（这个手势自 0.7.0 起被 Shift 格式表吞掉，本次修回）、公式里敲第三个 `$` 不再多插一个（用户报「`$ 1 $` → `$1$$`」）、预览按栏宽重排永不横滚、缩放复核换判据并把实测数据写进状态栏）。回看：**0.7.4 是「自动更新真的能生效」的第一个版本**（0.7.3 引入 updater 但仓库当时私有，客户端拉不到清单；仓库公开 + 0.7.4 发布之后这条链路才第一次跑通）；**0.7.8 起启动就检查更新、点过「稍后」不再自动打扰**。`main` 与 `origin/main` 同步；每次打 tag 后 `release.yml` 建草稿 Release，**由后台一次性任务自动 Publish**（不必等、不必问）。**发版后的验收就照这两条 curl 做**（见下）。
+- 版本 `0.7.9`（**界面与快捷键的收尾版**：`Esc` 关弹窗、`Ctrl+Shift+N` 新建窗口、公式里敲第三个 `$` 不再多插一个（用户报「`$ 1 $` → `$1$$`」）、预览按栏宽重排永不横滚、缩放复核换判据并把实测数据写进状态栏）。**注意：0.7.9 的「新建窗口」在真机上是坏的** —— `new WebviewWindow()` 需要的 `core:webview:allow-create-webview-window` 不在 capability 里，点下去只会在状态栏报「Command plugin:webview|create_webview_window not allowed by ACL」（用户装上 0.7.9 后立刻反馈）。权限已补、并加了 `scripts/capabilities.test.mjs` 静态体检，**等下一次发版（0.7.10）才真正生效**。回看：**0.7.4 是「自动更新真的能生效」的第一个版本**（0.7.3 引入 updater 但仓库当时私有，客户端拉不到清单；仓库公开 + 0.7.4 发布之后这条链路才第一次跑通）；**0.7.8 起启动就检查更新、点过「稍后」不再自动打扰**。`main` 与 `origin/main` 同步；每次打 tag 后 `release.yml` 建草稿 Release，**由后台一次性任务自动 Publish**（不必等、不必问）。**发版后的验收就照这两条 curl 做**（见下）。
 - **发行状态（2026-09-14 实测）：`v0.7.9`、`v0.7.8`、`v0.7.7`、`v0.7.6`、`v0.7.5`、`v0.7.4`、`v0.7.3`、`v0.7.2`、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）。0.7.9 已匿名验证过：`latest.json` 200 / `version: 0.7.9` / 安装包 200（16762871 字节）/ **签名与配置里的公钥验签通过**（keyid `4e79c0dd71347bb5` + ed25519 verify：公钥取 `plugins.updater.pubkey` 第二行，签名的 alg `ED` = 先 BLAKE2b-512 再签，node:crypto 就能验）。发版时 `release.yml` 建的仍是**草稿**，**必须手动 Publish**（或按下方约定直接发）——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效。
   - 发布后建议验一次：`gh api repos/Z3O1/Typst-pad/releases/latest --jq .tag_name` 应为新 tag；清单内容用 `gh api repos/Z3O1/Typst-pad/releases/assets/<latest.json 的 id> -H "Accept: application/octet-stream"` 取回核对（version / url / signature）。**匿名可达性是自动更新的硬前提，验这条最直接**：
     ```bash
@@ -34,7 +34,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（28 个文件 / 441 项）
+npm test                 # 前端 + 脚本单测（29 个文件 / 453 项）
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（35 passed / 1 ignored）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
@@ -200,6 +200,7 @@ src-tauri/fonts/            # 打包字体（见"字体"：**不放 static/**）
 - `svelte.config.js`：`@sveltejs/adapter-static`（SPA，`fallback: index.html`）。
 - `.github/workflows/`：`ci.yml`（test + build-bundles）、`release.yml`（tag 发草稿 Release），约定见"CI / 发布约定"。
 - `scripts/`：`check-fonts.mjs`（字体魔数校验）、`download-fonts.mjs`（重新下载字体）、`browser-check/`（CDP 验收）、`install-vs-buildtools.bat`/`verify-app.bat`（Windows 辅助）。
+  `scripts/capabilities.test.mjs`：**Tauri capability 静态体检**（前端用到的插件命令 → 必须在 `src-tauri/capabilities/default.json` 里有对应权限；ACL 拒绝只在真机运行时才出现，浏览器验收碰不到，见「多窗口与页面级按键路由」）。
   **历史遗留（wasm 时代，依赖已移除的 `@myriaddreamin/typst.ts`，跑不起来、也无人引用）**：`debug-math*.mjs`、`debug-svg.mjs`、`debug-fontinfo.mjs`、`verify-sanitize.mjs`。
 - `docs/`：`WYSIWYG-调研.md`（所见即所得的方案调研）；`CHANGELOG.md` 按 Keep a Changelog 维护；`.browser-check/` 为验收产物（已 gitignore）。
 
@@ -320,6 +321,7 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   - **Esc 的语义取"破坏性最小"的那个关闭**：未保存确认 = 取消（窗口不关）、**更新弹窗 = 只收起来（绝不写 `updateDismissedAt`** —— 那等于替用户点了「稍后」= 以后再也不自动弹更新窗）、设置 = 放弃草稿（同「关闭」按钮）、关于 = 关掉。
   - 菜单项的全局快捷键（Ctrl+N/O/S/,/P）仍由 MenuBar 处理（它 `preventDefault` 后我们的路由认 `ignored`，不会双重触发）；菜单里新增「文件 → 新建窗口」，右侧灰字 `Ctrl+Shift+N` **只是提示**（`menu-keys.shortcutMatches` 排除 Shift，不会命中）。
 - **新建窗口（`Ctrl+Shift+N`）**：`new WebviewWindow('editor-<时间戳>', { url: "/", … })`。label 前缀必须是 `editor-`——`capabilities/default.json` 的 `windows: ["main", "editor-*"]` 靠它把窗口纳入 ACL（0.2.x 踩过：不在名单里的窗口文件功能全被拒，提交 `b187118`）。创建失败（label 撞车/系统拒绝）会报到状态栏（`tauri://error`），发布版没有 devtools，静默失败等于"点了没反应"。
+  - **ACL 是这条的两个坑，都要有**：① 窗口 label 要落在 capability 的 `windows` 名单里（`["main", "editor-*"]`）——不在名单里的窗口连**应用自己的命令**都会被拒（0.2.x 踩过，提交 `b187118`）；② `new WebviewWindow()` 走的是 `plugin:webview|create_webview_window`，必须在`capabilities/default.json` 里**显式**写 `core:webview:allow-create-webview-window`：`core:webview:default`（`core:default` 里含的）**没有**这一条。缺了它不会编译报错、也不会被浏览器验收发现，只在**真机点下去时**报 「新建窗口失败：Command plugin:webview|create_webview_window not allowed by ACL」（**0.7.9 就是这样发出去的**：加了这个功能、但没人真机点过，用户装完立刻反馈）。现在有 `scripts/capabilities.test.mjs` 兜底：它把「前端用到的插件命令 → 需要的权限」钉成一张表（改前端 Tauri 调用后要补一行），并核对窗口名单与权限标识符是否拼错。
 - **副窗口 = 空白草稿窗口**（`isSecondaryWindow = getCurrentWindow().label !== "main"`，取不到 label 时按主窗口处理）。会话（未保存内容 / 当前文件 / 脏标记）**只属于主窗口**：
   - 副窗口起来**不恢复**上次内容，并在状态栏说明「新窗口：这里的修改不会记进「上次内容」」；
   - 写存档走 `saveState(…, { session: false })` —— 先读回存档、把会话字段原样带过去再写（`persistence.mergeSessionFields`）。**否则副窗口改一次主题就把主窗口的未保存内容换成了它那份空文档**（存档只有一个 localStorage key，两个窗口共用一个源）；
