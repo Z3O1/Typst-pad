@@ -2439,6 +2439,74 @@ check(
 );
 await c.screenshot(SHOT("wysiwyg-36-auto-indent"));
 
+console.log("37) 帮助 → 关于");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+const aboutProbe = `(() => {
+  const modal = document.querySelector(".about-modal");
+  return {
+    open: !!modal,
+    text: modal ? modal.innerText : "",
+    buttons: modal ? Array.from(modal.querySelectorAll(".modal-actions .modal-close")).map((e) => e.textContent.trim()) : [],
+    openUrls: window.__browserDevOpenUrls ?? [],
+  };
+})()`;
+
+await openMenu("帮助");
+await c.waitFor(`document.body.innerText.includes("关于 Typst-pad")`, { timeout: 5000 });
+await clickMenuItem("关于 Typst-pad");
+await new Promise((r) => setTimeout(r, 400));
+const about = await c.evaluate(aboutProbe);
+check("菜单「帮助 → 关于 Typst-pad」能打开关于弹窗", about.open, JSON.stringify(about));
+check(
+  "关于弹窗里的版本号来自运行时（桩给的 0.0.0-browserdev，不是页面里写死的字符串）",
+  about.text.includes("版本 0.0.0-browserdev"),
+  JSON.stringify(about.text.slice(0, 120)),
+);
+// 描述必须覆盖**默认的写作模式**（旧文案只写「左编辑 / 右实时预览」，那是源代码模式的形态）
+check(
+  "描述改成了两套 UI 的实际形态（写作模式 + 源代码模式），不再只写「左编辑 / 右实时预览」",
+  about.text.includes("写作模式") &&
+    about.text.includes("源代码模式") &&
+    !about.text.includes("左编辑") &&
+    !about.text.includes("右实时预览"),
+  JSON.stringify(about.text.slice(0, 200)),
+);
+check(
+  "两个动作按钮都在（项目主页 / 关闭）",
+  about.buttons.includes("项目主页") && about.buttons.includes("关闭"),
+  JSON.stringify(about.buttons),
+);
+
+await c.screenshot(SHOT("wysiwyg-37-about")); // 截图留在弹窗打开时（关闭后截就只有主界面）
+
+// 点「项目主页」：必须带着项目地址走到 opener 插件（权限 opener:default 的 allow-open-url）
+await c.evaluate(`(() => {
+  const el = Array.from(document.querySelectorAll(".about-modal .modal-actions .modal-close"))
+    .find((e) => e.textContent.trim() === "项目主页");
+  el.click();
+})()`);
+await new Promise((r) => setTimeout(r, 500));
+const opened = await c.evaluate(aboutProbe);
+check(
+  "点「项目主页」→ opener 收到项目地址，弹窗收起",
+  opened.openUrls.includes("https://github.com/Z3O1/Typst-pad") && !opened.open,
+  JSON.stringify(opened),
+);
+
+// Esc 关关于弹窗（about 在 app-keys 的弹窗优先级表里）
+await openMenu("帮助");
+await c.waitFor(`document.body.innerText.includes("关于 Typst-pad")`, { timeout: 5000 });
+await clickMenuItem("关于 Typst-pad");
+await new Promise((r) => setTimeout(r, 400));
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 400));
+const afterEscAbout = await c.evaluate(aboutProbe);
+check("Esc 关掉关于弹窗", !afterEscAbout.open, JSON.stringify(afterEscAbout));
+
 // 收尾：清回空文档并回写作模式
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });

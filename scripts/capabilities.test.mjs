@@ -35,7 +35,7 @@ const REQUIRED = [
   { permission: "core:webview:allow-set-webview-zoom", usedBy: "Ctrl+滚轮界面缩放（setZoom）" },
   { permission: "dialog:default", usedBy: "打开 / 保存 / 另存为 系统对话框" },
   { permission: "updater:default", usedBy: "自动更新检查与下载安装" },
-  { permission: "opener:default", usedBy: "打开外部链接" },
+  { permission: "opener:default", usedBy: "打开外部链接（关于弹窗的「项目主页」→ plugin:opener|open_url）" },
   { permission: "core:default", usedBy: "基础能力（事件、窗口查询、路径、is-focused 等）" },
 ];
 

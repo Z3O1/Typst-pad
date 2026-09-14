@@ -451,6 +451,22 @@ async function handleCommand(
     // （含更新说明的 Markdown 渲染）也能被验收覆盖——否则这条 UI 只有真发版时才看得到。
     // 另外**记一笔调用次数**（`window.__browserDevUpdaterChecks`）：第 34 组据此断言
     // 「关掉设置开关后启动**一次都没查**」，而不是只看"弹窗没出现"。
+    // 版本号（关于弹窗用）：`getVersion()` 走的就是这条命令。给一个**明显是假的**版本，
+    // 验收据此断言"弹窗里的版本号确实来自运行时"，而不是页面里硬编码的字符串。
+    case "plugin:app|version":
+      notify(command);
+      return "0.0.0-browserdev";
+    // 外部链接（关于弹窗的「项目主页」）：浏览器里没有系统浏览器可开，但**记录请求的 URL**，
+    // 让验收能断言"点下去确实带着项目地址走到了 opener 插件"。
+    case "plugin:opener|open_url": {
+      const url = typeof a.url === "string" ? a.url : null;
+      const w = window as unknown as Record<string, unknown>;
+      const urls = Array.isArray(w.__browserDevOpenUrls) ? (w.__browserDevOpenUrls as unknown[]) : [];
+      urls.push(url);
+      w.__browserDevOpenUrls = urls;
+      notify(command);
+      return null;
+    }
     case "plugin:updater|check": {
       notify(command);
       const w = window as unknown as Record<string, unknown>;

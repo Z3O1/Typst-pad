@@ -28,6 +28,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { loadState, saveState } from "$lib/persistence";
   import { decideAppKey, topModal } from "$lib/app-keys";
   import type { AppModal } from "$lib/app-keys";
@@ -197,6 +198,8 @@
   /** open-file 广播的兜底定时器（多窗口：没窗口有焦点时由主窗口延迟接，见 claimOpenFileOnBroadcast） */
   let pendingOpenTimer: ReturnType<typeof setTimeout> | null = null;
   let showAbout = $state(false);
+  /** 关于弹窗里的「项目主页」地址（开源仓库；关于弹窗与打开失败文案共用） */
+  const PROJECT_URL = "https://github.com/Z3O1/Typst-pad";
   // 关于弹窗版本号：运行时经 getVersion 异步读取（tauri.conf.json 的 version），
   // 未返回前显示占位符，避免每次发版漏更新硬编码版本号
   let appVersion = $state("");
@@ -474,6 +477,22 @@
   function onClosePromptDiscard() {
     showClosePrompt = false;
     getCurrentWindow().destroy();
+  }
+
+  /**
+   * 关于弹窗里的「项目主页」：交给系统默认浏览器打开（opener 插件，权限 `opener:default`
+   * 里的 `allow-open-url`；**加新的外部链接时别忘了它还在权限表里**）。
+   * 失败只写状态栏 + 调试日志（不弹错窗）：这只是一种"顺手点一下"的动作。
+   */
+  async function openProjectPage() {
+    try {
+      await openUrl(PROJECT_URL);
+      showAbout = false;
+      statusText = "已在浏览器打开项目主页";
+    } catch (e) {
+      dbg.log("about", "打开项目主页失败", e);
+      statusText = `打开项目主页失败：${PROJECT_URL}`;
+    }
   }
 
   /** 关闭弹窗：取消，保持窗口打开 */
@@ -2186,18 +2205,37 @@
         if (e.target === e.currentTarget) showAbout = false;
       }}
     >
-      <div class="modal">
+      <div class="modal about-modal">
         <h3 class="modal-title">Typst-pad</h3>
         <p class="modal-text">版本 {appVersion || "…"}</p>
-        <p class="modal-text">Typora 式布局的 Typst 桌面编辑器：左编辑 / 右实时预览。</p>
-        <p class="modal-text">MIT License © 2026 Z3O1</p>
-        <span
-          class="modal-close"
-          role="button"
-          tabindex="0"
-          onclick={() => (showAbout = false)}
-          onkeydown={(e) => e.key === "Enter" && (showAbout = false)}
-        >关闭</span>
+        <p class="modal-text">
+          仿 Typora 的 Typst 桌面编辑器：<strong>写作模式</strong>（默认）整页纸张，公式与标记就地排版，
+          光标 / 选区进入即展开源码；<strong>源代码模式</strong>（Ctrl+/）双栏对照，源码 + 整页预览。
+        </p>
+        <p class="modal-text">
+          排版由<strong>内置的 typst 引擎</strong>在本机完成：不联网，文档不出本机。
+        </p>
+        <p class="modal-text about-note">
+          MIT License © 2026 Z3O1 · 内置字体 Noto Serif CJK / Libertinus / New Computer Modern /
+          DejaVu Sans Mono 遵循各自的开源许可
+        </p>
+        <div class="modal-actions">
+          <span
+            class="modal-close"
+            role="button"
+            tabindex="0"
+            title={PROJECT_URL}
+            onclick={openProjectPage}
+            onkeydown={(e) => e.key === "Enter" && openProjectPage()}
+          >项目主页</span>
+          <span
+            class="modal-close"
+            role="button"
+            tabindex="0"
+            onclick={() => (showAbout = false)}
+            onkeydown={(e) => e.key === "Enter" && (showAbout = false)}
+          >关闭</span>
+        </div>
       </div>
     </button>
   {/if}
@@ -2475,6 +2513,17 @@
   .modal-close:hover {
     border-color: var(--accent);
     color: var(--accent);
+  }
+
+  /* 关于弹窗：正文长一点，限宽换行才好看（其余弹窗是标签 + 输入框，不需要） */
+  .about-modal {
+    max-width: 460px;
+    line-height: 1.7;
+  }
+
+  .about-note {
+    font-size: 12px;
+    color: var(--fg-dim);
   }
 
   /* 关闭确认弹窗（纯静态遮罩：不响应点击，必须选择按钮） */
