@@ -317,7 +317,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 - `ci.yml`：`test` job（ubuntu）push main/PR 跑 类型检查 → 单测 → 前端构建 → `cargo check`（**首次编译 typst 依赖树较慢**，之后命中缓存）；`build-bundles`（windows）**main push 或 workflow_dispatch 触发**（PR 不构建），Rust 缓存用 `shared-key: tauri-build-windows`（必须与 `release.yml` 相同，否则 release job 读不到缓存）。
 - `release.yml`：`v*` tag 触发，自行 checkout + 构建 + 发草稿 Release（不依赖 ci.yml 的 artifact）。发布构建吃 main 分支写入的缓存。
 - **自动更新与签名密钥（2026-09-14 接入）**：
-  - 私钥/密码存在仓库 Secrets：`TAURI_SIGNING_PRIVATE_KEY`（`tauri signer generate` 的 `.key` 文件内容）+ `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。**本地备份不在仓库里**（`.updater-keys/` 已 gitignore，只在本机；丢了就再也发不出更新）。
+  - 私钥/密码存在仓库 Secrets：`TAURI_SIGNING_PRIVATE_KEY`（`tauri signer generate` 的 `.key` 文件内容）+ `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。**本机备份有两份（2026-09-14 补的第二份）**：仓库内的 `.updater-keys/`（已 gitignore，但**它在工作区里**——`git clean -xfd` 或误删仓库就一起没了）与 `~/.tauri/`（`typst-pad.key` / `.key.pub` / `password.txt`，0600）。丢了就再也发不出更新，所以别只留工作区那一份；本地打包用 `TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/typst-pad.key`。
   - **pubkey 已写入 `tauri.conf.json` → 所有 `tauri build` 都必须有私钥**：缺了会直接失败（CLI 原文 "A public key has been found, but no private key"），所以 `ci.yml` 的 `build-bundles` 与 `release.yml` 的构建步骤都传了这两个 env。**推论：Secrets 缺失时 main 的 CI 会红**，别当成缓存问题排查；PR 不跑 `build-bundles`，fork PR 也不需要密钥。
   - 构建后由 `node scripts/generate-latest-json.mjs` 生成 `latest.json`（`ci.yml` 里只验证"生成得出来"，`release.yml` 里与安装包一起作为 Release 资产上传）。脚本坏了要在 main 上就发现，别等到发版。
   - 生成的清单以 **NSIS** 的 `*-setup.exe` 为更新包（`bundle/**` 里同时上传 `.sig` 签名文件）。
