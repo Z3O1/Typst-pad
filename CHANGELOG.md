@@ -2,6 +2,28 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.10] - 2026-09-15
+
+主题是**把「看着能用、其实没生效」的几个问题修掉**：字体集合、缩放复核、写作模式的缩进，外加一个说得更清楚的关于弹窗。
+
+### Added
+
+- **回车换行继承上一行的缩进**（用户要求「换行时应该和上一行缩进一样」）：新行沿用**上一行行首的空白**（空格 / 制表符），光标停在行中间时拆出来的下半行也照样对齐；空行（只剩一串缩进）上回车会顺手清掉那串残留空白，连按回车不会堆出一串「带缩进的空行」。原来走 CodeMirror 默认的 `insertNewlineAndIndent`，它的缩进来自语言服务 / 语法树，在 typst 文档里**时灵时不灵**（两空格缩进能抄到、四空格抄不到、光标停在行中间时一律丢失）。
+- **Tab 一档缩进 = 4 个空格**（用户要求「Tab 应该是四格缩进」；CodeMirror 缺省是 2 个空格），Shift+Tab 反缩进一层。**回车那条不看这个单位**：新行照抄上一行**实际**的空白，所以老文档里已有的 2 空格 / 制表符缩进不会被改动，回车、Tab 两处宽度也不会互相打架。
+- **「帮助 → 关于」重写**：原来的描述只有一句「Typora 式布局的 Typst 桌面编辑器：左编辑 / 右实时预览」——那是**源代码模式**的形态，把默认的写作模式漏了。现在写清两套 UI 的实际形态，另加一行「排版由内置 typst 引擎在本机完成：不联网，文档不出本机」，末尾小字写许可与内置字体（Noto Serif CJK / Libertinus / New Computer Modern / DejaVu Sans Mono 各自遵循开源许可）；并新增**「项目主页」**按钮（交给系统默认浏览器打开仓库）。
+
+### Fixed
+
+- **`.ttc` / `.otc` 字体集合一个都没读进来**（用户问「为什么字体列表和 `typst fonts` 不一样」）：旧代码只收 `.ttf/.otf` **且只取文件里的第 0 个 face**，而 Windows 上 **SimSun / NSimSun（`simsun.ttc`）、Microsoft YaHei / Microsoft YaHei UI（`msyh.ttc`）、微软正黑体（`msjh.ttc`）、细明体（`mingliu.ttc`）全都是集合** —— 这些字体在应用里压根不存在，连默认中文字体链里写着的 `SimSun` / `Microsoft YaHei` 都永远命中不了（「改了字体没反应」的一条真实成因）。现在按 typst 自己的 `Font::iter` **逐 face 注册**（多 face 共享同一份数据，不多占内存），扩展名收 `.ttf/.otf/.ttc/.otc`；Windows 系统字体目录另补上**「仅为我安装」的 `%LOCALAPPDATA%\Microsoft\Windows\Fonts`**（用户自己装的字体默认落这里），Linux 补旧约定的 `~/.fonts`。
+- **「界面缩放未生效」的根因**（用户第五次反馈「还是会出现界面缩放未生效的 BUG」，此前四轮都没定成因）：是**我们自己**的锅 —— 引擎改档会让 `window.innerWidth` 跟着变、浏览器随即派发一次 `resize`，而那一刻用的是**改档前**的档位去重校 100% 基准，于是基准被压低成「新宽度」，复核再量必然读到 `1.0`：**引擎明明接受了，却被判成「引擎把 130% 限制在 100%（布局宽度没变）」，档位随即被拉回、界面真的弹回 100%**。现在改档后的沉降窗口内（以及复核进行中）收到的 `resize` 一律不重校基准，真正的引擎上限**照样识别得出来**；「未生效」文案还多写一条 `dpr` 判据做交叉验证 —— 下次一张截图就能分清「引擎真没动」与「我们自己量歪了」。
+- **0.7.9 的「新建窗口」在真机上被 ACL 拒**（用户装上 0.7.9 后立刻反馈「Command plugin:webview|create_webview_window not allowed by ACL」）：`new WebviewWindow()` 需要的 `core:webview:allow-create-webview-window` 不在 capability 里。权限已补，并加了 `scripts/capabilities.test.mjs` 静态体检（前端用到的每条插件命令 → 必须在 capability 里有对应权限），这类**只在真机运行时才暴露**的问题以后能在单测里拦住。
+
+### 验收
+
+- 浏览器交互验收 **209 项**（193 → 209）：新增第 36 组 11 项（回车继承缩进 + Tab 四格，真实按键路径）、第 37 组 6 项（帮助 → 关于：版本号来自运行时、描述覆盖写作模式、项目主页真的走到 opener、Esc 关闭），第 27 组 +3 项（缩放自己引发的 resize 不许把 100% 基准带偏 —— 把修复临时改回旧行为，这一组会一起变红）。
+- Rust 单测 **36 项**（+1）：`font_collection_registers_every_face` 现场合成一个双 face 的 `.ttc`（把打包的 Libertinus 包成集合、表偏移按规范整体平移），锁住「集合逐 face 注册」这条。
+- 前端单测 **30 个文件 / 469 项**；`npm run check` 0 errors / 1 warning（历史遗留的 `previewHost`）。
+
 ## [0.7.9] - 2026-09-14
 
 主题是**预览的横向滚动条、缩放的死区，以及两条快捷键**（`Esc` 关弹窗、`Ctrl+Shift+N` 新建窗口）。
