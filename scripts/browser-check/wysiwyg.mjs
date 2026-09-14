@@ -1478,11 +1478,12 @@ await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await new Promise((r) => setTimeout(r, 200));
 
 // ---------------------------------------------------------------------------
-// 第 32 组：状态栏最左的「警告 / 错误」计数（用户要求：「加入警告，用类似 vscode 的图标
-// （三角形内部有感叹号），放到错误数量左边。另外，把这两个东西都移到最左边」）
-// 形态：状态栏最左是一个 badge-group，里面**警告在左、错误在右**，两者都**常驻显示**（无问题是 0，
-// 与 VS Code 的状态栏一致）；警告图标是内联 SVG 三角形+感叹号（currentColor 上色；不用 ⚠ 字形——
-// 跨字体渲染差异大、且常常是彩色 emoji 字体），错误仍是 CSS 圆环 + ✕。
+// 第 32 组：状态栏最左的「错误 / 警告」计数（用户要求：「加入警告，用类似 vscode 的图标
+// （三角形内部有感叹号）…另外，把这两个东西都移到最左边」，并随后给了参照图：⊗ 0 ⚠ 0）
+// 形态：状态栏最左是一个 badge-group，里面**错误在左、警告在右**（与 VS Code 状态栏同序），
+// 两者都**常驻显示**（无问题是 0，与 VS Code 的状态栏一致）；警告图标是内联 SVG 三角形+感叹号
+// （currentColor 上色；不用 ⚠ 字形——跨字体渲染差异大、且常常是彩色 emoji 字体），
+// 错误仍是 CSS 圆环 + ✕。
 // 布局注意：状态文字靠 `:first-child` 定位的老写法会失效（它不再是第一个子元素），已改成
 // `.status-text` 类名匹配，`:not(.spacer):not(.status-text)` 两条都不能漏。
 // ---------------------------------------------------------------------------
@@ -1521,7 +1522,7 @@ const barProbe = `(() => {
 
 const bar0 = await c.evaluate(barProbe);
 check(
-  "状态栏最左是「警告 + 错误」计数组（排在状态文字之前）",
+  "状态栏最左是「错误 + 警告」计数组（排在状态文字之前）",
   bar0.firstIsBadgeGroup === true,
   JSON.stringify(bar0.order),
 );
@@ -1531,12 +1532,12 @@ check(
   `警告 ${bar0.warnCount} / 错误 ${bar0.errCount}`,
 );
 check(
-  "警告在错误左边，且两者紧贴状态栏左缘（移到最左边）",
+  "错误在警告左边（⊗ 0 ⚠ 0，与参照图一致），且错误紧贴状态栏左缘（移到最左边）",
   bar0.warnX !== null &&
     bar0.errX !== null &&
-    bar0.warnX < bar0.errX &&
-    bar0.warnX - bar0.barLeft <= bar0.padLeft + 1,
-  `警告 x=${bar0.warnX}，错误 x=${bar0.errX}，状态栏左缘 ${bar0.barLeft}（内边距 ${bar0.padLeft}）`,
+    bar0.errX < bar0.warnX &&
+    bar0.errX - bar0.barLeft <= bar0.padLeft + 1,
+  `错误 x=${bar0.errX}，警告 x=${bar0.warnX}，状态栏左缘 ${bar0.barLeft}（内边距 ${bar0.padLeft}）`,
 );
 check(
   "警告图标是 SVG 三角形+感叹号（不是 ⚠ 字形：有描边路径且无文字内容）",
@@ -1552,8 +1553,8 @@ await c.type('#set text(font: "微软雅黑")\n中文测试');
 await c.waitFor(`!!document.querySelector(".warning-badge.clickable")`, { timeout: 8000 });
 const barWarn = await c.evaluate(barProbe);
 check(
-  "出现警告后该徽标计数 > 0（且仍排在错误左边）",
-  barWarn.warnCount !== "0" && Number(barWarn.warnCount) > 0 && barWarn.warnX < barWarn.errX,
+  "出现警告后该徽标计数 > 0（且仍排在错误右边）",
+  barWarn.warnCount !== "0" && Number(barWarn.warnCount) > 0 && barWarn.errX < barWarn.warnX,
   `警告 ${barWarn.warnCount}（x=${barWarn.warnX}），错误 ${barWarn.errCount}（x=${barWarn.errX}）`,
 );
 await c.evaluate(`document.querySelector(".warning-badge").click()`);

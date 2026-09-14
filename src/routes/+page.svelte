@@ -1643,10 +1643,58 @@
   </main>
 
   <footer class="statusbar">
-    <!-- 左侧最前：编译警告 + 编译错误计数（VS Code 风格，三角形感叹号 / 圆圈叉）。
+    <!-- 左侧最前：编译错误 + 编译警告计数（VS Code 状态栏同序：⊗ 0 ⚠ 0，用户给的参照图）。
          两者都**常驻显示**（无问题时是 0）——它们在同一列里，常驻才能一眼看出"编译干净"，
-         也避免数字出现/消失时整条状态栏左右抖动。警告在错误**左边**（用户要求）。 -->
+         也避免数字出现/消失时整条状态栏左右抖动。错误在警告**左边**。 -->
     <span class="badge-group">
+      <span class="error-badge-wrap" bind:this={errorWrapEl}>
+        <span
+          class="error-badge"
+          class:clickable={hasErrorToShow(errorCount, lastNonPosError)}
+          class:active={showErrors}
+          role="button"
+          tabindex="0"
+          aria-expanded={showErrors}
+          onclick={() => {
+            if (hasErrorToShow(errorCount, lastNonPosError)) showErrors = !showErrors;
+          }}
+          onkeydown={(e) => {
+            if (e.key === "Enter" && hasErrorToShow(errorCount, lastNonPosError)) {
+              showErrors = !showErrors;
+            }
+          }}
+        >
+          <span class="error-icon">✕</span><span class="error-count">{errorCount}</span>
+        </span>
+        {#if showErrors}
+          <div
+            class="error-popover"
+            bind:this={errorPopoverEl}
+            role="dialog"
+            aria-label="编译错误列表"
+            style="transform: translate({errorPopoverClamp.translateX}px, {errorPopoverClamp.translateY}px);{errorPopoverClamp.maxWidth > 0 ? `max-width:${errorPopoverClamp.maxWidth}px` : ""}"
+          >
+            <div class="error-popover-title">
+              编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}
+            </div>
+            <div class="error-list">
+              {#each buildErrorListItems(editorDiagnostics, lastNonPosError) as item}
+                {#if item.kind === "located"}
+                  <button class="error-item" onclick={() => onErrorItemClick(item)}>
+                    <span class="error-item-loc">{formatErrorLoc(item)}</span>
+                    <span class="error-item-msg">{item.message}</span>
+                  </button>
+                {:else}
+                  <div class="error-item error-item-generic">
+                    <span class="error-item-loc">{formatErrorLoc(item)}</span>
+                    <span class="error-item-msg">{item.message}</span>
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </span>
       <span class="error-badge-wrap">
         <span
           class="error-badge warning-badge"
@@ -1692,54 +1740,6 @@
                   </button>
                 {:else}
                   <div class="error-item error-item-generic">
-                    <span class="error-item-msg">{item.message}</span>
-                  </div>
-                {/if}
-              {/each}
-            </div>
-          </div>
-        {/if}
-      </span>
-      <span class="error-badge-wrap" bind:this={errorWrapEl}>
-        <span
-          class="error-badge"
-          class:clickable={hasErrorToShow(errorCount, lastNonPosError)}
-          class:active={showErrors}
-          role="button"
-          tabindex="0"
-          aria-expanded={showErrors}
-          onclick={() => {
-            if (hasErrorToShow(errorCount, lastNonPosError)) showErrors = !showErrors;
-          }}
-          onkeydown={(e) => {
-            if (e.key === "Enter" && hasErrorToShow(errorCount, lastNonPosError)) {
-              showErrors = !showErrors;
-            }
-          }}
-        >
-          <span class="error-icon">✕</span><span class="error-count">{errorCount}</span>
-        </span>
-        {#if showErrors}
-          <div
-            class="error-popover"
-            bind:this={errorPopoverEl}
-            role="dialog"
-            aria-label="编译错误列表"
-            style="transform: translate({errorPopoverClamp.translateX}px, {errorPopoverClamp.translateY}px);{errorPopoverClamp.maxWidth > 0 ? `max-width:${errorPopoverClamp.maxWidth}px` : ""}"
-          >
-            <div class="error-popover-title">
-              编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}
-            </div>
-            <div class="error-list">
-              {#each buildErrorListItems(editorDiagnostics, lastNonPosError) as item}
-                {#if item.kind === "located"}
-                  <button class="error-item" onclick={() => onErrorItemClick(item)}>
-                    <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                    <span class="error-item-msg">{item.message}</span>
-                  </button>
-                {:else}
-                  <div class="error-item error-item-generic">
-                    <span class="error-item-loc">{formatErrorLoc(item)}</span>
                     <span class="error-item-msg">{item.message}</span>
                   </div>
                 {/if}
