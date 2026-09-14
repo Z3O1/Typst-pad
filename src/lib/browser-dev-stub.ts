@@ -26,6 +26,45 @@ function isFakeUpdateEnabled(): boolean {
   return new URLSearchParams(window.location.search).has("fakeupdate");
 }
 
+// ---------------------------------------------------------------------------
+// 模拟 webview 缩放（?browserdev=1&zoomsim=1）——只给验收脚本用。
+//
+// 真机（WebView2）上遇到过一个只在真机出现的问题：引擎没接受"放大"，而前端状态照旧涨到上限，
+// 于是从 250% 往下滚要滚十几档才有反应（用户反馈「放大根本没用，缩小有用」→「最大后无法用滚轮缩小」）。
+// 要在无头验收里复现，就得让 setZoom **真的有副作用**：这里给 window.devicePixelRatio 装一个
+// getter，让它等于"模拟的引擎缩放 × 基准 dpr"（Chromium 的 dpr 本来就是显示器缩放 × 页面缩放），
+// 页面侧的复核逻辑（+page.svelte 的 engineZoom）就能读到引擎到底接受了多少。
+// `&zoomcap=1` 再模拟「引擎只肯缩小、放大一律按 100% 处理」那台机器。
+// ---------------------------------------------------------------------------
+
+/** 模拟的"显示器缩放"：故意用非整数，确保换算不是靠 1:1 蒙对的 */
+const ZOOM_SIM_BASE_DPR = 1.25;
+
+function zoomSimMode(): { sim: boolean; cap: number | null } {
+  if (typeof window === "undefined") return { sim: false, cap: null };
+  const params = new URLSearchParams(window.location.search);
+  const sim = params.has("zoomsim");
+  const cap = sim && params.has("zoomcap") ? 1 : null;
+  return { sim, cap };
+}
+
+/** 装上"假 dpr"：dpr = 基准 × 引擎实际接受的缩放 */
+function installFakeDevicePixelRatio(initialZoom: number): (zoom: number) => void {
+  let applied = initialZoom;
+  Object.defineProperty(window, "devicePixelRatio", {
+    configurable: true,
+    get: () => ZOOM_SIM_BASE_DPR * applied,
+  });
+  return (zoom: number) => {
+    applied = zoom;
+  };
+}
+
+/** 模拟引擎缩放的状态（见"模拟 webview 缩放"一节的说明） */
+let zoomSimEnabled = false;
+let capAt100 = false;
+let zoomSimState: ((zoom: number) => void) | null = null;
+
 // 假的可用更新（形状与 @tauri-apps/plugin-updater 的 Update 元数据一致：
 // rid / currentVersion / version / date / body）。body 就是 latest.json 的 notes，
 // 即 CHANGELOG 该版本的 Markdown 原文；这里刻意混进一条 HTML 注入样本，
@@ -340,6 +379,10 @@ async function handleCommand(
       const value = typeof a.value === "number" ? a.value : null;
       const w = window as unknown as Record<string, unknown>;
       w.__browserDevLastZoom = value;
+      if (zoomSimState !== null && value !== null) {
+        // 模拟引擎：默认照单全收；`&zoomcap=1` 时模拟"放大一律不接受"的真机
+        zoomSimState(capAt100 ? Math.min(value, 1) : value);
+      }
       // 调用次数：界面缩放会"设一次 + 手势停下后再确认一次"（见 +page.svelte 的
       // applyUiZoom/scheduleZoomConfirm），验收据此锁定那个兜底重试确实发出去了。
       w.__browserDevZoomCalls = (typeof w.__browserDevZoomCalls === "number" ? w.__browserDevZoomCalls : 0) + 1;
@@ -387,6 +430,20 @@ export function installBrowserDevStub(): void {
   if ("__TAURI_INTERNALS__" in window) return; // 真 Tauri 环境绝不覆盖
   installed = true;
 
+  // 模拟引擎缩放的接线（见文件开头的说明）：装假 dpr + 记住"引擎接受的系数"写入口
+  const simMode = zoomSimMode();
+  zoomSimEnabled = simMode.sim;
+  capAt100 = simMode.cap !== null;
+  if (simMode.sim) {
+    // 初始 100%（界面启动时就是 100%，页面侧随后会校准/恢复档位）
+    const applySimulatedZoom = installFakeDevicePixelRatio(1);
+    zoomSimState = (zoom: number) => {
+      applySimulatedZoom(zoom);
+      const w = window as unknown as Record<string, unknown>;
+      w.__browserDevEngineZoom = zoom;
+    };
+  }
+
   const callbacks = new Map<number, (payload: unknown) => void>();
   let nextCallbackId = 1;
 
@@ -416,10 +473,12 @@ export function installBrowserDevStub(): void {
   };
 
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = internals;
-  // 标记桩已生效，并声明"这里的 setZoom 是假的"：页面据此**跳过缩放复核**
-  // （真 webview 的缩放会改 devicePixelRatio，桩不会，不跳过就会误报"缩放未生效"）。
+  // 标记桩已生效。`fakeZoom: true` = 这里的 setZoom **没有真实副作用**（页面据此跳过缩放复核，
+  // 否则会误报"缩放未生效"）；开了 zoomsim（假 dpr）时副作用是模拟出来的，复核要照常跑。
   // 用标记而不是 import：桩是 dev-only 模块，页面 import 它会把桩打进生产包。
-  (window as unknown as Record<string, unknown>).__browserDevStub = { fakeZoom: true };
+  (window as unknown as Record<string, unknown>).__browserDevStub = {
+    fakeZoom: !zoomSimEnabled,
+  };
 
   // 开发信息：确认桩已生效
   console.info(

@@ -78,6 +78,7 @@
     zoomLabel,
     zoomOut,
     ZOOM_CONFIRM_DELAY_MS,
+    ZOOM_MIN,
   } from "$lib/zoom";
 
   // 新建时默认空白文档（不再预填示例内容）
@@ -181,8 +182,12 @@
   let uiZoom = $state(ZOOM_DEFAULT);
   /** 缩放的"再确认一次"定时器（见 applyUiZoom / scheduleZoomConfirm） */
   let zoomConfirmTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 上一次设进去的缩放与当时的 devicePixelRatio（见 verifyZoomApplied） */
-  let zoomApplied: { zoom: number; dpr: number } | null = null;
+  /** 100% 时的 devicePixelRatio（≈ 显示器缩放），首次应用缩放前校准一次（见 ensureZoomCalibration） */
+  let dprAtZoom100: number | null = null;
+  /** 校准只做一次；并发调用共用同一个 promise */
+  let zoomCalibration: Promise<void> | null = null;
+  /** dpr 读数是否可信（null = 还没验证过，见 probeDprTracksZoom） */
+  let zoomDprTrusted: boolean | null = null;
   // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
   // Map 本身不需要响应式（变更后靠 mathVersion 代次通知编辑器重整装饰）
   const mathCache = new Map<string, MathRender>();
@@ -394,6 +399,8 @@
   async function applyUiZoom(zoom: number) {
     if (!isTauri()) return;
     const target = clampZoom(zoom);
+    // 先校准 100% 基线（只做一次），后面才能把 devicePixelRatio 换算成"引擎实际接受的档位"
+    await ensureZoomCalibration();
     try {
       await getCurrentWebview().setZoom(target);
       dbg.log("zoom", `set ${zoomLabel(target)}`);
@@ -414,35 +421,105 @@
         .setZoom(target)
         .then(() => {
           dbg.log("zoom", `confirm ${zoomLabel(target)}`);
-          verifyZoomApplied(target);
+          void verifyZoomApplied(target);
         })
         // 这次是兜底重试，失败只记日志（首次调用已经把失败报过了）
         .catch((e) => dbg.log("zoom", "confirm failed", e));
     }, ZOOM_CONFIRM_DELAY_MS);
   }
 
+  /** 浏览器开发桩的 setZoom 是假的吗（桩在 app.html 挂了 __browserDevStub；zoomsim 模式下是模拟的，照常复核） */
+  function zoomIsFaked(): boolean {
+    return (
+      (window as unknown as { __browserDevStub?: { fakeZoom?: boolean } }).__browserDevStub
+        ?.fakeZoom === true
+    );
+  }
+
   /**
-   * 复核 webview 到底有没有接受这个缩放系数。
-   *
-   * Chromium 的 `devicePixelRatio` 会随页面缩放一起变（WebView2 的 ZoomFactor 就是页面缩放），
-   * 所以「请求了不同的系数、dpr 却纹丝不动」就说明引擎没接受——桌面版上出现过
-   * 「放大根本没用、缩小有用」（用户反馈 2026-09-14），有这条复核下次就不必靠猜。
-   * 只在"系数确实变了、dpr 却没变"时才提示，平时不打扰。浏览器开发桩的 setZoom 是假的
-   * （不会改 dpr），那种环境下跳过（桩在 app.html 里挂了 __browserDevStub 标记）。
+   * 启动后校准一次 100% 基线：先设 100% 再读 `devicePixelRatio`，这样 dpr 就等于
+   * 显示器缩放本身（顺便排掉 WebView2"记住上次站点缩放"的干扰）。有了它就能把任意时刻的
+   * dpr 换算成**引擎实际接受的缩放**（Chromium 的 dpr = 显示器缩放 × 页面缩放）。
    */
-  function verifyZoomApplied(target: number) {
-    const fake =
-      (window as unknown as { __browserDevStub?: { fakeZoom?: boolean } }).__browserDevStub;
-    if (fake?.fakeZoom) return;
-    const dpr = window.devicePixelRatio;
-    const last = zoomApplied;
-    zoomApplied = { zoom: target, dpr };
-    if (!last) return; // 第一次只记基线
-    if (Math.abs(target - last.zoom) < 0.001) return; // 系数没变，dpr 不变是正常的
-    if (Math.abs(dpr - last.dpr) > 0.001) return; // dpr 跟着变了 → 缩放确实生效
-    const detail = `请求 ${zoomLabel(target)}（上一次 ${zoomLabel(last.zoom)}），devicePixelRatio 一直是 ${dpr}`;
-    dbg.log("zoom", `webview 未接受缩放：${detail}`);
-    statusText = `界面缩放未生效：webview 没接受 ${zoomLabel(target)}（${detail}）`;
+  function ensureZoomCalibration(): Promise<void> {
+    if (zoomCalibration === null) {
+      zoomCalibration = (async () => {
+        try {
+          await getCurrentWebview().setZoom(ZOOM_DEFAULT);
+          await new Promise((r) => setTimeout(r, 90));
+          const dpr = window.devicePixelRatio;
+          if (Number.isFinite(dpr) && dpr > 0) {
+            dprAtZoom100 = dpr;
+            dbg.log("zoom", `校准 100% 基线：devicePixelRatio=${dpr}`);
+          }
+        } catch (e) {
+          dbg.log("zoom", "缩放校准失败（跳过复核）", e);
+        }
+      })();
+    }
+    return zoomCalibration;
+  }
+
+  /** 引擎**实际接受**的缩放系数；读不到（没校准 / 已判定 dpr 不可信）时给 null */
+  function engineZoom(): number | null {
+    if (zoomDprTrusted === false) return null;
+    if (dprAtZoom100 === null || dprAtZoom100 <= 0) return null;
+    return window.devicePixelRatio / dprAtZoom100;
+  }
+
+  /**
+   * 反证 dpr 到底跟不跟缩放走：临时设到下限 50%（真机上"缩小"是有效的），看 dpr 有没有按比例变，
+   * 然后还原。只在**首次发现"请求了缩放但 dpr 不动"**时做一次——如果 dpr 根本不跟随（换平台/换引擎
+   * 都可能），就把复核整体关掉，避免用不可信的读数去改用户的状态。
+   */
+  async function probeDprTracksZoom(): Promise<boolean> {
+    const base = dprAtZoom100;
+    if (base === null) return false;
+    try {
+      await getCurrentWebview().setZoom(ZOOM_MIN);
+      await new Promise((r) => setTimeout(r, 120));
+      const dpr = window.devicePixelRatio;
+      const tracks = Math.abs(dpr / base - ZOOM_MIN) < 0.05;
+      await getCurrentWebview().setZoom(clampZoom(uiZoom)); // 还原
+      dbg.log("zoom", `dpr 是否跟随缩放：${tracks}（50% 档 dpr=${dpr}，基线 ${base}）`);
+      return tracks;
+    } catch (e) {
+      dbg.log("zoom", "dpr 反证失败", e);
+      return false;
+    }
+  }
+
+  /**
+   * 复核 webview 到底有没有接受这个系数，**没接受就把界面状态拉回引擎给的档位**。
+   *
+   * 为什么必须拉回来（2026-09-14 两次实机反馈串起来看）：真机上引擎没接受"放大"，而 uiZoom 照旧
+   * 一路涨到上限 250%，于是从 250% 往下滚要滚十几档才有反应——用户看到的就是「放大根本没用，
+   * 缩小有用」，接着是「最大后无法用滚轮缩小」。让状态永远等于引擎实际接受的档位，滚轮就再也不会
+   * 掉进这种死区：放大被拒时档位原地不动（界面与状态都保持一致，并在状态栏说明原因），缩小立刻有效。
+   */
+  async function verifyZoomApplied(target: number) {
+    if (zoomIsFaked()) return;
+    const applied = engineZoom();
+    if (applied === null) return;
+    if (Math.abs(applied - target) <= 0.02) return; // 引擎接受了，正常路径
+    if (zoomDprTrusted === null) {
+      zoomDprTrusted = await probeDprTracksZoom();
+      if (!zoomDprTrusted) {
+        dbg.log("zoom", "devicePixelRatio 不跟随缩放，本次会话不再复核");
+        return;
+      }
+      const afterProbe = engineZoom();
+      if (afterProbe === null || Math.abs(afterProbe - target) <= 0.02) return;
+    }
+    const snapped = clampZoom(engineZoom() ?? target);
+    if (snapped === clampZoom(uiZoom)) return; // 状态已经在引擎给的档位上了
+    dbg.log(
+      "zoom",
+      `引擎未接受 ${zoomLabel(target)}（实际 ${engineZoom()?.toFixed(3)}），状态拉回 ${zoomLabel(snapped)}`,
+    );
+    uiZoom = snapped; // 触发 $effect → 再把引擎对齐到这个档位（已经是了，等价空操作）
+    schedulePersist();
+    statusText = `界面缩放未生效：引擎把 ${zoomLabel(target)} 限制在 ${zoomLabel(snapped)}`;
   }
 
   /** 改缩放并反馈（滚轮 / 菜单共用）；值没变时提示"已到边界"，不重复写存档 */

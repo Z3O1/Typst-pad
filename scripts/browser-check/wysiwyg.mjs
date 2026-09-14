@@ -995,5 +995,81 @@ await c.evaluate(
   `Array.from(document.querySelectorAll(".update-modal .modal-btn")).find(b => (b.textContent || "").includes("稍后")).click()`,
 );
 
+// ---------------------------------------------------------------------------
+// 第 27 组：引擎只肯缩小不肯放大时，界面状态必须跟着引擎走（真机 bug 的回归网）
+// 背景（2026-09-14 两次实机反馈）：Windows/WebView2 上引擎没接受"放大"，而前端 uiZoom 照旧涨到
+// 上限 250%，于是从 250% 往下滚要滚十几档才有反应——用户先报「放大根本没用，缩小有用」，
+// 接着报「最大后无法用滚轮缩小」。修法是让状态永远等于引擎实际接受的档位（+page.svelte 的
+// verifyZoomApplied）：放大被拒时档位原地不动、界面与状态一致，缩小立刻有效。
+// 无头环境靠桩的"模拟引擎"复现：?zoomsim=1 给 window.devicePixelRatio 装假 getter
+// （dpr = 1.25 × 引擎接受的缩放），再加 &zoomcap=1 就是"放大一律按 100% 处理"那台机器。
+// ---------------------------------------------------------------------------
+console.log("27) 引擎拒绝放大时，档位跟着引擎走（模拟真机）");
+const zoomProbe2 = `(() => {
+  const de = document.querySelector(".statusbar");
+  return {
+    requested: window.__browserDevLastZoom ?? null,
+    engine: window.__browserDevEngineZoom ?? null,
+    saved: JSON.parse(localStorage.getItem("typst-pad:state") || "{}").uiZoom ?? null,
+    status: de ? de.innerText : "",
+    tags: Array.from(document.querySelectorAll(".statusbar .mode-tag")).map(e => e.textContent.trim()),
+  };
+})()`;
+
+/** 导航到"模拟引擎"的页面并等界面就绪 */
+const gotoSim = async (extra) => {
+  await c.evaluate(`localStorage.clear()`);
+  await c.goto(`${DEV_URL}${extra}`);
+  await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+  await new Promise((r) => setTimeout(r, 900));
+};
+/** 在编辑区中心连滚 N 格 */
+const wheelOverEditor = async (deltaY, times) => {
+  const center = await c.evaluate(`(() => {
+    const r = document.querySelector(".editor-pane").getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  })()`);
+  for (let i = 0; i < times; i++) await c.wheel(center.x, center.y, deltaY, { modifiers: 2 });
+  await new Promise((r) => setTimeout(r, 700)); // 等"调档后再确认一次"那一拍跑完
+};
+
+// A) 引擎照单全收：复核不能误伤（状态 = 请求值）
+await gotoSim("&zoomsim=1");
+await wheelOverEditor(-100, 3);
+const simOk = await c.evaluate(zoomProbe2);
+check(
+  "模拟引擎接受缩放时，档位与引擎一致（不误报、不被拉回）",
+  Math.abs((simOk.requested ?? 0) - 1.3) < 0.001 && Math.abs((simOk.saved ?? 0) - 1.3) < 0.001,
+  JSON.stringify(simOk),
+);
+check(
+  "接受缩放时不出现「未生效」提示",
+  simOk.status.includes("缩放 130%") && !simOk.status.includes("未生效"),
+  JSON.stringify(simOk.status),
+);
+
+// B) 引擎只肯缩小（放大一律按 100% 处理）：档位必须停在引擎给的 100%，缩小立刻有效
+await gotoSim("&zoomsim=1&zoomcap=1");
+await wheelOverEditor(-100, 4);
+const capped = await c.evaluate(zoomProbe2);
+check(
+  "引擎拒绝放大时，档位被拉回引擎实际给的 100%（不再冲上限）",
+  Math.abs((capped.saved ?? 0) - 1) < 0.001 && Math.abs((capped.engine ?? 0) - 1) < 0.001,
+  JSON.stringify(capped),
+);
+check(
+  "状态栏说明是引擎限制，而不是静默没反应",
+  capped.status.includes("未生效") && capped.status.includes("限制在 100%"),
+  JSON.stringify(capped.status),
+);
+// 关键：接着往下滚必须立刻见效（这就是「最大后无法用滚轮缩小」那条反馈）
+await wheelOverEditor(100, 1);
+const afterOut = await c.evaluate(zoomProbe2);
+check(
+  "被拒之后立刻往下滚就能缩小（死区消失）",
+  Math.abs((afterOut.saved ?? 0) - 0.9) < 0.001 && Math.abs((afterOut.engine ?? 0) - 0.9) < 0.02,
+  JSON.stringify(afterOut),
+);
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();
