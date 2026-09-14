@@ -204,6 +204,52 @@ check(
   markup.headingSize > markup.bodySize * 1.3,
   `heading=${markup.headingSize} body=${markup.bodySize}`,
 );
+// 标题正文不许有下划线（2026-09-14 用户反馈「`== 1` 在写作模式有下划线」）：
+// 那条下划线是 codemirror-lang-typst 自带高亮样式给的（`tags.heading` 带 textDecoration: underline），
+// 由 typst-highlight.ts 再挂一份 `none !important` 压掉。
+// **先等依赖那份规则真的落到标题元素上再断言**：解析器是异步的，实测刚挂载时一个高亮类都没有、
+// 约 1 秒后才出现 —— 不等就等于恒真（把压制去掉也照样绿，这种测试没有意义）。
+await c.waitFor(
+  `(() => {
+     const matchesUnderlineRule = (el) => {
+       for (const sheet of Array.from(document.styleSheets)) {
+         let rules; try { rules = sheet.cssRules; } catch { continue; }
+         for (const r of rules) {
+           if (!r.selectorText || !r.style || !/underline/.test(r.style.textDecoration || "")) continue;
+           try { if (el.matches(r.selectorText)) return true; } catch {}
+         }
+       }
+       return false;
+     };
+     const heads = Array.from(document.querySelectorAll(".cm-markup-heading"));
+     return heads.some((h) => [h, ...h.querySelectorAll("*")].some(matchesUnderlineRule));
+   })()`,
+  { timeout: 10000 },
+);
+const underlinedInHeading = await c.evaluate(`(() => {
+  // 判定"看得见的下划线"：看元素自己**以及整条祖先链**（祖先的 text-decoration 会透传到文字上，
+  // 子元素用 none 也取消不了），这样无论依赖那条规则落在哪一层都能抓到。
+  // 编译错误的红色波浪线（.cm-diag-wavy）与链接蓝线（.cm-markup-link）是另一回事，跳过。
+  const visibleDeco = (el) => {
+    for (let e = el; e && e !== document.body; e = e.parentElement) {
+      if (e.classList && (e.classList.contains("cm-diag-wavy") || e.classList.contains("cm-markup-link"))) continue;
+      const d = getComputedStyle(e).textDecorationLine;
+      if (d && d !== "none") return d;
+    }
+    return "none";
+  };
+  const bad = [];
+  document.querySelectorAll(".cm-content *").forEach((el) => {
+    const d = visibleDeco(el);
+    if (d !== "none") bad.push({ cls: el.className, text: (el.textContent || "").slice(0, 12), deco: d });
+  });
+  return bad;
+})()`);
+check(
+  "标题正文没有下划线（依赖自带那条已被 typst-highlight.ts 压掉）",
+  Array.isArray(underlinedInHeading) && underlinedInHeading.length === 0,
+  JSON.stringify(underlinedInHeading),
+);
 check("粗体标记 `*` 被隐藏（文字保留）", markup.lines[2].includes("粗体") && !markup.lines[2].includes("*"), JSON.stringify(markup.lines[2]));
 check("粗体字重为 700", markup.strongWeight === "700", String(markup.strongWeight));
 check("斜体样式生效且 `_` 被隐藏", markup.emphStyle === "italic" && !markup.lines[2].includes("_"), String(markup.emphStyle));

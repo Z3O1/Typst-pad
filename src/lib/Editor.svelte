@@ -5,6 +5,7 @@
   import type { DecorationSet } from "@codemirror/view";
   import { basicSetup } from "codemirror";
   import { typst } from "codemirror-lang-typst";
+  import { typstHeadingHighlight } from "./typst-highlight";
   import { editorKeymap } from "./editor-keymap";
   import { planDollarInput } from "./auto-pair";
   import { oneDark } from "@codemirror/theme-one-dark";
@@ -118,6 +119,7 @@
       basicSetup,
       editorKeymap, // 自定义编辑快捷键（Prec.high，优先于 basicSetup 默认键位）
       typst(),
+      typstHeadingHighlight, // 压掉 codemirror-lang-typst 自带高亮给标题加的下划线（见模块注释）
       dollarAutoPair, // `$` 自动配对（空选区输入 `$` 时补出定界符）
       themeCompartment.of(theme === "dark" ? oneDark : []),
       diagnosticsCompartment.of(diagnosticsExtensions()),
