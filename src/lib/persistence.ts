@@ -108,16 +108,50 @@ export function loadState(): Partial<PersistedState> {
   }
 }
 
+/**
+ * 把 `next` 里的**会话字段**换成 `previous` 里的那份。
+ *
+ * 存档只有一个 key，而多窗口（`Ctrl+Shift+N` 新建窗口）共享同一个 localStorage 源：
+ * 副窗口是"空白草稿窗口"，它改设置（主题/字体/缩放…）时如果用自己那份空文档覆盖存档，
+ * 主窗口那次会话就被一次无关的设置改动清掉了。所以副窗口写存档前先把会话字段搬过来。
+ */
+export function mergeSessionFields(
+  next: PersistedState,
+  previous: Partial<PersistedState>,
+): PersistedState {
+  return {
+    ...next,
+    content: typeof previous.content === "string" ? previous.content : "",
+    filePath: typeof previous.filePath === "string" ? previous.filePath : null,
+    fileTitle: typeof previous.fileTitle === "string" ? previous.fileTitle : null,
+    dirty: previous.dirty === true,
+  };
+}
+
+export interface SaveStateOptions {
+  /**
+   * `false` = 只写设置：先读回存档，把里面的会话字段（content / filePath / fileTitle / dirty）
+   * 原样带过去。**副窗口（新建窗口）用它** —— 它没有自己的会话，不该动主窗口那一份。
+   * 默认 `true`（主窗口：连会话一起写）。
+   */
+  session?: boolean;
+}
+
 /** 保存状态；存储不可用（隐私模式/配额超限）时静默失败 */
-export function saveState(state: PersistedState): void {
+export function saveState(state: PersistedState, options: SaveStateOptions = {}): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    const payload = options.session === false ? mergeSessionFields(state, loadState()) : state;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   } catch {
     // 忽略：持久化失败不影响使用
   }
 }
 
-/** 清空持久化状态（用于"新建"） */
+/**
+ * 清空持久化状态（用于"新建"）。
+ * **只由主窗口调用**：它连会话一起清掉，而那份会话是主窗口的 —— 副窗口（新建窗口）里点"新建"
+ * 绝不该把主窗口的未保存内容从存档里抹掉（见 mergeSessionFields）。
+ */
 export function clearState(): void {
   try {
     localStorage.removeItem(STORAGE_KEY);

@@ -1,6 +1,29 @@
 // localStorage 持久化模块单元测试（jsdom 提供 localStorage）
 import { describe, it, expect, beforeEach } from "vitest";
-import { loadState, saveState, clearState } from "./persistence";
+import { loadState, saveState, clearState, mergeSessionFields } from "./persistence";
+import type { PersistedState } from "./persistence";
+
+/** 一份完整状态（测试里只关心个别字段，其余给默认值） */
+const fullState = (over: Partial<PersistedState> = {}): PersistedState => ({
+  theme: "system",
+  content: "",
+  filePath: null,
+  fileTitle: null,
+  prefixEnabled: false,
+  prefixCode: "",
+  viewMode: "write",
+  showPreview: false,
+  editorWrap: false,
+  dirty: false,
+  restoreSession: true,
+  autoCheckUpdates: true,
+  lastUpdateCheckAt: null,
+  updateDismissedAt: null,
+  uiZoom: 1,
+  chineseFont: "",
+  fontDirs: [],
+  ...over,
+});
 
 describe("persistence", () => {
   beforeEach(() => {
@@ -167,5 +190,49 @@ describe("persistence", () => {
       JSON.stringify({ updateDismissedAt: "刚刚" }),
     );
     expect(loadState().updateDismissedAt).toBeNull();
+  });
+});
+
+describe("多窗口：副窗口（新建窗口）只写设置，不动主窗口的会话", () => {
+  it("mergeSessionFields 用 previous 的会话字段覆盖 next", () => {
+    const merged = mergeSessionFields(fullState({ content: "副窗口的空文档", dirty: true, uiZoom: 1.4 }), {
+      content: "主窗口的未保存内容",
+      filePath: "D:\\doc.typ",
+      fileTitle: "doc.typ",
+      dirty: true,
+      uiZoom: 1,
+    });
+    // 会话字段来自 previous
+    expect(merged.content).toBe("主窗口的未保存内容");
+    expect(merged.filePath).toBe("D:\\doc.typ");
+    expect(merged.fileTitle).toBe("doc.typ");
+    expect(merged.dirty).toBe(true);
+    // 设置字段来自 next
+    expect(merged.uiZoom).toBe(1.4);
+  });
+
+  it("previous 里没有会话字段（首启动/旧存档）时回落成空会话，不写入 undefined", () => {
+    const merged = mergeSessionFields(fullState({ content: "x" }), {});
+    expect(merged.content).toBe("");
+    expect(merged.filePath).toBeNull();
+    expect(merged.fileTitle).toBeNull();
+    expect(merged.dirty).toBe(false);
+  });
+
+  it("saveState({ session: false }) 保留存档里已有的会话（副窗口改设置后主窗口内容还在）", () => {
+    saveState(fullState({ content: "主窗口的未保存内容", filePath: "D:\\doc.typ", fileTitle: "doc.typ", dirty: true }));
+    // 副窗口：空文档 + 改了自己的界面缩放
+    saveState(fullState({ content: "", uiZoom: 1.5 }), { session: false });
+    const saved = loadState();
+    expect(saved.content).toBe("主窗口的未保存内容");
+    expect(saved.filePath).toBe("D:\\doc.typ");
+    expect(saved.dirty).toBe(true);
+    expect(saved.uiZoom).toBe(1.5); // 设置是共享的：副窗口改的也要落盘
+  });
+
+  it("默认（不带 options）= 主窗口，会话一起写", () => {
+    saveState(fullState({ content: "主窗口的未保存内容" }));
+    saveState(fullState({ content: "换成新文档了" }));
+    expect(loadState().content).toBe("换成新文档了");
   });
 });

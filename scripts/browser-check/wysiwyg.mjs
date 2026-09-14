@@ -2097,6 +2097,156 @@ check(
   JSON.stringify(disabled),
 );
 
+// ---------------------------------------------------------------------------
+// 第 35 组：Esc 退出设置界面 + Ctrl+Shift+N 新建窗口（用户 2026-09-14 要求「需要按 Esc 退出设置
+// 界面 和 Ctrl + Shift + N 新建窗口」）
+//
+// 背景（别把这条当"新功能"读）：**Ctrl+Shift+N 从 0.7.0 起就彻底失效了**。仿 Typora 两套 UI 那一版
+// 引入了「Shift 组合的格式表」，它对**任何**带 Shift 的组合都无条件 return，而新建窗口的判定写在
+// 它后面 —— 那条路再也没走到过。现在按键路由抽到 app-keys.decideAppKey（纯函数，单测锁死顺序），
+// 这里锁**接线**：手势确实走到了"创建窗口"（桩记录 create_webview_window 的入参）、且没被格式
+// 命令吃掉、也没和 Ctrl+N（菜单「新建」）互相干扰。
+//
+// 真实多窗口（窗口本身、窗口之间的存档与 open-file 交接）只能在桌面版验证：
+// 浏览器里没有真的多窗口，桩只能证明"请求发出去了、参数对"。
+// ---------------------------------------------------------------------------
+console.log("35) Esc 退出设置界面 + Ctrl+Shift+N 新建窗口");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+await c.click(400, 300);
+await c.selectAll();
+await c.type("= 窗口测试");
+await new Promise((r) => setTimeout(r, 600)); // 等 300ms 防抖把内容落盘
+
+/**
+ * 文档内容的判据走**存档**而不是编辑器 innerText：写作模式会把标记/公式替换成 widget，
+ * innerText 看到的是渲染结果，判断"按键有没有改动文档"会被渲染差异带偏。
+ */
+const savedContent = `JSON.parse(localStorage.getItem("typst-pad:state") || "{}").content ?? ""`;
+const contentBefore = await c.evaluate(savedContent);
+
+// —— Esc 退出设置 ——
+await openMenu("文件");
+await c.waitFor(`document.body.innerText.includes("设置")`, { timeout: 5000 });
+await clickMenuItem("设置");
+await c.waitFor(`!!document.querySelector(".settings-modal")`, { timeout: 5000 });
+await new Promise((r) => setTimeout(r, 300));
+// 在弹窗里改一笔（关掉「启动时恢复上次内容」的勾）：Esc 之后这笔草稿必须**不生效**
+await c.evaluate(`(() => {
+  const row = Array.from(document.querySelectorAll(".settings-modal .settings-row"))
+    .find(e => (e.textContent || "").includes("启动时恢复上次内容"));
+  row.querySelector("input").click();
+})()`);
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 400));
+const afterEsc = await c.evaluate(`({
+  modal: !!document.querySelector(".settings-modal"),
+  restore: JSON.parse(localStorage.getItem("typst-pad:state") || "{}").restoreSession ?? null,
+})`);
+check("按 Esc 关掉设置弹窗", !afterEsc.modal, JSON.stringify(afterEsc));
+check(
+  "Esc 等于弹窗里的「关闭」（放弃草稿）：勾掉的开关没有生效",
+  afterEsc.restore === true,
+  JSON.stringify(afterEsc),
+);
+await c.screenshot(SHOT("wysiwyg-35-esc-settings"));
+
+// 再打开一次：那一勾应该还是原样（证明 Esc 没有偷偷保存草稿）
+await openMenu("文件");
+await c.waitFor(`document.body.innerText.includes("设置")`, { timeout: 5000 });
+await clickMenuItem("设置");
+await c.waitFor(`!!document.querySelector(".settings-modal")`, { timeout: 5000 });
+await new Promise((r) => setTimeout(r, 300));
+const reopened = await c.evaluate(`(() => {
+  const row = Array.from(document.querySelectorAll(".settings-modal .settings-row"))
+    .find(e => (e.textContent || "").includes("启动时恢复上次内容"));
+  return { checked: row.querySelector("input").checked };
+})()`);
+check("重新打开设置：那一勾回到原状（Esc 没有偷偷保存）", reopened.checked === true, JSON.stringify(reopened));
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 300));
+
+// —— Ctrl+Shift+N 新建窗口 ——
+const requestsBefore = await c.evaluate(`(window.__browserDevWindowRequests || []).length`);
+await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 10 }); // Ctrl(2)+Shift(8)
+await new Promise((r) => setTimeout(r, 500));
+const created = await c.evaluate(`(() => {
+  const reqs = window.__browserDevWindowRequests || [];
+  return {
+    requests: reqs.length,
+    last: reqs[reqs.length - 1] || null,
+  };
+})()`);
+check(
+  "Ctrl+Shift+N 真的走到了「创建窗口」（桩收到 create_webview_window）",
+  created.requests === requestsBefore + 1,
+  JSON.stringify(created),
+);
+check(
+  "新窗口参数：label 以 editor- 开头（capabilities 覆盖 editor-*）、url 指向应用首页、标题是未命名",
+  /^editor-\d+$/.test(String(created.last?.label)) &&
+    created.last?.url === "/" &&
+    String(created.last?.title).includes("未命名.typ"),
+  JSON.stringify(created.last),
+);
+check(
+  "Ctrl+Shift+N 没被 Shift 格式表吃掉：文档内容一字未改",
+  (await c.evaluate(savedContent)) === contentBefore,
+  JSON.stringify({ before: contentBefore, after: await c.evaluate(savedContent) }),
+);
+
+// 反向：Ctrl+N（无 Shift）仍然是菜单「新建」——两套手势互不干扰
+await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 }); // 只按 Ctrl
+await new Promise((r) => setTimeout(r, 600));
+const afterCtrlN = await c.evaluate(`({
+  requests: (window.__browserDevWindowRequests || []).length,
+  content: ${savedContent},
+})`);
+check(
+  "Ctrl+N（无 Shift）仍是「新建」：文档清空、也没有多开窗口",
+  afterCtrlN.requests === created.requests && afterCtrlN.content === "",
+  JSON.stringify(afterCtrlN),
+);
+
+// Shift 格式表本身没被改坏：Ctrl+Shift+M 还是公式块
+await c.click(400, 300);
+await c.type("= 格式表");
+await new Promise((r) => setTimeout(r, 300));
+await c.key("M", { code: "KeyM", keyCode: 77, modifiers: 10 }); // Ctrl+Shift+M
+await new Promise((r) => setTimeout(r, 600));
+const afterMath = await c.evaluate(savedContent);
+check(
+  "Shift 格式表仍然完好：Ctrl+Shift+M 照旧插入公式块定界符",
+  afterMath.includes("$"),
+  JSON.stringify(afterMath.slice(0, 80)),
+);
+
+// —— Esc 关更新弹窗：只收起来，不许替用户点「稍后」——
+// 「稍后」= 以后再也不自动弹更新窗（用户 2026-09-14 明确要的），一个 Esc 不该有这种后果。
+await c.goto(`${DEV_URL}&fakeupdate=1`);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+let updatePrompt = true;
+try {
+  await c.waitFor(`!!document.querySelector(".update-modal")`, { timeout: 15000 });
+} catch {
+  updatePrompt = false;
+}
+check("（前置）假更新弹窗自己弹出来了", updatePrompt, `appeared=${updatePrompt}`);
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 400));
+const afterEscUpdate = await c.evaluate(`({
+  dialog: !!document.querySelector(".update-modal"),
+  dismissedAt: JSON.parse(localStorage.getItem("typst-pad:state") || "{}").updateDismissedAt ?? null,
+})`);
+check("Esc 收起了更新弹窗", !afterEscUpdate.dialog, JSON.stringify(afterEscUpdate));
+check(
+  "Esc 没有替你点「稍后」：存档里 updateDismissedAt 仍为 null（下次启动照样会提示）",
+  afterEscUpdate.dismissedAt === null,
+  JSON.stringify(afterEscUpdate),
+);
+
 // 收尾：清回空文档并回写作模式
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });

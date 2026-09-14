@@ -465,6 +465,24 @@ async function handleCommand(
       notify(command);
       return null;
     }
+    // 多窗口（Ctrl+Shift+N 新建窗口）：浏览器里没有真的多窗口，但**记录创建请求**
+    // （label/title/url），让验收能断言"这个手势确实走到了创建窗口这一步、参数也对"。
+    // 真实多窗口只能在桌面版验证（窗口本身、以及窗口之间的存档与 open-file 交接）。
+    case "plugin:webview|create_webview_window": {
+      const options = (a.options ?? {}) as Record<string, unknown>;
+      const w = window as unknown as Record<string, unknown>;
+      const requests = Array.isArray(w.__browserDevWindowRequests)
+        ? (w.__browserDevWindowRequests as unknown[])
+        : [];
+      requests.push({
+        label: typeof options.label === "string" ? options.label : null,
+        title: typeof options.title === "string" ? options.title : null,
+        url: typeof options.url === "string" ? options.url : null,
+      });
+      w.__browserDevWindowRequests = requests;
+      notify(command);
+      return null;
+    }
     default:
       // dialog 插件（plugin:dialog|confirm 等）与未实现命令：给出行为安全的默认值，
       // 让 UI 不崩、也不产生"假成功"的错觉。

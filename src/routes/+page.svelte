@@ -29,6 +29,8 @@
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { loadState, saveState } from "$lib/persistence";
+  import { decideAppKey, topModal } from "$lib/app-keys";
+  import type { AppModal } from "$lib/app-keys";
   import { isEffectiveDirty, ensureTrailingNewline } from "$lib/doc-utils";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
@@ -93,7 +95,8 @@
     zoomProbeVerdict,
     zoomRejectedNotice,
   } from "$lib/zoom";
-  import { WRAP_SOURCE_ONLY_NOTICE, isWrapToggleKey, wrapNotice } from "$lib/word-wrap";
+  // isWrapToggleKey 的判定已挪进 app-keys.decideAppKey（那里统一管按键路由，含它的顺序要求）
+  import { WRAP_SOURCE_ONLY_NOTICE, wrapNotice } from "$lib/word-wrap";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -101,6 +104,35 @@
   // 浏览器 gate：已移除浏览器支持（编译走 Tauri 进程内原生命令），
   // 非 Tauri 环境（无 __TAURI_INTERNALS__）不渲染应用 UI，仅显示提示页
   const isDesktopApp = isTauri();
+
+  /**
+   * 本窗口是不是**副窗口**（`Ctrl+Shift+N` 新建出来的窗口，label 形如 `editor-<时间戳>`；
+   * 主窗口的 label 是 tauri.conf.json 里那个默认的 `main`）。
+   *
+   * 副窗口 = 空白草稿窗口：起来**不恢复**上次内容、"新建"也不清存档、写存档只写设置
+   * （会话字段由 persistence.saveState 的 `{ session: false }` 原样保留），启动自动检查更新也不做。
+   * 理由：存档只有一个 localStorage key、两个窗口共用一个源，副窗口一旦按"主窗口"那套走，
+   * 就会把主窗口那份未保存内容顶掉（或反过来恢复成主窗口的文档）。
+   *
+   * 取不到 label 时按主窗口处理（`isTauri()` 为假、或 API 抛错）：宁可行为和以前完全一致，
+   * 也不要凭空把窗口判成副窗口而丢掉"恢复上次内容"。
+   */
+  const isSecondaryWindow = (() => {
+    try {
+      return isTauri() && getCurrentWindow().label !== "main";
+    } catch {
+      return false;
+    }
+  })();
+
+  /** 副窗口首屏编译落地后写在状态栏的一句说明（见 onMount 末尾） */
+  const NEW_WINDOW_NOTICE = "新窗口：这里的修改不会记进「上次内容」";
+
+  /** 窗口 label 前缀：新窗口的 label 必须唯一（重名会创建失败），前缀要与 capabilities 里的 `editor-*` 一致 */
+  const NEW_WINDOW_LABEL_PREFIX = "editor-";
+
+  /** open-file 广播的兜底延迟：等有焦点的窗口先接（见 claimOpenFileOnBroadcast） */
+  const OPEN_FILE_FALLBACK_DELAY_MS = 250;
 
   // 启动打点：组件脚本求值时刻（JS chunk 加载后的首个可测点）
   mark("page-module-eval");
@@ -160,6 +192,8 @@
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
+  /** open-file 广播的兜底定时器（多窗口：没窗口有焦点时由主窗口延迟接，见 claimOpenFileOnBroadcast） */
+  let pendingOpenTimer: ReturnType<typeof setTimeout> | null = null;
   let showAbout = $state(false);
   // 关于弹窗版本号：运行时经 getVersion 异步读取（tauri.conf.json 的 version），
   // 未返回前显示占位符，避免每次发版漏更新硬编码版本号
@@ -440,25 +474,30 @@
   function schedulePersist() {
     clearTimeout(persistTimer);
     persistTimer = setTimeout(() => {
-      saveState({
-        theme,
-        content: doc,
-        filePath,
-        fileTitle,
-        prefixEnabled,
-        prefixCode,
-        viewMode,
-        showPreview,
-        editorWrap,
-        dirty,
-        restoreSession,
-        autoCheckUpdates,
-        lastUpdateCheckAt,
-        updateDismissedAt,
-        uiZoom,
-        chineseFont,
-        fontDirs,
-      });
+      saveState(
+        {
+          theme,
+          content: doc,
+          filePath,
+          fileTitle,
+          prefixEnabled,
+          prefixCode,
+          viewMode,
+          showPreview,
+          editorWrap,
+          dirty,
+          restoreSession,
+          autoCheckUpdates,
+          lastUpdateCheckAt,
+          updateDismissedAt,
+          uiZoom,
+          chineseFont,
+          fontDirs,
+        },
+        // 副窗口（Ctrl+Shift+N 新建的草稿窗口）只写设置：它对存档里的会话字段没有所有权，
+        // 否则改一次主题就把主窗口的未保存内容换成自己这份空文档（见 persistence.saveState）
+        { session: !isSecondaryWindow },
+      );
     }, 300);
   }
 
@@ -917,7 +956,9 @@
     filePath = null;
     fileTitle = "未命名.typ";
     dirty = false;
-    clearState();
+    // 清存档**只由主窗口做**：这份会话是主窗口的，副窗口里点"新建"不该把主窗口的未保存内容
+    // 从存档里抹掉（副窗口自己的内容是空的，后面 schedulePersist 也只写设置）
+    if (!isSecondaryWindow) clearState();
     resetMathCache();
     scheduleCompile();
     statusText = "已新建";
@@ -931,6 +972,13 @@
         items: [
           // shortcut 同时是菜单项右侧灰字显示与全局 Ctrl/Meta 组合键的触发来源（MenuBar 统一处理）
           { label: "新建", shortcut: "Ctrl+N", action: handleNew },
+          {
+            // 带 Shift 的组合键 MenuBar 的匹配器不认（见 menu-keys.shortcutMatches 排除 Shift），
+            // 所以这里只是把姿势当灰字提示显示出来，真正的触发在 handleKeydown → openNewWindow
+            label: "新建窗口",
+            shortcut: "Ctrl+Shift+N",
+            action: openNewWindow,
+          },
           { label: "打开…", shortcut: "Ctrl+O", action: handleOpen },
           { label: "保存", shortcut: "Ctrl+S", action: handleSave },
           { label: "设置…", shortcut: "Ctrl+,", action: openSettings },
@@ -1501,77 +1549,151 @@
     reportScriptError("unhandledrejection", e.reason);
   }
 
+  /**
+   * 新建窗口（`Ctrl+Shift+N` / 菜单「文件 → 新建窗口」）。新窗口是**空白草稿窗口**：
+   * 起来不恢复上次内容、写存档只写设置（见 isSecondaryWindow 的说明）。
+   *
+   * label 用时间戳保证唯一（Tauri 要求 label 唯一，重名会创建失败），前缀 `editor-` 必须与
+   * capabilities/default.json 的 `windows: ["main", "editor-*"]` 对得上 —— 否则新窗口里的
+   * 文件读写会在 ACL 层被拒（0.2.x 踩过，见提交 b187118）。
+   */
+  function openNewWindow() {
+    if (!isTauri()) return; // 浏览器预览没有多窗口（应用本身也只在桌面版渲染）
+    try {
+      const win = new WebviewWindow(`${NEW_WINDOW_LABEL_PREFIX}${Date.now()}`, {
+        url: "/",
+        title: "未命名.typ - Typst-pad",
+        width: 1280,
+        height: 800,
+        minWidth: 800,
+        minHeight: 600,
+        center: true,
+      });
+      // 创建失败（label 撞车 / 系统拒绝）在发布版里是看不见的（没有 devtools），报到状态栏
+      void win.once("tauri://error", (e) => {
+        const detail = (e as { payload?: unknown }).payload;
+        statusText = `新建窗口失败：${typeof detail === "string" ? detail : String(detail ?? "")}`;
+        dbg.log("window", "new-window error", detail);
+      });
+    } catch (e) {
+      statusText = `新建窗口失败：${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  /** 关闭当前窗口（Ctrl+W）：与标题栏关闭走同一条路（未保存修改会先弹确认，见 onCloseRequested） */
+  function closeCurrentWindow() {
+    if (!isTauri()) return;
+    void getCurrentWindow().close();
+  }
+
+  /** 当前窗口是否有焦点（多窗口下决定 open-file 广播由谁接）；查询失败按"没有焦点"处理 */
+  async function currentIsFocused(): Promise<boolean> {
+    try {
+      return (await getCurrentWindow().isFocused()) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 取走待打开队列里的最后一个路径（并清空队列）。多窗口下它同时是**"这个文件已被某窗口接走"
+   * 的记号**：都从 Rust 侧这份队列里取，取到空 = 别人先接了（见 claimOpenFileOnBroadcast）。
+   */
+  async function claimPendingFile(): Promise<string | null> {
+    try {
+      const paths = await invoke<string[]>("take_pending_files");
+      return paths.length > 0 ? paths[paths.length - 1] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `open-file` 广播的接球人（关联双击 / 跨实例转发打开）。
+   * Rust 侧是 `app.emit`，**所有窗口都会收到**，必须挑一个窗口接，否则两个窗口会同时切到同一个
+   * 文件、各自未保存的内容都可能被顶掉。规则：**有焦点的窗口接**（用户看得见文件开在哪）；
+   * 一个窗口都没焦点时（应用在后台/最小化）由主窗口延迟一拍兜底，兜底前先看队列——队列空说明
+   * 已经有窗口接走了，就放手（主窗口自己的会话不会被别人的双击顶掉）。
+   */
+  async function claimOpenFileOnBroadcast(path: string) {
+    if (await currentIsFocused()) {
+      void claimPendingFile(); // 清掉队列 = 告诉主窗口"已经有人接了"
+      await openPath(path);
+      return;
+    }
+    if (isSecondaryWindow) return; // 副窗口没焦点就不抢：交给主窗口兜底
+    if (pendingOpenTimer !== null) clearTimeout(pendingOpenTimer);
+    pendingOpenTimer = setTimeout(() => {
+      pendingOpenTimer = null;
+      void claimPendingFile().then((unclaimed) => {
+        if (unclaimed) void openPath(unclaimed);
+      });
+    }, OPEN_FILE_FALLBACK_DELAY_MS);
+  }
+
+  /** Esc 关掉最上层的弹窗（顺序见 app-keys.topModal）；每种都取**破坏性最小**的那个"关闭"语义 */
+  function dismissModal(modal: AppModal) {
+    switch (modal) {
+      case "close-prompt":
+        onClosePromptCancel(); // = 弹窗里的「取消」：窗口继续开着
+        return;
+      case "update":
+        // 只把弹窗收起来（状态栏仍留着「可更新到 vX」入口）。**绝不能在这里写 updateDismissedAt**：
+        // 那等于替用户点了「稍后」= 以后再也不自动弹更新窗，一个 Esc 不该有这种后果。
+        showUpdateDialog = false;
+        return;
+      case "settings":
+        closeSettings(); // = 弹窗里的「关闭」：放弃未保存的草稿（按「保存」才生效，见 openSettings）
+        return;
+      case "about":
+        showAbout = false;
+        return;
+    }
+  }
+
+  /**
+   * 页面级快捷键：按键 → 动作的判定全在 app-keys.decideAppKey（纯函数，有单测），这里只负责执行。
+   * **判定顺序本身就是行为**：`Ctrl+Shift+N` 必须排在 Shift 格式表之前，否则新建窗口会被整段吞掉
+   * —— 0.7.0 起就是这个状态，用户 2026-09-14 报「Ctrl+Shift+N 新建窗口」没反应。
+   * 菜单项的全局快捷键（Ctrl+N 新建 / Ctrl+O 打开 / Ctrl+S 保存 / Ctrl+, 设置 / Ctrl+P 导出 PDF）
+   * 由 MenuBar 的 window keydown 统一处理，不在此重复绑定（避免同一组合键双重触发）。
+   */
   function handleKeydown(e: KeyboardEvent) {
-    const key = e.key.toLowerCase();
-    const mod = e.ctrlKey || e.metaKey;
-
-    // Alt+Z：源码模式的自动换行开关（VS Code 同款手势）。它没有 Ctrl/Meta 修饰，
-    // 所以必须放在下面那句 `if (!mod) return` **之前**。判定见 word-wrap.isWrapToggleKey
-    // （排除 Ctrl+Z 撤销与 Alt+Shift+Z，理由在那边的注释里）。
-    if (isWrapToggleKey(e)) {
-      e.preventDefault();
-      toggleEditorWrap();
-      return;
-    }
-
-    if (!mod) return;
-
-    // Shift 组合的格式快捷键（MenuBar 的匹配器只支持「Ctrl+单键」，这些由页面处理）。
-    // 键位沿用 Typora 习惯，菜单里以同样的文字展示。
-    if (e.shiftKey) {
-      const shiftCommands: Record<string, WriteCommand> = {
-        "`": "code",
-        m: "math-block",
-        "]": "bullet",
-        "[": "ordered",
-        q: "quote",
-        c: "code-block",
-      };
-      const command = shiftCommands[key];
-      if (command) {
+    const action = decideAppKey(e, {
+      hasFilePath: filePath !== null,
+      openModal: topModal({
+        "close-prompt": showClosePrompt,
+        update: showUpdateDialog,
+        settings: showSettings,
+        about: showAbout,
+      }),
+    });
+    if (!action) return;
+    switch (action.type) {
+      case "wrap-toggle":
         e.preventDefault();
-        runFormat(command);
-      }
-      return;
-    }
-
-    // 注意：菜单项全局快捷键（Ctrl+N 新建 / Ctrl+O 打开 / Ctrl+S 保存 / Ctrl+, 设置 /
-    // Ctrl+P 导出 PDF）由 MenuBar 的 window keydown 统一处理，不在此重复绑定，
-    // 避免同一组合键双重触发（如保存对话框双弹）。
-    // 此处仅保留未进菜单的键：Ctrl+R 重读、Ctrl+Shift+N 新窗口、Ctrl+W 关窗。
-
-    // Ctrl/Cmd + R：重新读取当前文件（磁盘 → 编辑器）
-    if (key === "r") {
-      if (filePath) {
-        e.preventDefault(); // 仅在有文件时拦截；浏览器 dev 无文件路径 → 放行给浏览器刷新
+        toggleEditorWrap();
+        return;
+      case "format":
+        e.preventDefault();
+        runFormat(action.command);
+        return;
+      case "reload-file":
+        e.preventDefault(); // 仅在有文件时拦（没文件时 decideAppKey 已经返回 null，放行给浏览器刷新）
         reloadFile();
-      }
-      return;
-    }
-    // Ctrl/Cmd + Shift + N：打开新窗口（Tauri）；浏览器环境阻止默认并忽略。
-    // 必须带 Shift：无 Shift 的 Ctrl+N 是菜单「新建文档」（由 MenuBar 处理），
-    // MenuBar 的快捷键匹配排除 Shift 修饰，两者互不干扰
-    if (key === "n" && e.shiftKey) {
-      e.preventDefault();
-      if (isTauri()) {
-        new WebviewWindow(`editor-${Date.now()}`, {
-          url: "/",
-          title: "未命名.typ - Typst-pad",
-          width: 1280,
-          height: 800,
-          minWidth: 800,
-          minHeight: 600,
-          center: true,
-        });
-      }
-      return;
-    }
-    // Ctrl/Cmd + W：关闭当前窗口
-    if (key === "w") {
-      e.preventDefault();
-      if (isTauri()) {
-        getCurrentWindow().close();
-      }
+        return;
+      case "new-window":
+        e.preventDefault();
+        openNewWindow();
+        return;
+      case "close-window":
+        e.preventDefault();
+        closeCurrentWindow();
+        return;
+      case "dismiss-modal":
+        e.preventDefault();
+        dismissModal(action.modal);
+        return;
     }
   }
 
@@ -1604,7 +1726,14 @@
     updateDismissedAt = typeof saved.updateDismissedAt === "number" ? saved.updateDismissedAt : null;
     // 界面缩放：旧存档没有该字段 → 100%；越界/脏数据由 clampZoom 收敛（随后由 $effect 应用）
     uiZoom = clampZoom(saved.uiZoom);
-    if (restoreSession && typeof saved.content === "string" && saved.content.trim() !== "") {
+    // **副窗口（Ctrl+Shift+N 新建的窗口）一律不恢复**：它是空白草稿窗口，恢复出主窗口的文档
+    // 会让人以为"新窗口把我正在写的文章带过来了"，而那个窗口的内容改动又不会记进存档。
+    if (
+      !isSecondaryWindow &&
+      restoreSession &&
+      typeof saved.content === "string" &&
+      saved.content.trim() !== ""
+    ) {
       doc = saved.content;
       editorDoc = saved.content; // 镜像同步，见 editorDoc 声明处
       if (saved.filePath) {
@@ -1625,7 +1754,14 @@
       if (v.length > 0) defaultFonts = v;
     });
 
-    runCompile();
+    const firstCompile = runCompile();
+    if (isSecondaryWindow) {
+      // 副窗口是草稿窗口，说明一句"这里的内容不会记进上次内容"。首次编译成功会把状态栏写成
+      // 「就绪」，所以等它落地再写（只在没有更重要的话时才顶替，与 saveSettings 同一套路）。
+      void firstCompile.finally(() => {
+        if (statusText === "就绪") statusText = NEW_WINDOW_NOTICE;
+      });
+    }
     resolveTheme();
     // 系统主题变化时跟随（仅当处于“自动”态）
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1719,18 +1855,19 @@
         }),
       );
       // 应用已运行时再次打开文件（single-instance 转发）：先注册监听再取队列，
-      // 避免转发事件落在两者之间而丢失
+      // 避免转发事件落在两者之间而丢失。**多窗口下这条是广播**，要挑一个窗口接，见
+      // claimOpenFileOnBroadcast（有焦点的窗口接，都没焦点时主窗口延迟兜底）。
       const unlistenOpen = listen<string>("open-file", (e) => {
-        if (e.payload) openPath(e.payload);
+        if (e.payload) void claimOpenFileOnBroadcast(e.payload);
       });
       keepUnlisten(unlistenOpen);
       unlistenOpen.then(() => {
-        // 首次启动/跨实例转发的待打开文件（关联双击）：就绪后取走（取最后一个，即最新请求）
-        invoke<string[]>("take_pending_files")
-          .then((paths) => {
-            if (paths.length > 0) openPath(paths[paths.length - 1]);
-          })
-          .catch(() => {});
+        // 首次启动/跨实例转发的待打开文件（关联双击）：就绪后取走（取最后一个，即最新请求）。
+        // **只由主窗口取**：副窗口是草稿窗口，不该被启动参数里带的文件顶掉内容。
+        if (isSecondaryWindow) return;
+        void claimPendingFile().then((path) => {
+          if (path) void openPath(path);
+        });
       });
     }
     mark("mount-listeners-done");
@@ -1739,7 +1876,8 @@
     // **每次启动都查**，只受设置里的开关约束 —— 这里曾经还有一道"距上次检查满 6 小时才查"的节流，
     // 2026-09-14 用户报「自动更新没法用（打开的时候没有自动更新，但是检查的时候能检查到）」就是它：
     // 时间戳是上次检查写下的，于是启动时几乎永远被拦掉。别再把这道理加回来，见 update-utils.ts 的注解。
-    if (autoCheckUpdates) {
+    // **只由主窗口查**：两个窗口各查一次就会各弹一个更新窗（手动检查不受限，随时可用）。
+    if (autoCheckUpdates && !isSecondaryWindow) {
       startupCheckTimer = setTimeout(() => checkUpdates(false), AUTO_CHECK_DELAY_MS);
     }
     mark("mount-end");
@@ -1754,6 +1892,7 @@
       window.removeEventListener("focus", reapplyZoomOnReturn);
       document.removeEventListener("visibilitychange", reapplyZoomOnReturn);
       if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
+      if (pendingOpenTimer !== null) clearTimeout(pendingOpenTimer); // 关窗时取消还没落地的兜底打开
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
       previewResizeObserver?.disconnect();
