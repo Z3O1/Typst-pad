@@ -1,21 +1,49 @@
-// update-utils 单元测试：自动更新的纯逻辑（进度换算、错误文案、说明裁剪）。
+// update-utils 单元测试：自动更新的纯逻辑（进度换算、错误文案、说明裁剪、"别再自动弹窗"判定）。
 // Tauri 侧的 check/downloadAndInstall 不在这里测（浏览器里没有真实 updater），
-// 但"进度怎么显示""错误怎么说人话"这些判断全在这里，坏了用户立刻能感觉到。
+// 但"进度怎么显示""错误怎么说人话""点过稍后之后还弹不弹"这些判断全在这里。
 //
-// 注意这里**没有**"什么时候该检查"的用例：那道理（6 小时节流）已经删掉，现在是"每次启动都查"，
+// 注意这里**没有**"多久才该检查一次"的用例：那道 6 小时节流已经删掉（启动时每次都查），
 // 见 update-utils.ts 的注解与 wysiwyg.mjs 第 34 组的回归网。
 import { describe, it, expect } from "vitest";
 import {
   AUTO_CHECK_DELAY_MS,
+  UPDATE_DISMISS_NOTICE,
   formatBytes,
   progressFrom,
   formatProgress,
   describeUpdateError,
+  isUpdatePromptSuppressed,
 } from "./update-utils";
 
 describe("启动自动检查的延迟", () => {
   it("延迟是正数且不为 0（不能在 mount 里立刻打网络，会跟首屏抢那几秒）", () => {
     expect(AUTO_CHECK_DELAY_MS).toBeGreaterThan(0);
+  });
+});
+
+describe("isUpdatePromptSuppressed（点过「稍后」就不再自动弹窗）", () => {
+  it("没点过（null / undefined / 0 / NaN）→ 照常弹窗（默认是弹，别写反）", () => {
+    expect(isUpdatePromptSuppressed(null)).toBe(false);
+    expect(isUpdatePromptSuppressed(undefined)).toBe(false);
+    expect(isUpdatePromptSuppressed(0)).toBe(false);
+    expect(isUpdatePromptSuppressed(Number.NaN)).toBe(false);
+  });
+
+  it("点过「稍后」（任意合法时间戳）→ 自动检查不再弹窗", () => {
+    expect(isUpdatePromptSuppressed(1_700_000_000_000)).toBe(true);
+    // 用户要的是"再也别跳"，不是"过一会儿再跳"：多久以前点的都一样
+    expect(isUpdatePromptSuppressed(Date.now() - 365 * 24 * 3600 * 1000)).toBe(true);
+  });
+
+  it("坏值（字符串 / 负数 / Infinity）→ 不静默，宁可多提示一次", () => {
+    expect(isUpdatePromptSuppressed("刚刚" as unknown as number)).toBe(false);
+    expect(isUpdatePromptSuppressed(-1)).toBe(false);
+    expect(isUpdatePromptSuppressed(Number.POSITIVE_INFINITY)).toBe(false);
+  });
+
+  it("「稍后」后的状态栏提示里写明了「已停止自动提示、可手动检查」", () => {
+    expect(UPDATE_DISMISS_NOTICE).toContain("已停止自动提示更新");
+    expect(UPDATE_DISMISS_NOTICE).toContain("检查更新");
   });
 });
 

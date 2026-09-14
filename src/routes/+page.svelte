@@ -64,8 +64,10 @@
   } from "$lib/updater";
   import {
     AUTO_CHECK_DELAY_MS,
+    UPDATE_DISMISS_NOTICE,
     formatBytes,
     formatProgress,
+    isUpdatePromptSuppressed,
     type DownloadProgress,
   } from "$lib/update-utils";
   import { renderUpdateNotes } from "$lib/update-notes";
@@ -262,6 +264,12 @@
   let showUpdateDialog = $state(false);
   /** 上次检查更新的时间（持久化）：**只是记录，不参与判定**（诊断用，见 update-utils.ts 的注解） */
   let lastUpdateCheckAt: number | null = null;
+  /**
+   * 用户点过「稍后」的时刻（持久化）：有值 = 自动检查不再弹窗。
+   * 用户要求原话「不更新就再也别跳出来，直到点了检查更新」——判定与清标记见
+   * update-utils.isUpdatePromptSuppressed / 本文件的 dismissUpdatePrompt / clearUpdateDismissed。
+   */
+  let updateDismissedAt: number | null = null;
   let startupCheckTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** 状态栏的更新提示（点击重开更新弹窗）；无提示时为 null */
@@ -285,7 +293,11 @@
     // 下载/安装中不重入（否则会丢掉手上的句柄）
     if (updateFlow.kind === "downloading" || updateFlow.kind === "installing") return;
     updateFlow = { kind: "checking", manual };
-    if (manual) statusText = "正在检查更新…";
+    if (manual) {
+      statusText = "正在检查更新…";
+      // 手动检查 = 用户主动想知道有没有更新：清掉"别再自动弹窗"标记（"直到点了检查更新"）
+      clearUpdateDismissed();
+    }
 
     const outcome = await checkForUpdate();
     // 记一笔"上次检查时间"备查（自动 / 手动都记）：**它不再是节流门**，别拿它拦启动检查
@@ -317,8 +329,38 @@
       currentVersion: outcome.update.currentVersion,
       notes: outcome.update.notes,
     };
-    statusText = `发现新版本 v${outcome.update.version}`;
-    // 用户选定的交互：发现新版本 → 弹窗确认（不自动下载）；关掉弹窗后状态栏仍留着入口
+    // 用户点过「稍后」之后，自动检查只把入口留在状态栏（`updateNotice` 那个「可更新到 vX」按钮）：
+    // **不弹窗、也不动状态文字** —— 用户原话「不更新就再也别跳出来，直到点了检查更新」。
+    // 手动检查永远弹窗（上面的 clearUpdateDismissed 已经把标记清掉了）。
+    if (manual || !isUpdatePromptSuppressed(updateDismissedAt)) {
+      statusText = `发现新版本 v${outcome.update.version}`;
+      // 发现新版本 → 弹窗确认（不自动下载）；关掉弹窗后状态栏仍留着入口
+      showUpdateDialog = true;
+    }
+  }
+
+  /** 清掉"别再自动弹更新窗"标记（显式操作：手动检查 / 点状态栏入口 / 开始下载） */
+  function clearUpdateDismissed() {
+    if (updateDismissedAt === null) return;
+    updateDismissedAt = null;
+    schedulePersist();
+  }
+
+  /**
+   * 弹窗里点「稍后」：**以后自动检查只更新状态栏，不再弹窗**，直到用户手动检查
+   * （用户 2026-09-14 明确要求：「不更新就再也别跳出来，直到点了检查更新」）。
+   * 曾经实现成"静默 6 小时"，被否掉——别再退回按时间窗口的版本。
+   */
+  function dismissUpdatePrompt() {
+    showUpdateDialog = false;
+    updateDismissedAt = Date.now();
+    schedulePersist();
+    statusText = UPDATE_DISMISS_NOTICE;
+  }
+
+  /** 点状态栏的更新入口：与手动检查同属显式操作（清标记），然后打开弹窗 */
+  function openUpdateDialogFromNotice() {
+    clearUpdateDismissed();
     showUpdateDialog = true;
   }
 
@@ -326,6 +368,8 @@
   async function startUpdateInstall() {
     const handle = updateHandle;
     if (!handle) return;
+    // 用户改主意开始装了：标记没必要再留着（装完重启后又能正常自动提示下一个版本）
+    clearUpdateDismissed();
     updateFlow = {
       kind: "downloading",
       version: handle.version,
@@ -381,6 +425,7 @@
         restoreSession,
         autoCheckUpdates,
         lastUpdateCheckAt,
+        updateDismissedAt,
         uiZoom,
         chineseFont,
         fontDirs,
@@ -1443,6 +1488,8 @@
     autoCheckUpdates = saved.autoCheckUpdates ?? true;
     // 上次检查时间只用于显示/诊断，读回来原样存回去即可（启动检查不再看它）
     lastUpdateCheckAt = typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
+    // "点过稍后 = 别再自动弹窗"（旧存档没有这个字段 → null = 照常弹窗）
+    updateDismissedAt = typeof saved.updateDismissedAt === "number" ? saved.updateDismissedAt : null;
     // 界面缩放：旧存档没有该字段 → 100%；越界/脏数据由 clampZoom 收敛（随后由 $effect 应用）
     uiZoom = clampZoom(saved.uiZoom);
     if (restoreSession && typeof saved.content === "string" && saved.content.trim() !== "") {
@@ -1772,7 +1819,7 @@
       <button
         class="status-update"
         title="打开更新窗口"
-        onclick={() => (showUpdateDialog = true)}
+        onclick={openUpdateDialogFromNotice}
       >{updateNotice}</button>
     {/if}
     <span class="spacer"></span>
@@ -1908,7 +1955,8 @@
           </p>
           <div class="modal-actions">
             <button class="modal-btn primary" onclick={startUpdateInstall}>下载并安装</button>
-            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>稍后</button>
+            <!-- 「稍后」= 用户选择不更新：此后自动检查只更新状态栏、不再弹窗（见 dismissUpdatePrompt） -->
+            <button class="modal-btn" onclick={dismissUpdatePrompt}>稍后</button>
           </div>
         {:else if updateFlow.kind === "downloading"}
           <h3 class="modal-title">正在下载更新 v{updateFlow.version}</h3>

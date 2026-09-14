@@ -1714,18 +1714,21 @@ check(
 await c.screenshot(SHOT("wysiwyg-33-mode-switch-caret"));
 
 // ---------------------------------------------------------------------------
-// 第 34 组：**启动时就该自己发现新版本**（用户反馈「自动更新没法用」的回归网）
-// 背景（2026-09-14）：用户装了 0.7.6、0.7.7 发布后打开应用却什么都没提示，原话
+// 第 34 组：**启动时自己发现新版本；但用户说过不更新之后就不再自动弹窗**
+// 背景（2026-09-14，三轮）：用户装了 0.7.6、0.7.7 发布后打开应用却什么都没提示，原话
 // 「打开的时候没有自动更新，但是检查的时候能检查到」。根因不是网络也不是签名（那条链路
 // 当时是通的：清单 200、安装包 200、签名与配置里的公钥匹配），而是启动检查被一道
 // "距上次检查满 6 小时才查"的节流拦掉了 —— 而手动检查也会刷新那个时间戳，于是
-// 越手动查、启动越不查。现在改成"每次启动都查"，只受设置开关约束。
+// 越手动查、启动越不查。改成"每次启动都查"之后，用户又补了后半句：
+// **「算了，不更新就再也别跳出来，直到点了检查更新」**（中途那版"点稍后 → 静默 6 小时"被否掉）。
 //
-// 这一组刻意把 lastUpdateCheckAt 种成"几十秒前"（= 刚刚检查过），复现的正是被拦的那个状态：
-// 修之前弹窗不会出现（超时失败），修之后它会自己弹出来。
-// 桩：`&fakeupdate=1` 让 plugin:updater|check 返回一个假的可用更新（见 browser-dev-stub.ts）。
+// 现在锁住的规则：点过「稍后」→ 自动检查照做（状态栏仍留「可更新到 vX」入口）但**不再弹窗、
+// 也不动状态文字**；手动检查（或点状态栏入口、或点「下载并安装」）会清掉这个标记，
+// 弹窗随即恢复。种子把 lastUpdateCheckAt 种成"几十秒前"是为了复现当年被节流拦掉的那个状态。
+// 桩：`&fakeupdate=1` 让 plugin:updater|check 返回一个假的可用更新（见 browser-dev-stub.ts），
+// `window.__browserDevUpdaterChecks` 记的是检查次数（据此区分"没检查"和"检查了但不弹窗"）。
 // ---------------------------------------------------------------------------
-console.log("34) 启动时的自动更新检查（不节流）");
+console.log("34) 启动自动检查 + 「选择不更新」之后不再自动弹窗");
 
 /** 种一份存档再重载页面（跟用户"上次刚检查过、现在重新打开应用"的处境一致） */
 const seedState = async (state) => {
@@ -1798,16 +1801,101 @@ check(
   JSON.stringify(autoUpdate),
 );
 await c.screenshot(SHOT("wysiwyg-34-startup-auto-check"));
+
+// ---- 「选择不更新 = 再也别自动跳出来，直到手动检查」（用户 2026-09-14 的最终要求）----
+// 点「稍后」：关窗 + 写"别烦我"标记 + 状态栏明说以后不再自动弹（但可以手动查）
 await c.evaluate(
   `Array.from(document.querySelectorAll(".update-modal .modal-btn")).find(b => (b.textContent || "").includes("稍后")).click()`,
+);
+await new Promise((r) => setTimeout(r, 400));
+const afterDismiss = await c.evaluate(`(() => {
+  const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
+  return {
+    status: document.querySelector(".statusbar").innerText,
+    dismissedAt: typeof raw.updateDismissedAt === "number" ? raw.updateDismissedAt : null,
+    now: Date.now(),
+    dialog: !!document.querySelector(".update-modal"),
+  };
+})()`);
+check(
+  "点「稍后」→ 关窗，且状态栏说明以后不再自动提示（仍可手动检查）",
+  !afterDismiss.dialog && afterDismiss.status.includes("已停止自动提示更新"),
+  JSON.stringify(afterDismiss),
+);
+check(
+  "点「稍后」写进存档（updateDismissedAt，重开应用仍然有效）",
+  afterDismiss.dismissedAt !== null && afterDismiss.now - afterDismiss.dismissedAt < 60_000,
+  JSON.stringify(afterDismiss),
+);
+
+// 重新打开应用（存档照旧）：**更新窗不许再自己跳出来**
+await c.goto(`${DEV_URL}&fakeupdate=1`);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+// 自动检查是 mount 后约 4 秒才发的，等 6.5 秒再断言（不能只等 1 秒就宣布"没弹"）
+await new Promise((r) => setTimeout(r, 6500));
+const afterDismissReload = await c.evaluate(`({
+  dialog: !!document.querySelector(".update-modal"),
+  checks: window.__browserDevUpdaterChecks || 0,
+  notice: !!document.querySelector(".status-update"),
+})`);
+check(
+  "说了不更新之后再开应用：更新窗不再自己弹出来（「再也别跳出来」）",
+  !afterDismissReload.dialog,
+  JSON.stringify(afterDismissReload),
+);
+check(
+  "但仍照常悄悄检查（桩收到 check），只在状态栏留一个「可更新到 vX」入口",
+  afterDismissReload.checks >= 1 && afterDismissReload.notice,
+  JSON.stringify(afterDismissReload),
+);
+
+// ---- 「直到点了检查更新」：手动检查永远弹窗，并清掉"别烦我"标记 ----
+await openMenu("帮助");
+await c.waitFor(`document.body.innerText.includes("检查更新")`, { timeout: 5000 });
+await clickMenuItem("检查更新");
+await c.waitFor(`!!document.querySelector(".update-modal")`, { timeout: 10000 });
+// 存档写入是 300ms 防抖（`schedulePersist`）：读 localStorage **之前必须等它落盘**，
+// 否则读到的还是上一条状态（第一版就栽在这上面——断言"标记被清掉"时读到的仍是旧值）。
+await new Promise((r) => setTimeout(r, 600));
+const afterManual = await c.evaluate(`(() => {
+  const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
+  return {
+    title: document.querySelector(".update-modal .modal-title")?.textContent?.trim() || "",
+    dismissedAt: raw.updateDismissedAt ?? null,
+  };
+})()`);
+check(
+  "手动点「检查更新…」→ 更新窗照常弹出来（即使刚说过不更新）",
+  afterManual.title.includes("发现新版本"),
+  JSON.stringify(afterManual),
+);
+check(
+  "手动检查清掉「别再自动弹窗」标记（这就是「直到点了检查更新」）",
+  afterManual.dismissedAt === null,
+  JSON.stringify(afterManual),
+);
+
+// 标记清掉之后再开一次：自动弹窗恢复 —— 闭合"直到点了检查更新"这个承诺
+await c.goto(`${DEV_URL}&fakeupdate=1`);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+let promptRestored = true;
+try {
+  await c.waitFor(`!!document.querySelector(".update-modal")`, { timeout: 15000 });
+} catch {
+  promptRestored = false;
+}
+check("标记清掉后自动弹窗恢复（再开应用又会自己弹）", promptRestored, `appeared=${promptRestored}`);
+// 关掉弹窗（顺便把状态复位）。弹窗可能没出现（上面那条挂了），所以用 `?.` 兜一下别把整轮打崩
+await c.evaluate(
+  `Array.from(document.querySelectorAll(".update-modal .modal-btn")).find(b => (b.textContent || "").includes("稍后"))?.click()`,
 );
 
 // 设置里的开关仍然是这道门：关掉它，启动就一次都不该查（桩会记账）
 await seedState({ autoCheckUpdates: false, lastUpdateCheckAt: Date.now() });
 await c.goto(`${DEV_URL}&fakeupdate=1`);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await c.evaluate(`window.__browserDevUpdaterChecks = 0`);
-// 自动检查是启动后约 4 秒才发的，等够 8 秒再断言——不能只等 1 秒就宣布"没检查"
+// 自动检查是启动后约 4 秒才发的，等够 8 秒再断言——不能只等 1 秒就宣布"没检查"。
+// **故意不把计数器清零**：清零会把"其实查过一次"抹掉，这条断言就变成了假绿。
 await new Promise((r) => setTimeout(r, 8000));
 const disabled = await c.evaluate(`({
   checks: window.__browserDevUpdaterChecks || 0,

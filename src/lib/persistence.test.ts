@@ -26,6 +26,7 @@ describe("persistence", () => {
       restoreSession: false,
       autoCheckUpdates: false,
       lastUpdateCheckAt: 1_700_000_000_000,
+      updateDismissedAt: 1_700_000_100_000,
       uiZoom: 1.3,
       chineseFont: "SimSun",
       fontDirs: ["D:\\fonts"],
@@ -44,6 +45,7 @@ describe("persistence", () => {
       restoreSession: false,
       autoCheckUpdates: false,
       lastUpdateCheckAt: 1_700_000_000_000,
+      updateDismissedAt: 1_700_000_100_000,
       uiZoom: 1.3,
       chineseFont: "SimSun",
       fontDirs: ["D:\\fonts"],
@@ -56,13 +58,13 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, editorWrap: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, editorWrap: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, updateDismissedAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, editorWrap: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, editorWrap: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, updateDismissedAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
     expect(loadState().theme).toBe("system");
   });
 
@@ -120,6 +122,8 @@ describe("persistence", () => {
     // 旧存档没有自动更新字段：默认开启（启动时会检查一次，不再有"上次检查时间"这道门）
     expect(state.autoCheckUpdates).toBe(true);
     expect(state.lastUpdateCheckAt).toBeNull();
+    // "点过稍后 = 别再自动弹窗"也是新字段：旧存档读出来是 null（= 照常弹窗）
+    expect(state.updateDismissedAt).toBeNull();
     // 界面缩放也是新增字段：旧存档读出来是默认 100%
     expect(state.uiZoom).toBe(1);
   });
@@ -155,5 +159,13 @@ describe("persistence", () => {
       JSON.stringify({ lastUpdateCheckAt: "刚刚" }),
     );
     expect(loadState().lastUpdateCheckAt).toBeNull();
+  });
+
+  it("updateDismissedAt 损坏时不写进状态（否则一个坏值会让更新弹窗永远不再出现）", () => {
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ updateDismissedAt: "刚刚" }),
+    );
+    expect(loadState().updateDismissedAt).toBeNull();
   });
 });
