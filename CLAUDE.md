@@ -10,7 +10,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 
 **交接时的状态（2026-09-14）**：
 
-- 版本 `0.7.4`（**首个"自动更新真的能生效"的版本**：0.7.3 引入了 updater，但仓库当时还是私有的，客户端拉不到清单；仓库公开 + 本版发布之后这条链路才第一次跑通）。`main` 与 `origin/main` 同步；tag `v0.7.4` 已推（`release.yml` 构建草稿 Release，已按约定补发 Publish）。
+- 版本 `0.7.4`（**首个"自动更新真的能生效"的版本**：0.7.3 引入了 updater，但仓库当时还是私有的，客户端拉不到清单；仓库公开 + 本版发布之后这条链路才第一次跑通）。`main` 与 `origin/main` 同步；tag `v0.7.4` 已推，`release.yml` 建好草稿后由后台一次性任务自动 Publish —— **2026-09-14 实测已发布**：匿名取 `releases/latest/download/latest.json` 返回 **HTTP 200 且 `version` 已是 `0.7.4`**（签名对应 `Typst-pad_0.7.4_x64-setup.exe`），安装包匿名可达（HTTP 200 / 16.75 MB）。**下一次发版的验收就照这两条 curl 做**（见下）。
 - **发行状态（2026-09-14 实测）：`v0.7.3`、`v0.7.2`、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）；`v0.7.4` 见上一条。发版时 `release.yml` 建的仍是**草稿**，**必须手动 Publish**（或按下方约定直接发）——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效。
   - 发布后建议验一次：`gh api repos/Z3O1/Typst-pad/releases/latest --jq .tag_name` 应为新 tag；清单内容用 `gh api repos/Z3O1/Typst-pad/releases/assets/<latest.json 的 id> -H "Accept: application/octet-stream"` 取回核对（version / url / signature）。**匿名可达性是自动更新的硬前提，验这条最直接**：
     ```bash
