@@ -2,6 +2,14 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+
+- **界面缩放到很大时状态栏不再"长高"**（用户反馈「放大到 190% 之后界面像烂了」）：状态栏是 flex 行，视口变窄（= 缩放变大）时每个 `<span>` 都被压缩并各自折行——一条长报错加右侧一串标签就能把 27px 的状态栏顶成 40px+ 的竖排文字块。现在状态栏 `flex-wrap: nowrap`，左侧状态文字**单行省略号**（`flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis`），右侧徽标/标签/计数 `flex: none; white-space: nowrap`。
+- **Chromium 自己的 `ResizeObserver loop completed with undelivered notifications.` 不再被报成「脚本错误」**：那是引擎的提示（RO 回调里改了布局、同一帧又要再触发；规范允许，后果只是通知推迟到下一帧），而预览画布正是"量宽度 → 设宽度"的模式，缩放/改分栏时会偶发。以前它会带着「脚本错误：」出现在状态栏，用户以为应用坏了。现在只写调试日志；同时把 RO 回调里的重算推到 `requestAnimationFrame`，从源头减少它出现。
+- 浏览器验收新增第 28 组（4 项，合计 **110 项**）：用 CDP 的 `Emulation.setDeviceMetricsOverride` 把 CSS 视口压到 660×460（等价于 1258px 窗口里缩放到 ~190%），断言引擎提示不进状态栏、真错误仍显示、长文本不把状态栏顶高、右侧标签不折行。
+
 ## [0.7.5] - 2026-09-14
 
 ### Fixed

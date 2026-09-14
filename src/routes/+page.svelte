@@ -130,6 +130,7 @@
   // non_reactive_update 警告（previewHost 属历史既有模式，此处新变量按新写法声明）
   let previewBodyEl = $state<HTMLElement>();
   let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
+  let previewScaleFrame = 0; // 已排队的重算帧号（见 onMount 里的 ResizeObserver）
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1255,9 +1256,26 @@
   });
 
   /** 脚本错误统一提示：状态栏给出可读原因 + 调试日志留完整堆栈 */
+  /**
+   * Chromium 自己的提示，不算应用的脚本错误：
+   * "ResizeObserver loop completed with undelivered notifications." 是引擎在"RO 回调里改了布局、
+   * 同一帧又要再触发一次回调"时发的警告，规范上允许、后果只是把这次通知推迟到下一帧。
+   * 我们的预览画布正好是"量到宽度 → 设宽度"这种模式，所以它在缩放/改分栏时会偶发出现。
+   * 报成「脚本错误」会让用户以为应用坏了（2026-09-14 实测被反馈），只写调试日志。
+   */
+  const BENIGN_SCRIPT_ERRORS = [/ResizeObserver loop/i];
+
+  function isBenignScriptError(msg: string): boolean {
+    return BENIGN_SCRIPT_ERRORS.some((re) => re.test(msg));
+  }
+
   function reportScriptError(label: string, detail: unknown) {
     const msg =
       detail instanceof Error ? detail.message : typeof detail === "string" ? detail : String(detail);
+    if (isBenignScriptError(msg)) {
+      dbg.log("error", `${label}（引擎提示，忽略）`, detail);
+      return;
+    }
     statusText = `脚本错误：${msg}`;
     dbg.log("error", label, detail);
     console.error(`[script-error] ${label}`, detail);
@@ -1400,7 +1418,16 @@
     window.addEventListener("wheel", handleZoomWheel, { capture: true, passive: false });
     // 预览画布缩放：观测预览容器宽度变化（窗口 resize / 分栏布局变化），重算画布宽度；
     // observe 首次回调立即触发一次（覆盖挂载时已渲染的产物）
-    previewResizeObserver = new ResizeObserver(() => applyPreviewScale());
+    // 回调里把工作推到下一帧：applyPreviewScale 会改预览画布宽度 → 又改容器布局，
+    // 同步改会让 ResizeObserver 报 "loop completed with undelivered notifications"
+    //（规范允许、但会在控制台/状态栏刷提示，见 reportScriptError 的注解）。
+    previewResizeObserver = new ResizeObserver(() => {
+      if (previewScaleFrame !== 0) return; // 同一帧只排一次
+      previewScaleFrame = requestAnimationFrame(() => {
+        previewScaleFrame = 0;
+        applyPreviewScale();
+      });
+    });
     if (previewBodyEl) previewResizeObserver.observe(previewBodyEl); // bind:this 已在 onMount 前赋值
 
     // Tauri 内：支持拖放打开 / 关联双击打开 / 跨实例转发打开
@@ -1479,6 +1506,7 @@
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
       previewResizeObserver?.disconnect();
+      if (previewScaleFrame !== 0) cancelAnimationFrame(previewScaleFrame);
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
       clearTimeout(mathTimer); // 停止在途公式渲染批次
@@ -2063,6 +2091,7 @@
 
   .statusbar {
     display: flex;
+    flex-wrap: nowrap; /* 不许换行：换行会让状态栏长成一大块（缩放到 190% + 长报错时实测过） */
     align-items: center;
     gap: 16px;
     padding: 4px 12px;
@@ -2071,6 +2100,22 @@
     font-size: 12px;
     color: var(--fg-dim);
     user-select: none;
+  }
+
+  /* 左侧状态文字：占满剩余空间、**单行省略**（以前会被压成多行，把整条状态栏顶高） */
+  .statusbar > span:first-child {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  /* 右侧的徽标/标签/计数：保持原尺寸，既不被压缩也不换行
+     （`:not(.spacer)` 必须留着——排它的那条规则优先级更高，会把撑开右侧的 spacer 压没） */
+  .statusbar > span:not(:first-child):not(.spacer) {
+    flex: none;
+    white-space: nowrap;
   }
 
   .spacer {

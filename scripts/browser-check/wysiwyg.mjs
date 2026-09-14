@@ -1071,5 +1071,72 @@ check(
   JSON.stringify(afterOut),
 );
 
+// ---------------------------------------------------------------------------
+// 第 28 组：缩放到很大时状态栏不能"长高"（用户截图里的样子）
+// 背景（2026-09-14）：用户把界面放大到 190%（等价于 CSS 视口只剩 ~660px）后，状态栏里那条很长的
+// 脚本错误 + 右侧一堆标签在 flex 里被压缩 → 每个 span 各自折行 → 整条状态栏长成一大块竖排文字，
+// 看起来像"界面烂了"。修法：状态栏 flex-wrap: nowrap；左侧状态文字单行省略号；右侧徽标/标签/计数
+// flex: none + nowrap。同时把 Chromium 自己的 "ResizeObserver loop ..." 提示从"脚本错误"里过滤掉
+// （它不是应用的错误，报出来只会吓人），并把预览画布的重算推到下一帧。
+// ---------------------------------------------------------------------------
+console.log("28) 大缩放下状态栏仍是一行（≈660px 的 CSS 视口）");
+await c.evaluate(`(() => {
+  const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
+  raw.viewMode = "source";   // 双栏：状态栏项最多的情况
+  raw.showPreview = true;
+  localStorage.setItem("typst-pad:state", JSON.stringify(raw));
+})()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+// 660px 宽的 CSS 视口 = 在 1258px 窗口里缩放到 ~190%
+await c.send("Emulation.setDeviceMetricsOverride", {
+  width: 660,
+  height: 460,
+  deviceScaleFactor: 1,
+  mobile: false,
+});
+await new Promise((r) => setTimeout(r, 500));
+
+// ① Chromium 自己的 ResizeObserver 提示：不算应用的脚本错误，不许进状态栏
+await c.evaluate(
+  `window.dispatchEvent(new ErrorEvent("error", { message: "ResizeObserver loop completed with undelivered notifications." }))`,
+);
+await new Promise((r) => setTimeout(r, 300));
+const afterBenign = await c.evaluate(`document.querySelector(".statusbar").innerText`);
+check(
+  "引擎的 ResizeObserver 提示不再报成「脚本错误」",
+  !afterBenign.includes("脚本错误"),
+  JSON.stringify(afterBenign.slice(0, 80)),
+);
+
+// ② 真正的长错误：状态栏必须仍然只有一行（左侧省略号、右侧标签不折行）
+await c.evaluate(
+  `window.dispatchEvent(new ErrorEvent("error", { message: "TypeError: 一条很长的真实脚本错误信息，用来验证状态栏不会因为它变成两行" }))`,
+);
+await new Promise((r) => setTimeout(r, 300));
+const narrow = await c.evaluate(`(() => {
+  const bar = document.querySelector(".statusbar");
+  return {
+    h: Math.round(bar.getBoundingClientRect().height),
+    childHeights: Array.from(bar.children).map(e => Math.round(e.getBoundingClientRect().height)),
+    text: bar.innerText.replace(/\\n/g, " ⏎ ").slice(0, 120),
+    hasError: bar.innerText.includes("脚本错误"),
+  };
+})()`);
+check("真正的脚本错误仍然会显示在状态栏", narrow.hasError, JSON.stringify(narrow.text));
+check(
+  "长状态文字不把状态栏顶高（仍是一行：高度 ≤ 30px）",
+  narrow.h <= 30,
+  `状态栏高 ${narrow.h}px`,
+);
+check(
+  "右侧徽标/标签/计数在窄视口下也不折行（每项 ≤ 20px）",
+  narrow.childHeights.every((h) => h <= 20),
+  JSON.stringify(narrow.childHeights),
+);
+await c.screenshot(SHOT("wysiwyg-28-narrow-statusbar"));
+await c.send("Emulation.clearDeviceMetricsOverride");
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();
