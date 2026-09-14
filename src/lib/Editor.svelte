@@ -2,12 +2,14 @@
   import { onMount } from "svelte";
   import { EditorView, Decoration, hoverTooltip } from "@codemirror/view";
   import { EditorState, Compartment, StateField } from "@codemirror/state";
+  import { indentUnit } from "@codemirror/language";
   import type { DecorationSet } from "@codemirror/view";
   import { basicSetup } from "codemirror";
   import { typst } from "codemirror-lang-typst";
   import { typstHeadingHighlight } from "./typst-highlight";
   import { editorKeymap } from "./editor-keymap";
   import { planDollarInput } from "./auto-pair";
+  import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation, MathRender } from "./typst-engine";
   import { squiggleRanges, offsetAt } from "./diagnostics-utils";
@@ -118,6 +120,9 @@
     return [
       basicSetup,
       editorKeymap, // 自定义编辑快捷键（Prec.high，优先于 basicSetup 默认键位）
+      // 一档缩进 = 4 个空格（用户要求「Tab 应该是四格缩进」）：Tab / Shift+Tab 与语言侧自动缩进
+      // 都走这个 facet。回车那条**不用它** —— 新行照抄上一行实际的前导空白（见 auto-indent.ts）。
+      indentUnit.of(INDENT_UNIT),
       typst(),
       typstHeadingHighlight, // 压掉 codemirror-lang-typst 自带高亮给标题加的下划线（见模块注释）
       dollarAutoPair, // `$` 自动配对（空选区输入 `$` 时补出定界符）

@@ -11,6 +11,18 @@ export function isBlankLine(lineText: string): boolean {
 }
 
 /**
+ * 一档缩进 = **4 个空格**（用户要求「Tab 应该是四格缩进」，2026-09-14）。
+ *
+ * 交给 CodeMirror 的 `indentUnit` facet（见 `Editor.svelte` 的 buildExtensions）：
+ * Tab / Shift+Tab（`indentWithTab` → indentMore / indentLess）与任何语言侧的自动缩进都用它。
+ * **回车那条不用它** —— 新行缩进是照抄上一行**实际**的空白（见 indentForNewLine），
+ * 所以老文档里已有的 2 空格缩进不会被强行改成 4 格。
+ *
+ * typst 官方风格是 2 空格，但这是用户的选择，别再"照规范"改回去。
+ */
+export const INDENT_UNIT = "    ";
+
+/**
  * 换行后新行要带的缩进 = **光标左侧那一段前导空白**（空格 / 制表符）。
  *
  * - 光标在行尾（最常见）：整行的前导空白照抄 → 新行缩进与上一行完全一致；

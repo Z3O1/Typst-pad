@@ -2311,7 +2311,7 @@ check(
   JSON.stringify(afterEscUpdate),
 );
 
-console.log("36) 回车换行继承上一行缩进（用户要求「换行时应该和上一行缩进一样」）");
+console.log("36) 回车换行继承上一行缩进 + Tab 四格缩进（用户要求）");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
@@ -2397,7 +2397,35 @@ check(
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
-// ⑧ 这次换行要能被 Ctrl+Z 整体撤销（事务仍是可撤销的 input）
+// ⑧ Tab 一档缩进 = 4 个空格（用户要求「Tab 应该是四格缩进」）
+await retype("第一行");
+await c.key("Tab", { code: "Tab", keyCode: 9 });
+await new Promise((r) => setTimeout(r, 500));
+check(
+  "Tab 一档缩进 = 4 个空格（不是 CM 默认的 2 格）",
+  (await c.evaluate(savedContent)) === "    第一行",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+// ⑨ 紧接着回车：新行照抄 Tab 出来的那 4 格（两处宽度是同一套）
+await c.key("End", { code: "End", keyCode: 35 });
+await enter();
+check(
+  "Tab 缩进后的回车照抄同一宽度（4 格）",
+  (await c.evaluate(savedContent)) === "    第一行\n    ",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+// ⑩ Shift+Tab 反缩进一层：把光标放回第一行，它整好少掉 4 格（第二行的 4 格不动）
+await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 });
+await c.key("Home", { code: "Home", keyCode: 36 });
+await c.key("Tab", { code: "Tab", keyCode: 9, modifiers: 8 });
+await new Promise((r) => setTimeout(r, 500));
+check(
+  "Shift+Tab 反缩进一层（4 格 → 行首）",
+  (await c.evaluate(savedContent)) === "第一行\n    ",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ⑪ 这次换行要能被 Ctrl+Z 整体撤销（事务仍是可撤销的 input）
 await retype("  缩进");
 const indentBeforeUndo = await c.evaluate(savedContent);
 await enter();

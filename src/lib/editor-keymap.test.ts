@@ -13,17 +13,20 @@ import {
   toggleBlockComment,
   toggleComment,
 } from "@codemirror/commands";
+import { indentUnit } from "@codemirror/language";
 import { basicSetup } from "codemirror";
 import { editorKeymap } from "./editor-keymap";
+import { INDENT_UNIT } from "./auto-indent";
 
 // 与 Editor.svelte buildExtensions 的键位相关扩展保持一致（typst() 不含键位，不影响断言）
-const bindingExtensions = [basicSetup, editorKeymap];
+// indentUnit 也要带上：Tab 一档缩进多宽由它决定（应用里是 4 个空格，见 auto-indent.ts）
+const bindingExtensions = [basicSetup, editorKeymap, indentUnit.of(INDENT_UNIT)];
 
 /** 行为测试用扩展：basicSetup + 自定义键位 + 注释符号定义（代替 typst()） */
 const commentTokensData = EditorState.languageData.of(() => [
   { commentTokens: { block: { open: "/*", close: "*/" }, line: "//" } },
 ]);
-const behaviorExtensions = [basicSetup, editorKeymap, commentTokensData];
+const behaviorExtensions = [basicSetup, editorKeymap, indentUnit.of(INDENT_UNIT), commentTokensData];
 
 /** 按优先级展平后的全部键位绑定（facet 值按 Prec 优先级排列） */
 function allBindings() {
@@ -102,15 +105,31 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     );
   }
 
-  it("Tab 缩进、Shift+Tab 反缩进", () => {
+  it("Tab 一档缩进 = 4 个空格、Shift+Tab 反缩进一层", () => {
     const view = makeView("#foo\n");
     view.dispatch({ selection: { anchor: 0 } });
     press(view, { key: "Tab", code: "Tab", keyCode: 9 });
-    expect(view.state.doc.toString()).toBe("  #foo\n");
+    // 用户要求「Tab 应该是四格缩进」：一档就是 INDENT_UNIT（4 个空格），不是 CM 默认的 2 个
+    expect(view.state.doc.toString()).toBe("    #foo\n");
+    expect(view.state.facet(indentUnit)).toBe(INDENT_UNIT);
+    expect(INDENT_UNIT).toBe("    ");
 
     // Shift+Tab 反缩进一层
     press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
     expect(view.state.doc.toString()).toBe("#foo\n");
+    view.destroy();
+  });
+
+  it("Tab 缩进与回车继承是同一套宽度：Tab 出来的 4 格，回车后照抄", () => {
+    const view = makeView("#foo\n");
+    view.dispatch({ selection: { anchor: 0 } });
+    press(view, { key: "Tab", code: "Tab", keyCode: 9 });
+    expect(view.state.doc.toString()).toBe("    #foo\n");
+    // 光标移到行尾再回车：新行缩进 = 上一行实际的 4 个空格
+    view.dispatch({ selection: { anchor: view.state.doc.length - 1 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    // 原文末尾那个换行还在，所以是「4 格 + 换行 + 4 格 + 原换行」
+    expect(view.state.doc.toString()).toBe("    #foo\n    \n");
     view.destroy();
   });
 
