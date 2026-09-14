@@ -41,10 +41,10 @@ export interface PersistedState {
    */
   lastUpdateCheckAt: number | null;
   /**
-   * 分栏比例：**预览区**占分栏容器的宽度份额（0.25~0.75，默认 0.5）。
-   * Ctrl+滚轮调整（见 pane-ratio.ts）；存比例而不是像素宽度，窗口变化时按比例重排。
+   * 界面缩放系数（0.5~2.5，默认 1 = 100%），Ctrl+滚轮调整（见 zoom.ts）。
+   * 走 webview 缩放（Tauri `setZoom`），启动时恢复并重新应用。
    */
-  previewRatio: number;
+  uiZoom: number;
   /**
    * 正文字体（中文）选择：空串 = 用内置默认（思源宋体优先，缺字回退系统宋体）。
    * 非空时是 FontBook 里的**英文族名**（如 "SimSun"、"Microsoft YaHei"），
@@ -78,9 +78,9 @@ export function loadState(): Partial<PersistedState> {
     // 自动更新（0.7.2 后的存档才有）：默认开；没检查过时时间戳为 null（→ 启动即检查一次）
     if (state.autoCheckUpdates === undefined) state.autoCheckUpdates = true;
     if (typeof state.lastUpdateCheckAt !== "number") state.lastUpdateCheckAt = null;
-    // 分栏比例（旧存档没有）：默认 50/50；只认数字，越界值交给调用方 clamp（读档方用 pane-ratio）
-    if (typeof state.previewRatio !== "number" || !Number.isFinite(state.previewRatio)) {
-      state.previewRatio = 0.5;
+    // 界面缩放（旧存档没有）：默认 100%；只认数字，越界值交给调用方收敛（读档方用 zoom.clampZoom）
+    if (typeof state.uiZoom !== "number" || !Number.isFinite(state.uiZoom)) {
+      state.uiZoom = 1;
     }
     // 字体设置（旧存档没有）：正文字体默认空串 = 用内置默认列表；字体目录默认空
     if (typeof state.chineseFont !== "string") state.chineseFont = "";

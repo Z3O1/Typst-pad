@@ -304,6 +304,14 @@ async function handleCommand(
     case "plugin:updater|check":
       notify(command);
       return null;
+    // 界面缩放（Ctrl+滚轮）：浏览器开发模式没有 Tauri 的 webview 缩放，但**记录请求的系数**，
+    // 让浏览器验收能断言"确实按一档 10% 请求了缩放"（真实缩放效果只能在桌面版看）。
+    case "plugin:webview|set_webview_zoom": {
+      const value = typeof a.value === "number" ? a.value : null;
+      (window as unknown as Record<string, unknown>).__browserDevLastZoom = value;
+      notify(command);
+      return null;
+    }
     default:
       // dialog 插件（plugin:dialog|confirm 等）与未实现命令：给出行为安全的默认值，
       // 让 UI 不崩、也不产生"假成功"的错觉。
@@ -313,8 +321,20 @@ async function handleCommand(
       }
       // 目录选择器（设置 → 额外字体目录）：给一个假目录，让验收能走完"添加目录 → 刷新字体列表"。
       // 文件对话框仍返回 null（保持原有的"取消"语义，不影响文件打开/保存的验收）。
-      if (command === "plugin:dialog|open" && a.directory === true) {
-        return typeof a.defaultPath === "string" ? a.defaultPath : "D:\\fake-fonts";
+      //
+      // ⚠️ 参数形状：dialog 插件的**所有选项都嵌在 `options` 里**
+      // （`invoke('plugin:dialog|open', { options })`，见 @tauri-apps/plugin-dialog 的 dist-js），
+      // 不是平铺在顶层。曾经按 `args.directory` 判断，于是"添加字体目录"在浏览器验收里
+      // 永远拿到 null、点了没反应（第 25 组因此卡在找不到 .settings-dir-path）。
+      // 两种形状都接受，避免插件升级/调用方写法变化时又静默失效。
+      if (command === "plugin:dialog|open") {
+        const options = (typeof a.options === "object" && a.options !== null ? a.options : a) as Record<
+          string,
+          unknown
+        >;
+        if (options.directory === true) {
+          return typeof options.defaultPath === "string" ? options.defaultPath : "D:\\fake-fonts";
+        }
       }
       return null;
   }

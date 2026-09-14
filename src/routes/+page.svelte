@@ -25,6 +25,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { loadState, saveState } from "$lib/persistence";
@@ -70,13 +71,13 @@
     type DownloadProgress,
   } from "$lib/update-utils";
   import {
-    PANE_RATIO_DEFAULT,
-    clampPaneRatio,
-    nextPaneRatio,
-    paneRatioFlexStyle,
-    paneRatioPercent,
-    wheelResizeDelta,
-  } from "$lib/pane-ratio";
+    ZOOM_DEFAULT,
+    clampZoom,
+    nextZoom,
+    zoomIn,
+    zoomLabel,
+    zoomOut,
+  } from "$lib/zoom";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";
@@ -165,11 +166,12 @@
   // 也可以用视图菜单单独打开（例如所见即所得下仍想对照整页）。
   let showPreview = $state(false);
   /**
-   * 分栏比例 = **预览区**占分栏容器的宽度份额（0.25~0.75，默认 50/50），Ctrl+Shift+滚轮调
-   * （见 handlePanesWheel）。存**比例**而不是像素宽度：窗口大小变化时按比例重排，
-   * 窗口变小也不会把编辑区挤没。
+   * 界面缩放系数（0.5~2.5，默认 1 = 100%），**Ctrl+滚轮**调（见 handleZoomWheel）。
+   * 走 Tauri 的 webview 缩放（`setZoom`），效果等于浏览器 Ctrl+滚轮缩放：编辑区、预览、
+   * 菜单、状态栏一起等比放大，CSS 像素不变——所以 CodeMirror 的行高测量与 SVG 预览的尺寸
+   * 计算都不会错位（用 CSS `zoom` 就会错位）。
    */
-  let previewRatio = $state(PANE_RATIO_DEFAULT);
+  let uiZoom = $state(ZOOM_DEFAULT);
   // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
   // Map 本身不需要响应式（变更后靠 mathVersion 代次通知编辑器重整装饰）
   const mathCache = new Map<string, MathRender>();
@@ -351,7 +353,7 @@
         restoreSession,
         autoCheckUpdates,
         lastUpdateCheckAt,
-        previewRatio,
+        uiZoom,
         chineseFont,
         fontDirs,
       });
@@ -369,39 +371,57 @@
   }
 
   /**
-   * Ctrl+滚轮：调整分栏比例（预览区宽度）。
-   *
-   * 只在预览栏可见时有意义——写作模式单栏时预览是 `display:none`，此时给一句状态栏提示就放行
-   * （不 preventDefault），让用户知道"不是坏了，是这里没有可调的分栏"。
-   * 滚轮向上 = 预览区变宽；到上下限后继续滚只提示，不再变化。
-   *
-   * 位移量同时看 deltaY / deltaX（见 pane-ratio.wheelResizeDelta）：按 Shift 滚轮时 Chromium 会把
-   * 纵向滚动转成横向（deltaY=0、deltaX 有值），只读 deltaY 会"按了没反应"。
+   * 把缩放系数交给 webview。非 Tauri 环境（提示页）或调用失败都静默忽略——
+   * 缩放不是关键路径，失败不该弹错（调试日志里留痕）。
    */
-  function handlePanesWheel(e: WheelEvent) {
-    if (!e.ctrlKey) return;
-    if (!showPreview) {
-      statusText = "分栏比例：先打开预览栏（视图 → 显示预览栏）再 Ctrl+滚轮";
+  async function applyUiZoom(zoom: number) {
+    if (!isTauri()) return;
+    try {
+      await getCurrentWebview().setZoom(clampZoom(zoom));
+      dbg.log("zoom", `set ${zoomLabel(zoom)}`);
+    } catch (e) {
+      dbg.log("zoom", "setZoom failed", e);
+    }
+  }
+
+  /** 改缩放并反馈（滚轮 / 菜单共用）；值没变时提示"已到边界"，不重复写存档 */
+  function setUiZoom(next: number) {
+    const target = clampZoom(next);
+    if (target === uiZoom) {
+      statusText = `缩放已是 ${zoomLabel(target)}（到边界了）`;
       return;
     }
-    e.preventDefault(); // 别让这次滚动继续变成编辑器/预览区滚动或 WebView 缩放
-    const next = nextPaneRatio(previewRatio, wheelResizeDelta(e.deltaY, e.deltaX), e.deltaMode);
-    if (next === previewRatio) {
-      statusText = `预览区宽度已是 ${paneRatioPercent(next)}%（到边界了）`;
-      return;
-    }
-    previewRatio = next;
-    // 状态栏给出实时反馈：滚轮改的是"看不见的比例"，没有数字反馈会不知道调了多少
-    statusText = `预览区宽度 ${paneRatioPercent(next)}%`;
+    uiZoom = target; // $effect 把它交给 webview（见下方 applyUiZoom 的 effect）
+    statusText = `缩放 ${zoomLabel(target)}`;
     schedulePersist();
   }
 
-  /** 分栏比例复位 50/50（视图菜单；没有滚轮 / 想要确定的默认值时的出口） */
-  function resetPaneRatio() {
-    previewRatio = PANE_RATIO_DEFAULT;
-    statusText = "分栏比例已复位 50%";
-    schedulePersist();
+  /** 缩放复位 100%（视图菜单） */
+  function resetUiZoom() {
+    if (uiZoom === ZOOM_DEFAULT) {
+      statusText = "缩放已是 100%";
+      return;
+    }
+    setUiZoom(ZOOM_DEFAULT);
   }
+
+  /**
+   * Ctrl+滚轮：放大/缩小整个界面（编辑区 + 预览 + 菜单）。
+   *
+   * 命中时**必须 preventDefault**：否则这次滚动会继续滚动编辑器/预览区，WebView2 还可能顺手
+   * 用它自己那套系数缩放页面（与我们的系数打架，表现为"缩放了但系数对不上"）。
+   * 位移量同时看 deltaY / deltaX（见 zoom.ts 的注解）：按 Shift 滚轮时浏览器把纵向滚动转成横向。
+   */
+  function handleZoomWheel(e: WheelEvent) {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    setUiZoom(nextZoom(uiZoom, e.deltaY, e.deltaX, e.deltaMode));
+  }
+
+  // 缩放变化（含启动恢复后的首次赋值）→ 交给 webview；失败不影响其它逻辑
+  $effect(() => {
+    void applyUiZoom(uiZoom);
+  });
 
   /** 写作模式 ↔ 源码模式（仿 Typora 的"源代码模式"）：预览栏随模式联动 */
   function toggleViewMode() {
@@ -661,11 +681,17 @@
             action: () => (showPreview = !showPreview),
           },
           {
-            label: "重置分栏比例",
+            label: "放大",
             // 这里的 shortcut 不是真快捷键（MenuBar 的匹配器只支持「Ctrl+单键」，不会命中），
             // 而是把操作姿势当灰字提示显示出来：Ctrl+滚轮 没法写进快捷键匹配
             shortcut: "Ctrl+滚轮",
-            action: resetPaneRatio,
+            action: () => setUiZoom(zoomIn(uiZoom)),
+          },
+          { label: "缩小", action: () => setUiZoom(zoomOut(uiZoom)) },
+          {
+            label: "重置缩放",
+            checked: uiZoom === ZOOM_DEFAULT,
+            action: resetUiZoom,
           },
           { label: "主题：自动", checked: theme === "system", action: () => (theme = "system") },
           { label: "主题：暗", checked: theme === "dark", action: () => (theme = "dark") },
@@ -908,7 +934,14 @@
     if (fontsChanged) resetMathCache();
     // **保存后立即重编译**：以前只写状态不重编译，预览停在上一次结果，看起来就是
     // "改了字体/前缀没生效"（要在正文里敲一个字才刷新）。字体与前缀都会进编译源，故都要重编译。
-    if (fontsChanged || prefixChanged) runCompile();
+    if (fontsChanged || prefixChanged) {
+      // 重编译完成后再补一次确认：编译成功会把状态栏写成「就绪」，先写的那句会被顶掉
+      // （实测：点保存后 "设置已保存" 一闪而过，验收也因此判失败）。只在编译没有给出更重要的
+      // 提示（警告/编译错误）时才补——那些提示比"已保存"要紧。
+      void runCompile().finally(() => {
+        if (statusText === "就绪") statusText = "设置已保存";
+      });
+    }
     statusText = "设置已保存";
   }
 
@@ -1180,8 +1213,8 @@
     restoreSession = saved.restoreSession ?? true;
     autoCheckUpdates = saved.autoCheckUpdates ?? true;
     lastUpdateCheckAt = typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
-    // 分栏比例：旧存档没有该字段 → 默认 50/50；越界/脏数据由 clampPaneRatio 收敛
-    previewRatio = clampPaneRatio(saved.previewRatio);
+    // 界面缩放：旧存档没有该字段 → 100%；越界/脏数据由 clampZoom 收敛（随后由 $effect 应用）
+    uiZoom = clampZoom(saved.uiZoom);
     if (restoreSession && typeof saved.content === "string" && saved.content.trim() !== "") {
       doc = saved.content;
       editorDoc = saved.content; // 镜像同步，见 editorDoc 声明处
@@ -1317,7 +1350,7 @@
     />
   </header>
 
-  <main class="panes" class:single={!showPreview} onwheel={handlePanesWheel}>
+  <main class="panes" class:single={!showPreview} onwheel={handleZoomWheel}>
     {#if dragActive}
       <div class="drop-overlay">释放以打开 .typ 文件</div>
     {/if}
@@ -1340,11 +1373,7 @@
         />
       </div>
     </section>
-    <section
-      class="pane preview-pane"
-      class:hidden={!showPreview}
-      style={paneRatioFlexStyle(previewRatio)}
-    >
+    <section class="pane preview-pane" class:hidden={!showPreview}>
       <!-- data-context-zone：右键区域判定标记（覆盖占位/错误/预览纸张全部子区域） -->
       <div
         class="pane-body preview-body"
@@ -1467,6 +1496,10 @@
     </span>
     <span class="spacer"></span>
     <span class="mode-tag">{viewMode === "write" ? "写作" : "源码"}</span>
+    {#if uiZoom !== ZOOM_DEFAULT}
+      <!-- 只在非 100% 时出现：缩放是"整界面都在变"的状态，得有个常驻的地方能看出来 -->
+      <span class="mode-tag" title="Ctrl+滚轮缩放；视图 → 重置缩放">缩放 {zoomLabel(uiZoom)}</span>
+    {/if}
     <span>{charCount} 字符 · {pageCount} 页</span>
     {#if viewMode === "source"}
       <span>行 {cursorLine}, 列 {cursorCol}</span>

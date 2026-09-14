@@ -662,149 +662,125 @@ await c.evaluate(
   `Array.from(document.querySelectorAll(".settings-modal .modal-btn")).find(b => (b.textContent || "").includes("关闭")).click()`,
 );
 
-console.log("24) Ctrl+滚轮调整分栏比例（源码模式预览区宽度）");
-// 这一组只能在这儿验：滚轮事件（含修饰键）与 flex 实际布局都跑不出来于单测，
-// 而"Ctrl+滚轮会不会顺手把页面缩放掉"更是只有真实浏览器才看得见。
-// 教训：手势最初写成 Ctrl+Shift+滚轮，头less 里用 CDP 注入 deltaY 全绿，但真机上"按了没反应"——
-// 按着 Shift 滚轮时浏览器会把纵向滚动转成横向（deltaY=0、deltaX 有值）。现在手势是 Ctrl+滚轮，
-// 且页面侧同时读 deltaY/deltaX（pane-ratio.wheelResizeDelta），下面两个方向各留一条断言。
+console.log("24) Ctrl+滚轮界面缩放（字太小 → 放大整个界面）");
+// 这一组能锁住的是"请求了正确的缩放系数"：浏览器开发模式没有 Tauri 的 webview 缩放，
+// 桩把 setZoom 的入参记在 window.__browserDevLastZoom（见 browser-dev-stub.ts），
+// 真实的放大效果只能在桌面版看。手势本身的坑（Shift 把纵向滚动转成横向）、状态栏反馈、
+// 上下限、持久化与菜单都在这里锁住。
+// 背景：这一组原本验的是「Ctrl+滚轮改分栏宽度」——用户反馈他要的是**字变大**而不是栏变宽，
+// 于是手势改成整界面缩放（Tauri setZoom，等价浏览器 Ctrl+滚轮）。
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 700));
 
-/** 分栏比例探针：预览宽 / 容器宽，顺带取 dpr 与视口宽（用于确认没触发页面缩放） */
-const ratioProbe = `(() => {
-  const panes = document.querySelector(".panes").getBoundingClientRect();
-  const preview = document.querySelector(".preview-pane").getBoundingClientRect();
+/** 缩放探针：桩记录的缩放系数 + 存档 + 状态栏文案 + 状态栏缩放徽标 */
+const zoomProbe = `(() => {
   const editor = document.querySelector(".editor-pane").getBoundingClientRect();
-  const center = { x: Math.round(editor.left + editor.width / 2), y: Math.round(editor.top + editor.height / 2) };
   return {
-    ratio: Math.round((preview.width / panes.width) * 1000) / 1000,
-    previewWidth: Math.round(preview.width),
-    editorWidth: Math.round(editor.width),
-    dpr: window.devicePixelRatio,
-    innerWidth: window.innerWidth,
-    center,
-    saved: JSON.parse(localStorage.getItem("typst-pad:state") || "{}").previewRatio ?? null,
+    center: { x: Math.round(editor.left + editor.width / 2), y: Math.round(editor.top + editor.height / 2) },
+    requested: window.__browserDevLastZoom ?? null,
+    saved: JSON.parse(localStorage.getItem("typst-pad:state") || "{}").uiZoom ?? null,
     status: document.querySelector(".statusbar").innerText,
+    tags: Array.from(document.querySelectorAll(".statusbar .mode-tag")).map(e => e.textContent.trim()),
   };
 })()`;
 
-// 切到源码模式 → 双栏（预览区可见）
-await openMenu("视图");
-await c.waitFor(`document.body.innerText.includes("源代码模式")`, { timeout: 5000 });
-await clickMenuItem("源代码模式");
-await c.waitFor(`getComputedStyle(document.querySelector(".preview-pane")).display !== "none"`, {
-  timeout: 5000,
-});
-await new Promise((r) => setTimeout(r, 500));
-
-const before = await c.evaluate(ratioProbe);
+const zoomStart = await c.evaluate(zoomProbe);
 check(
-  "源码模式默认 50/50 分栏",
-  Math.abs(before.ratio - 0.5) < 0.02,
-  JSON.stringify(before),
+  "启动即把缩放交给 webview（默认 100%）",
+  Math.abs((zoomStart.requested ?? -1) - 1) < 0.001,
+  JSON.stringify(zoomStart),
 );
+check("默认状态栏不显示缩放徽标", !zoomStart.tags.some((t) => t.includes("缩放")), JSON.stringify(zoomStart.tags));
 
-// Ctrl + Shift + 滚轮向上 ×5 → 预览区变宽（每次 2 个百分点，鼠标一格 deltaY = ±100）
-// Ctrl + 滚轮向上 ×5 → 预览区变宽（每次 2 个百分点，鼠标一格 deltaY = ±100）
+// Ctrl + 滚轮向上 5 格 → 150%（一档 10%）
 for (let i = 0; i < 5; i++) {
-  await c.wheel(before.center.x, before.center.y, -100, { modifiers: 2 });
+  await c.wheel(zoomStart.center.x, zoomStart.center.y, -100, { modifiers: 2 });
 }
 await new Promise((r) => setTimeout(r, 400));
-const wider = await c.evaluate(ratioProbe);
+const zoomedIn = await c.evaluate(zoomProbe);
 check(
-  "Ctrl+滚轮向上：预览区变宽（5 档 ≈ +10%）",
-  Math.abs(wider.ratio - 0.6) < 0.02,
-  `${before.ratio} → ${wider.ratio}`,
+  "Ctrl+滚轮向上 5 档 → 请求 150% 缩放",
+  Math.abs((zoomedIn.requested ?? 0) - 1.5) < 0.001,
+  String(zoomedIn.requested),
 );
+check("状态栏给出实时反馈", zoomedIn.status.includes("缩放 150%"), JSON.stringify(zoomedIn.status));
 check(
-  "编辑区同步变窄（预览变宽不是覆盖上去）",
-  wider.editorWidth < before.editorWidth && wider.previewWidth > before.previewWidth,
-  JSON.stringify({ before, wider }),
+  "状态栏常驻显示当前缩放（非 100% 时）",
+  zoomedIn.tags.some((t) => t.includes("缩放 150%")),
+  JSON.stringify(zoomedIn.tags),
 );
-check(
-  "Ctrl+滚轮没有顺手缩放页面（dpr 与视口宽不变）",
-  wider.dpr === before.dpr && wider.innerWidth === before.innerWidth,
-  JSON.stringify({ dpr: [before.dpr, wider.dpr], innerWidth: [before.innerWidth, wider.innerWidth] }),
-);
-check("状态栏给出实时反馈", wider.status.includes("预览区宽度"), JSON.stringify(wider.status));
-check(
-  "比例写进存档（重启后保持）",
-  typeof wider.saved === "number" && Math.abs(wider.saved - 0.6) < 0.01,
-  String(wider.saved),
-);
-await c.screenshot(SHOT("wysiwyg-24-split-wider"));
+check("缩放写进存档", Math.abs((zoomedIn.saved ?? 0) - 1.5) < 0.001, String(zoomedIn.saved));
+await c.screenshot(SHOT("wysiwyg-24-zoom-in"));
 
-// 裸滚轮（不带 Ctrl）：不该改比例（留给编辑器/预览区自己的滚动）
-await c.wheel(wider.center.x, wider.center.y, -100, { modifiers: 0 });
-await new Promise((r) => setTimeout(r, 300));
-const plainWheel = await c.evaluate(ratioProbe);
-check(
-  "不带 Ctrl 的滚轮不改分栏比例",
-  Math.abs(plainWheel.ratio - wider.ratio) < 0.001,
-  `${wider.ratio} → ${plainWheel.ratio}`,
-);
-
-// Shift 把纵向滚动转成横向时（deltaY = 0、deltaX 有值）也要能调 —— 真机上就是这个形状
-await c.wheel(wider.center.x, wider.center.y, 0, { modifiers: 2, deltaX: 100 });
-await new Promise((r) => setTimeout(r, 300));
-const horizontal = await c.evaluate(ratioProbe);
-check(
-  "横向位移（deltaY=0 + deltaX）也能调比例（Shift 滚轮的真机形态）",
-  horizontal.ratio < wider.ratio - 0.01,
-  `${wider.ratio} → ${horizontal.ratio}`,
-);
-
-// 一直向下滚 → 收敛到下限 25%（不会把预览区挤没）
-for (let i = 0; i < 40; i++) {
-  await c.wheel(wider.center.x, wider.center.y, 100, { modifiers: 2 });
-}
-await new Promise((r) => setTimeout(r, 500));
-const narrowest = await c.evaluate(ratioProbe);
-check(
-  "向下滚到底收敛在 25%（编辑区保住 75%）",
-  Math.abs(narrowest.ratio - 0.25) < 0.02,
-  JSON.stringify({ ratio: narrowest.ratio, editor: narrowest.editorWidth, preview: narrowest.previewWidth }),
-);
-
-// 视图菜单：重置分栏比例 → 回到 50/50
-await openMenu("视图");
-await c.waitFor(`document.body.innerText.includes("重置分栏比例")`, { timeout: 5000 });
-// 提示文字要在菜单还开着的时候查（点完菜单就收了）
-const hasHint = await c.evaluate(
-  `Array.from(document.querySelectorAll(".menu-dropdown .menu-item")).some(e => (e.textContent || "").includes("Ctrl+滚轮"))`,
-);
-check("菜单项给出操作姿势提示（Ctrl+滚轮）", hasHint);
-await clickMenuItem("重置分栏比例");
-await new Promise((r) => setTimeout(r, 400));
-const reset = await c.evaluate(ratioProbe);
-check("「重置分栏比例」回到 50/50", Math.abs(reset.ratio - 0.5) < 0.02, `${narrowest.ratio} → ${reset.ratio}`);
-await c.screenshot(SHOT("wysiwyg-24-split-reset"));
-
-// 写作模式（单栏、预览栏隐藏）：Ctrl+滚轮 不该改比例，但要在状态栏说清原因
-// —— 「按了没反应」最容易被当成坏了，这句话就是给这种情况准备的
-await c.evaluate(`(() => {
-  const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
-  raw.viewMode = "write";
-  raw.showPreview = false;
-  localStorage.setItem("typst-pad:state", JSON.stringify(raw));
-  return 1;
-})()`);
+// 重载：恢复出来的缩放要重新交给 webview（否则重启后界面又变小了）
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
-const singlePaneBefore = await c.evaluate(ratioProbe);
-await c.wheel(singlePaneBefore.center.x, singlePaneBefore.center.y, -100, { modifiers: 2 });
-await new Promise((r) => setTimeout(r, 300));
-const singlePaneAfter = await c.evaluate(ratioProbe);
+await new Promise((r) => setTimeout(r, 900));
+const afterReload = await c.evaluate(zoomProbe);
 check(
-  "写作模式（无预览栏）：Ctrl+滚轮 不改比例，但状态栏说明原因",
-  Math.abs(singlePaneAfter.ratio - singlePaneBefore.ratio) < 0.001 &&
-    singlePaneAfter.status.includes("先打开预览栏"),
-  JSON.stringify({ status: singlePaneAfter.status, ratio: singlePaneAfter.ratio }),
+  "重载后恢复 150% 并重新应用",
+  Math.abs((afterReload.requested ?? 0) - 1.5) < 0.001,
+  String(afterReload.requested),
 );
+
+// 不带 Ctrl 的滚轮：不该动缩放（留给编辑器/预览区自己的滚动）
+await c.wheel(afterReload.center.x, afterReload.center.y, -100, { modifiers: 0 });
+await new Promise((r) => setTimeout(r, 300));
+const plain = await c.evaluate(zoomProbe);
+check("不带 Ctrl 的滚轮不改缩放", Math.abs((plain.saved ?? 0) - 1.5) < 0.001, String(plain.saved));
+
+// 横向位移（按 Shift 滚轮时浏览器把纵向滚动转成横向的真机形态）也要能缩放
+await c.wheel(plain.center.x, plain.center.y, 0, { modifiers: 2, deltaX: -100 });
+await new Promise((r) => setTimeout(r, 300));
+const horizontal = await c.evaluate(zoomProbe);
+check(
+  "横向位移（deltaY=0 + deltaX）也能缩放（Shift 滚轮的真机形态）",
+  Math.abs((horizontal.requested ?? 0) - 1.6) < 0.001,
+  String(horizontal.requested),
+);
+
+// 一直向下滚 → 收敛在下限 50%（不会缩到看不见）
+for (let i = 0; i < 40; i++) {
+  await c.wheel(horizontal.center.x, horizontal.center.y, 100, { modifiers: 2 });
+}
+await new Promise((r) => setTimeout(r, 500));
+const smallest = await c.evaluate(zoomProbe);
+check(
+  "向下滚到底收敛在 50%（不会缩到看不见）",
+  Math.abs((smallest.requested ?? 0) - 0.5) < 0.001,
+  String(smallest.requested),
+);
+
+// 视图菜单：放大 / 缩小 / 重置缩放（灰字给出 Ctrl+滚轮 这个姿势）
+await openMenu("视图");
+await c.waitFor(`document.body.innerText.includes("重置缩放")`, { timeout: 5000 });
+const menuItems = await c.evaluate(`(() => {
+  const items = Array.from(document.querySelectorAll(".menu-dropdown .menu-item")).map(e => e.textContent || "");
+  return {
+    zoomIn: items.some(t => t.includes("放大")),
+    zoomOut: items.some(t => t.includes("缩小")),
+    reset: items.some(t => t.includes("重置缩放")),
+    hint: items.some(t => t.includes("Ctrl+滚轮")),
+  };
+})()`);
+check(
+  "视图菜单有 放大 / 缩小 / 重置缩放，并给出 Ctrl+滚轮 提示",
+  Object.values(menuItems).every(Boolean),
+  JSON.stringify(menuItems),
+);
+await clickMenuItem("重置缩放");
+await new Promise((r) => setTimeout(r, 400));
+const reset = await c.evaluate(zoomProbe);
+check("「重置缩放」回到 100%", Math.abs((reset.requested ?? 0) - 1) < 0.001, String(reset.requested));
+check(
+  "回到 100% 后状态栏不再显示缩放徽标",
+  !reset.tags.some((t) => t.includes("缩放")),
+  JSON.stringify(reset.tags),
+);
+await c.screenshot(SHOT("wysiwyg-24-zoom-reset"));
+
 
 // ---------------------------------------------------------------------------
 // 第 25 组：正文字体设置（中文不再被 typst 回退成楷体）

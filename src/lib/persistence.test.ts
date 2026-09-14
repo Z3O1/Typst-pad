@@ -25,7 +25,7 @@ describe("persistence", () => {
       restoreSession: false,
       autoCheckUpdates: false,
       lastUpdateCheckAt: 1_700_000_000_000,
-      previewRatio: 0.65,
+      uiZoom: 1.3,
       chineseFont: "SimSun",
       fontDirs: ["D:\\fonts"],
     });
@@ -42,7 +42,7 @@ describe("persistence", () => {
       restoreSession: false,
       autoCheckUpdates: false,
       lastUpdateCheckAt: 1_700_000_000_000,
-      previewRatio: 0.65,
+      uiZoom: 1.3,
       chineseFont: "SimSun",
       fontDirs: ["D:\\fonts"],
     });
@@ -54,13 +54,13 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, previewRatio: 0.5, chineseFont: "", fontDirs: [] });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, previewRatio: 0.5, chineseFont: "", fontDirs: [] });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
     expect(loadState().theme).toBe("system");
   });
 
@@ -110,13 +110,13 @@ describe("persistence", () => {
     // 旧存档没有自动更新字段：默认开启，且"没检查过"（启动即检查一次，见 update-utils.isCheckDue）
     expect(state.autoCheckUpdates).toBe(true);
     expect(state.lastUpdateCheckAt).toBeNull();
-    // 分栏比例也是新增字段：旧存档读出来是默认 50/50
-    expect(state.previewRatio).toBe(0.5);
+    // 界面缩放也是新增字段：旧存档读出来是默认 100%
+    expect(state.uiZoom).toBe(1);
   });
 
-  it("previewRatio 损坏（字符串）时回落默认，不让脏数据把分栏搞乱", () => {
-    localStorage.setItem("typst-pad:state", JSON.stringify({ previewRatio: "一半" }));
-    expect(loadState().previewRatio).toBe(0.5);
+  it("uiZoom 损坏（字符串）时回落默认 100%，不让脏数据把界面放大", () => {
+    localStorage.setItem("typst-pad:state", JSON.stringify({ uiZoom: "两倍" }));
+    expect(loadState().uiZoom).toBe(1);
   });
 
   it("旧存档（无 chineseFont/fontDirs）默认：正文字体「默认」、无额外字体目录", () => {
