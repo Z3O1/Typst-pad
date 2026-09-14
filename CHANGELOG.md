@@ -2,7 +2,7 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.7.4] - 2026-09-14
 
 ### Fixed
 
@@ -19,6 +19,12 @@
 - **浏览器开发桩的 dialog 参数形状修正**：dialog 插件的选项嵌在 `options` 里（`invoke('plugin:dialog|open', { options })`），桩原先按平铺的 `args.directory` 判断，于是「添加字体目录」在浏览器验收里点了没反应（第 25 组卡在找不到 `.settings-dir-path`）。现在两种形状都接受。
 - **设置 → 正文字体（中文）**：下拉选项来自新命令 `list_font_families`（Rust 侧 FontBook 的真实族名，结构上不可能写出不存在的名字），首项「默认」= 内置列表；另加 **设置 → 额外字体目录**（字体文件放进目录即可用，递归扫 `.ttf/.otf`，对齐 typst CLI 的 `--font-path`/`TYPST_FONT_PATHS`，目录增删会重新加载字体集并刷新下拉——字体缓存改为按目录列表做 key）。
 - 前端新增 `font-settings.ts`（把选中的正文字体拼成字体族列表：拉丁基准留最前，其余默认项继续兜底）与 `font-warnings.ts`（编译警告可读化），各配单测；`browser-dev-stub.ts` 增加字体命令桩与"中文族名 → 真实 warning"桩；`wysiwyg.mjs` 新增第 25 组（12 项）覆盖设置 UI、字体透传与警告可见性。测试规模：前端 23 文件 / 348 项，Rust 32 项。
+
+### Changed
+
+- 版本号 0.7.3 → 0.7.4（package.json / tauri.conf.json / Cargo.toml 三处一致，Cargo.lock 根 crate 同步）。
+- 🔑 **仓库已从私有转为公开，自动更新从本版起才真正生效**：updater 是**匿名请求**、不带任何 GitHub 凭据，而私有仓库对匿名一律 404（连安装包也下载不到，不只是自动更新），插件对非 2xx 只记日志、最后统一报 `Could not fetch a valid release JSON from the remote`——0.7.3 里「检查更新失败」看到的正是这句。现在 `releases/latest/download/latest.json` 匿名可取了（实测 HTTP 200）。更新失败的文案也随之改了排序：现在最可能的原因是「该版本还没 Publish（草稿）」，私有仓库降为兜底提示。
+- 仓库公开的副作用：GitHub 的 secret scanning / push protection 开始生效（把签名私钥 commit 进去会被拒推），仓库上原有的分支规则集「protect main」也首次真正被执行（已按需调整为只保留「禁 force push / 禁删分支」）。
 
 ## [0.7.3] - 2026-09-14
 
