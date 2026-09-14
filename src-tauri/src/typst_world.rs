@@ -397,7 +397,7 @@ fn load_fonts_with_system(bundled_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBo
     (book, fonts)
 }
 
-/// 递归收集目录（含子目录）下全部 .ttf/.otf 并注册进 book/fonts。
+/// 递归收集目录（含子目录）下全部字体文件并注册进 book/fonts。
 /// 目录不存在/不可读时静默跳过；符号链接目录不递归（防环，与 list_dir_typ 约定一致），
 /// broken symlink 跳过。
 fn load_fonts_from_dir(dir: &Path, book: &mut FontBook, fonts: &mut Vec<Font>) {
@@ -422,17 +422,28 @@ fn load_fonts_from_dir(dir: &Path, book: &mut FontBook, fonts: &mut Vec<Font>) {
     }
 }
 
-/// 读取并注册单个字体文件：仅 .ttf/.otf（大小写不敏感），读盘/解析失败静默跳过。
+/// 读取并注册单个字体文件：`.ttf` / `.otf` / **`.ttc` / `.otc`**（大小写不敏感），
+/// 读盘/解析失败静默跳过。
+///
+/// **集合（collection）里的每个 face 都要注册**（2026-09-14 用户报「字体列表和 `typst fonts`
+/// 不一样」）：Windows 上 SimSun / NSimSun（`simsun.ttc`）、Microsoft YaHei / Microsoft YaHei UI
+/// （`msyh.ttc`）、微软正黑体（`msjh.ttc`）、细明体（`mingliu.ttc`）**全都是 .ttc 集合**，而
+/// `typst fonts` 走 fontdb、会把集合里每个 face 都列出来。旧代码只收 `.ttf/.otf` **且只取
+/// face 0**，于是这些字体在应用里压根不存在 —— 连 `DEFAULT_FONT_FAMILIES` 里的 "SimSun" /
+/// "Microsoft YaHei" 都永远命中不了（用户改了字体没反应，root 就在这里）。
+/// `Font::iter` 是 typst 自己的集合遍历（内部走 `ttf_parser::fonts_in_collection`），
+/// 普通单 face 字体也会走到它、行为不变；同一个 `Bytes` 是 Arc 语义，多 face 只共享一份数据。
 fn register_font_file(path: &Path, book: &mut FontBook, fonts: &mut Vec<Font>) {
-    let is_font = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"));
+    let is_font = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        ["ttf", "otf", "ttc", "otc"]
+            .iter()
+            .any(|ext| e.eq_ignore_ascii_case(ext))
+    });
     if !is_font {
         return;
     }
     let Ok(data) = fs::read(path) else { return };
-    if let Some(font) = Font::new(Bytes::new(data), 0) {
+    for font in Font::iter(Bytes::new(data)) {
         book.push(font.info().clone());
         fonts.push(font);
     }
@@ -440,7 +451,9 @@ fn register_font_file(path: &Path, book: &mut FontBook, fonts: &mut Vec<Font>) {
 
 /// 系统字体目录候选（与 typst CLI 默认加载范围对齐），按平台返回：
 /// - Windows：`%WINDIR%\Fonts`（WINDIR 环境变量缺失时回退 `C:\Windows\Fonts`）
-/// - Linux：`/usr/share/fonts`、`/usr/local/share/fonts`、用户字体目录
+///   **加上「仅为我安装」的 `%LOCALAPPDATA%\Microsoft\Windows\Fonts`** —— 用户从网上装的
+///   字体默认落在这里（fontdb / `typst fonts` 也会读它，只读 WINDIR 就会漏掉一批）
+/// - Linux：`/usr/share/fonts`、`/usr/local/share/fonts`、`~/.fonts`（旧约定）、用户字体目录
 ///   （`$XDG_DATA_HOME/fonts`，未设置时 `$HOME/.local/share/fonts`）
 /// - macOS：`/System/Library/Fonts`、`/Library/Fonts`、`~/Library/Fonts`
 /// 目录可能不存在/不可读，由调用方（load_fonts_with_system）静默跳过。
@@ -450,6 +463,15 @@ fn system_font_dirs() -> Vec<PathBuf> {
     {
         let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
         dirs.push(PathBuf::from(windir).join("Fonts"));
+        // 「仅为我安装」（用户级）的字体目录：不存在时加载侧静默跳过
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(
+                PathBuf::from(local)
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Fonts"),
+            );
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -463,6 +485,10 @@ fn system_font_dirs() -> Vec<PathBuf> {
     {
         dirs.push(PathBuf::from("/usr/share/fonts"));
         dirs.push(PathBuf::from("/usr/local/share/fonts"));
+        // 旧约定的用户字体目录（fontdb 也会扫）
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join(".fonts"));
+        }
         // XDG 优先：$XDG_DATA_HOME/fonts；未设置时退回 $HOME/.local/share/fonts
         match std::env::var("XDG_DATA_HOME").ok().filter(|s| !s.is_empty()) {
             Some(xdg) => dirs.push(PathBuf::from(xdg).join("fonts")),
@@ -1651,6 +1677,71 @@ hello"
             "注入默认字体族应与文档里显式 #set text(font:) 等价"
         );
         assert_ne!(injected.pages, fallback.pages, "不注入时应走回退，结果不应与注入相同");
+    }
+
+    /// 把单 face 的 sfnt 包成 `faces` 个 face 的 **.ttc 集合**（测试用）。
+    ///
+    /// 集合头：`ttcf` + version + numFonts + 每个 face 的偏移（都指向同一份表目录）；
+    /// **表记录里的偏移必须加上基准值**——ttf-parser 把表偏移当"从整个文件开头算"
+    /// （见 `RawFace::table`），真实 .ttc 也是这么约定的，所以复制的这份要平移。
+    fn wrap_as_ttc(sfnt: &[u8], faces: usize) -> Vec<u8> {
+        let base = 12 + 4 * faces;
+        let mut out = Vec::with_capacity(base + sfnt.len());
+        out.extend_from_slice(b"ttcf");
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&(faces as u32).to_be_bytes());
+        for _ in 0..faces {
+            out.extend_from_slice(&(base as u32).to_be_bytes());
+        }
+        let mut font = sfnt.to_vec();
+        let num_tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        for i in 0..num_tables {
+            let rec = 12 + i * 16; // tag(4) + checksum(4) + offset(4) + length(4)
+            let off = u32::from_be_bytes([font[rec + 8], font[rec + 9], font[rec + 10], font[rec + 11]]);
+            let shifted = (off + base as u32).to_be_bytes();
+            font[rec + 8..rec + 12].copy_from_slice(&shifted);
+        }
+        out.extend_from_slice(&font);
+        out
+    }
+
+    /// 字体集合（.ttc/.otc）：**每个 face 都要注册**，且 .ttc 扩展名要被收进来。
+    /// 回归背景（2026-09-14 用户报「字体列表和 `typst fonts` 不一样」）：旧代码只收
+    /// .ttf/.otf 且只取 face 0，而 Windows 的 SimSun / 微软雅黑 / 微软正黑体 全是 .ttc 集合 ——
+    /// 这些字体在应用里根本不存在，`DEFAULT_FONT_FAMILIES` 里的 "SimSun" 永远命中不了。
+    #[test]
+    fn font_collection_registers_every_face() {
+        let single = fs::read(fonts_dir().join("LibertinusSerif-Regular.otf")).unwrap();
+        let dir = std::env::temp_dir().join(format!("typst-pad-test-ttc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // ① 两个 face 的集合：应注册出 2 个字体、同一个族
+        fs::write(dir.join("pair.ttc"), wrap_as_ttc(&single, 2)).unwrap();
+        let (book, fonts) = load_fonts(&dir);
+        assert_eq!(fonts.len(), 2, "集合里的两个 face 都应注册（旧代码只会注册 0 个）");
+        assert!(book.contains_family("libertinus serif"), "集合里的字体族应进 FontBook");
+        // 下拉列表（用户看到的那份）也要有它
+        let families = list_font_families(&dir, &[]);
+        assert!(
+            families.iter().any(|f| f == "Libertinus Serif"),
+            ".ttc 里的字体族应出现在列表里: {families:?}"
+        );
+
+        // ② 假集合头（numFonts 与实际不符）不该被当成多 face：坏文件静默跳过
+        let mut broken = wrap_as_ttc(&single, 2);
+        broken[8..12].copy_from_slice(&9999u32.to_be_bytes());
+        let broken_dir = dir.join("broken");
+        fs::create_dir_all(&broken_dir).unwrap();
+        fs::write(broken_dir.join("broken.ttc"), broken).unwrap();
+        let (_, broken_fonts) = load_fonts(&broken_dir);
+        assert_eq!(broken_fonts.len(), 0, "坏集合头应静默跳过，不 panic 也不误注册");
+
+        // ③ 非字体扩展名仍然不收（防把 .txt 读进来）
+        fs::write(dir.join("readme.txt"), &single).unwrap();
+        let (_, only_pair) = load_fonts(&dir);
+        assert_eq!(only_pair.len(), 2, "只有 .ttc 被注册，readme.txt 不算字体");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 字体族列表（设置里的下拉数据源）：包含打包字体与系统字体。

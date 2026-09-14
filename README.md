@@ -116,7 +116,7 @@ src-tauri/
 - `LibertinusSerif-{Regular,Bold}.otf` — 正文衬线
 - `DejaVuSansMono.ttf` — 等宽
 
-字体加载在 **Rust 侧**完成：编译时读取字体目录（打包后为 `resource_dir/fonts`，开发/测试为仓库 `src-tauri/fonts`），与**系统字体目录**、**用户额外字体目录**（设置 → 额外字体目录，等同于 typst CLI 的 `--font-path`）合并后把全部 `.ttf/.otf` 注册进 FontBook；目录缺失时不影响编译（typst 给出缺字诊断）。打包映射见 `tauri.conf.json` 的 `bundle.resources`（`fonts` → `fonts/`）。
+字体加载在 **Rust 侧**完成：编译时读取字体目录（打包后为 `resource_dir/fonts`，开发/测试为仓库 `src-tauri/fonts`），与**系统字体目录**（Windows 含 `%WINDIR%\Fonts` 与「仅为我安装」的 `%LOCALAPPDATA%\Microsoft\Windows\Fonts`）、**用户额外字体目录**（设置 → 额外字体目录，等同于 typst CLI 的 `--font-path`）合并后注册进 FontBook；`.ttf` / `.otf` / **`.ttc` / `.otc` 都收，集合里的每个 face 都会注册**（Windows 的 SimSun、微软雅黑、微软正黑体都是 .ttc 集合，只读 .ttf/.otf 会让它们整个缺席）。目录缺失时不影响编译（typst 给出缺字诊断）。打包映射见 `tauri.conf.json` 的 `bundle.resources`（`fonts` → `fonts/`）。
 
 **中文默认字体是显式指定的，不靠 typst 自动回退**：typst 默认正文字体 `Libertinus Serif` 不含汉字，不指定时所有中文都走"自动回退"，而回退打分优先"与基准字体同衬线"（`Libertinus Serif` 的 panose 全 0，被判定无衬线，于是思源宋体等宋体全被扣分）再比"家族名长短"——实测（typst 0.15.1）Windows 会渲染成楷体/隶书、Linux 成 Noto Sans CJK 的日文字形。所以 typst-pad 在编译时把默认字体族列表注入基础样式层：`Libertinus Serif` → 打包的思源宋体 → 系统宋体兜底（打包那份是子集，生僻字靠 `SimSun`/`Songti SC` 接住）→ `Microsoft YaHei` 收尾。**文档里的 `#set text(font:)` 优先级更高**（与原生 typst 一致），设置里也可以从「正文字体」下拉直接选一个真实族名。字体族名写错时 typst 只发警告不报错（会静默改用别的字体），所以编译警告会显示在状态栏徽标里，并提示"族名要用英文名 / 可放进额外字体目录"。
 
