@@ -77,6 +77,7 @@
     zoomIn,
     zoomLabel,
     zoomOut,
+    ZOOM_CONFIRM_DELAY_MS,
   } from "$lib/zoom";
 
   // 新建时默认空白文档（不再预填示例内容）
@@ -169,9 +170,19 @@
    * 界面缩放系数（0.5~2.5，默认 1 = 100%），**Ctrl+滚轮**调（见 handleZoomWheel）。
    * 走 Tauri 的 webview 缩放（`setZoom`），效果等于浏览器 Ctrl+滚轮缩放：编辑区、预览、
    * 菜单、状态栏一起等比放大，CSS 像素不变——所以 CodeMirror 的行高测量与 SVG 预览的尺寸
-   * 计算都不会错位（用 CSS `zoom` 就会错位）。
+   * 计算都不会错位。
+   *
+   * **为什么不用 CSS `zoom`**（2026-09-14 实测过一次，别再试）：在 `<html>` 上打 `zoom: 1.5`
+   * 之后 `document.documentElement.scrollHeight` 会从 802 变成 1203（`height: 100%` 被一起
+   * 放大）、状态栏被推到视口下方 401px，而且 `getBoundingClientRect()` 给的是**放大后**的 px
+   * 而 `window.innerWidth` 仍是**未放大**的 px —— 两套单位混用会打烂右键菜单/popover 的定位。
+   * webview 缩放发生在 CSS 层之下，所有这些单位都不动。
    */
   let uiZoom = $state(ZOOM_DEFAULT);
+  /** 缩放的"再确认一次"定时器（见 applyUiZoom / scheduleZoomConfirm） */
+  let zoomConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 上一次设进去的缩放与当时的 devicePixelRatio（见 verifyZoomApplied） */
+  let zoomApplied: { zoom: number; dpr: number } | null = null;
   // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
   // Map 本身不需要响应式（变更后靠 mathVersion 代次通知编辑器重整装饰）
   const mathCache = new Map<string, MathRender>();
@@ -373,15 +384,65 @@
   /**
    * 把缩放系数交给 webview。非 Tauri 环境（提示页）或调用失败都静默忽略——
    * 缩放不是关键路径，失败不该弹错（调试日志里留痕）。
+   *
+   * **为什么要"设完再确认一次"**（2026-09-14，实机反馈「放大根本没用、缩小有用」）：
+   * WebView2 在 Ctrl+滚轮这种缩放手势进行中/结束时，会用它自己那套逻辑处理这次手势
+   * （见 WebView2Feedback #1022：手势期间宿主设的 ZoomFactor 会被"还原"回手势开始时的值），
+   * 于是在滚轮事件里立刻就 setZoom 有可能被引擎抹掉。这里在**手势停下来之后**再设一遍同一个
+   * 系数：值没被抹掉时这次调用等价于空操作，被抹掉时就把界面拉回用户要的档位。
    */
   async function applyUiZoom(zoom: number) {
     if (!isTauri()) return;
+    const target = clampZoom(zoom);
     try {
-      await getCurrentWebview().setZoom(clampZoom(zoom));
-      dbg.log("zoom", `set ${zoomLabel(zoom)}`);
+      await getCurrentWebview().setZoom(target);
+      dbg.log("zoom", `set ${zoomLabel(target)}`);
     } catch (e) {
       dbg.log("zoom", "setZoom failed", e);
+      return;
     }
+    scheduleZoomConfirm();
+  }
+
+  /** 手势/连续调档停止后再确认一次缩放（见 applyUiZoom 的注解）；重复调用只保留最后一次 */
+  function scheduleZoomConfirm() {
+    if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
+    zoomConfirmTimer = setTimeout(() => {
+      zoomConfirmTimer = null;
+      const target = clampZoom(uiZoom);
+      void getCurrentWebview()
+        .setZoom(target)
+        .then(() => {
+          dbg.log("zoom", `confirm ${zoomLabel(target)}`);
+          verifyZoomApplied(target);
+        })
+        // 这次是兜底重试，失败只记日志（首次调用已经把失败报过了）
+        .catch((e) => dbg.log("zoom", "confirm failed", e));
+    }, ZOOM_CONFIRM_DELAY_MS);
+  }
+
+  /**
+   * 复核 webview 到底有没有接受这个缩放系数。
+   *
+   * Chromium 的 `devicePixelRatio` 会随页面缩放一起变（WebView2 的 ZoomFactor 就是页面缩放），
+   * 所以「请求了不同的系数、dpr 却纹丝不动」就说明引擎没接受——桌面版上出现过
+   * 「放大根本没用、缩小有用」（用户反馈 2026-09-14），有这条复核下次就不必靠猜。
+   * 只在"系数确实变了、dpr 却没变"时才提示，平时不打扰。浏览器开发桩的 setZoom 是假的
+   * （不会改 dpr），那种环境下跳过（桩在 app.html 里挂了 __browserDevStub 标记）。
+   */
+  function verifyZoomApplied(target: number) {
+    const fake =
+      (window as unknown as { __browserDevStub?: { fakeZoom?: boolean } }).__browserDevStub;
+    if (fake?.fakeZoom) return;
+    const dpr = window.devicePixelRatio;
+    const last = zoomApplied;
+    zoomApplied = { zoom: target, dpr };
+    if (!last) return; // 第一次只记基线
+    if (Math.abs(target - last.zoom) < 0.001) return; // 系数没变，dpr 不变是正常的
+    if (Math.abs(dpr - last.dpr) > 0.001) return; // dpr 跟着变了 → 缩放确实生效
+    const detail = `请求 ${zoomLabel(target)}（上一次 ${zoomLabel(last.zoom)}），devicePixelRatio 一直是 ${dpr}`;
+    dbg.log("zoom", `webview 未接受缩放：${detail}`);
+    statusText = `界面缩放未生效：webview 没接受 ${zoomLabel(target)}（${detail}）`;
   }
 
   /** 改缩放并反馈（滚轮 / 菜单共用）；值没变时提示"已到边界"，不重复写存档 */
@@ -406,11 +467,17 @@
   }
 
   /**
-   * Ctrl+滚轮：放大/缩小整个界面（编辑区 + 预览 + 菜单）。
+   * Ctrl+滚轮：放大/缩小整个界面（编辑区 + 预览 + 菜单 + 状态栏）。
    *
    * 命中时**必须 preventDefault**：否则这次滚动会继续滚动编辑器/预览区，WebView2 还可能顺手
    * 用它自己那套系数缩放页面（与我们的系数打架，表现为"缩放了但系数对不上"）。
    * 位移量同时看 deltaY / deltaX（见 zoom.ts 的注解）：按 Shift 滚轮时浏览器把纵向滚动转成横向。
+   *
+   * 监听挂在 `window` 的**捕获阶段**（注册见 onMount），不是挂在 `<main>` 上：
+   * ① 鼠标在菜单栏/状态栏上滚也该能缩放（原先只有编辑区/预览区那一块有效）；
+   * ② 捕获阶段早于编辑器与预览区自己的滚动处理，preventDefault 更稳。
+   * **注意**：window 上的 wheel 监听默认会被浏览器当"被动监听"，必须显式 `{ passive: false }`，
+   * 否则 preventDefault 无效（滚动继续、缩放也拦不住）。
    */
   function handleZoomWheel(e: WheelEvent) {
     if (!e.ctrlKey) return;
@@ -1252,6 +1319,8 @@
     window.addEventListener("unhandledrejection", onUnhandledRejection);
     // 自定义右键菜单：编辑器/预览区替换原生菜单（菜单栏/状态栏拦截无效果，其余区域放行给浏览器原生）
     window.addEventListener("contextmenu", handleContextMenu);
+    // Ctrl+滚轮缩放：挂 window 捕获阶段 + 显式 passive: false（见 handleZoomWheel 的注解）
+    window.addEventListener("wheel", handleZoomWheel, { capture: true, passive: false });
     // 预览画布缩放：观测预览容器宽度变化（窗口 resize / 分栏布局变化），重算画布宽度；
     // observe 首次回调立即触发一次（覆盖挂载时已渲染的产物）
     previewResizeObserver = new ResizeObserver(() => applyPreviewScale());
@@ -1328,6 +1397,8 @@
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("contextmenu", handleContextMenu);
+      window.removeEventListener("wheel", handleZoomWheel, { capture: true });
+      if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
       previewResizeObserver?.disconnect();
@@ -1350,7 +1421,7 @@
     />
   </header>
 
-  <main class="panes" class:single={!showPreview} onwheel={handleZoomWheel}>
+  <main class="panes" class:single={!showPreview}>
     {#if dragActive}
       <div class="drop-overlay">释放以打开 .typ 文件</div>
     {/if}

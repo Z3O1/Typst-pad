@@ -338,7 +338,11 @@ async function handleCommand(
     // 让浏览器验收能断言"确实按一档 10% 请求了缩放"（真实缩放效果只能在桌面版看）。
     case "plugin:webview|set_webview_zoom": {
       const value = typeof a.value === "number" ? a.value : null;
-      (window as unknown as Record<string, unknown>).__browserDevLastZoom = value;
+      const w = window as unknown as Record<string, unknown>;
+      w.__browserDevLastZoom = value;
+      // 调用次数：界面缩放会"设一次 + 手势停下后再确认一次"（见 +page.svelte 的
+      // applyUiZoom/scheduleZoomConfirm），验收据此锁定那个兜底重试确实发出去了。
+      w.__browserDevZoomCalls = (typeof w.__browserDevZoomCalls === "number" ? w.__browserDevZoomCalls : 0) + 1;
       notify(command);
       return null;
     }
@@ -412,6 +416,10 @@ export function installBrowserDevStub(): void {
   };
 
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = internals;
+  // 标记桩已生效，并声明"这里的 setZoom 是假的"：页面据此**跳过缩放复核**
+  // （真 webview 的缩放会改 devicePixelRatio，桩不会，不跳过就会误报"缩放未生效"）。
+  // 用标记而不是 import：桩是 dev-only 模块，页面 import 它会把桩打进生产包。
+  (window as unknown as Record<string, unknown>).__browserDevStub = { fakeZoom: true };
 
   // 开发信息：确认桩已生效
   console.info(

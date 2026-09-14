@@ -680,6 +680,7 @@ const zoomProbe = `(() => {
   return {
     center: { x: Math.round(editor.left + editor.width / 2), y: Math.round(editor.top + editor.height / 2) },
     requested: window.__browserDevLastZoom ?? null,
+    zoomCalls: window.__browserDevZoomCalls ?? 0,
     saved: JSON.parse(localStorage.getItem("typst-pad:state") || "{}").uiZoom ?? null,
     status: document.querySelector(".statusbar").innerText,
     tags: Array.from(document.querySelectorAll(".statusbar .mode-tag")).map(e => e.textContent.trim()),
@@ -712,6 +713,19 @@ check(
   JSON.stringify(zoomedIn.tags),
 );
 check("缩放写进存档", Math.abs((zoomedIn.saved ?? 0) - 1.5) < 0.001, String(zoomedIn.saved));
+// 兜底重试：硬件上 WebView2 可能在 Ctrl+滚轮手势结束时把宿主设的 ZoomFactor 还原
+// （WebView2Feedback #1022），所以每次调档除了立刻设一次，还要在**手势停下后**再确认一次
+check(
+  "调档后会再确认一次缩放（防 WebView2 手势结束时还原系数）",
+  zoomedIn.zoomCalls >= 2,
+  `setZoom 调用 ${zoomedIn.zoomCalls} 次`,
+);
+// 复核逻辑本身不能误报：桩的 setZoom 是假的（不改 devicePixelRatio），页面已按桩标记跳过复核
+check(
+  "正常路径不会误报「缩放未生效」",
+  !zoomedIn.status.includes("未生效"),
+  JSON.stringify(zoomedIn.status),
+);
 await c.screenshot(SHOT("wysiwyg-24-zoom-in"));
 
 // 重载：恢复出来的缩放要重新交给 webview（否则重启后界面又变小了）
@@ -731,13 +745,27 @@ await new Promise((r) => setTimeout(r, 300));
 const plain = await c.evaluate(zoomProbe);
 check("不带 Ctrl 的滚轮不改缩放", Math.abs((plain.saved ?? 0) - 1.5) < 0.001, String(plain.saved));
 
+// 鼠标在状态栏上滚也要能缩放（监听挂在 window 捕获阶段，不是挂在 .panes 上）
+const statusCenter = await c.evaluate(`(() => {
+  const r = document.querySelector(".statusbar").getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+})()`);
+await c.wheel(statusCenter.x, statusCenter.y, -100, { modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+const overStatus = await c.evaluate(zoomProbe);
+check(
+  "在状态栏上 Ctrl+滚轮也能缩放（监听挂在 window，不再只有编辑区有效）",
+  Math.abs((overStatus.requested ?? 0) - 1.6) < 0.001,
+  String(overStatus.requested),
+);
+
 // 横向位移（按 Shift 滚轮时浏览器把纵向滚动转成横向的真机形态）也要能缩放
 await c.wheel(plain.center.x, plain.center.y, 0, { modifiers: 2, deltaX: -100 });
 await new Promise((r) => setTimeout(r, 300));
 const horizontal = await c.evaluate(zoomProbe);
 check(
   "横向位移（deltaY=0 + deltaX）也能缩放（Shift 滚轮的真机形态）",
-  Math.abs((horizontal.requested ?? 0) - 1.6) < 0.001,
+  Math.abs((horizontal.requested ?? 0) - 1.7) < 0.001,
   String(horizontal.requested),
 );
 
