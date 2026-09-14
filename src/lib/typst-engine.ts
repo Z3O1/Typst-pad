@@ -57,8 +57,51 @@ export interface CompileOk {
   ok: true;
   svg: string;
   pageCount: number;
-  /** 编译警告（Rust 侧携带；当前 UI 不展示，保留供后续使用） */
+  /** 编译警告（Rust 侧携带；UI 在状态栏徽标里展示，字体族写错只有这里看得见） */
   warnings?: Diagnostic[];
+}
+
+/**
+ * 传给 Rust 的字体配置（对应 typst_world.rs 的 FontConfig）。
+ * 三项都可缺省：families 缺省/null = 用 Rust 内置的 DEFAULT_FONT_FAMILIES。
+ */
+export interface FontConfigArgs {
+  /** 默认字体族列表（顺序即优先级）；null = 用 Rust 默认列表（中文 = 思源宋体 + 系统宋体兜底） */
+  families?: string[] | null;
+  /** 额外字体目录（对齐 typst CLI 的 --font-path / TYPST_FONT_PATHS） */
+  dirs?: string[] | null;
+}
+
+/** 组装 invoke 的字体参数：缺省一律传 null，Rust 侧回落到默认行为 */
+function fontArgs(fonts?: FontConfigArgs) {
+  return {
+    fontFamilies: fonts?.families ?? null,
+    fontDirs: fonts?.dirs ?? null,
+  };
+}
+
+/**
+ * 列出可用字体族（设置里「正文字体」下拉的数据源）：打包字体 + 系统字体 + 额外目录。
+ * 失败（浏览器环境 / IPC 异常）返回空数组，调用方退化成只能选「默认」。
+ */
+export async function listFontFamilies(dirs: string[] = []): Promise<string[]> {
+  try {
+    return await invoke<string[]>("list_font_families", { fontDirs: dirs });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Rust 内置的默认字体族列表：前端拿它拼「用户选中项 + 其余默认项兜底」
+ * （见 font-settings.buildFontFamilies）。失败返回空数组（此时只会用用户选的那一个）。
+ */
+export async function defaultFontFamilies(): Promise<string[]> {
+  try {
+    return await invoke<string[]>("default_font_families");
+  } catch {
+    return [];
+  }
 }
 
 export interface CompileFail {
@@ -130,9 +173,14 @@ export function composePages(pages: string[]): string {
 export async function compileToSvg(
   source: string,
   documentPath: string | null,
+  fonts?: FontConfigArgs,
 ): Promise<CompileResult> {
   try {
-    const out = await invoke<CompileOutput>("compile_doc", { src: source, documentPath });
+    const out = await invoke<CompileOutput>("compile_doc", {
+      src: source,
+      documentPath,
+      ...fontArgs(fonts),
+    });
     if (out.ok) {
       return {
         ok: true,
@@ -191,6 +239,7 @@ export async function compileMath(
   context: string,
   documentPath: string | null,
   sizePt: number = MATH_SIZE_PT,
+  fonts?: FontConfigArgs,
 ): Promise<MathRender> {
   try {
     const out = await invoke<MathRender>("compile_math", {
@@ -199,6 +248,7 @@ export async function compileMath(
       context,
       documentPath,
       sizePt,
+      ...fontArgs(fonts),
     });
     return {
       ok: out.ok,
@@ -229,6 +279,7 @@ export async function compileToPdf(
   source: string,
   documentPath: string | null,
   suggestedName: string,
+  fonts?: FontConfigArgs,
 ): Promise<PdfExportResult> {
   const target = await savePdfDialog(pdfFileName(suggestedName));
   if (!target) return { ok: false, cancelled: true };
@@ -236,6 +287,7 @@ export async function compileToPdf(
     src: source,
     documentPath,
     targetPath: target,
+    ...fontArgs(fonts),
   });
   if (res.ok) return { ok: true, targetPath: target };
   return { ok: false, cancelled: false, error: res.error ?? "PDF 导出失败：未生成产物" };

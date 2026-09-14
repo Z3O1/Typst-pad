@@ -42,9 +42,17 @@ export interface PersistedState {
   lastUpdateCheckAt: number | null;
   /**
    * 分栏比例：**预览区**占分栏容器的宽度份额（0.25~0.75，默认 0.5）。
-   * Ctrl+Shift+滚轮调整（见 pane-ratio.ts）；存比例而不是像素宽度，窗口变化时按比例重排。
+   * Ctrl+滚轮调整（见 pane-ratio.ts）；存比例而不是像素宽度，窗口变化时按比例重排。
    */
   previewRatio: number;
+  /**
+   * 正文字体（中文）选择：空串 = 用内置默认（思源宋体优先，缺字回退系统宋体）。
+   * 非空时是 FontBook 里的**英文族名**（如 "SimSun"、"Microsoft YaHei"），
+   * 由设置里的下拉选择产生——手写族名极易写错，而 typst 对不存在的族名只发 warning 后静默回退。
+   */
+  chineseFont: string;
+  /** 额外字体目录（对齐 typst CLI 的 --font-path）：与打包字体、系统字体一起注册进 FontBook */
+  fontDirs: string[];
 }
 
 /** 读取持久化状态；不存在或损坏时返回空对象 */
@@ -74,6 +82,9 @@ export function loadState(): Partial<PersistedState> {
     if (typeof state.previewRatio !== "number" || !Number.isFinite(state.previewRatio)) {
       state.previewRatio = 0.5;
     }
+    // 字体设置（旧存档没有）：正文字体默认空串 = 用内置默认列表；字体目录默认空
+    if (typeof state.chineseFont !== "string") state.chineseFont = "";
+    if (!Array.isArray(state.fontDirs)) state.fontDirs = [];
     return state;
   } catch {
     return {};

@@ -4,9 +4,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **中文不再被渲染成楷体/隶书（Windows）或黑体日文字形（Linux）**。根因不是"缺字"：typst 默认正文字体 `Libertinus Serif` 不含汉字，**所有中文都要走 typst 的自动回退**，而回退打分是「先比衬线标记（`Libertinus Serif` 的 panose 全 0 → typst 判它**无衬线** → 于是思源宋体等**所有宋体都被扣分**）→ 再比**家族名谁短**」——Windows 上 `LiSu`(4)/`KaiTi`(5) 赢过 `Noto Serif CJK SC`(17)、Linux 上 `Noto Sans CJK` 赢过 `Noto Serif CJK`。实测（typst 0.15.1，Windows `typst.exe` 与 WSL snap 双侧 CLI）：不指定字体时编译出的 PDF 里嵌的是 `KaiTi` + `LiSu`（Windows）/ `NotoSansCJKjp`（Linux）。修法是 Rust 侧把默认字体族列表注入 `Library.styles`（基础层，**文档里的 `#set text(font:)` 仍然优先**，与原生 typst 语义一致，且不改编译源、不动诊断行号）：`Libertinus Serif` → 打包思源宋体 → 系统宋体兜底（打包那份是**子集**：4382 码位、CJK 基本区缺 83%，生僻字靠 `SimSun`/`Songti SC` 接住）→ `Microsoft YaHei` 收尾。新增 `FontConfig`/`DEFAULT_FONT_FAMILIES`/`build_library`/`list_font_families` 与 3 项 Rust 单测（关键一条：**注入 ≡ 文档里显式 `#set text(font:)`**，且与走回退的结果不同）。
+- **"改了字体没生效"的四条路一起修**：① 族名写错（如中文名"微软雅黑"）时 typst **只发 warning 不报错**、静默回退——现在状态栏出现警告徽标 + 弹窗，`font-warnings.ts` 给出"族名要用英文名 / 可放进额外字体目录"的中文提示；② 在设置里改前缀或字体后**不重新编译**（以前要再敲一个字才生效）——`saveSettings()` 现在立即重编译；③ 公式缓存键不含字体配置——字体变了即 `resetMathCache()`，视口内公式一起重渲染；④ 三处渲染不一致——`compile_doc`/`compile_math`/`export_pdf` 现在都带同一份字体配置。
+
 ### Added
 
 - **Ctrl+滚轮调整分栏比例**（源代码模式右键预览区宽度）：范围 25%~75%、默认 50/50，向上滚 = 预览区变宽（一次一格 2 个百分点），状态栏实时显示当前百分比；比例随界面偏好持久化（存的是**份额**而不是像素宽，窗口变化时按比例重排），视图菜单新增「重置分栏比例」回到 50/50（菜单项右侧灰字就是操作姿势提示）。纯逻辑在新模块 `src/lib/pane-ratio.ts`（含 17 项单测：方向、三种 deltaMode 的档距、触摸板小步长、上下限收敛、非法输入回落、横向位移退回）；浏览器验收第 24 组 12 项（含"没有顺手把页面缩放掉"的断言），合计 79 项。
+- **设置 → 正文字体（中文）**：下拉选项来自新命令 `list_font_families`（Rust 侧 FontBook 的真实族名，结构上不可能写出不存在的名字），首项「默认」= 内置列表；另加 **设置 → 额外字体目录**（字体文件放进目录即可用，递归扫 `.ttf/.otf`，对齐 typst CLI 的 `--font-path`/`TYPST_FONT_PATHS`，目录增删会重新加载字体集并刷新下拉——字体缓存改为按目录列表做 key）。
+- 前端新增 `font-settings.ts`（把选中的正文字体拼成字体族列表：拉丁基准留最前，其余默认项继续兜底）与 `font-warnings.ts`（编译警告可读化），各配单测；`browser-dev-stub.ts` 增加字体命令桩与"中文族名 → 真实 warning"桩；`wysiwyg.mjs` 新增第 25 组（12 项）覆盖设置 UI、字体透传与警告可见性。测试规模：前端 23 文件 / 348 项，Rust 32 项。
   - 行为细节：只在预览栏可见时响应（写作模式单栏时**状态栏提示"先打开预览栏"**再放行，避免"按了没反应"被当成坏了）；不带 Ctrl 的滚轮不响应；到上下限后继续滚只提示不变化。
   - **踩过的坑**：手势最初写成 Ctrl+Shift+滚轮，头less 验收里用 CDP 注入 `deltaY` 全绿，但真机上"按了没反应"——按着 Shift 滚轮时浏览器会把纵向滚动转成横向（`deltaY=0`、`deltaX` 有值）。现在手势是 Ctrl+滚轮，且页面侧同时读 `deltaY`/`deltaX`（`wheelResizeDelta`），验收里各留一条断言。
 

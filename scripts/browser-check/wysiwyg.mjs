@@ -806,5 +806,136 @@ check(
   JSON.stringify({ status: singlePaneAfter.status, ratio: singlePaneAfter.ratio }),
 );
 
+// ---------------------------------------------------------------------------
+// 第 25 组：正文字体设置（中文不再被 typst 回退成楷体）
+// 背景（2026-09-14 实测）：typst 默认正文字体 Libertinus Serif 没有汉字，不指定字体时中文全走
+// 自动回退，而回退打分优先「与基准字体同衬线」再比「家族名长短」→ Windows 落到楷体/隶书、
+// Linux 落到日文字形黑体。现在由设置里的「正文字体」（选项来自 Rust 侧 FontBook）+ Rust 注入的
+// 默认字体族决定；同时修掉"改了字体没生效"：保存立即重编译、写错的族名以警告形式可见。
+// ---------------------------------------------------------------------------
+console.log("25) 正文字体设置");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+await openMenu("文件");
+await c.waitFor(`document.body.innerText.includes("设置")`, { timeout: 5000 });
+await clickMenuItem("设置…");
+await c.waitFor(`!!document.querySelector(".settings-modal")`, { timeout: 5000 });
+await new Promise((r) => setTimeout(r, 600));
+
+const fontUi = await c.evaluate(`(() => {
+  const modal = document.querySelector(".settings-modal");
+  const select = modal.querySelector("select.settings-select");
+  return {
+    hasSelect: !!select,
+    options: select ? Array.from(select.options).map((o) => o.value) : [],
+    hasDirBlock: Array.from(modal.querySelectorAll(".settings-block-title")).some((e) =>
+      (e.textContent || "").includes("额外字体目录"),
+    ),
+    hasAddBtn: Array.from(modal.querySelectorAll("button")).some((e) =>
+      (e.textContent || "").includes("添加字体目录"),
+    ),
+  };
+})()`);
+check("设置弹窗里有「正文字体（中文）」下拉", fontUi.hasSelect, JSON.stringify(fontUi));
+check("下拉首项是「默认」（值 = 空串）", fontUi.options[0] === "", JSON.stringify(fontUi.options.slice(0, 3)));
+check(
+  "下拉选项来自字体列表（桩给出 SimSun / Noto Serif CJK SC）",
+  fontUi.options.includes("SimSun") && fontUi.options.includes("Noto Serif CJK SC"),
+  JSON.stringify(fontUi.options),
+);
+check("有「额外字体目录」区与添加按钮", fontUi.hasDirBlock && fontUi.hasAddBtn, JSON.stringify(fontUi));
+
+// 添加字体目录（桩的目录选择器返回假目录）→ 目录进列表、字体列表随之刷新
+await c.evaluate(`(() => {
+  const btn = Array.from(document.querySelectorAll(".settings-modal button")).find((e) =>
+    (e.textContent || "").includes("添加字体目录"),
+  );
+  btn.click();
+})()`);
+await c.waitFor(`!!document.querySelector(".settings-modal .settings-dir-path")`, { timeout: 5000 });
+const afterAdd = await c.evaluate(`(() => {
+  const modal = document.querySelector(".settings-modal");
+  const select = modal.querySelector("select.settings-select");
+  return {
+    dir: (modal.querySelector(".settings-dir-path") || {}).textContent || "",
+    options: Array.from(select.options).map((o) => o.value),
+  };
+})()`);
+check("添加字体目录后，目录出现在设置里", afterAdd.dir.trim().length > 0, afterAdd.dir.trim());
+check(
+  "字体列表随额外目录刷新（多出用户字体）",
+  afterAdd.options.includes("UserFont Demo"),
+  JSON.stringify(afterAdd.options.slice(-3)),
+);
+
+// 选正文字体 + 保存：字体族列表要传下去，并且**立即重编译**（以前要再敲一个字才生效）
+const compilesBefore = await c.evaluate(`window.__browserDevCompileCount || 0`);
+await c.evaluate(`(() => {
+  const sel = document.querySelector(".settings-modal select.settings-select");
+  sel.value = "SimSun";
+  sel.dispatchEvent(new Event("change", { bubbles: true }));
+})()`);
+await c.evaluate(`(() => {
+  const btn = Array.from(document.querySelectorAll(".settings-modal button")).find((e) =>
+    (e.textContent || "").includes("保存"),
+  );
+  btn.click();
+})()`);
+await new Promise((r) => setTimeout(r, 900));
+const saved = await c.evaluate(`({
+  compiles: window.__browserDevCompileCount || 0,
+  last: window.__browserDevLastCompile || null,
+  status: document.querySelector(".statusbar").innerText,
+  modalOpen: !!document.querySelector(".settings-modal"),
+})`);
+check(
+  "保存设置后立即重编译（不必再敲一个字）",
+  saved.compiles > compilesBefore,
+  `${compilesBefore} → ${saved.compiles}`,
+);
+check(
+  "字体族列表透传给编译：拉丁基准最前、选中项其次（拉丁/数字不跟着变）",
+  !!saved.last &&
+    Array.isArray(saved.last.fontFamilies) &&
+    saved.last.fontFamilies[0] === "Libertinus Serif" &&
+    saved.last.fontFamilies[1] === "SimSun",
+  JSON.stringify(saved.last && saved.last.fontFamilies),
+);
+check(
+  "额外字体目录一并透传",
+  !!saved.last && Array.isArray(saved.last.fontDirs) && saved.last.fontDirs.length === 1,
+  JSON.stringify(saved.last && saved.last.fontDirs),
+);
+check("保存后弹窗关闭并给出状态栏反馈", !saved.modalOpen && saved.status.includes("设置已保存"), saved.status.slice(0, 40));
+
+// 字体族名写错（中文族名永远匹配不上）→ typst 只发 warning：必须可见，否则就是"改了字体没用"
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 600));
+await c.click(400, 300);
+await c.type('#set text(font: "微软雅黑")\n中文测试');
+await c.waitFor(`!!document.querySelector(".warning-badge")`, { timeout: 8000 });
+const warnStatus = await c.evaluate(`document.querySelector(".statusbar").innerText`);
+check(
+  "写错的字体族名以警告形式出现在状态栏（不再静默回退）",
+  warnStatus.includes("警告") && warnStatus.includes("未知字体族"),
+  warnStatus.slice(0, 80),
+);
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(`!!document.querySelector(".error-popover .error-item-msg")`, { timeout: 5000 });
+const warnText = await c.evaluate(
+  `document.querySelector(".error-popover").innerText`,
+);
+check(
+  "警告弹窗给出可行动提示（英文族名 + 额外字体目录）",
+  warnText.includes("Microsoft YaHei") && warnText.includes("额外字体目录"),
+  warnText.replace(/\n/g, " ").slice(0, 120),
+);
+await c.screenshot(SHOT("wysiwyg-25-font-warning"));
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

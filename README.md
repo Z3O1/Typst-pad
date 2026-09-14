@@ -58,8 +58,8 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 
 ## 测试与 CI
 
-- 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键、自动更新的纯逻辑（`update-utils`：检查节流 / 进度换算 / 错误文案），以及所见即所得链路（`typst-lex` 区域扫描 / `math-ranges` 公式范围 / `markup-ranges` 标记 / `live-preview` 装饰行为）；发布脚本的测试在 `scripts/generate-latest-json.test.mjs`（更新清单的生成与校验）
-- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（77 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
+- 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键、自动更新的纯逻辑（`update-utils`：检查节流 / 进度换算 / 错误文案），所见即所得链路（`typst-lex` 区域扫描 / `math-ranges` 公式范围 / `markup-ranges` 标记 / `live-preview` 装饰行为）、字体设置（`font-settings` 把选中的正文字体拼成字体族列表、`font-warnings` 把编译警告翻成可行动提示）；发布脚本的测试在 `scripts/generate-latest-json.test.mjs`（更新清单的生成与校验）
+- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（91 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
 - 浏览器端的**真实排版视觉验证**：`npm run fixtures:math` 导出 Rust 侧真实公式产物 → `node scripts/browser-check/wysiwyg-visual.mjs`。它把真实产物注入浏览器开发模式页面，实测 ① 行内公式基线与同行文字基线是否齐平（用零宽基线探针量，误差 < 1px）② 渲染尺寸是否等于真实 pt 尺寸 × 4/3 ③ 行间公式块级 widget 是否居中并独占整行 ④ 暗色主题下公式是否可见
 - Rust 单测（`typst_world.rs` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）、单公式渲染（`compile_math`：贴边 SVG、透明底、基线测量、前缀宏生效、语法错误回退）
 - CI（GitHub Actions，`.github/workflows/ci.yml`）：
@@ -112,11 +112,13 @@ src-tauri/
 - `LibertinusSerif-{Regular,Bold}.otf` — 正文衬线
 - `DejaVuSansMono.ttf` — 等宽
 
-字体加载在 **Rust 侧**完成：编译时读取字体目录（打包后为 `resource_dir/fonts`，开发/测试为仓库 `src-tauri/fonts`），与**系统字体目录**合并后把全部 `.ttf/.otf` 注册进 FontBook（与 typst CLI 字体集对齐）；目录缺失时不影响编译（typst 给出缺字诊断）。打包映射见 `tauri.conf.json` 的 `bundle.resources`（`fonts` → `fonts/`）。
+字体加载在 **Rust 侧**完成：编译时读取字体目录（打包后为 `resource_dir/fonts`，开发/测试为仓库 `src-tauri/fonts`），与**系统字体目录**、**用户额外字体目录**（设置 → 额外字体目录，等同于 typst CLI 的 `--font-path`）合并后把全部 `.ttf/.otf` 注册进 FontBook；目录缺失时不影响编译（typst 给出缺字诊断）。打包映射见 `tauri.conf.json` 的 `bundle.resources`（`fonts` → `fonts/`）。
+
+**中文默认字体是显式指定的，不靠 typst 自动回退**：typst 默认正文字体 `Libertinus Serif` 不含汉字，不指定时所有中文都走"自动回退"，而回退打分优先"与基准字体同衬线"（`Libertinus Serif` 的 panose 全 0，被判定无衬线，于是思源宋体等宋体全被扣分）再比"家族名长短"——实测（typst 0.15.1）Windows 会渲染成楷体/隶书、Linux 成 Noto Sans CJK 的日文字形。所以 typst-pad 在编译时把默认字体族列表注入基础样式层：`Libertinus Serif` → 打包的思源宋体 → 系统宋体兜底（打包那份是子集，生僻字靠 `SimSun`/`Songti SC` 接住）→ `Microsoft YaHei` 收尾。**文档里的 `#set text(font:)` 优先级更高**（与原生 typst 一致），设置里也可以从「正文字体」下拉直接选一个真实族名。字体族名写错时 typst 只发警告不报错（会静默改用别的字体），所以编译警告会显示在状态栏徽标里，并提示"族名要用英文名 / 可放进额外字体目录"。
 
 字体目录刻意**不放在前端静态目录**：放 `static/` 会被 SvelteKit 整份拷进前端产物，而前端从不引用它们（编辑器用的是系统字体栈，见下），安装包里会白多一份约 5.7MB。
 
-预览与公式的 SVG **不依赖字体**：`typst_svg` 把字形导出成矢量轮廓（`<symbol>`/`<use>`/`<path>`，无 `<text>`），所以预览在任何机器上渲染一致。编辑器自身的界面文本走系统字体栈（写作模式衬线、源码模式等宽），目前**没有** `@font-face`。
+预览与公式的 SVG **不依赖字体**：`typst_svg` 把字形导出成矢量轮廓（`<symbol>`/`<use>`/`<path>`，无 `<text>`），所以预览在任何机器上渲染一致。编辑器自身的界面文本仍走系统字体栈（写作模式衬线、源码模式等宽），**没有** `@font-face`——界面里的中文与预览/PDF 的思源宋体不保证完全一致。
 
 ### 启动耗时观测
 

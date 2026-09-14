@@ -10,6 +10,9 @@ import {
   composePages,
   compileToSvg,
   compileToPdf,
+  compileMath,
+  listFontFamilies,
+  defaultFontFamilies,
 } from "./typst-engine";
 import type { Diagnostic } from "./typst-engine";
 
@@ -111,6 +114,8 @@ describe("compileToSvg（invoke 已 mock）", () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("compile_doc", {
       src: "#let x = 1",
       documentPath: SAVED_DOC_PATH,
+      fontFamilies: null,
+      fontDirs: null,
     });
   });
 
@@ -120,10 +125,12 @@ describe("compileToSvg（invoke 已 mock）", () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("compile_doc", {
       src: "x",
       documentPath: null,
+      fontFamilies: null,
+      fontDirs: null,
     });
   });
 
-  it("成功：携带 warnings（当前 UI 不展示，透传保留）", async () => {
+  it("成功：携带 warnings（透传保留；UI 在状态栏警告徽标里展示）", async () => {
     vi.mocked(invoke).mockResolvedValue({
       ok: true,
       pages: ["<svg>p1</svg>"],
@@ -196,7 +203,22 @@ describe("compileToPdf（invoke / dialog 已 mock）", () => {
       src: "#let x = 1",
       documentPath: SAVED_DOC_PATH,
       targetPath: "C:\\out\\报告.pdf",
+      fontFamilies: null,
+      fontDirs: null,
     });
+  });
+
+  it("字体配置透传：families/dirs 原样进 invoke（设置改了必须作用于导出）", async () => {
+    vi.mocked(save).mockResolvedValue("C:\\out\\a.pdf");
+    vi.mocked(invoke).mockResolvedValue({ ok: true });
+    await compileToPdf("x", null, "a.typ", { families: ["Libertinus Serif", "SimSun"], dirs: ["D:\\fonts"] });
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "export_pdf",
+      expect.objectContaining({
+        fontFamilies: ["Libertinus Serif", "SimSun"],
+        fontDirs: ["D:\\fonts"],
+      }),
+    );
   });
 
   it("取消对话框：不调用 export_pdf，返回 cancelled", async () => {
@@ -219,5 +241,48 @@ describe("compileToPdf（invoke / dialog 已 mock）", () => {
     const r = await compileToPdf("x", SAVED_DOC_PATH, "a.typ");
     expect(r.ok).toBe(false);
     if (!r.ok && !r.cancelled) expect(r.error).toBe("PDF 导出失败：未生成产物");
+  });
+});
+
+describe("字体命令包装（设置里的下拉数据源）", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("listFontFamilies：调用 list_font_families 并透传目录", async () => {
+    vi.mocked(invoke).mockResolvedValue(["Libertinus Serif", "SimSun"]);
+    const fonts = await listFontFamilies(["D:\\fonts"]);
+    expect(fonts).toEqual(["Libertinus Serif", "SimSun"]);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("list_font_families", {
+      fontDirs: ["D:\\fonts"],
+    });
+  });
+
+  it("listFontFamilies：失败（浏览器环境/IPC 异常）返回空数组不抛", async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error("no tauri"));
+    expect(await listFontFamilies()).toEqual([]);
+  });
+
+  it("defaultFontFamilies：调用 default_font_families；失败返回空数组", async () => {
+    vi.mocked(invoke).mockResolvedValue(["Libertinus Serif", "Noto Serif CJK SC"]);
+    expect(await defaultFontFamilies()).toEqual(["Libertinus Serif", "Noto Serif CJK SC"]);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("default_font_families");
+    vi.mocked(invoke).mockRejectedValue(new Error("no tauri"));
+    expect(await defaultFontFamilies()).toEqual([]);
+  });
+
+  it("compileMath：字体配置与字号一起透传（公式里的中文也要跟随正文字体）", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ok: true,
+      svg: "<svg/>",
+      widthPt: 1,
+      heightPt: 2,
+      baselinePt: 1.5,
+    });
+    await compileMath("x^2", false, "", null, 12, { families: ["SimSun"], dirs: [] });
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "compile_math",
+      expect.objectContaining({ sizePt: 12, fontFamilies: ["SimSun"], fontDirs: [] }),
+    );
   });
 });

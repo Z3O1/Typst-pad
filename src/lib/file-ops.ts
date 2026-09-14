@@ -63,6 +63,16 @@ export async function saveTypFile(
   return target;
 }
 
+/**
+ * 选择字体目录（设置 → 额外字体目录）：把字体文件丢进该目录即可被 typst 使用，
+ * 等价于 typst CLI 的 `--font-path`。取消返回 null；浏览器环境返回 null。
+ */
+export async function pickFontDir(): Promise<string | null> {
+  if (!isTauri()) return null;
+  const dir = await open({ directory: true, multiple: false });
+  return typeof dir === "string" ? dir : null;
+}
+
 /** 弹出系统"另存为"对话框（默认文件名 defaultName），返回目标绝对路径；取消返回 null */
 export async function savePdfDialog(defaultName: string): Promise<string | null> {
   if (!isTauri()) return null;

@@ -190,6 +190,32 @@ function notify(command: string): void {
   console.info(`[browser-dev] 假命令 <<< ${command}（未调用真实 Rust 后端，仅首次提示）`);
 }
 
+/**
+ * 浏览器开发模式下的假字体列表（设置 → 正文字体 的下拉数据源）。
+ * 真实字体集由 Rust 侧 FontBook 提供（打包字体 + 系统字体 + 额外目录），浏览器里没有；
+ * 这里给出与真实形状一致的数据，让验收脚本能覆盖"下拉/额外字体目录"这条 UI 链路。
+ * DEFAULT 与 typst_world.rs 的 DEFAULT_FONT_FAMILIES 保持一致。
+ */
+const FAKE_FONT_FAMILIES = [
+  "DejaVu Sans Mono",
+  "Libertinus Serif",
+  "Microsoft YaHei",
+  "New Computer Modern Math",
+  "Noto Serif CJK SC",
+  "SimSun",
+  "Songti SC",
+  "STSong",
+];
+const FAKE_FONT_FAMILIES_DEFAULT = [
+  "Libertinus Serif",
+  "Noto Serif CJK SC",
+  "SimSun",
+  "Songti SC",
+  "Source Han Serif SC",
+  "Noto Serif SC",
+  "Microsoft YaHei",
+];
+
 async function handleCommand(
   command: string,
   args: Record<string, unknown> | undefined
@@ -199,8 +225,29 @@ async function handleCommand(
     case "compile_doc": {
       const src = typeof a.src === "string" ? a.src : "";
       notify(command);
+      // 仿造一条真实存在的警告：中文族名（如 "微软雅黑"）永远匹配不上字体文件里的英文族名，
+      // typst 只发 warning 后静默回退——验收要靠它验证"警告徽标 + 中文提示"这条链路。
+      const warnings: Diagnostic[] = /font:\s*"[^"]*[\u4e00-\u9fff]/.test(src)
+        ? [
+            {
+              message: "unknown font family: 微软雅黑",
+              severity: "warning",
+              line: 1,
+              column: 1,
+            },
+          ]
+        : [];
+      // 记录最近一次 compile_doc 入参 + 调用次数：验收靠它断言「保存设置 → 立即重编译」
+      // 与「字体配置确实传下去了」（假 SVG 本身看不出字体）
+      const w = window as unknown as Record<string, unknown>;
+      w.__browserDevCompileCount = ((w.__browserDevCompileCount as number) ?? 0) + 1;
+      w.__browserDevLastCompile = {
+        src,
+        fontFamilies: Array.isArray(a.fontFamilies) ? a.fontFamilies : null,
+        fontDirs: Array.isArray(a.fontDirs) ? a.fontDirs : null,
+      };
       // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
-      return { ok: true, pages: fakePages(src), warnings: [] as Diagnostic[] };
+      return { ok: true, pages: fakePages(src), warnings };
     }
     case "compile_math": {
       notify(command);
@@ -237,6 +284,16 @@ async function handleCommand(
     case "list_dir_typ":
       notify(command);
       return command === "list_dir_typ" ? [] : null;
+    // 字体：设置里「正文字体」下拉的选项来源 + Rust 内置默认列表
+    case "list_font_families": {
+      notify(command);
+      const dirs = Array.isArray(a.fontDirs) ? (a.fontDirs as unknown[]) : [];
+      // 加了额外字体目录时多返回一个"用户字体"，便于验收断言"加目录 → 下拉里出现新字体"
+      return dirs.length > 0 ? [...FAKE_FONT_FAMILIES, "UserFont Demo"] : [...FAKE_FONT_FAMILIES];
+    }
+    case "default_font_families":
+      notify(command);
+      return [...FAKE_FONT_FAMILIES_DEFAULT];
     case "take_pending_files":
       return [];
     case "get_debug_flag":
@@ -253,6 +310,11 @@ async function handleCommand(
       notify(command);
       if (command === "plugin:dialog|confirm" || command === "plugin:dialog|ask") {
         return false;
+      }
+      // 目录选择器（设置 → 额外字体目录）：给一个假目录，让验收能走完"添加目录 → 刷新字体列表"。
+      // 文件对话框仍返回 null（保持原有的"取消"语义，不影响文件打开/保存的验收）。
+      if (command === "plugin:dialog|open" && a.directory === true) {
+        return typeof a.defaultPath === "string" ? a.defaultPath : "D:\\fake-fonts";
       }
       return null;
   }

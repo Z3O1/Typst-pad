@@ -88,12 +88,15 @@ async fn compile_doc(
     state: tauri::State<'_, CompileState>,
     src: String,
     document_path: Option<String>,
+    font_families: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
 ) -> Result<typst_world::CompileOutput, String> {
     let lock = std::sync::Arc::clone(&state.lock);
     let fonts_dir = state.fonts_dir.clone();
+    let fonts = typst_world::FontConfig::new(font_families, font_dirs);
     Ok(tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        typst_world::compile(src, document_path, &fonts_dir)
+        typst_world::compile(src, document_path, &fonts_dir, &fonts)
     })
     .await
     .unwrap_or_else(|_| typst_world::CompileOutput::internal_error("编译任务异常终止")))
@@ -114,9 +117,12 @@ async fn compile_math(
     context: String,
     document_path: Option<String>,
     size_pt: Option<f64>,
+    font_families: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
 ) -> Result<typst_world::MathOutput, String> {
     let lock = std::sync::Arc::clone(&state.lock);
     let fonts_dir = state.fonts_dir.clone();
+    let fonts = typst_world::FontConfig::new(font_families, font_dirs);
     Ok(tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         typst_world::compile_math(
@@ -125,6 +131,7 @@ async fn compile_math(
             &context,
             document_path,
             &fonts_dir,
+            &fonts,
             size_pt.unwrap_or(typst_world::MATH_TEXT_PT),
         )
     })
@@ -141,6 +148,8 @@ async fn export_pdf(
     src: String,
     document_path: Option<String>,
     target_path: String,
+    font_families: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
 ) -> Result<typst_world::PdfResult, String> {
     let final_path = match validate_write_path(&target_path) {
         Ok(p) => p,
@@ -153,9 +162,10 @@ async fn export_pdf(
     };
     let lock = std::sync::Arc::clone(&state.lock);
     let fonts_dir = state.fonts_dir.clone();
+    let fonts = typst_world::FontConfig::new(font_families, font_dirs);
     Ok(tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        match typst_world::compile_to_pdf_bytes(src, document_path, &fonts_dir) {
+        match typst_world::compile_to_pdf_bytes(src, document_path, &fonts_dir, &fonts) {
             Ok(bytes) => match fs::write(&final_path, bytes) {
                 Ok(()) => typst_world::PdfResult {
                     ok: true,
@@ -177,6 +187,36 @@ async fn export_pdf(
         ok: false,
         error: Some("导出任务异常终止".into()),
     }))
+}
+
+/// 返回内置的默认字体族列表（设置里「默认」选项的兜底链）。
+/// 前端拿它拼「用户选中项 + 其余默认项」——保证改了正文字体后，生僻字仍由其余字体接住
+/// （打包的思源宋体是子集）。列表定义只此一处，避免前后端各写一份走样。
+#[tauri::command]
+fn default_font_families() -> Vec<String> {
+    typst_world::DEFAULT_FONT_FAMILIES
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// 列出可用字体族（设置里「中文字体」下拉的数据源）：打包字体 + 系统字体 + 额外目录。
+/// 选项来自真实注册的字体，因此用户选不出不存在的族名——写错族名的后果是 typst 只发
+/// warning 然后**静默回退到楷体**，正是"改了字体没用"的根源。
+#[tauri::command]
+async fn list_font_families(
+    state: tauri::State<'_, CompileState>,
+    font_dirs: Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
+    let lock = std::sync::Arc::clone(&state.lock);
+    let fonts_dir = state.fonts_dir.clone();
+    let dirs = typst_world::FontConfig::new(Some(Vec::new()), font_dirs).dirs;
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        typst_world::list_font_families(&fonts_dir, &dirs)
+    })
+    .await
+    .unwrap_or_default())
 }
 
 /// 取走待打开的 .typ 文件队列（仅一次，供前端就绪后逐个加载）
@@ -429,7 +469,9 @@ pub fn run() {
             get_debug_flag,
             compile_doc,
             compile_math,
-            export_pdf
+            export_pdf,
+            list_font_families,
+            default_font_families
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

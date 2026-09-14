@@ -26,6 +26,8 @@ describe("persistence", () => {
       autoCheckUpdates: false,
       lastUpdateCheckAt: 1_700_000_000_000,
       previewRatio: 0.65,
+      chineseFont: "SimSun",
+      fontDirs: ["D:\\fonts"],
     });
     expect(loadState()).toEqual({
       theme: "dark",
@@ -41,6 +43,8 @@ describe("persistence", () => {
       autoCheckUpdates: false,
       lastUpdateCheckAt: 1_700_000_000_000,
       previewRatio: 0.65,
+      chineseFont: "SimSun",
+      fontDirs: ["D:\\fonts"],
     });
   });
 
@@ -50,13 +54,13 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, previewRatio: 0.5 });
+    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, previewRatio: 0.5, chineseFont: "", fontDirs: [] });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, previewRatio: 0.5 });
+    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, previewRatio: 0.5, chineseFont: "", fontDirs: [] });
     expect(loadState().theme).toBe("system");
   });
 
@@ -113,6 +117,26 @@ describe("persistence", () => {
   it("previewRatio 损坏（字符串）时回落默认，不让脏数据把分栏搞乱", () => {
     localStorage.setItem("typst-pad:state", JSON.stringify({ previewRatio: "一半" }));
     expect(loadState().previewRatio).toBe(0.5);
+  });
+
+  it("旧存档（无 chineseFont/fontDirs）默认：正文字体「默认」、无额外字体目录", () => {
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null }),
+    );
+    const state = loadState();
+    expect(state.chineseFont).toBe("");
+    expect(state.fontDirs).toEqual([]);
+  });
+
+  it("chineseFont 损坏（非字符串）/ fontDirs 损坏（非数组）时回落默认", () => {
+    localStorage.setItem(
+      "typst-pad:state",
+      JSON.stringify({ chineseFont: 123, fontDirs: "D:\\fonts" }),
+    );
+    const state = loadState();
+    expect(state.chineseFont).toBe("");
+    expect(state.fontDirs).toEqual([]);
   });
 
   it("lastUpdateCheckAt 损坏（字符串/NaN 之类）时不传给节流逻辑", () => {

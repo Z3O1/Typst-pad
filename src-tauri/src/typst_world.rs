@@ -4,8 +4,14 @@
 //! 整体思路参考 typst 官方 CLI（typst-cli 的 SystemWorld），但针对编辑器场景做了简化：
 //! - 字体：打包字体目录（打包后为 resource_dir/fonts，开发/测试为 `src-tauri/fonts`）
 //!   与系统字体目录（见 system_font_dirs，Windows/Linux/macOS）合并加载全部 .ttf/.otf，
-//!   注册进同一个 FontBook（与 typst CLI 字体集对齐，同一文档两边字体解析一致）；
-//!   进程内缓存（cached_fonts），每次编译复用而非重读盘；
+//!   注册进同一个 FontBook（与 typst CLI 字体集对齐，同一文档两边字体解析一致），
+//!   再加上用户设置的额外字体目录（FontConfig.dirs，对齐 typst CLI 的 --font-path）；
+//!   进程内缓存（cached_fonts，按「打包目录 + 额外目录」列表做 key），复用而非重读盘；
+//! - 默认字体：FontConfig.families 注入 Library.styles（基础样式层）。**必须注入**：
+//!   不注入时中文完全交给 typst 自动回退，而回退打分是「先看衬线标记（Libertinus Serif
+//!   的 panose 全 0 → 被判无衬线，于是所有宋体都被扣分）→ 再比家族名谁短」，实测
+//!   Windows 挑到楷体/隶书、Linux 挑到 Noto Sans CJK 的日文字形（2026-09-14 用 typst
+//!   0.15.1 在两边 CLI 复现）。文档里的 `#set text(font: ...)` 优先级更高，照旧覆盖。
 //! - 文件：主文档源码由前端传入（未保存即可编译）；相对 include 以 document_path 所在目录为
 //!   根从磁盘读取（与 typst 语义一致：相对路径基于引用文件所在目录解析，根为项目目录）；
 //! - 包：`@local/{name}:{version}` 从本地数据目录读取；`@preview/{name}:{version}` 从缓存
@@ -22,13 +28,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, LinkedNode, RootedPath, Source, SyntaxKind, VirtualPath, VirtualRoot};
-use typst::text::{Font, FontBook};
+use typst::text::{Font, FontBook, FontFamily, FontList, TextElem};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
 use typst_layout::{Page, PagedDocument};
@@ -120,10 +126,16 @@ impl TypstWorld {
     ///
     /// - `src`：主文档源码
     /// - `document_path`：主文档磁盘路径（决定项目根目录与 include 解析；None = 未保存）
-    /// - `fonts_dir`：打包字体目录（.ttf/.otf 全量加载；系统字体目录自动合并，进程内缓存）
-    pub fn new(src: String, document_path: Option<String>, fonts_dir: &Path) -> Self {
-        let (book, fonts) = cached_fonts(fonts_dir);
-        let library = Library::default();
+    /// - `fonts_dir`：打包字体目录（.ttf/.otf 全量加载；系统目录 + 额外目录自动合并，进程内缓存）
+    /// - `font_config`：默认字体族列表（注入基础样式，中文不再走回退）与额外字体目录
+    pub fn new(
+        src: String,
+        document_path: Option<String>,
+        fonts_dir: &Path,
+        font_config: &FontConfig,
+    ) -> Self {
+        let (book, fonts) = cached_fonts(fonts_dir, &font_config.dirs);
+        let library = build_library(&font_config.families);
 
         // 项目根 = 主文档所在目录；主 FileId 的虚拟路径相对该根（盘符前缀被剥离）
         let (root, main_id) = match document_path {
@@ -285,6 +297,77 @@ fn civil_from_days(z: i64) -> (i32, u8, u8) {
     (if m <= 2 { (y + 1) as i32 } else { y as i32 }, m, d)
 }
 
+/// 默认字体族列表（前端未指定时使用）：把「中文不再靠回退」固化下来。
+///
+/// 顺序即优先级（typst 按列表逐个找能覆盖该字符的字体）：
+/// 1. `Libertinus Serif`——拉丁正文与数学文本的 typst 原生默认；
+/// 2. `Noto Serif CJK SC`——打包自带的思源宋体（离线可用，与预览/PDF 预期一致）；
+/// 3. 系统宋体兜底（`SimSun` Windows / `Songti SC` macOS / `Source Han Serif SC`）——
+///    打包那份是**子集**（4382 码位，CJK 基本区缺 83%），生僻字得靠系统字体接住；
+/// 4. `Microsoft YaHei` 收尾（覆盖更全，仍好过落到楷体/隶书）。
+pub const DEFAULT_FONT_FAMILIES: &[&str] = &[
+    "Libertinus Serif",
+    "Noto Serif CJK SC",
+    "SimSun",
+    "Songti SC",
+    "Source Han Serif SC",
+    "Noto Serif SC",
+    "Microsoft YaHei",
+];
+
+/// 字体配置（前端设置传入）。
+#[derive(Clone, Debug)]
+pub struct FontConfig {
+    /// 注入进编译基础样式的默认字体族列表。
+    /// - `None`（走 FontConfig::new）= DEFAULT_FONT_FAMILIES（默认：中文直接命中宋体）；
+    /// - `Some(空 vec)` = **完全不注入**，交给 typst 原生默认与自动回退；
+    /// - `Some(v)` = 注入 v。
+    /// 文档里的 `#set text(font: ...)` 优先级始终更高（library.styles 是基础层）。
+    pub families: Vec<String>,
+    /// 额外字体目录（对齐 typst CLI 的 `--font-path` / `TYPST_FONT_PATHS`）：
+    /// 用户在设置里添加的目录，与打包字体、系统字体一起注册进同一个 FontBook。
+    pub dirs: Vec<PathBuf>,
+}
+
+impl FontConfig {
+    /// 从命令参数构造：families 为 None 时用默认列表；目录项去空串。
+    pub fn new(families: Option<Vec<String>>, dirs: Option<Vec<String>>) -> Self {
+        Self {
+            families: match families {
+                None => DEFAULT_FONT_FAMILIES.iter().map(|s| s.to_string()).collect(),
+                Some(v) => v,
+            },
+            dirs: dirs
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|d| !d.trim().is_empty())
+                .map(PathBuf::from)
+                .collect(),
+        }
+    }
+}
+
+impl Default for FontConfig {
+    /// 默认配置 = 注入 DEFAULT_FONT_FAMILIES。
+    fn default() -> Self {
+        Self::new(None, None)
+    }
+}
+
+/// 构造标准库：把默认字体族列表注入 `Library.styles`（基础样式层）。
+///
+/// typst-eval 的入口是 `StyleChain::new(&library.styles).chain(&target)`——库样式在**外层**、
+/// 文档样式在内层，查找内层先命中，所以文档里的 `#set text(font: ...)` 照旧覆盖这里
+/// （与原生 typst 的「用户设置 > 默认设置」一致）。列表为空则完全不注入。
+fn build_library(families: &[String]) -> Library {
+    let mut library = Library::default();
+    if !families.is_empty() {
+        let list = FontList(families.iter().map(|f| FontFamily::new(f)).collect());
+        library.styles.set(TextElem::font, list);
+    }
+    library
+}
+
 /// 从单个目录加载全部 .ttf/.otf 字体（含子目录递归），返回 (FontBook, 字体列表)
 /// （与 FontBook 索引一一对应）。目录不存在/不可读时返回空集（不影响编译，
 /// 缺字体时 typst 会给出缺字诊断）。
@@ -298,10 +381,14 @@ fn load_fonts(dir: &Path) -> (FontBook, Vec<Font>) {
 /// 打包字体目录 + 系统字体目录合并加载，全部注册进同一个 FontBook。
 /// 与 typst CLI 字体集对齐：CLI 默认加载系统全部字体，typst-pad 此前只加载打包的
 /// 7 个字体，同一文档在两边的字体解析结果可能不一致。目录不存在/不可读时静默跳过。
-fn load_fonts_with_system(bundled_dir: &Path) -> (FontBook, Vec<Font>) {
+/// `extra_dirs` 是用户在设置里添加的额外字体目录（同样静默跳过不存在的）。
+fn load_fonts_with_system(bundled_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBook, Vec<Font>) {
     let (mut book, mut fonts) = load_fonts(bundled_dir);
     for dir in system_font_dirs() {
         load_fonts_from_dir(&dir, &mut book, &mut fonts);
+    }
+    for dir in extra_dirs {
+        load_fonts_from_dir(dir, &mut book, &mut fonts);
     }
     (book, fonts)
 }
@@ -385,15 +472,35 @@ fn system_font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// 进程级字体缓存：字体集合在进程生命周期内不变（打包字体目录在 setup 时解析一次，
-/// 系统字体目录也是静态的），首次编译时全量加载一次，此后每次编译复用克隆。
+/// 进程级字体缓存：按「打包目录 + 额外字体目录」列表做 key。
+/// 字体集合在一个进程内是静态的（打包/系统目录不变），但用户可以在设置里增删额外字体
+/// 目录，所以缓存必须按目录列表区分；Font 为 Arc 引用计数，FontBook 克隆廉价。
 /// 前端每次按键都会触发编译，若每次重读几百个系统字体文件将严重拖慢输入。
-/// Font 为 Arc 引用计数，FontBook/字体列表克隆廉价。
-static FONT_CACHE: OnceLock<(FontBook, Vec<Font>)> = OnceLock::new();
+static FONT_CACHE: OnceLock<Mutex<HashMap<Vec<PathBuf>, Arc<(FontBook, Vec<Font>)>>>> =
+    OnceLock::new();
 
-/// 获取字体集：首次调用时从打包目录 + 系统字体目录全量加载并缓存，之后返回缓存克隆。
-fn cached_fonts(fonts_dir: &Path) -> (FontBook, Vec<Font>) {
-    FONT_CACHE.get_or_init(|| load_fonts_with_system(fonts_dir)).clone()
+/// 获取字体集：命中缓存返回克隆，未命中则从打包目录 + 系统目录 + 额外目录全量加载。
+fn cached_fonts(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBook, Vec<Font>) {
+    let mut key = Vec::with_capacity(extra_dirs.len() + 1);
+    key.push(fonts_dir.to_path_buf());
+    key.extend(extra_dirs.iter().cloned());
+    let cache = FONT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = guard
+        .entry(key)
+        .or_insert_with(|| Arc::new(load_fonts_with_system(fonts_dir, extra_dirs)));
+    (**entry).clone()
+}
+
+/// 列出 FontBook 里的字体族名（排序去重）——设置里「中文字体」下拉的数据源。
+/// 选项取自真实注册的字体，用户不可能写出一个不存在的族名（写错的后果是 typst 只发
+/// warning 就静默回退到楷体，见模块文档）。
+pub fn list_font_families(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> Vec<String> {
+    let (book, _) = cached_fonts(fonts_dir, extra_dirs);
+    let mut names: Vec<String> = book.families().map(|(family, _)| family.to_string()).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 /// 解析字体目录：优先打包/构建产物 resource_dir 下的 fonts（tauri.conf.json
@@ -416,7 +523,12 @@ pub fn resolve_fonts_dir(app: &tauri::AppHandle) -> PathBuf {
 
 /// 编译文档为每页 SVG（pages 按页序，含 <svg> 标签）。
 /// 失败时返回诊断列表；成功但带警告时 warnings 附加返回。
-pub fn compile(src: String, document_path: Option<String>, fonts_dir: &Path) -> CompileOutput {
+pub fn compile(
+    src: String,
+    document_path: Option<String>,
+    fonts_dir: &Path,
+    font_config: &FontConfig,
+) -> CompileOutput {
     // 未保存文档时预检相对 include，给出明确诊断（编译阶段只会得到笼统的 file not found）
     if document_path.is_none() {
         if let Some(diags) = check_relative_imports(&src) {
@@ -429,7 +541,7 @@ pub fn compile(src: String, document_path: Option<String>, fonts_dir: &Path) -> 
         }
     }
 
-    let world = TypstWorld::new(src, document_path, fonts_dir);
+    let world = TypstWorld::new(src, document_path, fonts_dir, font_config);
     match typst::compile::<PagedDocument>(&world) {
         typst::diag::Warned {
             output: Ok(document),
@@ -529,6 +641,7 @@ pub fn compile_math(
     context: &str,
     document_path: Option<String>,
     fonts_dir: &Path,
+    font_config: &FontConfig,
     size_pt: f64,
 ) -> MathOutput {
     // 夹取到合理范围（NaN/越界都退回默认），保证探针文档始终可编译
@@ -557,7 +670,7 @@ pub fn compile_math(
         "#box({math})\n#pagebreak()\n#box({math})#box(width: 0pt, height: {BASELINE_PROBE_PT}pt, baseline: {BASELINE_PROBE_PT}pt)"
     ));
 
-    let world = TypstWorld::new(src, document_path, fonts_dir);
+    let world = TypstWorld::new(src, document_path, fonts_dir, font_config);
     let document = match typst::compile::<PagedDocument>(&world) {
         typst::diag::Warned {
             output: Ok(doc), ..
@@ -601,6 +714,7 @@ pub fn compile_to_pdf_bytes(
     src: String,
     document_path: Option<String>,
     fonts_dir: &Path,
+    font_config: &FontConfig,
 ) -> Result<Vec<u8>, String> {
     if document_path.is_none() {
         if let Some(diags) = check_relative_imports(&src) {
@@ -611,7 +725,7 @@ pub fn compile_to_pdf_bytes(
         }
     }
 
-    let world = TypstWorld::new(src, document_path, fonts_dir);
+    let world = TypstWorld::new(src, document_path, fonts_dir, font_config);
     let document = match typst::compile::<PagedDocument>(&world) {
         typst::diag::Warned {
             output: Ok(doc),
@@ -790,7 +904,7 @@ mod tests {
     /// 尺寸与 SVG 根属性一致（前端按 pt 原样显示，契约不能漂）
     #[test]
     fn compile_math_inline_ok() {
-        let out = compile_math("x^2", false, "", None, &fonts_dir(), MATH_TEXT_PT);
+        let out = compile_math("x^2", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(out.ok, "行内公式应渲染成功: {:?}", out.error);
         assert!(out.svg.contains("<svg"), "产物应是 SVG");
         assert!(out.width_pt > 0.0 && out.height_pt > 0.0, "尺寸应为正");
@@ -815,8 +929,8 @@ mod tests {
     /// 公式渲染：行间（display 风格）公式明显高于行内风格（分式由 a/b 变为竖排）
     #[test]
     fn compile_math_display_taller_than_inline() {
-        let inline = compile_math("frac(a,b)", false, "", None, &fonts_dir(), MATH_TEXT_PT);
-        let display = compile_math("frac(a,b)", true, "", None, &fonts_dir(), MATH_TEXT_PT);
+        let inline = compile_math("frac(a,b)", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+        let display = compile_math("frac(a,b)", true, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(inline.ok && display.ok);
         assert!(
             display.height_pt > inline.height_pt * 2.0,
@@ -830,12 +944,12 @@ mod tests {
     /// 这条锁住「两页探针」测得的基线（若退回 page.frame.baseline()，depth 会恒为 0）。
     #[test]
     fn compile_math_baseline_measures_depth() {
-        let integral = compile_math("integral_0^1 f(x) dif x", false, "", None, &fonts_dir(), MATH_TEXT_PT);
+        let integral = compile_math("integral_0^1 f(x) dif x", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(integral.ok);
         let depth = integral.height_pt - integral.baseline_pt;
         assert!(depth > 0.3, "积分应有下沉深度，实际 {depth}");
 
-        let sup = compile_math("x^2", false, "", None, &fonts_dir(), MATH_TEXT_PT);
+        let sup = compile_math("x^2", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(sup.ok);
         let sup_depth = sup.height_pt - sup.baseline_pt;
         assert!(
@@ -848,13 +962,13 @@ mod tests {
     #[test]
     fn compile_math_context_applies_without_changing_size() {
         // 前缀定义的宏在公式里可用（#myX）
-        let with_let = compile_math("#myX", false, "#let myX = 42", None, &fonts_dir(), MATH_TEXT_PT);
+        let with_let = compile_math("#myX", false, "#let myX = 42", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(with_let.ok, "前缀宏应可用: {:?}", with_let.error);
         assert!(with_let.width_pt > 0.0);
 
         // 前缀把正文设成 30pt：公式仍按 MATH_TEXT_PT 渲染（#set 在 30pt 之后生效）
-        let plain = compile_math("x", false, "", None, &fonts_dir(), MATH_TEXT_PT);
-        let with_big_prefix = compile_math("x", false, "#set text(size: 30pt)", None, &fonts_dir(), MATH_TEXT_PT);
+        let plain = compile_math("x", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+        let with_big_prefix = compile_math("x", false, "#set text(size: 30pt)", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(plain.ok && with_big_prefix.ok);
         assert!(
             (plain.width_pt - with_big_prefix.width_pt).abs() < 0.1,
@@ -867,7 +981,7 @@ mod tests {
     /// 跨行公式（行间公式多行书写）：仍能渲染成贴边 SVG（前端整行替换为块级 widget）
     #[test]
     fn compile_math_multiline_body() {
-        let out = compile_math("a + b \\ = c", true, "", None, &fonts_dir(), MATH_TEXT_PT);
+        let out = compile_math("a + b \\ = c", true, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(out.ok, "跨行公式应渲染成功: {:?}", out.error);
         assert!(out.width_pt > 0.0 && out.height_pt > 0.0);
         // 行间公式的盒应明显高于单行行内公式（19pt 量级 vs 7pt 量级）
@@ -899,7 +1013,7 @@ mod tests {
         ];
         for (body, display) in cases {
             for size_pt in [12.0, MATH_TEXT_PT] {
-                let out = compile_math(body, display, "", None, &fonts_dir(), size_pt);
+                let out = compile_math(body, display, "", None, &fonts_dir(), &FontConfig::default(), size_pt);
                 assert!(out.ok, "夹具公式应渲染成功: {body} / {:?}", out.error);
                 let json = serde_json::json!({
                     "body": body,
@@ -919,8 +1033,8 @@ mod tests {
     /// （曾经的 bug：正文 16px 而公式仍按 10.5pt 编译 → 公式比正文小一圈）
     #[test]
     fn compile_math_size_matches_editor_font() {
-        let small = compile_math("x", false, "", None, &fonts_dir(), MATH_TEXT_PT);
-        let big = compile_math("x", false, "", None, &fonts_dir(), 12.0);
+        let small = compile_math("x", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+        let big = compile_math("x", false, "", None, &fonts_dir(), &FontConfig::default(), 12.0);
         assert!(small.ok && big.ok);
         let ratio = big.width_pt / small.width_pt;
         assert!(
@@ -929,7 +1043,7 @@ mod tests {
             12.0 / MATH_TEXT_PT
         );
         // 越界/NaN 退回默认，不 panic
-        let bad = compile_math("x", false, "", None, &fonts_dir(), f64::NAN);
+        let bad = compile_math("x", false, "", None, &fonts_dir(), &FontConfig::default(), f64::NAN);
         assert!(bad.ok);
         assert!((bad.width_pt - small.width_pt).abs() < 0.001);
     }
@@ -937,7 +1051,7 @@ mod tests {
     /// 公式语法错误：ok=false 且带消息（前端据此保持源码显示，不显示空 widget）
     #[test]
     fn compile_math_syntax_error() {
-        let out = compile_math("frac(a", false, "", None, &fonts_dir(), MATH_TEXT_PT);
+        let out = compile_math("frac(a", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(!out.ok, "非法公式应失败");
         assert!(out.svg.is_empty(), "失败时不应有产物");
         assert!(
@@ -956,7 +1070,7 @@ mod tests {
 $ a^2 + b^2 = c^2 $
 "#
         .to_string();
-        let out = compile(src, None, &fonts_dir());
+        let out = compile(src, None, &fonts_dir(), &FontConfig::default());
         assert!(out.ok, "编译应成功，实际诊断: {:?}", out.diagnostics);
         assert!(!out.pages.is_empty(), "应至少有一页");
         assert!(out.pages[0].contains("<svg"), "每页应是完整 SVG");
@@ -975,7 +1089,7 @@ $ a^2 + b^2 = c^2 $
         assert_bundled_families_registered(&book);
 
         // 合并加载（打包 + 系统字体目录）：打包族仍在，字体数不少于打包数量
-        let (merged_book, merged_fonts) = load_fonts_with_system(&fonts_dir());
+        let (merged_book, merged_fonts) = load_fonts_with_system(&fonts_dir(), &[]);
         assert_bundled_families_registered(&merged_book);
         assert!(
             merged_fonts.len() >= fonts.len(),
@@ -1025,7 +1139,7 @@ $ a^2 + b^2 = c^2 $
         let src = "#let = 3
 hello"
             .to_string();
-        let out = compile(src, None, &fonts_dir());
+        let out = compile(src, None, &fonts_dir(), &FontConfig::default());
         assert!(!out.ok);
         assert!(!out.diagnostics.is_empty(), "应有诊断");
         let d = &out.diagnostics[0];
@@ -1058,7 +1172,7 @@ hello"
 
         let src = fs::read_to_string(dir.join("main.typ")).unwrap();
         let doc_path = dir.join("main.typ").to_string_lossy().to_string();
-        let out = compile(src, Some(doc_path.clone()), &fonts_dir());
+        let out = compile(src, Some(doc_path.clone()), &fonts_dir(), &FontConfig::default());
         assert!(out.ok, "include 应成功，实际诊断: {:?}", out.diagnostics);
         assert!(!out.pages.is_empty());
 
@@ -1067,6 +1181,7 @@ hello"
             fs::read_to_string(dir.join("main.typ")).unwrap(),
             Some(doc_path),
             &fonts_dir(),
+            &FontConfig::default(),
         );
         assert!(pdf.is_ok(), "PDF 导出应成功: {:?}", pdf.err());
         assert!(!pdf.unwrap().is_empty(), "PDF 字节不应为空");
@@ -1090,7 +1205,7 @@ hello"
 
         let src = fs::read_to_string(dir.join("main.typ")).unwrap();
         let doc_path = dir.join("main.typ").to_string_lossy().to_string();
-        let out = compile(src, Some(doc_path), &fonts_dir());
+        let out = compile(src, Some(doc_path), &fonts_dir(), &FontConfig::default());
         assert!(!out.ok);
         let d = out
             .diagnostics
@@ -1110,6 +1225,7 @@ hello"
             .to_string(),
             None,
             &fonts_dir(),
+            &FontConfig::default(),
         );
         assert!(!out.ok);
         let d = out
@@ -1122,6 +1238,65 @@ hello"
     }
 
     /// 序列化契约：JSON 键名必须是 camelCase（endLine/endColumn），前端按此消费
+    /// 默认字体族注入：注入后应与「文档里显式 #set text(font:)」完全等价，
+    /// 且与不注入（走 typst 自动回退）结果不同——回退会挑到楷体/隶书（Windows）或
+    /// Noto Sans CJK 的日文字形（Linux），中文排版不可控。
+    #[test]
+    fn default_font_families_apply() {
+        let dir = fonts_dir();
+        let body = "中文测试 汉字永\n";
+        let injected = compile(
+            body.to_string(),
+            None,
+            &dir,
+            &FontConfig {
+                families: vec!["Noto Serif CJK SC".to_string()],
+                dirs: Vec::new(),
+            },
+        );
+        let explicit = compile(
+            format!("#set text(font: \"Noto Serif CJK SC\")\n{body}"),
+            None,
+            &dir,
+            &FontConfig { families: Vec::new(), dirs: Vec::new() },
+        );
+        let fallback = compile(
+            body.to_string(),
+            None,
+            &dir,
+            &FontConfig { families: Vec::new(), dirs: Vec::new() },
+        );
+        assert!(injected.ok && explicit.ok && fallback.ok, "三个文档都应编译成功");
+        assert_eq!(
+            injected.pages, explicit.pages,
+            "注入默认字体族应与文档里显式 #set text(font:) 等价"
+        );
+        assert_ne!(injected.pages, fallback.pages, "不注入时应走回退，结果不应与注入相同");
+    }
+
+    /// 字体族列表（设置里的下拉数据源）：包含打包字体与系统字体。
+    #[test]
+    fn font_families_listing_includes_bundled() {
+        let families = list_font_families(&fonts_dir(), &[]);
+        for want in [
+            "Noto Serif CJK SC",
+            "Libertinus Serif",
+            "DejaVu Sans Mono",
+            "New Computer Modern Math",
+        ] {
+            assert!(families.iter().any(|f| f == want), "字体族列表应包含 {want}");
+        }
+    }
+
+    /// 额外字体目录不存在时静默跳过：用户在设置里写错路径不该让编译挂掉。
+    #[test]
+    fn missing_extra_font_dir_is_ignored() {
+        let bogus = std::env::temp_dir().join("typst-pad-no-such-fonts-dir");
+        let cfg = FontConfig { families: Vec::new(), dirs: vec![bogus] };
+        let out = compile("中文可编译\n".to_string(), None, &fonts_dir(), &cfg);
+        assert!(out.ok, "额外字体目录不存在时仍应正常编译");
+    }
+
     #[test]
     fn json_keys_are_camel_case() {
         let out = CompileOutput {
@@ -1200,7 +1375,7 @@ hello"
         );
 
         let src = "#import \"@local/mypkg:1.0.0\": hello\n\n#hello\n".to_string();
-        let out = compile(src, None, &fonts_dir());
+        let out = compile(src, None, &fonts_dir(), &FontConfig::default());
         assert!(out.ok, "@local 导入应编译成功，实际诊断: {:?}", out.diagnostics);
         // SVG 文本按字形渲染（<use> 引用字形路径），8 个汉字对应 8 个字形
         assert!(
@@ -1234,7 +1409,7 @@ hello"
         );
 
         let src = "#import \"@preview/pkg:0.2.0\": v\n\n#v\n".to_string();
-        let out = compile(src, None, &fonts_dir());
+        let out = compile(src, None, &fonts_dir(), &FontConfig::default());
         assert!(out.ok, "@preview 缓存命中应编译成功，实际诊断: {:?}", out.diagnostics);
         // SVG 文本按字形渲染：数字 42 对应 2 个字形
         assert!(
@@ -1259,7 +1434,7 @@ hello"
         std::env::set_var("TYPST_PACKAGE_CACHE_PATH", &root);
 
         let src = "#import \"@local/ghost:1.0.0\": x\n".to_string();
-        let out = compile(src, None, &fonts_dir());
+        let out = compile(src, None, &fonts_dir(), &FontConfig::default());
         assert!(!out.ok, "不存在的包应编译失败");
         let d = out
             .diagnostics

@@ -1,8 +1,16 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import Editor from "$lib/Editor.svelte";
-  import { compileToSvg, compileToPdf, compileMath } from "$lib/typst-engine";
-  import type { CompileErrorLocation, MathRender } from "$lib/typst-engine";
+  import {
+    compileToSvg,
+    compileToPdf,
+    compileMath,
+    listFontFamilies,
+    defaultFontFamilies,
+  } from "$lib/typst-engine";
+  import type { CompileErrorLocation, Diagnostic, MathRender } from "$lib/typst-engine";
+  import { buildFontFamilies, FONT_CHOICE_DEFAULT, normalizeFontDirs } from "$lib/font-settings";
+  import { describeCompileWarning } from "$lib/font-warnings";
   import type { MathRequest } from "$lib/live-preview";
   import type { WriteCommand } from "$lib/write-commands";
   import {
@@ -10,6 +18,7 @@
     saveTypFile,
     readTypFile,
     pickTypPath,
+    pickFontDir,
     isTauri,
   } from "$lib/file-ops";
   import { invoke } from "@tauri-apps/api/core";
@@ -39,6 +48,7 @@
     hasErrorToShow,
     isErrorLineInPrefix,
     prefixLineCharOffset,
+    type ErrorListItem,
     type LocatedErrorItem,
   } from "$lib/error-list";
   import { mark, reportStartup } from "$lib/startup-timing";
@@ -173,6 +183,26 @@
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
   let settingsPrefixEnabled = $state(false);
   let settingsPrefixCode = $state("");
+  // ---------------------------------------------------------------------------
+  // 字体设置（见 font-settings.ts / font-warnings.ts 的模块注释）
+  // 起因：typst 默认正文是 Libertinus Serif（无汉字），不指定字体时中文全走自动回退，
+  // 结果是 Windows 楷体/隶书、Linux 黑体日文字形（2026-09-14 实测）。Rust 侧注入默认字体族
+  // 终结了这件事，这里只是把用户的选择与"额外字体目录"传下去。
+  // ---------------------------------------------------------------------------
+  /** 正文字体（中文）：空串 = 内置默认（思源宋体优先 + 系统宋体兜底） */
+  let chineseFont = $state(FONT_CHOICE_DEFAULT);
+  /** 额外字体目录（对齐 typst CLI 的 --font-path） */
+  let fontDirs = $state<string[]>([]);
+  let settingsChineseFont = $state(FONT_CHOICE_DEFAULT);
+  let settingsFontDirs = $state<string[]>([]);
+  /** 可用字体族（设置里下拉的数据源，打开设置时从 Rust 取一次） */
+  let availableFonts = $state<string[]>([]);
+  /** Rust 内置默认字体族（拼"选中项 + 其余兜底"用；启动时取一次） */
+  let defaultFonts = $state<string[]>([]);
+  let fontsLoading = $state(false);
+  /** 编译警告（Rust 侧 warnings）：字体族写错只会以警告形式出现，必须显示出来 */
+  let compileWarnings = $state<Diagnostic[]>([]);
+  let showWarnings = $state(false);
   // 启动时恢复上次未保存的内容（设置弹窗里的开关，默认开；关掉即回到"每次全新开始"）
   let restoreSession = $state(true);
   let settingsRestoreSession = $state(true);
@@ -322,6 +352,8 @@
         autoCheckUpdates,
         lastUpdateCheckAt,
         previewRatio,
+        chineseFont,
+        fontDirs,
       });
     }, 300);
   }
@@ -689,7 +721,7 @@
       const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
       // 导出流程：推导默认文件名 → 弹系统"另存为"对话框 → Rust 侧编译并直接落盘
       // （typst-engine.compileToPdf；不再经前端出 PDF 字节 + write_binary）
-      const result = await compileToPdf(source, filePath, fileTitle);
+      const result = await compileToPdf(source, filePath, fileTitle, fontArgs());
       if (result.ok) {
         statusText = "已导出 PDF";
       } else if (result.cancelled) {
@@ -733,9 +765,23 @@
     const prefixOnly = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
     for (const req of batch) {
       // 用请求自带的上下文编译（与生成缓存键时一致，见 MathRequest.context 的说明）
-      let render = await compileMath(req.body, req.display, req.context, filePath);
+      let render = await compileMath(
+        req.body,
+        req.display,
+        req.context,
+        filePath,
+        undefined,
+        fontArgs(),
+      );
       if (!render.ok && prefixOnly !== req.context) {
-        const fallback = await compileMath(req.body, req.display, prefixOnly, filePath);
+        const fallback = await compileMath(
+          req.body,
+          req.display,
+          prefixOnly,
+          filePath,
+          undefined,
+          fontArgs(),
+        );
         if (fallback.ok) render = fallback;
       }
       mathCache.set(req.key, render);
@@ -766,6 +812,65 @@
     mathVersion++;
   }
 
+  /**
+   * 当前字体设置 → 传给 Rust 的字体配置。每次编译都要带：设置改了必须同时作用于
+   * 正文预览、公式 widget 与 PDF 导出（三者都走 Rust 侧同一个注入）。
+   */
+  function fontArgs() {
+    return {
+      families: buildFontFamilies(chineseFont, defaultFonts),
+      dirs: normalizeFontDirs(fontDirs),
+    };
+  }
+
+  /** 取可用字体族（下拉数据源）与内置默认列表；打开设置、增删字体目录后调用 */
+  async function refreshFontList(dirs: string[]) {
+    fontsLoading = true;
+    try {
+      const [families, defaults] = await Promise.all([
+        listFontFamilies(normalizeFontDirs(dirs)),
+        defaultFontFamilies(),
+      ]);
+      availableFonts = families;
+      if (defaults.length > 0) defaultFonts = defaults;
+    } finally {
+      fontsLoading = false;
+    }
+  }
+
+  /** 添加额外字体目录（系统目录选择器）→ 立刻重新扫描字体，让下拉里出现新字体 */
+  async function addFontDir() {
+    const dir = await pickFontDir();
+    if (!dir) return;
+    settingsFontDirs = normalizeFontDirs([...settingsFontDirs, dir]);
+    await refreshFontList(settingsFontDirs);
+  }
+
+  /** 移除额外字体目录 → 同步刷新字体列表 */
+  function removeFontDir(dir: string) {
+    settingsFontDirs = settingsFontDirs.filter((d) => d !== dir);
+    void refreshFontList(settingsFontDirs);
+  }
+
+  /** 状态栏单行文案截断（警告可能很长，别把状态栏挤变形） */
+  function truncateStatus(text: string, max = 70): string {
+    return text.length > max ? `${text.slice(0, max)}…` : text;
+  }
+
+  /** 警告列表条目：有源码位置的可点击跳转（消息已翻成中文可行动提示），否则纯展示 */
+  function warningItems(): ErrorListItem[] {
+    return compileWarnings.map((w) =>
+      w.line > 0
+        ? {
+            kind: "located" as const,
+            message: describeCompileWarning(w.message),
+            line: w.line,
+            col: w.column,
+          }
+        : { kind: "generic" as const, message: describeCompileWarning(w.message) },
+    );
+  }
+
   function scheduleCompile() {
     runCompile(); // 立即编译：内容变化后直接编译，编译完即显示（无防抖延迟）
   }
@@ -776,17 +881,34 @@
     settingsPrefixCode = prefixCode;
     settingsRestoreSession = restoreSession;
     settingsAutoCheckUpdates = autoCheckUpdates;
+    settingsChineseFont = chineseFont;
+    settingsFontDirs = [...fontDirs];
     showSettings = true;
+    // 字体下拉的选项来自 Rust 侧真实注册的字体（结构上不可能写出一个不存在的族名）
+    void refreshFontList(settingsFontDirs);
   }
 
   /** 保存设置：应用前缀配置并持久化 */
   function saveSettings() {
+    const fontsChanged =
+      settingsChineseFont !== chineseFont ||
+      normalizeFontDirs(settingsFontDirs).join("\n") !== fontDirs.join("\n");
+    const prefixChanged =
+      settingsPrefixEnabled !== prefixEnabled || settingsPrefixCode !== prefixCode;
     prefixEnabled = settingsPrefixEnabled;
     prefixCode = settingsPrefixCode;
     restoreSession = settingsRestoreSession;
     autoCheckUpdates = settingsAutoCheckUpdates;
+    chineseFont = settingsChineseFont;
+    fontDirs = normalizeFontDirs(settingsFontDirs);
     schedulePersist();
     showSettings = false;
+    // 公式缓存的键是「风格 + 前缀 + 公式文本」，不含字体配置 → 改了字体必须整体作废，
+    // 否则视口内的公式会一直用旧字体（编辑器收到 mathVersion 变化后重新请求渲染）。
+    if (fontsChanged) resetMathCache();
+    // **保存后立即重编译**：以前只写状态不重编译，预览停在上一次结果，看起来就是
+    // "改了字体/前缀没生效"（要在正文里敲一个字才刷新）。字体与前缀都会进编译源，故都要重编译。
+    if (fontsChanged || prefixChanged) runCompile();
     statusText = "设置已保存";
   }
 
@@ -824,7 +946,7 @@
     // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行；
     // documentPath 传当前文档绝对路径（未保存为 null），Rust 侧以其所在目录解析 include
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
-    const result = await compileToSvg(source, filePath);
+    const result = await compileToSvg(source, filePath, fontArgs());
     if (mySeq === 1) {
       // 首次编译完成 = 应用「可正常编辑/预览」就绪点，输出一次启动报告
       mark("first-compile-result");
@@ -841,7 +963,13 @@
       errorCount = 0; // 编译成功：错误徽标归零（与状态栏文本同源）
       lastNonPosError = null; // 编译成功：无非定位错误
       charCount = doc.length;
-      statusText = "就绪";
+      // 编译警告（典型：unknown font family）必须可见——typst 对写错的字体族名只发 warning
+      // 然后静默改用其他字体，不显示出来用户只会看到"改了字体没用"（见 font-warnings.ts）
+      compileWarnings = result.warnings ?? [];
+      statusText =
+        compileWarnings.length > 0
+          ? truncateStatus(`警告：${describeCompileWarning(compileWarnings[0].message)}`)
+          : "就绪";
       // 调试日志：编译结果摘要（ok/页数/耗时），排查编译链路时对照 compile-diagnostics
       dbg.log("compile", `ok pages:${result.pageCount} t:${(performance.now() - t0).toFixed(1)}ms`);
     } else {
@@ -849,6 +977,7 @@
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
       editorDiagnostics = result.errors;
       errorCount = result.errors.length; // 与状态栏文本「编译错误：N 处」同源
+      compileWarnings = []; // 编译失败时 Rust 不返回 warnings（错误优先，避免两套提示打架）
       // 非定位错误（如包不存在 / 访问模型异常）单独记录，供徽标弹窗展示
       // （定位错误存在时与第一条同源，弹窗内不重复展示）
       lastNonPosError = result.errors.length === 0 ? result.error : null;
@@ -1041,6 +1170,8 @@
     }
     prefixEnabled = saved.prefixEnabled ?? false;
     prefixCode = saved.prefixCode ?? "";
+    chineseFont = saved.chineseFont ?? FONT_CHOICE_DEFAULT;
+    fontDirs = normalizeFontDirs(saved.fontDirs ?? []);
 
     // 旧存档迁移：只有 livePreview 字段时，按其值推断模式
     viewMode = saved.viewMode ?? (saved.livePreview === false ? "source" : "write");
@@ -1067,6 +1198,10 @@
     // 关于弹窗版本号：从 Tauri 运行时读取（getVersion 返回 tauri.conf.json 的
     // version，如 0.4.0）；失败静默忽略，弹窗显示占位符
     getVersion().then((v) => (appVersion = v)).catch(() => {});
+    // 内置默认字体族（拼"选中项 + 其余兜底"用）：静态列表，取一次即可
+    void defaultFontFamilies().then((v) => {
+      if (v.length > 0) defaultFonts = v;
+    });
 
     runCompile();
     resolveTheme();
@@ -1243,6 +1378,45 @@
         onclick={() => (showUpdateDialog = true)}
       >{updateNotice}</button>
     {/if}
+    {#if compileWarnings.length > 0}
+      <span class="error-badge-wrap warning-badge-wrap">
+        <span
+          class="error-badge clickable warning-badge"
+          class:active={showWarnings}
+          role="button"
+          tabindex="0"
+          aria-expanded={showWarnings}
+          title="编译警告（不中断渲染）"
+          onclick={() => (showWarnings = !showWarnings)}
+          onkeydown={(e) => {
+            if (e.key === "Enter") showWarnings = !showWarnings;
+          }}
+        >
+          <span class="error-icon warning-icon">!</span><span
+            class="error-count">{compileWarnings.length}</span
+          >
+        </span>
+        {#if showWarnings}
+          <div class="error-popover" role="dialog" aria-label="编译警告列表">
+            <div class="error-popover-title">编译警告（{compileWarnings.length} 处）</div>
+            <div class="error-list">
+              {#each warningItems() as item}
+                {#if item.kind === "located"}
+                  <button class="error-item" onclick={() => onErrorItemClick(item)}>
+                    <span class="error-item-loc">{formatErrorLoc(item)}</span>
+                    <span class="error-item-msg">{item.message}</span>
+                  </button>
+                {:else}
+                  <div class="error-item error-item-generic">
+                    <span class="error-item-msg">{item.message}</span>
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </span>
+    {/if}
     <span class="error-badge-wrap" bind:this={errorWrapEl}>
       <span
         class="error-badge"
@@ -1361,6 +1535,39 @@
           placeholder="#set page(margin: 2cm)"
           spellcheck="false"
         ></textarea>
+        <label class="settings-row settings-row-font">
+          <span>正文字体（中文）</span>
+          <select class="settings-select" bind:value={settingsChineseFont}>
+            <option value={FONT_CHOICE_DEFAULT}>默认（思源宋体，缺字回退系统宋体）</option>
+            {#each availableFonts as font (font)}
+              <option value={font}>{font}</option>
+            {/each}
+          </select>
+        </label>
+        <p class="settings-hint">
+          只认字体文件里的英文族名；用「额外字体目录」加入自己的字体后，这里会多出对应选项。
+        </p>
+        <div class="settings-block">
+          <div class="settings-block-title">
+            额外字体目录（放进这里的字体立即可用，等同于 typst CLI 的 --font-path）
+          </div>
+          {#each settingsFontDirs as dir (dir)}
+            <div class="settings-dir">
+              <span class="settings-dir-path" title={dir}>{dir}</span>
+              <button class="modal-btn" onclick={() => removeFontDir(dir)}>移除</button>
+            </div>
+          {/each}
+          <div class="settings-dir-actions">
+            <button class="modal-btn" onclick={addFontDir} disabled={fontsLoading}>
+              添加字体目录…
+            </button>
+            {#if fontsLoading}
+              <span class="settings-hint">正在读取字体…</span>
+            {:else if availableFonts.length > 0}
+              <span class="settings-hint">可用字体族 {availableFonts.length} 个</span>
+            {/if}
+          </div>
+        </div>
         <div class="modal-actions">
           <button class="modal-btn primary" onclick={saveSettings}>保存</button>
           <button class="modal-btn" onclick={closeSettings}>关闭</button>
@@ -1724,6 +1931,67 @@
   /* 徽标 Popover 展开中：保持高亮，提示再次点击可收起 */
   .error-badge.clickable.active {
     color: #ffc9c9;
+  }
+
+  /* 编译警告徽标：与错误徽标同款但偏黄——警告不中断渲染，别让人以为编译挂了 */
+  .warning-badge.clickable {
+    color: #e5c07b;
+  }
+  .warning-badge.clickable:hover,
+  .warning-badge.clickable.active {
+    color: #ffd79a;
+  }
+  .warning-icon {
+    border-radius: 50%;
+    font-weight: 700;
+  }
+
+  /* 设置弹窗里的字体项：下拉与目录列表 */
+  .settings-row-font {
+    justify-content: space-between;
+    cursor: default;
+  }
+  .settings-select {
+    max-width: 260px;
+    padding: 4px 6px;
+    background: var(--bg-pane);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg);
+    font-size: 13px;
+  }
+  .settings-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 10px 0 4px;
+  }
+  .settings-block-title {
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+  .settings-hint {
+    margin: 2px 0;
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+  .settings-dir {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .settings-dir-path {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+  }
+  .settings-dir-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .preview-body {

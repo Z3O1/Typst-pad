@@ -22,8 +22,8 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（21 个文件 / 331 项）
-cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（29 passed / 1 ignored）
+npm test                 # 前端 + 脚本单测（23 个文件 / 348 项）
+cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（32 passed / 1 ignored）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 本地打包需要更新签名私钥（配置里已有 pubkey → 缺私钥打包会直接失败）：
@@ -31,7 +31,7 @@ node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 无显示器环境下的「浏览器验收」（本仓库的主力验收手段）：**换端口跑，别跟 tauri dev 抢 1420**
 npm run dev -- --port 1425
-BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 79 项交互验收 + 截图
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 91 项交互验收 + 截图
 npm run fixtures:math
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 12 项真实排版视觉验收
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
@@ -260,7 +260,14 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 ### 字体
 
-预览字体打包在 `src-tauri/fonts/`（7 个：思源宋体 / NewCMMath×3 / LibertinusSerif×2 / DejaVuSansMono，离线可用）。**不放 `static/`**：那会被 SvelteKit 拷进前端产物（`build/fonts/`）而前端从不引用（无 `@font-face`），安装包凭空多一份 5.7MB。**加载全部在 Rust 侧**（FontBook），前端不再有字体注入（旧 `addFontData`/`loadFonts` 坑已随 wasm 移除）。新增字体时需同步：`scripts/download-fonts.mjs` 的 `FONTS` 列表、Rust 单测 `fonts_all_registered` 的计数/族名断言、README 字体清单。
+**两条管线**：① **typst 渲染**（预览/公式/PDF）用 Rust `FontBook`，产物 SVG 是字形轮廓；② **编辑器界面文字**用纯 CSS 字体栈（无 `@font-face`，即系统字体）——所以界面的中文与预览/PDF 的思源宋体**不保证一致**（想一致得把打包字体经 Tauri asset 协议喂给 webview，未做）。
+
+- **打包字体**：`src-tauri/fonts/`（7 个：思源宋体 / NewCMMath×3 / LibertinusSerif×2 / DejaVuSansMono）。**不放 `static/`**（会被拷进前端产物，安装包白胖 5.7MB）。新增字体同步 `download-fonts.mjs`、Rust 单测 `fonts_all_registered`、README 清单。
+- **字体集 = 打包目录 + 系统目录 + 用户额外目录**（`FontConfig.dirs`，设置 → 额外字体目录，对齐 typst CLI 的 `--font-path`）。缓存**按目录列表做 key**（`Mutex<HashMap<..>>`）——增删目录必须重新加载，别退回 `OnceLock` 单值缓存。
+- **必须注入默认字体族（`build_library`，勿删）**：不注入时中文全交给 typst 的**自动回退**，而回退打分是「先比衬线标记（`Libertinus Serif` 的 panose 全 0 → 被判**无衬线** → 宋体全被扣分）→ 再比**家族名谁短**」→ **实测（typst 0.15.1，2026-09-14 双侧 CLI 复现）**：Windows 渲染成 `KaiTi`+`LiSu`（楷体/隶书）、Linux 成 `NotoSansCJKjp`（日文字形黑体）。`DEFAULT_FONT_FAMILIES` = Libertinus Serif → 打包思源宋体 → 系统宋体兜底（打包那份是**子集**：4382 码位、CJK 基本区缺 83%，生僻字靠系统字体接住）→ 雅黑收尾。注入走 `Library.styles`（基础层，`typst-eval` 是 `base.chain(&target)`）→ **文档里的 `#set text(font:)` 仍然优先**，且不改编译源、不动诊断行号。
+- **设置 → 正文字体**：选项来自 `list_font_families`（真实族名，结构上写不错）；`default_font_families` 给内置列表，前端 `font-settings.buildFontFamilies` 拼「拉丁基准 + 选中项 + 其余兜底」（拉丁基准必须留最前）。
+- **字体族名写错 = 静默回退**：typst 对不存在的族名只发 `unknown font family` 警告（族名只认**英文名**，写"微软雅黑"必然不匹配）。所以 warnings 必须显示（状态栏警告徽标 + `font-warnings.ts` 的中文提示）——**删了它，"改了字体没生效"就没人知道了**。
+- **正文/公式/PDF 三处同一份配置**（三个命令都收 `fontFamilies`/`fontDirs`，共用 `build_library`）→ 设置里改字体三处一起变；而**文档里**的 `#set text(font:)` 只管正文（公式上下文只含「前缀 + 文档内 `#let`」）。`saveSettings()` 会 `resetMathCache()` 并**立即重编译**——否则预览停在上一次结果，看起来就是"改了没生效"。
 
 ### 文件操作与路径安全（src-tauri/src/lib.rs）
 
@@ -322,7 +329,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - **端口**：验收脚本默认打 `http://localhost:1420/?browserdev=1`，而 **1420 也是 `npm run tauri dev` 的 Vite 端口**——用户自己开着桌面应用时，验收脚本会被 "Port 1420 is already in use" 挡住（实测被反馈过）。换端口跑即可：`npm run dev -- --port 1425` 起服务 + `BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs`（1420 是 `vite.config.js` 里写死的 `server.port` + `strictPort: true`，CLI `--port` 可覆盖，不覆盖时宁可报错也不自动换端口；脚本侧由 `cdp.mjs` 导出的 `DEV_URL` 读取 `BROWSER_CHECK_PORT` / `BROWSER_CHECK_URL`，`probe.mjs` 仍可传 URL 参数）。
   - `cdp.mjs`：连接 Windows headless Chrome 的 CDP（WSL 里直接跑 `/mnt/c/Program Files/Google/Chrome/Application/chrome.exe --headless=new --remote-debugging-port=9333 --remote-debugging-address=0.0.0.0 --user-data-dir=... 'http://localhost:1420/?browserdev=1'`；镜像网络下 WSL 可直连 localhost:9333）；提供 evaluate / 真实点击 / 真实输入（`Input.insertText`）/ 截图。
   - `probe.mjs`：排障小工具（导航到页面 → 打印渲染结果/页面内错误），"页面是不是坏了"先用它看。
-  - `wysiwyg.mjs`：所见即所得 + 自动更新入口 + 分栏比例的 **79 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大 → 启动恢复会话 → Alt 不夺焦 → **第 23 组自动更新入口**：帮助菜单有「检查更新…」、点它后状态栏显示"已是最新版本"（桩返回无更新）、没更新时不弹窗不留状态栏提示、检查不抢焦点、设置里有「启动时自动检查更新」且默认勾选 → **第 24 组分栏比例**：源码模式默认 50/50、Ctrl+滚轮向上 5 档变宽到 60%、编辑区同步变窄、**dpr 与视口宽不变（没有顺手缩放页面）**、状态栏实时反馈、比例进存档、不带 Ctrl 的滚轮不改比例、**横向位移（deltaY=0 + deltaX）也能调**（Shift 滚轮的真机形态）、向下滚到底收敛在 25%、菜单项给出"Ctrl+滚轮"提示、重置回 50/50、写作模式下只提示"先打开预览栏"且不改比例），截图落在 `.browser-check/`（已 gitignore）。
+  - `wysiwyg.mjs`：所见即所得 + 自动更新入口 + 分栏比例 + 字体设置的 **91 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换 → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大 → 启动恢复会话 → Alt 不夺焦 → **第 23 组自动更新入口**：帮助菜单有「检查更新…」、点它后状态栏显示"已是最新版本"（桩返回无更新）、没更新时不弹窗不留状态栏提示、检查不抢焦点、设置里有「启动时自动检查更新」且默认勾选 → **第 24 组分栏比例**：源码模式默认 50/50、Ctrl+滚轮向上 5 档变宽到 60%、编辑区同步变窄、**dpr 与视口宽不变（没有顺手缩放页面）**、状态栏实时反馈、比例进存档、不带 Ctrl 的滚轮不改比例、**横向位移（deltaY=0 + deltaX）也能调**（Shift 滚轮的真机形态）、向下滚到底收敛在 25%、菜单项给出"Ctrl+滚轮"提示、重置回 50/50、写作模式下只提示"先打开预览栏"且不改比例 → **第 25 组正文字体设置**（12 项）：字体下拉（首项「默认」）+ 额外字体目录 UI；保存后**立即重编译**且字体族/目录透传（桩记 `__browserDevCompileCount`/`__browserDevLastCompile`）；写错的中文族名以警告徽标出现并给中文提示）。**该组未在本机执行过**（Vite 绑 0.0.0.0 时 Windows Chrome 的 `localhost` 超时、Playwright 缓存的 Linux Chromium 直接 SIGTRAP 崩），请在桌面版环境跑一次。
   - **实测坑（都踩过）**：① `Page.navigate` 对**相同 URL** 不重新加载，上一次停在 500 错误页时会一直复现 → `goto()` 先跳 `about:blank`；② 截图必须由 Node 写进**工作区**（写 `/mnt/c/...` 会被文件沙箱拒绝，报 EROFS），别交给 Chrome 写；③ **Windows 的 headless Chrome 必须加 `--no-proxy-server`**，否则 localhost 会被系统代理吞掉、页面报"无法访问此网站"，看起来像"WSL 端口转发坏了"（判断连通性更干净的判据是 Windows 自带 `curl.exe`：`/mnt/c/Windows/System32/curl.exe -s -o NUL -w '%{http_code}' http://localhost:1420/`）；④ 验收脚本开始前**必须清 localStorage 再重新加载**，否则上一轮遗留的「源代码模式」会让页面不渲染公式，第一条断言莫名超时；⑤ 找菜单项要限定在 `.menu-dropdown .menu-item` 里，别在全页找同名文字（状态栏会显示"源代码模式"这类同名状态文字）。
   - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`（**两种字号各一份**：12pt 写作模式 / 10.5pt 源码模式，桩按 body+display+**sizePt** 匹配，字号对不上宁可退回假 SVG），再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
   - 浏览器开发模式（`?browserdev=1`，见 `src/lib/browser-dev-stub.ts`）里的 `compile_doc` 是假实现（假分页 SVG），`compile_math` 在没有注入夹具时也是假 SVG；文件/PDF 等 Tauri 命令同样是假的。**真实 typst 排版可用夹具链路上浏览器验证**，只有 Tauri IPC / WebView2 那一层必须桌面端（Windows）确认。
