@@ -80,6 +80,9 @@
   import {
     ZOOM_DEFAULT,
     ZOOM_CONFIRM_DELAY_MS,
+    ZOOM_MEASURE_SETTLE_MS,
+    ZOOM_VERIFY_RESET_DELAY_MS,
+    ZOOM_VERIFY_WAITS_MS,
     zoomFromWidths,
     clampZoom,
     nextZoom,
@@ -87,6 +90,8 @@
     zoomIn,
     zoomLabel,
     zoomOut,
+    zoomProbeVerdict,
+    zoomRejectedNotice,
   } from "$lib/zoom";
   import { WRAP_SOURCE_ONLY_NOTICE, isWrapToggleKey, wrapNotice } from "$lib/word-wrap";
 
@@ -220,6 +225,8 @@
   let zoomBaseline100 = 0;
   /** 正在设一次缩放并测量（期间不接受 resize 事件改基准——那是缩放自己引起的） */
   let zoomStepInFlight = false;
+  /** 复核的代次令牌：新的复核一开始，旧的立刻作废（否则旧复核会把新档位拉回引擎的旧读数） */
+  let zoomVerifySeq = 0;
   /** 校准只做一次；并发调用共用同一个 promise */
   let zoomCalibration: Promise<void> | null = null;
   // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
@@ -550,37 +557,71 @@
     return zoomFromWidths(zoomBaseline100, document.documentElement.clientWidth);
   }
 
+  /** setTimeout 的 Promise 版（复核的等待节奏用） */
+  function sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /** 设完缩放后等引擎重排完，再读一次"引擎实际接受的档位" */
+  async function measureEngineZoom(): Promise<number | null> {
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    await sleep(ZOOM_MEASURE_SETTLE_MS);
+    return engineZoomNow();
+  }
+
   /**
    * 复核 webview 到底有没有接受这个系数，**没接受就把界面状态拉回引擎给的档位**。
    *
-   * 为什么必须拉回来（2026-09-14 三次实机反馈串起来看）：真机上引擎没接受"放大"，而 uiZoom 照旧
-   * 一路涨到上限 250%，于是从 250% 往下滚要滚十几档才有反应——用户看到的就是「放大根本没用，
-   * 缩小有用」，接着是「最大后无法用滚轮缩小」，第三次仍是「缩放到最大后无法从 Ctrl+滚轮缩小」。
-   * 让状态永远等于引擎实际接受的档位，滚轮就再也不会掉进这种死区：放大被拒时档位原地不动
-   * （界面与状态都保持一致，并在状态栏说明原因），缩小立刻有效。
+   * 为什么必须拉回来（2026-09-14 四次实机反馈串起来看）：真机上引擎没接受"放大"，而 uiZoom 照旧
+   * 一路涨到上限 250%，于是从 250% 往下滚要滚十几档才有反应——用户先看到「放大根本没用，缩小有用」，
+   * 接着是「最大后无法用滚轮缩小」，第三次仍是「缩放到最大后无法从 Ctrl+滚轮缩小」，第四次直接
+   * 截图「引擎把 150% 限制在 100%」。让状态永远等于引擎实际接受的档位，滚轮就再也不会掉进这种
+   * 死区：放大被拒时档位原地不动（界面与状态都保持一致，并在状态栏说明原因），缩小立刻有效。
    *
    * **判据是 CSS 布局宽度不是 devicePixelRatio**（0.7.8 之后换的）：dpr 依赖显示器缩放、真机上
    * 可能不跟随宿主设的 ZoomFactor，那时旧代码会把复核整体关掉（fail-open）→ 状态又开始一路涨。
    * 布局宽度比是页面缩放的定义本身，精确且与显示器无关。详见 zoom.ts 的 zoomFromWidths。
+   *
+   * **复核要"多量几次"**（见 zoom.ts 的 ZOOM_VERIFY_WAITS_MS 那段注解）：设一次立刻量只覆盖
+   * "立即生效"的引擎；实测有的机器上引擎会晚一拍才把档位落到布局上，或者在手势结束时把宿主设的值
+   * 抹掉（#1022）。所以设一次之后按 0/250/700ms 连量三次，还不对就把这一档再设一遍再量一次——
+   * 只有"重设"能救回被丢掉的值。引擎明确给了别的档位（上限）时不再等（见 zoomProbeVerdict）。
    */
   async function verifyZoomApplied(target: number) {
     if (zoomIsFaked()) return;
     if (zoomCalibration === null) return; // 还没校准过（正常路径一定先经过 applyUiZoom）
+    const mySeq = ++zoomVerifySeq;
     let observed: number | null = null;
+    let measurements = 0;
     zoomStepInFlight = true;
     try {
       await getCurrentWebview().setZoom(target); // 顺带把这一档再设一遍（兜底重试）
-      // 等引擎把布局重排完再量：一帧 + 一小段余量（校准那边用的是 90ms，同一量级）
-      await new Promise((r) => requestAnimationFrame(() => r(null)));
-      await new Promise((r) => setTimeout(r, 60));
-      observed = engineZoomNow();
+      for (const wait of ZOOM_VERIFY_WAITS_MS) {
+        if (wait > 0) await sleep(wait);
+        if (mySeq !== zoomVerifySeq) return; // 用户又调档了：这次复核作废（别把新档位拉回去）
+        measurements += 1;
+        observed = await measureEngineZoom();
+        const verdict = zoomProbeVerdict(target, observed, appliedZoom);
+        if (verdict === "accepted" || verdict === "capped") break; // 有结论了，不必再等
+      }
+      if (observed !== null && !zoomApplied(target, observed)) {
+        // 一路量下来都是"没动过"：值很可能是被引擎丢掉了，重设一遍才是解法（立刻重设没用）
+        await sleep(ZOOM_VERIFY_RESET_DELAY_MS);
+        if (mySeq !== zoomVerifySeq) return;
+        await getCurrentWebview().setZoom(target);
+        measurements += 1;
+        observed = await measureEngineZoom();
+      }
     } catch (e) {
       dbg.log("zoom", "复核时 setZoom 失败", e);
       return;
     } finally {
-      zoomStepInFlight = false;
+      // 只有"最新那次复核"才有资格解除测量标记（期间可能有更新的复核接手）
+      if (mySeq === zoomVerifySeq) zoomStepInFlight = false;
     }
-    if (observed === null) return; // 量不到：不判定、不改状态（绝不拿坏读数动用户的状态）
+    if (mySeq !== zoomVerifySeq) return;
+    const currentWidth = document.documentElement.clientWidth;
+    if (observed === null || !Number.isFinite(observed)) return; // 量不到：不判定、不改状态
     if (zoomApplied(target, observed)) {
       appliedZoom = clampZoom(target);
       rebaselineZoom(); // 测量刚做完，此刻"宽度 × 档位"就是 100% 基准
@@ -592,11 +633,18 @@
     if (snapped === clampZoom(uiZoom)) return; // 状态已经在引擎给的档位上了
     dbg.log(
       "zoom",
-      `引擎未接受 ${zoomLabel(target)}（实测 ${observed.toFixed(3)}），状态拉回 ${zoomLabel(snapped)}`,
+      `引擎未接受 ${zoomLabel(target)}（实测 ${observed.toFixed(3)}，量了 ${measurements} 次；` +
+        `布局宽度 ${Math.round(zoomBaseline100)}→${Math.round(currentWidth)}，dpr ${window.devicePixelRatio}）`,
     );
     uiZoom = snapped; // 触发 $effect → 再把引擎对齐到这个档位（已经是了，等价空操作）
     schedulePersist();
-    statusText = `界面缩放未生效：引擎把 ${zoomLabel(target)} 限制在 ${zoomLabel(snapped)}`;
+    statusText = zoomRejectedNotice(
+      target,
+      observed,
+      measurements,
+      { baseline: zoomBaseline100, current: currentWidth },
+      window.devicePixelRatio,
+    );
   }
 
   /** 改缩放并反馈（滚轮 / 菜单共用）；值没变时提示"已到边界"，不重复写存档 */
@@ -1602,6 +1650,16 @@
       rebaselineZoom();
     };
     window.addEventListener("resize", onWindowResize);
+    // 回到前台/重新聚焦时把当前档位再设一遍：WebView2 在一些时机（失焦、被系统改过缩放状态）
+    // 可能把宿主设的 ZoomFactor 丢掉，而那时界面已经和状态不一致了（用户看到的就是"放大没用"）。
+    // 值没被丢时这次调用是空操作；丢掉时它自己会走复核，结论照样写进状态栏（见 verifyZoomApplied）。
+    const reapplyZoomOnReturn = () => {
+      if (document.visibilityState !== "visible") return;
+      if (zoomIsFaked()) return;
+      void applyUiZoom(uiZoom);
+    };
+    window.addEventListener("focus", reapplyZoomOnReturn);
+    document.addEventListener("visibilitychange", reapplyZoomOnReturn);
     // 预览画布缩放：观测预览容器宽度变化（窗口 resize / 分栏布局变化），重算画布宽度；
     // observe 首次回调立即触发一次（覆盖挂载时已渲染的产物）
     // 回调里把工作推到下一帧：applyPreviewScale 会改预览画布宽度 → 又改容器布局，
@@ -1693,6 +1751,8 @@
       window.removeEventListener("contextmenu", handleContextMenu);
       window.removeEventListener("wheel", handleZoomWheel, { capture: true });
       window.removeEventListener("resize", onWindowResize);
+      window.removeEventListener("focus", reapplyZoomOnReturn);
+      document.removeEventListener("visibilitychange", reapplyZoomOnReturn);
       if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);

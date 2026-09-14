@@ -126,3 +126,70 @@ export function zoomApplied(target: number, observed: number | null, tolerance =
   if (observed === null || !Number.isFinite(observed)) return false;
   return Math.abs(observed - target) <= tolerance;
 }
+
+// ---------------------------------------------------------------------------
+// 复核的等待节奏（2026-09-14 用户第四次反馈「缩放会无效」+ 状态栏「引擎把 150% 限制在 100%」）
+//
+// 那台机器上引擎**完全没接受**放大（缩小有效），而且 0.7.4（那时还没有任何复核）时就是这个
+// 现象，所以不像是复核自己误判。真机上没法复现，能做的有两条：
+//   ① **多等一会儿再量**：引擎把宿主设的 ZoomFactor 落到布局上可能有延迟（也可能被它自己在
+//      手势结束时那套处理抹掉，#1022）；设一次立刻量只覆盖"立即生效"这一种引擎。
+//   ② **量不到就再设一遍**：值被丢掉时只有重设才救得回来（立刻重设没用——丢掉发生在之后）。
+// 于是复核变成：设一次 → 按 0 / 250 / 700ms 连量三次 → 还不对就把这一档再设一遍再量一次。
+// 引擎明确给了**别的**档位（比如上限 210%）时不再等（见 zoomProbeVerdict 的 "capped"）——
+// 那种情况等多久都一样，早报早安心。
+// ---------------------------------------------------------------------------
+
+/** 复核量读数的时间点（毫秒，相对第一次 setZoom）：0 = 立刻，后两次是给"迟到"的引擎留的时间 */
+export const ZOOM_VERIFY_WAITS_MS = [0, 250, 700] as const;
+/** 都量不到时最后一次"重设"之前的等待（先让引擎把手势收尾） */
+export const ZOOM_VERIFY_RESET_DELAY_MS = 80;
+/** 一次 setZoom 之后等一帧 + 这段余量再读布局宽度（引擎要重排完才量得准） */
+export const ZOOM_MEASURE_SETTLE_MS = 80;
+
+/** 一次读数的判词（见上方注解） */
+export type ZoomProbeVerdict = "accepted" | "capped" | "retry" | "unknown";
+
+/**
+ * 这次读数该怎么处理：
+ * - `accepted`：引擎给的正是请求值（容差 2%）；
+ * - `capped`：引擎给了**别的**档位（与改档前不同）——典型是它自己的上限，等下去也没用；
+ * - `retry`：读数和改档前一模一样——可能只是还没生效（或值被同一档位覆盖），值得再等；
+ * - `unknown`：量不到（非法宽度）——不改状态，也谈不上判定（见调用方的 fail-open）。
+ */
+export function zoomProbeVerdict(
+  target: number,
+  observed: number | null,
+  previous: number,
+  tolerance = 0.02,
+): ZoomProbeVerdict {
+  if (observed === null || !Number.isFinite(observed)) return "unknown";
+  if (Math.abs(observed - target) <= tolerance) return "accepted";
+  if (Math.abs(observed - previous) > tolerance) return "capped";
+  return "retry";
+}
+
+/**
+ * 复核判定"引擎没接受"时的状态栏文案。
+ *
+ * **把实测数据一起写出来**（2026-09-14 加）：这个现象只在用户那台真机上出现，而我拿不到它的
+ * 任何运行时数据（release 版没有 devtools、dbg 只写 console）——用户截图里的状态栏是我们唯一
+ * 能读到的通道。所以文案里带上"量了几次 / 布局宽度变了没有 / dpr"，一张截图就能判断是
+ * 「引擎把档位丢了」（宽度变过又回来）还是「引擎压根没动」（宽度一模一样，dpr 也不动）。
+ */
+export function zoomRejectedNotice(
+  target: number,
+  observed: number,
+  measurements: number,
+  widths: { baseline: number; current: number },
+  dpr?: number,
+): string {
+  const detail = [`量了 ${measurements} 次`];
+  const base = Math.round(widths.baseline);
+  const now = Math.round(widths.current);
+  detail.push(base === now ? `布局宽度没变（${now}px）` : `布局宽度 ${base}→${now}px`);
+  if (typeof dpr === "number" && Number.isFinite(dpr) && dpr > 0) {
+    detail.push(`dpr ${dpr.toFixed(2)}`);
+  }
+  return `界面缩放未生效：引擎把 ${zoomLabel(target)} 限制在 ${zoomLabel(observed)}（${detail.join("；")}）`;
+}

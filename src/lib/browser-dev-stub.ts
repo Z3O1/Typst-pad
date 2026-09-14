@@ -44,16 +44,20 @@ const ZOOM_SIM_BASE_DPR = 1.25;
  * `?browserdev=1&zoomsim=1` 的档位上限模拟：
  * - `&zoomcap=1`：引擎**只肯缩小**，放大一律按 100% 处理（最极端的那台机器）；
  * - `&zoommax=2.1`：引擎能放大，但**只到 2.1**（2026-09-14 用户报「缩放到最大后无法从
- *   Ctrl+滚轮缩小」就是这台机器的形状：状态冲过引擎上限 → 往下滚要滚十几档才有反应）。
+ *   Ctrl+滚轮缩小」就是这台机器的形状：状态冲过引擎上限 → 往下滚要滚十几档才有反应）；
+ * - `&zoomdelay=300`：引擎**晚一拍**才把档位落到布局上（模拟"设完立刻量还是旧档位"的机器，
+ *   复核的多等几次就是为它准备的，见 zoom.ts 的 ZOOM_VERIFY_WAITS_MS）。
  */
-function zoomSimMode(): { sim: boolean; cap: number | null } {
-  if (typeof window === "undefined") return { sim: false, cap: null };
+function zoomSimMode(): { sim: boolean; cap: number | null; delay: number } {
+  if (typeof window === "undefined") return { sim: false, cap: null, delay: 0 };
   const params = new URLSearchParams(window.location.search);
   const sim = params.has("zoomsim");
-  if (!sim) return { sim: false, cap: null };
-  if (params.has("zoomcap")) return { sim: true, cap: 1 };
+  if (!sim) return { sim: false, cap: null, delay: 0 };
+  const delayParam = Number(params.get("zoomdelay"));
+  const delay = Number.isFinite(delayParam) && delayParam > 0 ? delayParam : 0;
+  if (params.has("zoomcap")) return { sim: true, cap: 1, delay };
   const max = Number(params.get("zoommax"));
-  return { sim: true, cap: Number.isFinite(max) && max > 0 ? max : null };
+  return { sim: true, cap: Number.isFinite(max) && max > 0 ? max : null, delay };
 }
 
 /**
@@ -62,10 +66,22 @@ function zoomSimMode(): { sim: boolean; cap: number | null } {
  * （`clientWidth = 基准宽 ÷ 缩放`）——页面现在用这个宽度比来判定"引擎到底接受了多少"
  * （见 zoom.ts 的 zoomFromWidths）。基准宽在第一次读取时取，那时浏览器没有真实缩放，
  * 量到的就是 100% 下的布局宽度。
+ *
+ * `delayMs > 0` 时**延迟生效**（同一时刻只保留最后一次请求，像真引擎那样把中间值合并掉）：
+ * 设完之后立刻量读到的还是旧档位，过一会儿才变。
  */
-function installFakeDevicePixelRatio(initialZoom: number): (zoom: number) => void {
+function installFakeDevicePixelRatio(
+  initialZoom: number,
+  delayMs = 0,
+  onApplied?: (zoom: number) => void,
+): (zoom: number) => void {
   let applied = initialZoom;
   let baseWidth: number | null = null;
+  let pending: ReturnType<typeof setTimeout> | null = null;
+  const commit = (zoom: number) => {
+    applied = zoom;
+    onApplied?.(zoom);
+  };
   Object.defineProperty(window, "devicePixelRatio", {
     configurable: true,
     get: () => ZOOM_SIM_BASE_DPR * applied,
@@ -77,8 +93,17 @@ function installFakeDevicePixelRatio(initialZoom: number): (zoom: number) => voi
       return baseWidth > 0 ? baseWidth / applied : baseWidth;
     },
   });
+  onApplied?.(applied);
   return (zoom: number) => {
-    applied = zoom;
+    if (delayMs > 0) {
+      if (pending !== null) clearTimeout(pending);
+      pending = setTimeout(() => {
+        pending = null;
+        commit(zoom);
+      }, delayMs);
+      return;
+    }
+    commit(zoom);
   };
 }
 
@@ -487,12 +512,11 @@ export function installBrowserDevStub(): void {
   zoomSimCap = simMode.cap;
   if (simMode.sim) {
     // 初始 100%（界面启动时就是 100%，页面侧随后会校准/恢复档位）
-    const applySimulatedZoom = installFakeDevicePixelRatio(1);
-    zoomSimState = (zoom: number) => {
-      applySimulatedZoom(zoom);
-      const w = window as unknown as Record<string, unknown>;
-      w.__browserDevEngineZoom = zoom;
-    };
+    const engineWindow = window as unknown as Record<string, unknown>;
+    const applySimulatedZoom = installFakeDevicePixelRatio(1, simMode.delay, (zoom) => {
+      engineWindow.__browserDevEngineZoom = zoom;
+    });
+    zoomSimState = (zoom: number) => applySimulatedZoom(zoom);
   }
 
   const callbacks = new Map<number, (payload: unknown) => void>();

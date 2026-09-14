@@ -1045,12 +1045,14 @@ await c.evaluate(
 
 // ---------------------------------------------------------------------------
 // 第 27 组：引擎只肯缩小不肯放大时，界面状态必须跟着引擎走（真机 bug 的回归网）
-// 背景（2026-09-14 两次实机反馈）：Windows/WebView2 上引擎没接受"放大"，而前端 uiZoom 照旧涨到
-// 上限 250%，于是从 250% 往下滚要滚十几档才有反应——用户先报「放大根本没用，缩小有用」，
-// 接着报「最大后无法用滚轮缩小」。修法是让状态永远等于引擎实际接受的档位（+page.svelte 的
-// verifyZoomApplied）：放大被拒时档位原地不动、界面与状态一致，缩小立刻有效。
-// 无头环境靠桩的"模拟引擎"复现：?zoomsim=1 给 window.devicePixelRatio 装假 getter
-// （dpr = 1.25 × 引擎接受的缩放），再加 &zoomcap=1 就是"放大一律按 100% 处理"那台机器。
+// 背景（2026-09-14 用户四次反馈同一现象）：Windows/WebView2 上引擎没接受"放大"，而前端 uiZoom
+// 照旧涨到上限 250%，于是从 250% 往下滚要滚十几档才有反应——「放大根本没用，缩小有用」→
+// 「最大后无法用滚轮缩小」→「缩放到最大后无法从 Ctrl+滚轮缩小」→（第四次直接给了状态栏截图）
+// 「引擎把 150% 限制在 100%」。修法是让状态永远等于引擎实际接受的档位（+page.svelte 的
+// verifyZoomApplied），并且**多量几次**（引擎可能晚一拍才生效，或者把手势里的值抹掉）。
+// 无头环境靠桩的"模拟引擎"复现：?zoomsim=1 给 window.devicePixelRatio 与
+// document.documentElement.clientWidth 装假 getter（都跟着"引擎接受的缩放"走），
+// 再加 &zoomcap=1 / &zoommax=2.1 / &zoomdelay=N 就是那几台机器。
 // ---------------------------------------------------------------------------
 console.log("27) 引擎拒绝放大时，档位跟着引擎走（模拟真机）");
 const zoomProbe2 = `(() => {
@@ -1078,10 +1080,12 @@ const wheelOverEditor = async (deltaY, times) => {
     return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
   })()`);
   for (let i = 0; i < times; i++) await c.wheel(center.x, center.y, deltaY, { modifiers: 2 });
-  // 等状态**稳定**再断言：调档后还有"再确认一次"的复核（ZOOM_CONFIRM_DELAY_MS=250ms）+ 存档
-  // 300ms 防抖，被引擎拒绝的档位正是靠这一拍拉回来的。固定等 700ms 在负载高时会读到"最后一次
-  // 复核落地之前"的中间态（实测偶发红），改成"先等够下限，再轮询到连续两次读数相同"。
-  await new Promise((r) => setTimeout(r, 900));
+  // 等状态**稳定**再断言（这条比看起来难：引擎拒绝时界面要过好几拍才把档位拉回来）：
+  //   手势停下 250ms → 复核设一次 → 按 0/250/700ms 连量三次（见 zoom.ts 的 ZOOM_VERIFY_WAITS_MS）
+  //   → 再重设一次并量一次 ≈ 1.2s → 拉回状态 → 存档 300ms 防抖。
+  // 合计约 1.8s，所以下限取 2400ms 留足余量，再轮询到连续两次读数相同。
+  // （等不够会读到"复核还没落地"的中间态：实测 1600ms 就会偶发读到还没落盘的旧档位。）
+  await new Promise((r) => setTimeout(r, 2400));
   const readZoom = () =>
     c.evaluate(`JSON.parse(localStorage.getItem("typst-pad:state") || "{}").uiZoom ?? null`);
   let previous = await readZoom();
@@ -1122,6 +1126,15 @@ check(
   capped.status.includes("未生效") && capped.status.includes("限制在 100%"),
   JSON.stringify(capped.status),
 );
+// 文案要带上实测数据（2026-09-14 加）：这个现象只在用户那台真机上出现，状态栏是唯一能读到的
+// 通道——"布局宽度没变" 与 "宽度变过又回来" 指向完全不同的成因（前者是引擎没动、后者是被抹掉）。
+check(
+  "「未生效」文案带上了实测数据（量了几次 / 布局宽度 / dpr）",
+  capped.status.includes("量了") &&
+    capped.status.includes("布局宽度") &&
+    capped.status.includes("dpr"),
+  JSON.stringify(capped.status),
+);
 // 关键：接着往下滚必须立刻见效（这就是「最大后无法用滚轮缩小」那条反馈）
 await wheelOverEditor(100, 1);
 const afterOut = await c.evaluate(zoomProbe2);
@@ -1154,6 +1167,23 @@ check(
   "被 210% 上限挡住后，**往下滚一档立刻见效**（用户报的症状）",
   Math.abs((afterDown210.saved ?? 0) - 2.0) < 0.011 && Math.abs((afterDown210.engine ?? 0) - 2.0) < 0.02,
   JSON.stringify(afterDown210),
+);
+
+// D) 引擎**晚一拍**才生效（`&zoomdelay=300`）：设完立刻量还是旧档位。复核必须多等几次才下结论，
+// 否则一台"只是慢"的机器会被误判成"引擎不接受"，把用户刚调上去的档位又拉回来 —— 这正是
+// 「缩放会无效」最可能的形态之一（见 zoom.ts 的 ZOOM_VERIFY_WAITS_MS）。
+await gotoSim("&zoomsim=1&zoomdelay=300");
+await wheelOverEditor(-100, 3);
+const delayed = await c.evaluate(zoomProbe2);
+check(
+  "引擎晚 300ms 才生效时，档位仍然落在请求值（多等几次就等到了）",
+  Math.abs((delayed.saved ?? 0) - 1.3) < 0.001 && Math.abs((delayed.engine ?? 0) - 1.3) < 0.011,
+  JSON.stringify(delayed),
+);
+check(
+  "慢引擎不误报「未生效」",
+  !delayed.status.includes("未生效"),
+  JSON.stringify(delayed.status),
 );
 
 // ---------------------------------------------------------------------------

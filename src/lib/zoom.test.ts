@@ -14,6 +14,8 @@ import {
   zoomPercent,
   zoomFromWidths,
   zoomApplied,
+  zoomProbeVerdict,
+  zoomRejectedNotice,
 } from "./zoom";
 
 describe("clampZoom", () => {
@@ -161,5 +163,55 @@ describe("zoomApplied（引擎接受的档位是不是请求值）", () => {
 
   it("量不到（null）→ false（调用方据此不改状态）", () => {
     expect(zoomApplied(1.5, null)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 一次读数该怎么处理（复核要不要继续等）：accepted / capped / retry / unknown
+// ---------------------------------------------------------------------------
+describe("zoomProbeVerdict（这次读数要不要再等）", () => {
+  it("读到请求值 → accepted", () => {
+    expect(zoomProbeVerdict(1.1, 1.1, 1)).toBe("accepted");
+    expect(zoomProbeVerdict(1.1, 1.105, 1)).toBe("accepted");
+  });
+
+  it("引擎给了别的档位（典型是自己的上限）→ capped（等下去也没用）", () => {
+    expect(zoomProbeVerdict(2.2, 2.1, 1)).toBe("capped");
+    expect(zoomProbeVerdict(1.5, 1.2, 1)).toBe("capped");
+  });
+
+  it("读数与改档前一样 → retry（可能只是还没生效）", () => {
+    expect(zoomProbeVerdict(1.5, 1, 1)).toBe("retry");
+    expect(zoomProbeVerdict(1.5, 1.01, 1)).toBe("retry");
+  });
+
+  it("量不到 → unknown（不改状态、也不谈判定）", () => {
+    expect(zoomProbeVerdict(1.5, null, 1)).toBe("unknown");
+    expect(zoomProbeVerdict(1.5, Number.NaN, 1)).toBe("unknown");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 「未生效」文案：必须能被用户截图读出成因（量了几次 / 宽度变没变 / dpr）
+// ---------------------------------------------------------------------------
+describe("zoomRejectedNotice（状态栏文案）", () => {
+  it("宽度没变 → 明说没变（=引擎压根没动），带上次数与 dpr", () => {
+    const s = zoomRejectedNotice(1.5, 1, 4, { baseline: 1379, current: 1379.4 }, 1.5);
+    expect(s).toContain("界面缩放未生效");
+    expect(s).toContain("限制在 100%");
+    expect(s).toContain("量了 4 次");
+    expect(s).toContain("布局宽度没变（1379px）");
+    expect(s).toContain("dpr 1.50");
+  });
+
+  it("宽度变了 → 写出前后值（=引擎动过又回去）", () => {
+    const s = zoomRejectedNotice(1.5, 1, 3, { baseline: 1379, current: 919 }, 1.5);
+    expect(s).toContain("布局宽度 1379→919px");
+  });
+
+  it("dpr 读不到时不写这一段（别写 NaN）", () => {
+    const s = zoomRejectedNotice(2.2, 2.1, 1, { baseline: 1200, current: 545 }, Number.NaN);
+    expect(s).toContain("限制在 210%");
+    expect(s).not.toContain("dpr");
   });
 });
