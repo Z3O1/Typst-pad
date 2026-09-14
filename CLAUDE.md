@@ -21,7 +21,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
     - 转公开前查过历史里没有任何私钥/密钥文件（`git log --diff-filter=A --name-only` 无 `.key`/`.env`/`secret`，`git grep 'minisign encrypted secret key'` 全历史无命中），`.updater-keys/` 一直是 gitignore —— 所以转公开**没有**泄露签名私钥，红线 10 的密钥仍然是安全的。
     - 仓库公开后 GitHub 的 secret scanning / push protection 会生效：**今后任何把私钥 commit 进去的操作会被直接拒绝推送**，别把这条拒绝误读成 SSH 或权限坏了。
 - **自动更新已接入（0.7.3）**：`tauri-plugin-updater` + 更新弹窗/状态栏提示/设置开关；签名密钥已生成并设进仓库 Secrets，`latest.json` 由 CI 生成。**注意顺序**：`tauri.conf.json` 里已经有 pubkey，所以任何 `tauri build`（含 main 的 CI）都必须拿得到私钥，**不要删那两个 Secrets**；0.7.3 之前的版本里没有 updater，**要手动装一次 0.7.3 才进入自动更新通道**（之后 0.7.4 起才能自动升）。细节见「自动更新（tauri-plugin-updater）数据流」与「CI / 发布约定」。
-- 0.7.5 之后（**未发版，等用户指令**）：**大缩放下状态栏折行**的修复 + 过滤引擎的 `ResizeObserver loop` 提示（用户反馈「放大到 190% 之后界面像烂了」；见「界面缩放」那节最后两条注解与第 28 组验收）。
+- 0.7.5 之后（**未发版，等用户指令**）：**公式下标被画布裁掉**的修复（用户反馈「`a_0 = 0` 的下半部分没有渲染」——typst 把上下标画到帧外，而公式页是贴边页，SVG 视口即裁剪框；现在按墨迹包围盒撑画布，见「公式渲染」那节）+ **大缩放下状态栏折行**的修复 + 过滤引擎的 `ResizeObserver loop` 提示（用户反馈「放大到 190% 之后界面像烂了」；见「界面缩放」那节最后两条注解与第 28 组验收）。
 - 上一轮（**0.7.5**，2026-09-14 发）：① **更新说明的 Markdown 渲染**——用户反馈「更新说明无法渲染」，弹窗里以前直接显示 CHANGELOG 的 Markdown 原文（`### Fixed`、`**粗体**`），现在由 `update-notes.ts` 渲染成受控子集的安全 HTML（见「自动更新数据流」末尾 + 第 26 组验收）；② **界面缩放两轮加固**——先反馈「放大根本没用，缩小有用」，再反馈「最大后无法用滚轮缩小」，两者是**同一个机制**：引擎（WebView2）没接受放大，而 `uiZoom` 照旧涨到上限，于是往下滚要滚十几档才有反应。现在把档位拉回引擎实际给的值（见「界面缩放」那节的几条注解），并且滚轮监听挪到 window 捕获阶段、调档后再确认一次。**现象只在真机 WebView2 上、Chromium 复现不出来，所以最后靠"模拟引擎"的验收（第 27 组）把这条路径锁住。**
 - 最近几轮：**0.7.4 = 界面缩放**（Ctrl+滚轮，`zoom.ts` + webview `setZoom`）+ **正文字体设置**（含额外字体目录、中文回退修复）+ 仓库转公开（自动更新首次真正可用的**运维前提**）；0.7.2→0.7.3 是**自动更新**（含签名密钥约束与 `latest.json` 发版链路）；0.7.1→0.7.2 修的是「写作模式」的可用性 bug（Alt 抢焦点、装饰异常导致编辑区卡死、空正文标题崩溃、整行选区底色凸出）。**这些经验都在下面「改动前的红线」和各章节的"勿回退"里，动编辑器/装饰代码前先扫一遍。**
 
@@ -32,7 +32,7 @@ npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
 npm test                 # 前端 + 脚本单测（24 个文件 / 357 项）
-cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（32 passed / 1 ignored）
+cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（33 passed / 1 ignored）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 本地打包需要更新签名私钥（配置里已有 pubkey → 缺私钥打包会直接失败）：
@@ -42,7 +42,7 @@ node scripts/check-fonts.mjs                       # 打包字体魔数校验
 npm run dev -- --port 1425
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 110 项交互验收 + 截图
 npm run fixtures:math
-BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 12 项真实排版视觉验收
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 15 项真实排版视觉验收
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
 ```
 
@@ -208,6 +208,7 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 - **范围识别**：`typst-lex.ts` 先把文档切成 markup / code / raw / comment / string 区域（`#let a = b*c*d`、`#let s = "$5"`、`// $x$`、`` `$x$` `` 都不参与标记识别；代码里成对 `[...]` 是内容块，内部回到 markup）；`math-ranges.ts` 在 markup 区里认 `$...$`（内侧两侧空白 = 行间公式），`markup-ranges.ts` 拆标题/粗斜体/行内代码/列表符号/链接。**保守优先：宁可漏渲染，不可误渲染。**
 - **公式渲染**：`live-preview.ts` 视口内出现未缓存公式 → `onRequest` 回调父组件（`+page.svelte`）→ 去重 + 120ms 防抖 → `compileMath()` invoke **`compile_math { body, display, context, documentPath }`**（与 compile_doc 共用命令层互斥锁，一次一个）→ 结果进 `mathCache`（键 = 风格 + 前缀 + 公式文本，前缀参与键）→ `mathVersion++` → 编辑器 dispatch `refreshLivePreview` 重整装饰。
 - **渲染契约（`MathOutput`）**：`{ ok, svg, widthPt, heightPt, baselinePt, error }`。svg 是**贴边**（`#set page(width/height: auto, margin: 0pt)`）且**透明底**（`fill: none`）的单页 SVG；尺寸单位 pt。**基线**用「两页探针」测得：`page.frame.baseline()` 实测返回盒底（`has_baseline=false`），故第 2 页放同一公式 + 一个挂在基线下 100pt 的零宽盒，页高 = ascent + 100pt → `ascent = H2 - 100`；外层 `#box(...)` 不可省（行间公式不加盒时探针会另起段落，实测 ascent 由 11.75pt 变 31.67pt）。
+- **画布必须按「墨迹」而不是帧尺寸裁**（2026-09-14 用户反馈「`a_0 = 0` 的下半部分没有渲染」）：typst 允许把上下标画到**帧外**，帧尺寸只是"排版尺寸"——实测 `$a_0$` 帧高 8.196pt（基线就在帧底），下标基线在 **11.16pt**，比帧底低 2.96pt。我们的公式页是 `height: auto` 的**贴边页**，导出 SVG 后**视口就是裁剪框**，帧外的墨迹（下标的下半截、上标的顶部、`y`/`g` 的降部）全被裁。`compile_math` 现在先量**墨迹包围盒**（`ink_bounds_of_frame`：递归 group 的仿射变换、文本用**字形包围盒** `FontInstance::edges(…, TextEdgeBounds::Glyph(gid))`、图形用 `Shape::bbox(true)`），溢出时用「显式页面尺寸 + `#pad(top:)`」重编一遍，把内容整体挪进画布（**只有溢出才走第二遍**）。两条注意：① 字形墨迹要用 `edges` 而不是字体度量（度量的 descender 比 Libertinus 的 `y` 尾巴浅约 1pt，用度量还会再裁一次）；② 在 `#pad(top: …)` 这类**代码模式**的参数里不能再写 `#box(...)`，要写成 `#pad(top: …)[#box(...)]`（否则报 "the character `#` is not valid in code"，实测踩过）。验收在**视觉**那一套（第 4 组，`getBBox()` vs `viewBox`，对全部真实产物做一次性几何体检）。
 - **字号**：`MATH_TEXT_PT = 10.5`（Rust）/ 编辑器正文 14px = 10.5pt，故 SVG 的 pt 与编辑器 CSS 的 pt **1:1**，前端直接写 `width/height: Npt` + `vertical-align: -(height-baseline)pt`。改字号要两侧同步。
 - **暗色主题**：typst 产物是黑字透明底，暗色下看不见 → widget 带 `cm-math-dark` 类整体 `filter: invert(1)`。**不要用 `&dark` 选择器**：`EditorView.theme` 不支持该前缀（实测抛 `RangeError: Unsupported selector: &dark`，SvelteKit 会整页渲染成 500 错误页，表现为"应用没渲染"）。
 - **展开规则**：`selectionTouchesRange`（光标落在区间内含两端即展开，非空选区相交即展开）。标记类构造的展开范围必须是**标记 + 正文的并集**——标题/列表只有前导标记，只取标记范围会导致光标落在正文里时 `= ` 不露出（实测踩过）。

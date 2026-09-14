@@ -34,9 +34,13 @@ use serde::Serialize;
 use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, LinkedNode, RootedPath, Source, SyntaxKind, VirtualPath, VirtualRoot};
-use typst::text::{Font, FontBook, FontFamily, FontList, TextElem};
+use typst::text::{
+    BottomEdge, BottomEdgeMetric, Font, FontBook, FontFamily, FontList, TextEdgeBounds,
+    TextElem, TopEdge, TopEdgeMetric,
+};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
+use typst::layout::{Abs, Frame, FrameItem, Point};
 use typst_layout::{Page, PagedDocument};
 use typst_pdf::PdfOptions;
 use typst_svg::SvgOptions;
@@ -656,21 +660,9 @@ pub fn compile_math(
     } else {
         format!("${body}$")
     };
-    let mut src = String::with_capacity(context.len() + math.len() * 2 + 256);
-    if !context.is_empty() {
-        src.push_str(context);
-        if !context.ends_with('\n') {
-            src.push('\n');
-        }
-    }
-    // 贴边（width/height: auto, margin: 0）+ 透明背景（fill: none）→ SVG 即公式本身
-    src.push_str("#set page(width: auto, height: auto, margin: 0pt, fill: none)\n");
-    src.push_str(&format!("#set text(size: {size_pt}pt)\n"));
-    src.push_str(&format!(
-        "#box({math})\n#pagebreak()\n#box({math})#box(width: 0pt, height: {BASELINE_PROBE_PT}pt, baseline: {BASELINE_PROBE_PT}pt)"
-    ));
+    let src = math_probe_source(context, &math, size_pt, None);
 
-    let world = TypstWorld::new(src, document_path, fonts_dir, font_config);
+    let world = TypstWorld::new(src, document_path.clone(), fonts_dir, font_config);
     let document = match typst::compile::<PagedDocument>(&world) {
         typst::diag::Warned {
             output: Ok(doc), ..
@@ -694,19 +686,208 @@ pub fn compile_math(
     }
     let size = pages[0].frame.size();
     let width_pt = size.x.to_pt();
-    let height_pt = size.y.to_pt();
+    let frame_height_pt = size.y.to_pt();
     let probe_height_pt = pages[1].frame.size().y.to_pt();
     // 夹取到 [0, H]：探针盒比公式本身矮时（理论上不会）也不会给出越界基线
-    let baseline_pt = (probe_height_pt - BASELINE_PROBE_PT).clamp(0.0, height_pt);
+    let ascent_pt = (probe_height_pt - BASELINE_PROBE_PT).clamp(0.0, frame_height_pt);
+
+    // 墨迹可能画到帧外（见 ink_bounds_of_frame）：SVG 视口按帧尺寸裁剪，下标就会缺一截。
+    let ink = ink_bounds_of_frame(&pages[0].frame);
+    let pad_top_pt = (-ink.top.to_pt()).max(0.0);
+    let height_pt = ink.bottom.to_pt().max(frame_height_pt) + pad_top_pt;
+
+    // 只有真的溢出时才走第二遍：给页面显式尺寸 + 顶部内边距，让内容整体落在画布内。
+    // （不给尺寸就还是贴边页，帧外的东西照样被裁；顶部内边距是因为上标方向也会溢出去）
+    let overflows = pad_top_pt > 0.01 || height_pt > frame_height_pt + 0.01;
+    let svg = if overflows {
+        let src = math_probe_source(
+            context,
+            &math,
+            size_pt,
+            Some((width_pt, height_pt, pad_top_pt, ascent_pt)),
+        );
+        let world = TypstWorld::new(src, document_path, fonts_dir, font_config);
+        match typst::compile::<PagedDocument>(&world) {
+            typst::diag::Warned {
+                output: Ok(doc), ..
+            } => {
+                svg_for_page(&doc.pages()[0])
+            }
+            // 第二遍只是"把画布撑大"，失败了就用第一遍的产物（少一截总比什么都没有强）
+            typst::diag::Warned { output: Err(_), .. } => svg_for_page(&pages[0]),
+        }
+    } else {
+        svg_for_page(&pages[0])
+    };
 
     MathOutput {
         ok: true,
-        svg: svg_for_page(&pages[0]),
+        svg,
         width_pt,
         height_pt,
-        baseline_pt,
+        baseline_pt: (ascent_pt + pad_top_pt).clamp(0.0, height_pt),
         error: None,
     }
+}
+
+/// 公式探针文档的源码（两遍编译共用）。
+///
+/// 形态：第一页 = 公式本身（`width/height: auto` + `margin: 0` + `fill: none` → 贴边透明页，
+/// SVG 即公式本身）；第二页 = 公式 + 一个挂在基线下 100pt 的零宽盒（用来反推 ascent）。
+///
+/// `padded` 有值时改用**显式页面尺寸**并给内容加顶部内边距（用于"墨迹画到帧外"的补救，
+/// 见 `ink_bounds_of_frame`）：`(page_width, page_height, pad_top, ascent)`。
+fn math_probe_source(
+    context: &str,
+    math: &str,
+    size_pt: f64,
+    padded: Option<(f64, f64, f64, f64)>,
+) -> String {
+    let mut src = String::with_capacity(context.len() + math.len() * 2 + 320);
+    if !context.is_empty() {
+        src.push_str(context);
+        if !context.ends_with('\n') {
+            src.push('\n');
+        }
+    }
+    match padded {
+        None => {
+            src.push_str("#set page(width: auto, height: auto, margin: 0pt, fill: none)\n");
+            src.push_str(&format!("#set text(size: {size_pt}pt)\n"));
+            src.push_str(&format!(
+                "#box({math})\n#pagebreak()\n#box({math})#box(width: 0pt, height: {BASELINE_PROBE_PT}pt, baseline: {BASELINE_PROBE_PT}pt)"
+            ));
+        }
+        Some((page_w, page_h, pad_top, ascent)) => {
+            // 第一页：显式尺寸 + 顶部内边距（内容整体下移 pad_top，墨迹才落在画布内）
+            src.push_str("#set page(margin: 0pt, fill: none)\n");
+            src.push_str(&format!("#set text(size: {size_pt}pt)\n"));
+            src.push_str(&format!("#set page(width: {page_w}pt, height: {page_h}pt)\n"));
+            // 注意：进了 pad(...) 的**代码模式**后子里不能再写 `#box(...)`（会报
+            // "the character `#` is not valid in code"），用内容块 `[ ... ]` 回到 markup 模式
+            src.push_str(&format!("#pad(top: {pad_top}pt)[#box({math})]\n"));
+            // 第二页：探针页保持"自动高度"，高度 = pad_top + ascent + 100
+            src.push_str("#set page(width: auto, height: auto)\n");
+            src.push_str(&format!(
+                "#pagebreak()\n#pad(top: {pad_top}pt)[#box({math})#box(width: 0pt, height: {BASELINE_PROBE_PT}pt, baseline: {BASELINE_PROBE_PT}pt)]"
+            ));
+            let _ = ascent; // 显式页高已经覆盖了探针页，这里只需保持同一基线
+        }
+    }
+    src
+}
+
+/// 帧内容的墨迹纵向范围（相对帧左上角，y 向下）。
+///
+/// **为什么需要它**：typst 允许把内容画到帧**外面**，帧尺寸只反映"排版尺寸"。数学排版里的
+/// 上下标就是这种情形——实测（typst 0.15.1）`$a_0$` 的帧高只有 8.196pt（= 基准字母的 ascent，
+/// 基线正好落在帧底边），而下标 `0` 的基线在 **11.16pt**，比帧底还低 2.96pt。平时看不出来
+/// （正文页够大、帧不裁剪），但我们的公式页是 `height: auto` 的**贴边页**，导出成 SVG 后
+/// **视口就是裁剪框** —— 下标被裁掉，用户看到的就是「a_0 的下半部分没有渲染」。
+///
+/// 这里递归把帧内容的墨迹范围算出来（group 按自己的仿射变换映射、文本按字体的
+/// ascender/descender、图形/图片/链接按各自尺寸），供公式导出把画布撑够。
+#[derive(Debug, Clone, Copy)]
+struct InkBounds {
+    top: Abs,
+    bottom: Abs,
+}
+
+fn ink_bounds_of_frame(frame: &Frame) -> InkBounds {
+    let mut top = Abs::zero();
+    let mut bottom = Abs::zero();
+    for (pos, item) in frame.items() {
+        let (item_top, item_bottom) = item_ink_bounds(item);
+        // 子项的坐标在 group 内部，group 的 transform 已在递归里映射过，这里加外层偏移
+        let t = pos.y + item_top;
+        let b = pos.y + item_bottom;
+        if t < top {
+            top = t;
+        }
+        if b > bottom {
+            bottom = b;
+        }
+    }
+    InkBounds { top, bottom }
+}
+
+/// 单个帧项的墨迹纵向范围（相对该项自己的原点，y 向下、基线为 0）
+fn item_ink_bounds(item: &FrameItem) -> (Abs, Abs) {
+    match item {
+        FrameItem::Text(t) => {
+            // 用**字形包围盒**而不是字体度量：度量的 descender 是"排版值"，实测比真实墨迹还浅
+            // ——`sqrt(x^2 + y^2)` 里 Libertinus 的 `y` 尾巴比 descender 低约 1pt，用度量会再裁一次。
+            let mut up = Abs::zero();
+            let mut down = Abs::zero();
+            for glyph in &t.glyphs {
+                let (top, bottom) = t.font.edges(
+                    TopEdge::Metric(TopEdgeMetric::Bounds),
+                    BottomEdge::Metric(BottomEdgeMetric::Bounds),
+                    t.size,
+                    TextEdgeBounds::Glyph(glyph.id),
+                );
+                if top > up {
+                    up = top;
+                }
+                if bottom > down {
+                    down = bottom;
+                }
+            }
+            if up <= Abs::zero() && down <= Abs::zero() {
+                // 字体没提供字形包围盒（极少数）：退回字体度量。宁可多留白，也不裁字。
+                let m = t.font.metrics();
+                (-m.ascender.at(t.size), m.descender.at(t.size).abs())
+            } else {
+                (-up, down)
+            }
+        }
+        FrameItem::Group(g) => {
+            let inner = ink_bounds_of_frame(&g.frame);
+            // 子帧的上下边经 group 变换映射回本层（变换可能含 y 翻转，所以取两者较大值）
+            let a = Point::new(Abs::zero(), inner.top).transform(g.transform);
+            let b = Point::new(Abs::zero(), inner.bottom).transform(g.transform);
+            (a.y.min(b.y), a.y.max(b.y))
+        }
+        FrameItem::Image(_, size, _) | FrameItem::Link(_, size) => (Abs::zero(), size.y),
+        FrameItem::Shape(s, _) => {
+            // 图形（根号、分数线等）的墨迹就是它自己的包围盒；坐标相对该项原点
+            // （y 向下为正，min.y 可能为负 → 会往基线以上长）
+            let bb = s.bbox(true);
+            (bb.min.y, bb.max.y)
+        }
+        FrameItem::Tag(_) => (Abs::zero(), Abs::zero()),
+    }
+}
+
+/// 把公式 SVG 的视口（`viewBox` 与 width/height）撑到给定尺寸，**内容坐标不动**。
+/// 只用于"墨迹比页框大"的情形（见 `ink_bounds_of_frame`）：内容锚在左上角，画布变高即可。
+fn grow_svg_viewport(svg: &str, width_pt: f64, height_pt: f64) -> String {
+    let fmt = |v: f64| {
+        let s = format!("{v:.4}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    let mut out = svg.to_string();
+    let Some(start) = out.find("<svg ") else { return out };
+    let Some(tag_end_rel) = out[start..].find('>') else { return out };
+    let tag_end = start + tag_end_rel;
+    let tag = out[start..tag_end].to_string();
+    let mut new_tag = tag.clone();
+    for (attr, value) in [
+        ("viewBox", format!("0 0 {} {}", fmt(width_pt), fmt(height_pt))),
+        ("width", format!("{}pt", fmt(width_pt))),
+        ("height", format!("{}pt", fmt(height_pt))),
+    ] {
+        let needle = format!("{attr}=\"");
+        if let Some(i) = new_tag.find(&needle) {
+            let val_start = i + needle.len();
+            if let Some(rel_end) = new_tag[val_start..].find('"') {
+                let val_end = val_start + rel_end;
+                new_tag.replace_range(val_start..val_end, &value);
+            }
+        }
+    }
+    out.replace_range(start..tag_end, &new_tag);
+    out
 }
 
 /// 编译并导出 PDF 字节（成功返回字节，失败返回人类可读错误信息）
@@ -932,11 +1113,19 @@ mod tests {
         let inline = compile_math("frac(a,b)", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         let display = compile_math("frac(a,b)", true, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(inline.ok && display.ok);
+        // 画布高度已经含"墨迹余量"（见 ink_bounds_of_frame），所以比值不再是 2 倍上下；
+        // 真正要锁的是"行间分式明显比行内高"
         assert!(
-            display.height_pt > inline.height_pt * 2.0,
+            display.height_pt > inline.height_pt * 1.4,
             "行间分式应显著更高：inline={} display={}",
             inline.height_pt,
             display.height_pt
+        );
+        assert!(
+            display.baseline_pt > inline.baseline_pt * 1.4,
+            "行间分式基线以上的部分也应更高：inline={} display={}",
+            inline.baseline_pt,
+            display.baseline_pt
         );
     }
 
@@ -949,13 +1138,60 @@ mod tests {
         let depth = integral.height_pt - integral.baseline_pt;
         assert!(depth > 0.3, "积分应有下沉深度，实际 {depth}");
 
+        // x^2 的墨迹全在基线上方：画布只该给字体的 descender 留一点余量（≈0.2em），
+        // 不该像积分那样留出大块下沉空间
         let sup = compile_math("x^2", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
         assert!(sup.ok);
         let sup_depth = sup.height_pt - sup.baseline_pt;
         assert!(
-            sup_depth.abs() < 0.05,
-            "x^2 视觉上不下沉，实际 depth={sup_depth}"
+            sup_depth >= 0.0 && sup_depth < 3.0,
+            "x^2 视觉上不下沉（只留字体 descender 余量），实际 depth={sup_depth}"
         );
+        assert!(
+            sup.baseline_pt > sup.height_pt * 0.6,
+            "x^2 的基线应仍靠画布下方：baseline={} height={}",
+            sup.baseline_pt,
+            sup.height_pt
+        );
+    }
+
+    /// **下标不许被画布裁掉**（2026-09-14 用户反馈「a_0 的下半部分没有渲染」）。
+    ///
+    /// typst 允许把上下标画到**帧外**（实测 `$a_0$`：帧高 8.196pt、基线就在帧底、下标基线在 11.16pt），
+    /// 而我们的公式页是贴边页 —— 导出 SVG 后视口就是裁剪框，帧外的下标直接被裁掉。
+    /// 现在按墨迹范围撑画布（见 ink_bounds_of_frame），这条测试锁住：画布够高、且 SVG 视口与
+    /// 返回的 height_pt 一致（不一致就说明还有墨迹落在视口外）。
+    #[test]
+    fn compile_math_script_ink_inside_canvas() {
+        let out = compile_math("a_0", false, "", None, &fonts_dir(), &FontConfig::default(), 12.0);
+        assert!(out.ok, "公式应渲染成功: {:?}", out.error);
+        // 下标基线实测在 11.16pt（数字 0 的墨迹全在它自己基线上方），画布只要超过它就是安全
+        assert!(
+            out.height_pt > 11.2,
+            "画布要装得下下标（下标基线在 11.16pt 附近），实际 {}",
+            out.height_pt
+        );
+        assert!(
+            out.baseline_pt > 7.0 && out.baseline_pt < out.height_pt,
+            "基线应落在画布内：baseline={} height={}",
+            out.baseline_pt,
+            out.height_pt
+        );
+        let vb_h = view_box_height(&out.svg).expect("SVG 应有 viewBox");
+        assert!(
+            (vb_h - out.height_pt).abs() < 0.01,
+            "SVG 视口高 {vb_h} 应等于 height_pt {}（否则视口会裁掉墨迹）",
+            out.height_pt
+        );
+        // 下标墨迹（基线 11.16 + 自己的 descender）也要落在视口内
+        assert!(vb_h > 11.2, "视口高 {vb_h} 必须超过下标基线，否则下标会被裁");
+    }
+
+    /// 从 SVG 头部取 viewBox 的高度
+    fn view_box_height(svg: &str) -> Option<f64> {
+        let start = svg.find("viewBox=\"")? + "viewBox=\"".len();
+        let end = svg[start..].find('"')? + start;
+        svg[start..end].split_whitespace().nth(3)?.parse().ok()
     }
 
     /// 前缀（context）参与公式编译，但公式字号恒为编辑器字号（前缀里的 text(size) 不得带偏）
@@ -999,7 +1235,11 @@ mod tests {
     #[test]
     #[ignore = "按需运行：导出浏览器视觉验证用的真实公式产物"]
     fn dump_math_fixtures() {
-        let cases: [(&str, bool); 10] = [
+        let cases: [(&str, bool); 13] = [
+            // 带下标的用例（2026-09-14 加）：用户反馈 `$a_0 = 0$` 的下标下半截被裁掉
+            ("a_0", false),
+            ("a_0 = 0", false),
+            ("y_p + g_q", false),
             ("x^2 + y^2 = z^2", false),
             ("frac(a,b)", false),
             ("integral_0^1 f(x) dif x", false),

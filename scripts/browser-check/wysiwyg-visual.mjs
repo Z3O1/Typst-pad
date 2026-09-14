@@ -208,5 +208,57 @@ check(
 await c.screenshot(SHOT("visual-3-dark-math"));
 await c.send("Emulation.setEmulatedMedia", { features: [] });
 
+console.log("4) 真实产物的墨迹必须整个落在 SVG 视口内（a_0 曾经被裁掉下半截）");
+// typst 允许把上下标画到**帧外**（实测 `$a_0$`：帧高 8.196pt、基线就在帧底、下标基线 11.16pt），
+// 而公式页是贴边页 —— 导出 SVG 后**视口就是裁剪框**，帧外的墨迹全被裁掉。修法在 Rust 侧按墨迹
+// 撑画布（见 ink_bounds_of_frame）。这里把**每条真实产物**都塞进页面量 getBBox()（真实墨迹，
+// 用户单位）与 viewBox —— 不依赖编辑器状态，等于对整批产物做一次几何体检。
+const inkAudit = await c.evaluate(`(() => {
+  const fixtures = window.__DEV_MATH_FIXTURES || [];
+  const out = [];
+  for (const f of fixtures) {
+    const host = document.createElement("div");
+    host.style.cssText = "position: fixed; left: -9999px; top: 0";
+    host.innerHTML = f.svg;
+    document.body.appendChild(host);
+    const svg = host.querySelector("svg");
+    if (svg) {
+      const b = svg.getBBox();
+      const vb = svg.viewBox.baseVal;
+      out.push({
+        body: f.body,
+        sizePt: f.sizePt,
+        overBottom: +(b.y + b.height - (vb.y + vb.height)).toFixed(3),
+        overTop: +(vb.y - b.y).toFixed(3),
+        overRight: +(b.x + b.width - (vb.x + vb.width)).toFixed(3),
+        vbH: +vb.height.toFixed(2),
+      });
+    }
+    host.remove();
+  }
+  return out;
+})()`);
+const clippedBottom = inkAudit.filter((m) => m.overBottom > 0.2);
+const clippedTop = inkAudit.filter((m) => m.overTop > 0.2);
+check(
+  `全部 ${inkAudit.length} 条产物：墨迹底边没有超出画布（无下裁）`,
+  inkAudit.length >= 20 && clippedBottom.length === 0,
+  JSON.stringify(clippedBottom.slice(0, 4)),
+);
+check(
+  `全部 ${inkAudit.length} 条产物：墨迹顶边没有超出画布（无上裁）`,
+  inkAudit.length >= 20 && clippedTop.length === 0,
+  JSON.stringify(clippedTop.slice(0, 4)),
+);
+// 下标用例必须真的"有下沉空间"：画布要明显高过基线（否则说明产物退化了）
+const sub = inkAudit.filter((m) => m.body === "a_0");
+// 下标基线实测 ≈0.93em（12pt 字号下 11.16pt）：画布必须高过它，下标才有落脚处
+check(
+  "下标公式的画布高过下标基线（≈0.93em）",
+  sub.length === 2 && sub.every((m) => m.vbH / (m.sizePt ?? 12) >= 0.93),
+  JSON.stringify(sub),
+);
+await c.screenshot(SHOT("visual-4-ink-audit"));
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("visual-*")}`);
 c.close();
