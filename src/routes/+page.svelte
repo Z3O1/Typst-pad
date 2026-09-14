@@ -1664,7 +1664,20 @@
             }
           }}
         >
-          <span class="error-icon">✕</span><span class="error-count">{errorCount}</span>
+          <!-- 圆圈叉（VS Code 的 error 图标形状）：**整幅内联 SVG**，圆圈与叉一起画。
+               以前是 CSS 圆环 + `✕` 字形，字形随系统字体变粗变细、叉的粗细与圆圈对不上，
+               用户比对参照图后指出"不像"——现在两个图标都是 16×16 视图框里的描边图形，
+               线宽比例也照参照图定（圆环 1.5、叉 1.35，叉的线略细于圆环）。 -->
+          <svg class="error-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <circle cx="8" cy="8" r="7.25" fill="none" stroke="currentColor" stroke-width="1.5" />
+            <path
+              d="M5 5 11 11M11 5 5 11"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.35"
+              stroke-linecap="round"
+            />
+          </svg><span class="error-count">{errorCount}</span>
         </span>
         {#if showErrors}
           <div
@@ -1714,17 +1727,19 @@
           }}
         >
           <!-- 三角形内部感叹号（VS Code 的 warning 图标形状）：内联 SVG，用 currentColor
-               上色（不用 ⚠ 字形——跨字体渲染差异大，而且它是彩色 emoji 字体） -->
-          <svg class="warning-icon" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+               上色（不用 ⚠ 字形——跨字体渲染差异大，而且它是彩色 emoji 字体）。
+               描边路径的三个角都是**显式圆弧**（半径 1.25），比 stroke-linejoin 的圆角更接近
+               参照图里那种圆钝的三角；感叹号按参照图量出来的比例：竖杠略粗于三角线宽、圆点稍大。 -->
+          <svg class="warning-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
             <path
-              d="M7.56 1.4a.5.5 0 0 1 .88 0l6.5 11.3a.5.5 0 0 1-.44.8H1.5a.5.5 0 0 1-.44-.8z"
+              d="M15.09 12.83A1.3 1.3 0 0 1 13.95 14.75L2.05 14.75A1.3 1.3 0 0 1 0.91 12.83L6.86 1.93A1.3 1.3 0 0 1 9.14 1.93Z"
               fill="none"
               stroke="currentColor"
-              stroke-width="1.3"
+              stroke-width="1.5"
               stroke-linejoin="round"
             />
-            <path d="M8 5.5v3.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-            <circle cx="8" cy="11.9" r="0.95" fill="currentColor" />
+            <path d="M8 5.4V9.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            <circle cx="8" cy="11.6" r="0.9" fill="currentColor" />
           </svg>
           <span class="error-count">{compileWarnings.length}</span>
         </span>
@@ -2227,16 +2242,13 @@
     color: var(--fg-dim);
   }
 
-  .error-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 13px;
-    height: 13px;
-    border: 1.5px solid currentColor; /* CSS 圆环，不用 ⓧ 字形（跨字体渲染不一致） */
-    border-radius: 50%;
-    font-size: 9px;
-    line-height: 1;
+  /* 两个状态徽标的图标：都是 16×16 视图框、显示 14px 的内联 SVG（尺寸与线宽都照
+     参照图标定：图标高度 / 数字高度 ≈ 1.6）。别再退回 CSS 圆环 + `✕` 字形或 `⚠` 字形 ——
+     字形随系统字体变粗细，跟旁边的描边图形不是一套观感（用户比对参照图后指出过）。 */
+  .error-icon,
+  .warning-icon {
+    display: block;
+    flex: none;
   }
 
   .error-count {
@@ -2266,10 +2278,6 @@
   .warning-badge.clickable:hover,
   .warning-badge.clickable.active {
     color: #ffd79a;
-  }
-  .warning-icon {
-    display: block;
-    flex: none;
   }
 
   /* 设置弹窗里的字体项：下拉与目录列表 */

@@ -1512,7 +1512,18 @@ const barProbe = `(() => {
     errCount: err?.querySelector(".error-count")?.textContent?.trim() ?? null,
     warnSvgPaths: warn ? warn.querySelectorAll("svg path, svg circle").length : 0,
     warnIconText: (warn?.querySelector(".warning-icon")?.textContent ?? "").length,
-    errIconText: err?.querySelector(".error-icon")?.textContent?.trim() ?? null,
+    errIconTag: err?.querySelector(".error-icon")?.tagName?.toLowerCase() ?? null,
+    errSvgShapes: err ? err.querySelectorAll(".error-icon circle, .error-icon path").length : 0,
+    errIconText: (err?.querySelector(".error-icon")?.textContent ?? "").trim(),
+    iconSizes: (() => {
+      const g = (sel) => {
+        const el = bar.querySelector(sel);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return [Math.round(r.width), Math.round(r.height)];
+      };
+      return { err: g(".error-icon"), warn: g(".warning-icon") };
+    })(),
     statusTextLeft: statusEl ? Math.round(statusEl.getBoundingClientRect().left) : null,
     barLeft: Math.round(br.left),
     padLeft: Math.round(parseFloat(getComputedStyle(bar).paddingLeft)),
@@ -1544,7 +1555,17 @@ check(
   bar0.warnSvgPaths >= 2 && bar0.warnIconText === 0,
   `图形元素数 ${bar0.warnSvgPaths}，图标文字长度 ${bar0.warnIconText}`,
 );
-check("错误图标仍是圆环 ✕（未被改动）", bar0.errIconText === "✕", JSON.stringify(bar0.errIconText));
+check(
+  "错误图标也是内联 SVG（圆圈 + 叉，不再是 CSS 圆环 + ✕ 字形）",
+  bar0.errIconTag === "svg" && bar0.errSvgShapes >= 2 && bar0.errIconText === "",
+  `标签 ${bar0.errIconTag}，图形元素数 ${bar0.errSvgShapes}，文字 ${JSON.stringify(bar0.errIconText)}`,
+);
+check(
+  "两个图标同尺寸（14×14，与参照图的「图标高 ≈ 数字高 × 1.6」一致）",
+  JSON.stringify(bar0.iconSizes.err) === "[14,14]" &&
+    JSON.stringify(bar0.iconSizes.warn) === "[14,14]",
+  JSON.stringify(bar0.iconSizes),
+);
 check("状态栏仍是一行、没被顶高", bar0.height <= 30, `${bar0.height}px`);
 
 // 有警告时：计数 > 0、徽标变黄可点、点开后浮层从最左边向右展开（不越出窗口）
