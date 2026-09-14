@@ -1271,5 +1271,85 @@ await new Promise((r) => setTimeout(r, 400));
 await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
 await new Promise((r) => setTimeout(r, 300));
 
+// ---------------------------------------------------------------------------
+// 第 30 组：界面缩放要**真的**带动预览画布（用户反馈：「代码模式预览框的缩放还是无效」
+// 「Ctrl+滚轮 变了但立刻弹回原样」）
+// 根因：界面缩放走 webview `setZoom`，它把 CSS 视口一起缩小 —— 预览栏的 CSS 宽度也从 505
+// 变成 331；而预览画布的"铺满容器"分支正是拿这个**已缩小**的宽度算的，于是画布缩回原样，
+// 引擎再放大一次恰好抵消。编辑区没事（字号是 CSS px，被引擎放大），只有自适应的预览被吃掉。
+// 复现（本组跑的就是这个）：1040px 窗口下 100%→150%，画布物理尺寸比只有 0.983（等于没变）。
+// 修法：拟合用**缩放前**的栏宽（previewScale 收 uiZoom）。
+// 无头环境怎么造 150%：CDP `Emulation.setDeviceMetricsOverride` 把 CSS 视口压到「窗口宽 ÷ 1.5」
+// 在布局上等价于 webview 缩放，配合预置的 uiZoom=1.5，画布的物理尺寸 = 画布 CSS 宽度 × 1.5
+// （webview 缩放发生在 CSS 层之下，量到的 rect 仍是未放大的 px）。
+// ---------------------------------------------------------------------------
+console.log("30) 界面缩放带动预览画布（模拟 150% 的 CSS 视口）");
+const previewProbe = `(() => {
+  const body = document.querySelector(".preview-body");
+  const host = document.querySelector("#preview-host");
+  const svg = host?.querySelector("svg");
+  const rect = svg?.getBoundingClientRect();
+  const z = JSON.parse(localStorage.getItem("typst-pad:state") || "{}").uiZoom ?? 1;
+  return {
+    z,
+    container: body ? body.clientWidth : null,
+    canvasCss: rect ? Math.round(rect.width * 10) / 10 : null,
+    canvasPhys: rect ? Math.round(rect.width * z * 10) / 10 : null,
+    overflowX: body ? body.scrollWidth - body.clientWidth : null,
+  };
+})()`;
+
+/** 预置「源码模式 + 双栏 + 指定缩放」，在给定 CSS 视口宽下加载，等重算跑完再量 */
+async function loadPreviewAt(viewportW, uiZoom) {
+  await c.evaluate(`(() => {
+    const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
+    raw.viewMode = "source";
+    raw.showPreview = true;
+    raw.uiZoom = ${uiZoom};
+    localStorage.setItem("typst-pad:state", JSON.stringify(raw));
+  })()`);
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: viewportW,
+    height: 620,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await c.goto(DEV_URL);
+  await c.waitFor(`!!document.querySelector(".preview-body svg")`, { timeout: 30000 });
+  await new Promise((r) => setTimeout(r, 1200)); // 等 ResizeObserver + rAF 那次重算
+  return c.evaluate(previewProbe);
+}
+
+// 1040px 窗口：100% 时栏宽比自然尺寸窄，所以 100% 走"铺满"分支（正是被吃掉的那一支）
+const WIN = 1040;
+const preview100 = await loadPreviewAt(WIN, 1);
+check(
+  "100% 时画布铺满预览栏（窄栏的自适应行为照旧）",
+  preview100.canvasCss !== null &&
+    Math.abs(preview100.canvasCss - preview100.container) <= 2 &&
+    preview100.overflowX <= 1,
+  JSON.stringify(preview100),
+);
+
+const preview150 = await loadPreviewAt(Math.round(WIN / 1.5), 1.5);
+const physRatio = preview150.canvasPhys / preview100.canvasPhys;
+check(
+  "150% 时画布的物理尺寸真的放大 1.5 倍（不再被自适应缩回去）",
+  physRatio > 1.4,
+  `物理 ${preview100.canvasPhys} → ${preview150.canvasPhys}（比 ${physRatio.toFixed(3)}）`,
+);
+check(
+  "150% 时画布的 CSS 宽度不再跟着窄栏缩水（就是「弹回原样」那条）",
+  preview150.canvasCss >= preview100.canvasCss * 0.95,
+  `CSS ${preview100.canvasCss} → ${preview150.canvasCss}，栏宽 ${preview100.container} → ${preview150.container}`,
+);
+check(
+  "放大后画布比栏宽大（超出部分靠横向滚动看，而不是被裁掉）",
+  preview150.overflowX > 0,
+  `横向溢出 ${preview150.overflowX}px`,
+);
+await c.screenshot(SHOT("wysiwyg-30-preview-zoom"));
+await c.send("Emulation.clearDeviceMetricsOverride");
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

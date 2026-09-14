@@ -1134,6 +1134,12 @@
    * 缩放系数，把画布宽度写入预览容器内联样式（各页 SVG width:100% 随之等宽显示）——
    * - 字号恒定：默认字号对齐输入区（14px），窗口拉宽时画布停在自然尺寸不再放大；
    * - 等宽显示：窗口变窄时画布等比缩小铺满容器宽度，文本不拉伸变形。
+   *
+   * **必须把界面缩放（uiZoom）一起传进去**（2026-09-14 修「代码模式预览框的缩放还是无效」）：
+   * 界面缩放走 webview `setZoom`，预览栏的 CSS 宽度会跟着变小，直接拿它算"铺满"会把画布
+   * 缩回原样、与引擎的放大正好抵消 —— 表现为"变了但立刻弹回原样"。传 uiZoom 后按缩放**前**
+   * 的栏宽算，画布的 CSS 宽度保持在 100% 时的值，由引擎把它真正放大（超出栏宽则横向滚动）。
+   * 依据是实测：1040px 窗口下 100%→150% 时画布物理尺寸比只有 0.983（等于没变）。
    * 测量失败（无产物/容器不可测）时清空内联宽度，回退 CSS width: 100%。
    */
   function applyPreviewScale() {
@@ -1146,6 +1152,7 @@
     const displayWidth = previewCanvasWidth({
       containerWidth: previewBodyEl.clientWidth,
       pageWidthPt: viewBoxWidthPt(svg.getAttribute("viewBox") ?? ""),
+      uiZoom,
     });
     previewHost.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
   }

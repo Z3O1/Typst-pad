@@ -5,6 +5,7 @@ import {
   TYPST_DEFAULT_TEXT_PT,
   EDITOR_FONT_PX,
   naturalScale,
+  normalizeUiZoom,
   previewScale,
   previewCanvasWidth,
   viewBoxWidthPt,
@@ -83,6 +84,67 @@ describe("previewCanvasWidth（画布显示宽度）", () => {
   it("测量失败：返回 NaN", () => {
     expect(previewCanvasWidth({ containerWidth: 0, pageWidthPt: A4_WIDTH_PT })).toBeNaN();
     expect(previewCanvasWidth({ containerWidth: 800, pageWidthPt: NaN })).toBeNaN();
+  });
+});
+
+describe("界面缩放（uiZoom）与容器宽度", () => {
+  // 背景（2026-09-14 用户反馈「代码模式预览框的缩放还是无效」「变了但立刻弹回原样」）：
+  // 界面缩放走 webview setZoom，预览栏的 CSS 宽度会一起变小；若拿这个变小后的宽度算"铺满"，
+  // 画布就缩回原样，而引擎再放大一次正好抵消 —— 缩放对编辑区有效、对预览无效。
+  // 传 uiZoom 后按缩放前的栏宽算，画布 CSS 宽度保持 100% 时的值，由引擎把它真正放大。
+
+  it("缩放 150% 时换算回缩放前的栏宽（画布不跟着变窄）", () => {
+    const zoomedContainer = 331; // 1040px 窗口在 150% 下量到的栏宽
+    const at100 = previewCanvasWidth({ containerWidth: 505, pageWidthPt: A4_WIDTH_PT });
+    const zoomed = previewCanvasWidth({
+      containerWidth: zoomedContainer,
+      pageWidthPt: A4_WIDTH_PT,
+      uiZoom: 1.5,
+    });
+    // 不传 uiZoom 会缩回 331（这正是 bug）；传了之后与 100% 时的 505 基本一致
+    expect(previewCanvasWidth({ containerWidth: zoomedContainer, pageWidthPt: A4_WIDTH_PT })).toBeCloseTo(331, 10);
+    expect(zoomed).toBeCloseTo(zoomedContainer * 1.5, 10);
+    expect(Math.abs(zoomed - at100) / at100).toBeLessThan(0.05);
+  });
+
+  it("缩放 200% 且栏宽换算后超过自然尺寸：仍被自然系数夹住（字号仍与编辑区一致）", () => {
+    const naturalWidth = A4_WIDTH_PT * naturalScale(EDITOR_FONT_PX);
+    const width = previewCanvasWidth({
+      containerWidth: 600,
+      pageWidthPt: A4_WIDTH_PT,
+      uiZoom: 2,
+    });
+    expect(width).toBeCloseTo(naturalWidth, 10);
+  });
+
+  it("缩小到 50%：铺满分支按缩放前的栏宽算（引擎再把它缩一半）", () => {
+    // 50% 缩放时 CSS 视口是窗口的两倍宽：量到的栏宽 800 → 换算回未缩放的 400，
+    // 等价于"100% 时这栏只有 400px"；物理尺寸 = 400 × 0.5 = 200（正好一半）。
+    const width = previewCanvasWidth({
+      containerWidth: 800,
+      pageWidthPt: A4_WIDTH_PT,
+      uiZoom: 0.5,
+    });
+    expect(width).toBeCloseTo(400, 10);
+  });
+
+  it("uiZoom 缺省 / 非法值：按 1 处理（老调用方行为不变）", () => {
+    const base = previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT });
+    for (const uiZoom of [undefined, 0, -1, NaN, Infinity]) {
+      expect(previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT, uiZoom })).toBeCloseTo(
+        base,
+        10,
+      );
+    }
+  });
+
+  it("normalizeUiZoom：只认有限正数", () => {
+    expect(normalizeUiZoom(1.3)).toBe(1.3);
+    expect(normalizeUiZoom(undefined)).toBe(1);
+    expect(normalizeUiZoom(0)).toBe(1);
+    expect(normalizeUiZoom(-2)).toBe(1);
+    expect(normalizeUiZoom(NaN)).toBe(1);
+    expect(normalizeUiZoom(Infinity)).toBe(1);
   });
 });
 
