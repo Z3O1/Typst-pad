@@ -41,8 +41,9 @@ export interface PersistedState {
    */
   autoCheckUpdates: boolean;
   /**
-   * 上次自动检查更新的时间戳（ms）。用来做跨启动的节流（见 update-utils.isCheckDue）：
-   * 一天里反复开关应用不会每次都打网络请求。
+   * 上次检查更新的时间戳（ms）：**只是一条记录，不参与任何判定**。
+   * 它曾经用来做跨启动节流（6 小时才自动查一次），2026-09-14 用户报「自动更新没法用」就是被它拦的
+   * ——现在是"每次启动都查"，留这个字段只为了出问题时能看出上次检查发生在什么时候（见 update-utils.ts）。
    */
   lastUpdateCheckAt: number | null;
   /**

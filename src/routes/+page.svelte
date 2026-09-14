@@ -66,7 +66,6 @@
     AUTO_CHECK_DELAY_MS,
     formatBytes,
     formatProgress,
-    isCheckDue,
     type DownloadProgress,
   } from "$lib/update-utils";
   import { renderUpdateNotes } from "$lib/update-notes";
@@ -261,7 +260,7 @@
   // 待安装的更新句柄：持有 Rust 侧资源（rid），不进响应式（模板不渲染它），换版本时 close
   let updateHandle: AvailableUpdate | null = null;
   let showUpdateDialog = $state(false);
-  /** 上次检查时间（持久化）：跨启动节流，反复开关应用不会每次都打网络请求 */
+  /** 上次检查更新的时间（持久化）：**只是记录，不参与判定**（诊断用，见 update-utils.ts 的注解） */
   let lastUpdateCheckAt: number | null = null;
   let startupCheckTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -289,6 +288,7 @@
     if (manual) statusText = "正在检查更新…";
 
     const outcome = await checkForUpdate();
+    // 记一笔"上次检查时间"备查（自动 / 手动都记）：**它不再是节流门**，别拿它拦启动检查
     lastUpdateCheckAt = Date.now();
     schedulePersist();
 
@@ -1441,6 +1441,7 @@
     editorWrap = saved.editorWrap ?? false;
     restoreSession = saved.restoreSession ?? true;
     autoCheckUpdates = saved.autoCheckUpdates ?? true;
+    // 上次检查时间只用于显示/诊断，读回来原样存回去即可（启动检查不再看它）
     lastUpdateCheckAt = typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
     // 界面缩放：旧存档没有该字段 → 100%；越界/脏数据由 clampZoom 收敛（随后由 $effect 应用）
     uiZoom = clampZoom(saved.uiZoom);
@@ -1556,9 +1557,10 @@
     mark("mount-listeners-done");
 
     // 自动更新：启动后延迟一次静默检查（不阻塞首屏）。
-    // 节流按持久化的 lastUpdateCheckAt 判断（默认 6 小时，见 update-utils.isCheckDue）——
-    // 反复开关应用不会每次都打网络请求；关掉设置里的开关则完全不检查。
-    if (autoCheckUpdates && isCheckDue(lastUpdateCheckAt, Date.now())) {
+    // **每次启动都查**，只受设置里的开关约束 —— 这里曾经还有一道"距上次检查满 6 小时才查"的节流，
+    // 2026-09-14 用户报「自动更新没法用（打开的时候没有自动更新，但是检查的时候能检查到）」就是它：
+    // 时间戳是上次检查写下的，于是启动时几乎永远被拦掉。别再把这道理加回来，见 update-utils.ts 的注解。
+    if (autoCheckUpdates) {
       startupCheckTimer = setTimeout(() => checkUpdates(false), AUTO_CHECK_DELAY_MS);
     }
     mark("mount-end");

@@ -1713,6 +1713,113 @@ check(
 );
 await c.screenshot(SHOT("wysiwyg-33-mode-switch-caret"));
 
+// ---------------------------------------------------------------------------
+// 第 34 组：**启动时就该自己发现新版本**（用户反馈「自动更新没法用」的回归网）
+// 背景（2026-09-14）：用户装了 0.7.6、0.7.7 发布后打开应用却什么都没提示，原话
+// 「打开的时候没有自动更新，但是检查的时候能检查到」。根因不是网络也不是签名（那条链路
+// 当时是通的：清单 200、安装包 200、签名与配置里的公钥匹配），而是启动检查被一道
+// "距上次检查满 6 小时才查"的节流拦掉了 —— 而手动检查也会刷新那个时间戳，于是
+// 越手动查、启动越不查。现在改成"每次启动都查"，只受设置开关约束。
+//
+// 这一组刻意把 lastUpdateCheckAt 种成"几十秒前"（= 刚刚检查过），复现的正是被拦的那个状态：
+// 修之前弹窗不会出现（超时失败），修之后它会自己弹出来。
+// 桩：`&fakeupdate=1` 让 plugin:updater|check 返回一个假的可用更新（见 browser-dev-stub.ts）。
+// ---------------------------------------------------------------------------
+console.log("34) 启动时的自动更新检查（不节流）");
+
+/** 种一份存档再重载页面（跟用户"上次刚检查过、现在重新打开应用"的处境一致） */
+const seedState = async (state) => {
+  await c.evaluate(`localStorage.clear()`);
+  await c.goto(DEV_URL); // 先落到应用源上，localStorage 才可写（about:blank 上会抛 SecurityError）
+  await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+  await c.evaluate(
+    `localStorage.setItem("typst-pad:state", ${JSON.stringify(JSON.stringify(state))})`,
+  );
+};
+
+await seedState({ autoCheckUpdates: true, lastUpdateCheckAt: Date.now() });
+await c.goto(`${DEV_URL}&fakeupdate=1`);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+// 种进去的"刚刚检查过"必须真的生效，否则这一组就退化成"旧存档所以当然会查"
+const seeded = await c.evaluate(`(() => {
+  const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
+  return { at: typeof raw.lastUpdateCheckAt === "number" ? raw.lastUpdateCheckAt : null, now: Date.now() };
+})()`);
+check(
+  "起手：存档里「上次检查时间」就是刚刚（复现被节流拦掉的那个状态）",
+  seeded.at !== null && seeded.now - seeded.at < 60_000,
+  JSON.stringify(seeded),
+);
+
+// 先在编辑区落一个焦点：更新窗是"自己弹出来的"，绝不能把焦点从写作位置上抢走。
+// （冷启动的页面本来就没有编辑区焦点，所以这一步必须先做，否则这条断言测的是空气。）
+const editorRect = await c.evaluate(`(() => {
+  const r = document.querySelector(".cm-content").getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + Math.min(60, r.height / 2) };
+})()`);
+await c.click(editorRect.x, editorRect.y);
+await new Promise((r) => setTimeout(r, 200));
+const focusBeforeAutoCheck = await c.evaluate(
+  `(!!document.activeElement && !!document.activeElement.closest(".cm-content")) + "|" + !!document.querySelector(".update-modal")`,
+);
+check(
+  "起手：焦点在编辑区里，且此刻还没有更新弹窗（自动检查是延迟发起的）",
+  focusBeforeAutoCheck === "true|false",
+  focusBeforeAutoCheck,
+);
+
+// 关键断言：**不做任何操作**，等它自己弹出来
+let autoDialogAppeared = true;
+try {
+  await c.waitFor(`!!document.querySelector(".update-modal")`, { timeout: 15000 });
+} catch {
+  autoDialogAppeared = false;
+}
+const autoUpdate = await c.evaluate(`({
+  title: document.querySelector(".update-modal .modal-title")?.textContent?.trim() || "",
+  version: document.querySelector(".update-modal .modal-text")?.textContent?.trim() || "",
+  status: document.querySelector(".statusbar").innerText,
+  notice: !!document.querySelector(".status-update"),
+  focusInEditor: !!document.activeElement && !!document.activeElement.closest(".cm-content"),
+})`);
+check(
+  "刚检查过也要在启动时自动再查一次：弹窗自己出现（修前被 6 小时节流拦掉，永远不出现）",
+  autoDialogAppeared && autoUpdate.title.includes("发现新版本"),
+  `appeared=${autoDialogAppeared} ${JSON.stringify(autoUpdate)}`,
+);
+check(
+  "自动检查的结果和手动一样落到状态栏（状态文字 + 可点开的入口）",
+  autoUpdate.status.includes("发现新版本") && autoUpdate.notice,
+  JSON.stringify(autoUpdate.status),
+);
+check(
+  "自动弹出的更新窗不抢编辑区焦点（用户要求：不改变当前编辑位置）",
+  autoUpdate.focusInEditor,
+  JSON.stringify(autoUpdate),
+);
+await c.screenshot(SHOT("wysiwyg-34-startup-auto-check"));
+await c.evaluate(
+  `Array.from(document.querySelectorAll(".update-modal .modal-btn")).find(b => (b.textContent || "").includes("稍后")).click()`,
+);
+
+// 设置里的开关仍然是这道门：关掉它，启动就一次都不该查（桩会记账）
+await seedState({ autoCheckUpdates: false, lastUpdateCheckAt: Date.now() });
+await c.goto(`${DEV_URL}&fakeupdate=1`);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.evaluate(`window.__browserDevUpdaterChecks = 0`);
+// 自动检查是启动后约 4 秒才发的，等够 8 秒再断言——不能只等 1 秒就宣布"没检查"
+await new Promise((r) => setTimeout(r, 8000));
+const disabled = await c.evaluate(`({
+  checks: window.__browserDevUpdaterChecks || 0,
+  dialog: !!document.querySelector(".update-modal"),
+  status: document.querySelector(".statusbar").innerText,
+})`);
+check(
+  "关掉「启动时自动检查更新」后启动一次都不查（开关仍然是这道门）",
+  disabled.checks === 0 && !disabled.dialog,
+  JSON.stringify(disabled),
+);
+
 // 收尾：清回空文档并回写作模式
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });

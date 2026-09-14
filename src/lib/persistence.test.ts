@@ -117,7 +117,7 @@ describe("persistence", () => {
     expect(state.restoreSession).toBe(true);
     expect(state.dirty).toBe(false);
     expect(state.content).toBe("旧内容");
-    // 旧存档没有自动更新字段：默认开启，且"没检查过"（启动即检查一次，见 update-utils.isCheckDue）
+    // 旧存档没有自动更新字段：默认开启（启动时会检查一次，不再有"上次检查时间"这道门）
     expect(state.autoCheckUpdates).toBe(true);
     expect(state.lastUpdateCheckAt).toBeNull();
     // 界面缩放也是新增字段：旧存档读出来是默认 100%
@@ -149,7 +149,7 @@ describe("persistence", () => {
     expect(state.fontDirs).toEqual([]);
   });
 
-  it("lastUpdateCheckAt 损坏（字符串/NaN 之类）时不传给节流逻辑", () => {
+  it("lastUpdateCheckAt 损坏（字符串/NaN 之类）时不写进状态（它现在只是记录，别再被当成判定依据）", () => {
     localStorage.setItem(
       "typst-pad:state",
       JSON.stringify({ lastUpdateCheckAt: "刚刚" }),

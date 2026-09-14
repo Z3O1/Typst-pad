@@ -1,46 +1,21 @@
-// update-utils 单元测试：自动更新的纯逻辑（节流、进度换算、错误文案、说明裁剪）。
+// update-utils 单元测试：自动更新的纯逻辑（进度换算、错误文案、说明裁剪）。
 // Tauri 侧的 check/downloadAndInstall 不在这里测（浏览器里没有真实 updater），
-// 但"什么时候该检查""进度怎么显示""错误怎么说人话"这些判断全在这里，坏了用户立刻能感觉到。
+// 但"进度怎么显示""错误怎么说人话"这些判断全在这里，坏了用户立刻能感觉到。
+//
+// 注意这里**没有**"什么时候该检查"的用例：那道理（6 小时节流）已经删掉，现在是"每次启动都查"，
+// 见 update-utils.ts 的注解与 wysiwyg.mjs 第 34 组的回归网。
 import { describe, it, expect } from "vitest";
 import {
-  isCheckDue,
+  AUTO_CHECK_DELAY_MS,
   formatBytes,
   progressFrom,
   formatProgress,
   describeUpdateError,
-  AUTO_CHECK_MIN_INTERVAL_MS,
 } from "./update-utils";
 
-describe("isCheckDue", () => {
-  const now = 1_700_000_000_000;
-
-  it("从未检查过（null / 0 / 缺字段）→ 该检查", () => {
-    expect(isCheckDue(null, now)).toBe(true);
-    expect(isCheckDue(undefined, now)).toBe(true);
-    expect(isCheckDue(0, now)).toBe(true);
-  });
-
-  it("刚检查过（间隔内）→ 不检查", () => {
-    expect(isCheckDue(now - 1000, now)).toBe(false);
-    expect(isCheckDue(now - AUTO_CHECK_MIN_INTERVAL_MS + 1, now)).toBe(false);
-  });
-
-  it("超过间隔 → 该检查（边界值算到期）", () => {
-    expect(isCheckDue(now - AUTO_CHECK_MIN_INTERVAL_MS, now)).toBe(true);
-    expect(isCheckDue(now - AUTO_CHECK_MIN_INTERVAL_MS * 2, now)).toBe(true);
-  });
-
-  it("非法时间戳（NaN）→ 该检查，不当成\"刚查过\"而永久静默", () => {
-    expect(isCheckDue(Number.NaN, now)).toBe(true);
-  });
-
-  it("时间戳在未来（系统时钟被回拨）→ 该检查", () => {
-    expect(isCheckDue(now + 60_000, now)).toBe(true);
-  });
-
-  it("间隔可覆盖（测试与将来改策略用）", () => {
-    expect(isCheckDue(now - 500, now, 100)).toBe(true);
-    expect(isCheckDue(now - 50, now, 100)).toBe(false);
+describe("启动自动检查的延迟", () => {
+  it("延迟是正数且不为 0（不能在 mount 里立刻打网络，会跟首屏抢那几秒）", () => {
+    expect(AUTO_CHECK_DELAY_MS).toBeGreaterThan(0);
   });
 });
 

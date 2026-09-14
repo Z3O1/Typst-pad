@@ -1,8 +1,5 @@
-// 自动更新的**纯逻辑**（不碰 Tauri API，可单测）：检查节流、下载进度换算、错误文案、说明裁剪。
+// 自动更新的**纯逻辑**（不碰 Tauri API，可单测）：下载进度换算、错误文案、说明裁剪。
 // 与 Tauri 交互的部分在 updater.ts；页面只负责把这里的结果摆到状态栏 / 弹窗上。
-
-/** 同一台机器上两次自动检查之间的最短间隔（6 小时） */
-export const AUTO_CHECK_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * 启动后延迟多久做首次自动检查。
@@ -11,22 +8,17 @@ export const AUTO_CHECK_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
  */
 export const AUTO_CHECK_DELAY_MS = 4000;
 
-/**
- * 现在是否该做一次自动检查。`lastCheckAt` 为 0 / null / 非法值（首次运行或旧存档）时总是该检查。
- * 时间戳取未来值（改过系统时间）时也放行，避免"永远不再检查"。
- */
-export function isCheckDue(
-  lastCheckAt: number | null | undefined,
-  now: number,
-  minIntervalMs: number = AUTO_CHECK_MIN_INTERVAL_MS,
-): boolean {
-  if (typeof lastCheckAt !== "number" || !Number.isFinite(lastCheckAt) || lastCheckAt <= 0) {
-    return true;
-  }
-  const elapsed = now - lastCheckAt;
-  if (elapsed < 0) return true; // 时钟回拨：按"该检查"处理
-  return elapsed >= minIntervalMs;
-}
+// 这里曾经有一个 `AUTO_CHECK_MIN_INTERVAL_MS`（6 小时）+ `isCheckDue(lastCheckAt, now)`：
+// 「同一台机器两次自动检查至少隔 6 小时」。**别再把它加回来**——2026-09-14 用户报「自动更新没法用」，
+// 复现出来的现象就是它造成的：那次启动的自动检查被上一条时间戳拦掉了（安装完 0.7.6 时记的），
+// 于是"打开应用"永远不会自己发现新版本，只有手动点「检查更新」才查得到（用户原话：
+// 「打开的时候没有自动更新，但是检查的时候能检查到」）。而且**手动检查也会刷新那个时间戳**，
+// 于是越频繁手动查、启动时越不可能自动查，这个组合特别难自己撞见。
+//
+// 现在的规则：启动时**每次都查一次**（只受设置里的「启动时自动检查更新」开关约束）。
+// 代价是每次启动多两个 HTTPS 请求（清单 + 重定向），换到的是"打开就看到新版本"这个用户预期；
+// 桌面编辑器本来就该在启动时自报新版本（VS Code / Typora 同理）。`lastUpdateCheckAt` 现在
+// **只是一条记录**（诊断用：出问题时能看出上次检查是什么时候），不再参与任何判定。
 
 /** 字节数 → 人类可读（B / KB / MB / GB）；非法或非正值一律 "0 B" */
 export function formatBytes(bytes: number): string {

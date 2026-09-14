@@ -370,9 +370,14 @@ async function handleCommand(
     // 而不是刷一屏未知命令。真实更新行为只能在桌面版验证（见 CLAUDE.md「测试」）。
     // 例外：`?browserdev=1&fakeupdate=1` 时返回一个**假的可用更新**，让"发现新版本"弹窗
     // （含更新说明的 Markdown 渲染）也能被验收覆盖——否则这条 UI 只有真发版时才看得到。
-    case "plugin:updater|check":
+    // 另外**记一笔调用次数**（`window.__browserDevUpdaterChecks`）：第 34 组据此断言
+    // 「关掉设置开关后启动**一次都没查**」，而不是只看"弹窗没出现"。
+    case "plugin:updater|check": {
       notify(command);
+      const w = window as unknown as Record<string, unknown>;
+      w.__browserDevUpdaterChecks = (typeof w.__browserDevUpdaterChecks === "number" ? w.__browserDevUpdaterChecks : 0) + 1;
       return isFakeUpdateEnabled() ? FAKE_UPDATE : null;
+    }
     // 界面缩放（Ctrl+滚轮）：浏览器开发模式没有 Tauri 的 webview 缩放，但**记录请求的系数**，
     // 让浏览器验收能断言"确实按一档 10% 请求了缩放"（真实缩放效果只能在桌面版看）。
     case "plugin:webview|set_webview_zoom": {
