@@ -110,7 +110,10 @@ export function describeUpdateError(error: unknown): string {
     lower.includes("404") ||
     lower.includes("not found")
   ) {
-    return `没有取到更新清单（latest.json）：可能是网络不可用，或该版本还没发布/还是草稿。原始错误：${message}`;
+    // 这条错误我们实际踩过两次：插件对**非 2xx** 只记日志、当成"没有 release"，最后统一报成
+    // "Could not fetch a valid release JSON from the remote"，所以字面上完全看不出是 404。
+    // 三个已知原因按可能性排序，第一种（私有仓库）是最容易忽略、也最不像"网络问题"的那个。
+    return `没有取到更新清单（latest.json）。常见原因：① 仓库/Release 还是**私有**的——客户端的更新检查不带任何 GitHub 凭据，匿名请求私有仓库一律 404；② 该版本还没发布、还是草稿；③ 网络不通。原始错误：${message}`;
   }
   if (
     lower.includes("dns") ||
