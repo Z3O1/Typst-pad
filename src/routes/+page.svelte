@@ -1637,33 +1637,44 @@
   </main>
 
   <footer class="statusbar">
-    <span>{statusText}</span>
-    {#if updateNotice}
-      <button
-        class="status-update"
-        title="打开更新窗口"
-        onclick={() => (showUpdateDialog = true)}
-      >{updateNotice}</button>
-    {/if}
-    {#if compileWarnings.length > 0}
-      <span class="error-badge-wrap warning-badge-wrap">
+    <!-- 左侧最前：编译警告 + 编译错误计数（VS Code 风格，三角形感叹号 / 圆圈叉）。
+         两者都**常驻显示**（无问题时是 0）——它们在同一列里，常驻才能一眼看出"编译干净"，
+         也避免数字出现/消失时整条状态栏左右抖动。警告在错误**左边**（用户要求）。 -->
+    <span class="badge-group">
+      <span class="error-badge-wrap">
         <span
-          class="error-badge clickable warning-badge"
-          class:active={showWarnings}
+          class="error-badge warning-badge"
+          class:clickable={compileWarnings.length > 0}
+          class:active={showWarnings && compileWarnings.length > 0}
           role="button"
           tabindex="0"
-          aria-expanded={showWarnings}
+          aria-expanded={showWarnings && compileWarnings.length > 0}
           title="编译警告（不中断渲染）"
-          onclick={() => (showWarnings = !showWarnings)}
+          onclick={() => {
+            if (compileWarnings.length > 0) showWarnings = !showWarnings;
+          }}
           onkeydown={(e) => {
-            if (e.key === "Enter") showWarnings = !showWarnings;
+            if (e.key === "Enter" && compileWarnings.length > 0) {
+              showWarnings = !showWarnings;
+            }
           }}
         >
-          <span class="error-icon warning-icon">!</span><span
-            class="error-count">{compileWarnings.length}</span
-          >
+          <!-- 三角形内部感叹号（VS Code 的 warning 图标形状）：内联 SVG，用 currentColor
+               上色（不用 ⚠ 字形——跨字体渲染差异大，而且它是彩色 emoji 字体） -->
+          <svg class="warning-icon" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+            <path
+              d="M7.56 1.4a.5.5 0 0 1 .88 0l6.5 11.3a.5.5 0 0 1-.44.8H1.5a.5.5 0 0 1-.44-.8z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linejoin="round"
+            />
+            <path d="M8 5.5v3.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            <circle cx="8" cy="11.9" r="0.95" fill="currentColor" />
+          </svg>
+          <span class="error-count">{compileWarnings.length}</span>
         </span>
-        {#if showWarnings}
+        {#if showWarnings && compileWarnings.length > 0}
           <div class="error-popover" role="dialog" aria-label="编译警告列表">
             <div class="error-popover-title">编译警告（{compileWarnings.length} 处）</div>
             <div class="error-list">
@@ -1683,55 +1694,64 @@
           </div>
         {/if}
       </span>
-    {/if}
-    <span class="error-badge-wrap" bind:this={errorWrapEl}>
-      <span
-        class="error-badge"
-        class:clickable={hasErrorToShow(errorCount, lastNonPosError)}
-        class:active={showErrors}
-        role="button"
-        tabindex="0"
-        aria-expanded={showErrors}
-        onclick={() => {
-          if (hasErrorToShow(errorCount, lastNonPosError)) showErrors = !showErrors;
-        }}
-        onkeydown={(e) => {
-          if (e.key === "Enter" && hasErrorToShow(errorCount, lastNonPosError)) {
-            showErrors = !showErrors;
-          }
-        }}
-      >
-        <span class="error-icon">✕</span><span class="error-count">{errorCount}</span>
-      </span>
-      {#if showErrors}
-        <div
-          class="error-popover"
-          bind:this={errorPopoverEl}
-          role="dialog"
-          aria-label="编译错误列表"
-          style="transform: translate({errorPopoverClamp.translateX}px, {errorPopoverClamp.translateY}px);{errorPopoverClamp.maxWidth > 0 ? `max-width:${errorPopoverClamp.maxWidth}px` : ""}"
+      <span class="error-badge-wrap" bind:this={errorWrapEl}>
+        <span
+          class="error-badge"
+          class:clickable={hasErrorToShow(errorCount, lastNonPosError)}
+          class:active={showErrors}
+          role="button"
+          tabindex="0"
+          aria-expanded={showErrors}
+          onclick={() => {
+            if (hasErrorToShow(errorCount, lastNonPosError)) showErrors = !showErrors;
+          }}
+          onkeydown={(e) => {
+            if (e.key === "Enter" && hasErrorToShow(errorCount, lastNonPosError)) {
+              showErrors = !showErrors;
+            }
+          }}
         >
-          <div class="error-popover-title">
-            编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}
+          <span class="error-icon">✕</span><span class="error-count">{errorCount}</span>
+        </span>
+        {#if showErrors}
+          <div
+            class="error-popover"
+            bind:this={errorPopoverEl}
+            role="dialog"
+            aria-label="编译错误列表"
+            style="transform: translate({errorPopoverClamp.translateX}px, {errorPopoverClamp.translateY}px);{errorPopoverClamp.maxWidth > 0 ? `max-width:${errorPopoverClamp.maxWidth}px` : ""}"
+          >
+            <div class="error-popover-title">
+              编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}
+            </div>
+            <div class="error-list">
+              {#each buildErrorListItems(editorDiagnostics, lastNonPosError) as item}
+                {#if item.kind === "located"}
+                  <button class="error-item" onclick={() => onErrorItemClick(item)}>
+                    <span class="error-item-loc">{formatErrorLoc(item)}</span>
+                    <span class="error-item-msg">{item.message}</span>
+                  </button>
+                {:else}
+                  <div class="error-item error-item-generic">
+                    <span class="error-item-loc">{formatErrorLoc(item)}</span>
+                    <span class="error-item-msg">{item.message}</span>
+                  </div>
+                {/if}
+              {/each}
+            </div>
           </div>
-          <div class="error-list">
-            {#each buildErrorListItems(editorDiagnostics, lastNonPosError) as item}
-              {#if item.kind === "located"}
-                <button class="error-item" onclick={() => onErrorItemClick(item)}>
-                  <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                  <span class="error-item-msg">{item.message}</span>
-                </button>
-              {:else}
-                <div class="error-item error-item-generic">
-                  <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                  <span class="error-item-msg">{item.message}</span>
-                </div>
-              {/if}
-            {/each}
-          </div>
-        </div>
-      {/if}
+        {/if}
+      </span>
     </span>
+    <!-- 状态文字：占满剩余空间、单行省略（可伸缩项，见 .status-text 的样式） -->
+    <span class="status-text">{statusText}</span>
+    {#if updateNotice}
+      <button
+        class="status-update"
+        title="打开更新窗口"
+        onclick={() => (showUpdateDialog = true)}
+      >{updateNotice}</button>
+    {/if}
     <span class="spacer"></span>
     <span class="mode-tag">{viewMode === "write" ? "写作" : "源码"}</span>
     {#if uiZoom !== ZOOM_DEFAULT}
@@ -2164,8 +2184,9 @@
     user-select: none;
   }
 
-  /* 左侧状态文字：占满剩余空间、**单行省略**（以前会被压成多行，把整条状态栏顶高） */
-  .statusbar > span:first-child {
+  /* 状态文字：占满剩余空间、**单行省略**（以前会被压成多行，把整条状态栏顶高）。
+     按**类名**定位而不是 `:first-child` —— 左侧最前现在是警告/错误两个徽标（2026-09-14 用户要求）。 */
+  .statusbar > .status-text {
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
@@ -2173,11 +2194,19 @@
     text-overflow: ellipsis;
   }
 
-  /* 右侧的徽标/标签/计数：保持原尺寸，既不被压缩也不换行
-     （`:not(.spacer)` 必须留着——排它的那条规则优先级更高，会把撑开右侧的 spacer 压没） */
-  .statusbar > span:not(:first-child):not(.spacer) {
+  /* 其余徽标/标签/计数：保持原尺寸，既不被压缩也不换行。
+     两条 `:not()` 都不可省：`.spacer`（撑开左右两组）与 `.status-text`（要可伸缩 + 省略号）
+     都在这条规则的命中范围里，漏掉就会被 `flex: none` 压成不可伸缩。 */
+  .statusbar > span:not(.spacer):not(.status-text) {
     flex: none;
     white-space: nowrap;
+  }
+
+  /* 左侧最前的两个计数徽标（警告、错误）成组：组内间距比状态栏主间距紧凑一点 */
+  .statusbar > .badge-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
   }
 
   .spacer {
@@ -2223,7 +2252,8 @@
     color: #ffc9c9;
   }
 
-  /* 编译警告徽标：与错误徽标同款但偏黄——警告不中断渲染，别让人以为编译挂了 */
+  /* 编译警告徽标：与错误徽标同款但偏黄——警告不中断渲染，别让人以为编译挂了。
+     图标是内联 SVG 三角形+感叹号（VS Code 形状），用 currentColor 上色 */
   .warning-badge.clickable {
     color: #e5c07b;
   }
@@ -2232,8 +2262,8 @@
     color: #ffd79a;
   }
   .warning-icon {
-    border-radius: 50%;
-    font-weight: 700;
+    display: block;
+    flex: none;
   }
 
   /* 设置弹窗里的字体项：下拉与目录列表 */
@@ -2426,10 +2456,12 @@
     display: inline-flex;
   }
 
-  /* 编译错误 Popover：锚定徽标上方，圆角阴影风格与菜单下拉一致，不遮全屏 */
+  /* 编译错误/警告 Popover：锚定徽标上方，圆角阴影风格与菜单下拉一致，不遮全屏。
+     `left: 0` 而不是 `right: 0` —— 徽标现在在状态栏最左（2026-09-14），右对齐会把 520px 宽的
+     浮层整体推到窗口左侧外面（靠 clampPopoverRect 也能救回来，但那样每次都是"被夹住"的状态）。 */
   .error-popover {
     position: absolute;
-    right: 0;
+    left: 0;
     bottom: calc(100% + 8px);
     width: 520px;
     max-width: 90vw;

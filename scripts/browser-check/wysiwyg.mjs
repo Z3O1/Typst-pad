@@ -922,7 +922,9 @@ await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 600));
 await c.click(400, 300);
 await c.type('#set text(font: "微软雅黑")\n中文测试');
-await c.waitFor(`!!document.querySelector(".warning-badge")`, { timeout: 8000 });
+// 注意：警告徽标自 2026-09-14 起**常驻显示**（无警告时是 0），所以这里要等"可点击"
+// （= 真有警告）而不是等它出现，否则会在警告到达前就点一个空徽标
+await c.waitFor(`!!document.querySelector(".warning-badge.clickable")`, { timeout: 8000 });
 const warnStatus = await c.evaluate(`document.querySelector(".statusbar").innerText`);
 check(
   "写错的字体族名以警告形式出现在状态栏（不再静默回退）",
@@ -1474,6 +1476,110 @@ check("代码区里不配对（只插入一个 `$`）", codeCase === "#let s = 1
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await new Promise((r) => setTimeout(r, 200));
+
+// ---------------------------------------------------------------------------
+// 第 32 组：状态栏最左的「警告 / 错误」计数（用户要求：「加入警告，用类似 vscode 的图标
+// （三角形内部有感叹号），放到错误数量左边。另外，把这两个东西都移到最左边」）
+// 形态：状态栏最左是一个 badge-group，里面**警告在左、错误在右**，两者都**常驻显示**（无问题是 0，
+// 与 VS Code 的状态栏一致）；警告图标是内联 SVG 三角形+感叹号（currentColor 上色；不用 ⚠ 字形——
+// 跨字体渲染差异大、且常常是彩色 emoji 字体），错误仍是 CSS 圆环 + ✕。
+// 布局注意：状态文字靠 `:first-child` 定位的老写法会失效（它不再是第一个子元素），已改成
+// `.status-text` 类名匹配，`:not(.spacer):not(.status-text)` 两条都不能漏。
+// ---------------------------------------------------------------------------
+console.log("32) 状态栏左侧的警告/错误计数");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+const barProbe = `(() => {
+  const bar = document.querySelector(".statusbar");
+  const warn = bar.querySelector(".warning-badge");
+  const err = bar.querySelector(".error-badge:not(.warning-badge)");
+  const group = bar.querySelector(".badge-group");
+  const first = bar.children[0];
+  const wr = warn?.getBoundingClientRect();
+  const er = err?.getBoundingClientRect();
+  const br = bar.getBoundingClientRect();
+  const statusEl = bar.querySelector(".status-text");
+  return {
+    order: Array.from(bar.children).map((e) => e.className.split(" ")[0]).join(" > "),
+    firstIsBadgeGroup: first === group,
+    warnX: wr ? Math.round(wr.left) : null,
+    errX: er ? Math.round(er.left) : null,
+    warnCount: warn?.querySelector(".error-count")?.textContent?.trim() ?? null,
+    errCount: err?.querySelector(".error-count")?.textContent?.trim() ?? null,
+    warnSvgPaths: warn ? warn.querySelectorAll("svg path, svg circle").length : 0,
+    warnIconText: (warn?.querySelector(".warning-icon")?.textContent ?? "").length,
+    errIconText: err?.querySelector(".error-icon")?.textContent?.trim() ?? null,
+    statusTextLeft: statusEl ? Math.round(statusEl.getBoundingClientRect().left) : null,
+    barLeft: Math.round(br.left),
+    padLeft: Math.round(parseFloat(getComputedStyle(bar).paddingLeft)),
+    height: Math.round(br.height),
+  };
+})()`;
+
+const bar0 = await c.evaluate(barProbe);
+check(
+  "状态栏最左是「警告 + 错误」计数组（排在状态文字之前）",
+  bar0.firstIsBadgeGroup === true,
+  JSON.stringify(bar0.order),
+);
+check(
+  "两个计数常驻显示（无问题时都是 0，与 VS Code 一致）",
+  bar0.warnCount === "0" && bar0.errCount === "0",
+  `警告 ${bar0.warnCount} / 错误 ${bar0.errCount}`,
+);
+check(
+  "警告在错误左边，且两者紧贴状态栏左缘（移到最左边）",
+  bar0.warnX !== null &&
+    bar0.errX !== null &&
+    bar0.warnX < bar0.errX &&
+    bar0.warnX - bar0.barLeft <= bar0.padLeft + 1,
+  `警告 x=${bar0.warnX}，错误 x=${bar0.errX}，状态栏左缘 ${bar0.barLeft}（内边距 ${bar0.padLeft}）`,
+);
+check(
+  "警告图标是 SVG 三角形+感叹号（不是 ⚠ 字形：有描边路径且无文字内容）",
+  bar0.warnSvgPaths >= 2 && bar0.warnIconText === 0,
+  `图形元素数 ${bar0.warnSvgPaths}，图标文字长度 ${bar0.warnIconText}`,
+);
+check("错误图标仍是圆环 ✕（未被改动）", bar0.errIconText === "✕", JSON.stringify(bar0.errIconText));
+check("状态栏仍是一行、没被顶高", bar0.height <= 30, `${bar0.height}px`);
+
+// 有警告时：计数 > 0、徽标变黄可点、点开后浮层从最左边向右展开（不越出窗口）
+await c.click(400, 300);
+await c.type('#set text(font: "微软雅黑")\n中文测试');
+await c.waitFor(`!!document.querySelector(".warning-badge.clickable")`, { timeout: 8000 });
+const barWarn = await c.evaluate(barProbe);
+check(
+  "出现警告后该徽标计数 > 0（且仍排在错误左边）",
+  barWarn.warnCount !== "0" && Number(barWarn.warnCount) > 0 && barWarn.warnX < barWarn.errX,
+  `警告 ${barWarn.warnCount}（x=${barWarn.warnX}），错误 ${barWarn.errCount}（x=${barWarn.errX}）`,
+);
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(`!!document.querySelector(".error-popover .error-item-msg")`, { timeout: 5000 });
+const warnPopover = await c.evaluate(`(() => {
+  const p = document.querySelector(".error-popover");
+  const r = p.getBoundingClientRect();
+  return {
+    left: Math.round(r.left),
+    right: Math.round(r.right),
+    win: window.innerWidth,
+    text: p.innerText.split("\\n").join(" ").slice(0, 60),
+  };
+})()`);
+check(
+  "警告浮层从最左边的徽标向右展开、不越出窗口",
+  warnPopover.left >= 0 && warnPopover.right <= warnPopover.win + 1,
+  JSON.stringify(warnPopover),
+);
+await c.screenshot(SHOT("wysiwyg-32-statusbar-badges"));
+
+// 收尾：关掉浮层、清回空文档（警告消失 → 徽标回到 0）
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 400));
 
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();
