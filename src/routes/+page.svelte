@@ -55,7 +55,13 @@
   import { mark, reportStartup } from "$lib/startup-timing";
   import { dbg, setCliDebug } from "$lib/debug";
   import { clampPopoverRect } from "$lib/popover-utils";
-  import { previewCanvasWidth, viewBoxWidthPt } from "$lib/preview-scale";
+  import {
+    isReflowApplied,
+    previewCanvasWidth,
+    previewPageWidthPt,
+    reflowCanvasWidth,
+    viewBoxWidthPt,
+  } from "$lib/preview-scale";
   import {
     checkForUpdate,
     downloadAndInstallUpdate,
@@ -135,6 +141,16 @@
   let previewBodyEl = $state<HTMLElement>();
   let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
   let previewScaleFrame = 0; // 已排队的重算帧号（见 onMount 里的 ResizeObserver）
+  /**
+   * 预览重排（用户 2026-09-14 选定）：预览栏多宽、纸张就多宽，让 Rust 侧按这个页宽（pt）
+   * **重新排版**预览，画布因此恒 ≤ 栏宽 → 永不出现横向滚动条，且预览字号仍与编辑器一致。
+   * 0 = 本次编译不重排（预览栏隐藏 / 不可测时走旧的等比缩放路径）。
+   * 见 preview-scale.ts 的「预览按栏宽重新排版」一节。
+   */
+  let previewPageWidthRequest = 0;
+  /** 最近一次编译请求的页宽（0 = 没请求）：判定产物是否真的重排了（文档自己 #set page 会覆盖） */
+  let previewPageWidthUsed = 0;
+  let previewReflowTimer: ReturnType<typeof setTimeout> | undefined;
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1208,12 +1224,42 @@
       previewHost.style.width = "";
       return;
     }
+    const containerWidth = previewBodyEl.clientWidth;
+    const actualPageWidthPt = viewBoxWidthPt(svg.getAttribute("viewBox") ?? "");
+    // 重排生效（产物页宽 = 我们请求的页宽）：画布恒 ≤ 栏宽 —— 这是"预览永不横向滚动"的保证。
+    // 请求被文档自己的 #set page 覆盖时落到下面的等比缩放路径（那也是用户自己的纸型）。
+    if (previewPageWidthUsed > 0 && isReflowApplied(actualPageWidthPt, previewPageWidthUsed)) {
+      const reflowWidth = reflowCanvasWidth(containerWidth, actualPageWidthPt);
+      previewHost.style.width = Number.isNaN(reflowWidth) ? "" : `${reflowWidth}px`;
+      return;
+    }
     const displayWidth = previewCanvasWidth({
-      containerWidth: previewBodyEl.clientWidth,
-      pageWidthPt: viewBoxWidthPt(svg.getAttribute("viewBox") ?? ""),
+      containerWidth,
+      pageWidthPt: actualPageWidthPt,
       uiZoom,
     });
     previewHost.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
+  }
+
+  /**
+   * 预览栏宽度（或界面缩放）变化后，按新栏宽**重新编译**预览（去抖 250ms）。
+   *
+   * 为什么必须重编译：重排的页宽是**编译期**的输入（Rust 侧注入 `#set page`），画布宽度
+   * 只是它的结果。所以每次栏宽有明显变化（窗口缩放 / Ctrl+滚轮 / 切换模式）就要重排一次。
+   * 去抖是因为拖窗口边会连着触发几十次；阈值 2pt 是避免像素级抖动引起无意义重编译。
+   * 预览栏不可测（写作模式隐藏预览、宽度 0）时不重排 —— 那时也没有横向滚动条的问题。
+   */
+  function schedulePreviewReflow() {
+    clearTimeout(previewReflowTimer);
+    previewReflowTimer = setTimeout(() => {
+      const width = previewBodyEl ? previewPageWidthPt(previewBodyEl.clientWidth) : NaN;
+      const next = Number.isNaN(width) ? 0 : width;
+      const changed = next === 0 ? previewPageWidthUsed > 0 : Math.abs(next - previewPageWidthRequest) > 2;
+      if (!changed) return;
+      previewPageWidthRequest = next;
+      dbg.log("preview-reflow", `页宽 ${next === 0 ? "关闭（不重排）" : `${next.toFixed(1)}pt`}`);
+      void runCompile();
+    }, 250);
   }
 
   async function runCompile() {
@@ -1224,7 +1270,20 @@
     // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行；
     // documentPath 传当前文档绝对路径（未保存为 null），Rust 侧以其所在目录解析 include
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
-    const result = await compileToSvg(source, filePath, fontArgs());
+    // 首次编译可能早于 ResizeObserver 的第一次回调：这里补算一次页宽，避免启动时多编译一遍
+    if (previewPageWidthRequest === 0 && previewBodyEl) {
+      const initialWidth = previewPageWidthPt(previewBodyEl.clientWidth);
+      if (!Number.isNaN(initialWidth)) previewPageWidthRequest = initialWidth;
+    }
+    // 预览重排的页宽是**编译期输入**（Rust 侧据此注入 #set page），所以随本次编译一起发出；
+    // 请求值只在结果落地时记进 previewPageWidthUsed（与产物一一对应，见 applyPreviewScale）
+    const requestedPreviewWidthPt = previewPageWidthRequest;
+    const result = await compileToSvg(
+      source,
+      filePath,
+      fontArgs(),
+      requestedPreviewWidthPt || undefined,
+    );
     if (mySeq === 1) {
       // 首次编译完成 = 应用「可正常编辑/预览」就绪点，输出一次启动报告
       mark("first-compile-result");
@@ -1234,7 +1293,8 @@
     if (result.ok) {
       if (!previewHost) return; // 预览栏未挂载（理论上隐藏时仍在 DOM，这里兜底）
       previewHost.innerHTML = result.svg;
-      applyPreviewScale(); // 新产物注入后按当前容器宽度重算画布缩放
+      previewPageWidthUsed = requestedPreviewWidthPt; // 本次产物的请求页宽（0 = 没请求重排）
+      applyPreviewScale(); // 新产物注入后按当前容器宽度重算画布宽度
       pageCount = result.pageCount;
       previewStatus = "ready";
       editorDiagnostics = [];
@@ -1541,6 +1601,9 @@
       previewScaleFrame = requestAnimationFrame(() => {
         previewScaleFrame = 0;
         applyPreviewScale();
+        // 栏宽变了（窗口缩放 / Ctrl+滚轮 / 切换模式）：重排的页宽是编译期输入，
+        // 所以除了重算画布宽度，还要按新栏宽去抖重编译一次（见 schedulePreviewReflow）
+        schedulePreviewReflow();
       });
     });
     if (previewBodyEl) previewResizeObserver.observe(previewBodyEl); // bind:this 已在 onMount 前赋值
@@ -1626,6 +1689,7 @@
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
       clearTimeout(mathTimer); // 停止在途公式渲染批次
+      clearTimeout(previewReflowTimer); // 停止在途的预览重排（避免卸载后还发起编译）
       clearTimeout(startupCheckTimer); // 关窗时取消还没发起的自动更新检查
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
     };

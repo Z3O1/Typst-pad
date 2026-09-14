@@ -1078,7 +1078,19 @@ const wheelOverEditor = async (deltaY, times) => {
     return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
   })()`);
   for (let i = 0; i < times; i++) await c.wheel(center.x, center.y, deltaY, { modifiers: 2 });
-  await new Promise((r) => setTimeout(r, 700)); // 等"调档后再确认一次"那一拍跑完
+  // 等状态**稳定**再断言：调档后还有"再确认一次"的复核（ZOOM_CONFIRM_DELAY_MS=250ms）+ 存档
+  // 300ms 防抖，被引擎拒绝的档位正是靠这一拍拉回来的。固定等 700ms 在负载高时会读到"最后一次
+  // 复核落地之前"的中间态（实测偶发红），改成"先等够下限，再轮询到连续两次读数相同"。
+  await new Promise((r) => setTimeout(r, 900));
+  const readZoom = () =>
+    c.evaluate(`JSON.parse(localStorage.getItem("typst-pad:state") || "{}").uiZoom ?? null`);
+  let previous = await readZoom();
+  for (let i = 0; i < 12; i++) {
+    await new Promise((r) => setTimeout(r, 150));
+    const current = await readZoom();
+    if (current === previous) break;
+    previous = current;
+  }
 };
 
 // A) 引擎照单全收：复核不能误伤（状态 = 请求值）
@@ -1326,28 +1338,31 @@ check(
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// 第 30 组：预览**跟着界面缩放一起变大**（用户两次反馈「预览框大小还是没变」
-// 「预览框里面的字的大小还是没变」）
-// 背景：预览画布是自适应铺满的（applyPreviewScale → preview-scale.ts），而界面缩放走 webview
-// `setZoom`，它把 CSS 视口一起缩小（预览栏 CSS 宽度 505 → 331）。拿这个**缩小后**的栏宽算
-// "铺满"，画布就缩回原样、与引擎的放大正好抵消 → 缩放对编辑区有效、对预览无效。
-// 实测（不修）：1040px 窗口下 100%→150% 画布**物理尺寸比 0.983**（等于没变）。
-// 修法：拟合按**缩放前**的栏宽算（previewScale 收 uiZoom），画布 CSS 宽度保持 100% 时的值，
-// 由引擎把它真正放大。代价也一起锁住：
-//   - 放大到超过栏宽时预览栏**会出现横向滚动条**（固定版心的页面二选一：跟着变大 or 永不横滚，
-//     用户选了跟着变大）；
-//   - 溢出时**左缘必须可达**（`.preview-paper { margin-inline: auto }`：负剩余空间下 auto 外边距
-//     退化成 0 → 左对齐；靠容器 align-items:center 会把左半部分顶出滚动区，永远看不到）。
+// 第 30 组：预览**按栏宽重新排版**（用户 2026-09-14：「预览模式还是有横的拖动的条」）
+// 背景（三轮）：① 预览曾是"自适应铺满栏宽"，界面缩放走 webview `setZoom`、把 CSS 视口一起缩小，
+// 拿缩小后的栏宽算铺满正好与放大抵消 → 用户两次反馈「预览框大小还是没变」；
+// ② 修成"按缩放前的栏宽算、画布保持不变"之后，固定版心（A4）的页面在放大时必然超出预览栏
+// → 出现横向滚动条（用户「预览模式还是有横的拖动的条」，实测 210% 缩放下要横滚 ~250px）；
+// ③ 用户选定**重排**：预览的纸张宽度跟着预览栏走，正文按新宽度重新排版、**字号不变** ——
+// 预览栏永不出现横向滚动条，而且预览字号仍与编辑器一致。代价（用户知情接受）：
+// 预览的换行/分页不再等于导出的 PDF。
+// 实现：栏宽 → 页宽（pt）是**编译期输入**（Rust 侧在编译源最前面注入 `#set page(...)`，
+// 见 typst_world::preview_page_setup）；栏宽变化时去抖 250ms 重编译一次。
+// 文档自己写了 `#set page(...)` 会覆盖注入 → 前端用产物页宽判断，退回旧的等比缩放路径
+// （验收用 `&reflowfail=1` 让桩模拟这台机器）。
 // 无头环境怎么造缩放：CDP `Emulation.setDeviceMetricsOverride` 把 CSS 视口压到「窗口宽 ÷ 缩放」，
 // 布局上等价于 webview 缩放；画布的物理尺寸 = 画布 CSS 宽度 × 缩放（量的 rect 仍是未放大的 px）。
 // ---------------------------------------------------------------------------
-console.log("30) 预览跟着界面缩放变大（100% / 150% / 250%）");
+console.log("30) 预览按栏宽重新排版（永不横向滚动条 + 预览字号不随栏宽缩水）");
 const previewProbe = `(() => {
   const body = document.querySelector(".preview-body");
   const host = document.querySelector("#preview-host");
   const svg = host?.querySelector("svg");
   const rect = svg?.getBoundingClientRect();
   const z = JSON.parse(localStorage.getItem("typst-pad:state") || "{}").uiZoom ?? 1;
+  // 用户单位（pt）→ CSS px 的实际缩放：重排生效时应恒为 EDITOR_FONT_PX / 11pt ≈ 1.27
+  // （预览字号与编辑器一致），且**不随栏宽/缩放变化**——这正是"重排而不是缩小"的判据
+  const ctm = svg?.getScreenCTM?.();
   return {
     z,
     container: body ? body.clientWidth : null,
@@ -1355,19 +1370,39 @@ const previewProbe = `(() => {
     canvasPhys: rect ? Math.round(rect.width * z * 10) / 10 : null,
     overflowX: body ? body.scrollWidth - body.clientWidth : null,
     scrollLeft: body ? body.scrollLeft : null,
-    // 左缘可达性：滚动到最左时，页面左缘不能跑到容器左边之外（否则那部分永远看不到）
     leftGap: rect && body ? Math.round(rect.left - body.getBoundingClientRect().left) : null,
     pages: document.querySelectorAll("#preview-host > svg").length,
+    unitScale: ctm ? Math.round(ctm.a * 1000) / 1000 : null,
+    // 预览里**正文**那行字的高度（CSS px / 物理 px）：重排后纸张恒等于栏宽，所以"跟着缩放
+    // 变大的东西"是字而不是纸张宽度 —— 判据要量字，别量画布宽度（第一版就写错了）
+    textCssPx: (() => {
+      const t = host?.querySelector("text");
+      const r = t?.getBoundingClientRect();
+      return r ? Math.round(r.height * 10) / 10 : null;
+    })(),
+    textPhysPx: (() => {
+      const t = host?.querySelector("text");
+      const r = t?.getBoundingClientRect();
+      return r ? Math.round(r.height * z * 10) / 10 : null;
+    })(),
+    viewBoxW: svg ? Math.round(Number((svg.getAttribute("viewBox") || "0 0 0 0").split(/[\\s,]+/)[2]) * 10) / 10 : null,
+    lastPreviewWidthPt: window.__browserDevLastCompile ? window.__browserDevLastCompile.previewWidthPt : null,
   };
 })()`;
 
-/** 预置「源码模式 + 双栏 + 指定缩放」，在给定 CSS 视口宽下加载，等重算跑完再量 */
-async function loadPreviewAt(viewportW, uiZoom) {
+/** 预置「源码模式 + 双栏 + 指定缩放」，在给定 CSS 视口宽下加载，等重排编译跑完再量 */
+async function loadPreviewAt(viewportW, uiZoom, extraQuery = "") {
   await c.evaluate(`(() => {
     const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
     raw.viewMode = "source";
     raw.showPreview = true;
+    raw.restoreSession = true;
     raw.uiZoom = ${uiZoom};
+    // 给一段足够长的正文：本组判据之一是"窄栏下页数变多"（真的重排了），文档太短时两档都是
+    // 一页、量不出区别（第一版就栽在这上面）
+    const lines = [];
+    for (let i = 1; i <= 60; i++) lines.push("第 " + i + " 行内容");
+    raw.content = lines.join("\\n");
     localStorage.setItem("typst-pad:state", JSON.stringify(raw));
   })()`);
   await c.send("Emulation.setDeviceMetricsOverride", {
@@ -1376,44 +1411,97 @@ async function loadPreviewAt(viewportW, uiZoom) {
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await c.goto(DEV_URL);
+  await c.goto(`${DEV_URL}${extraQuery}`);
   await c.waitFor(`!!document.querySelector(".preview-body svg")`, { timeout: 30000 });
-  await new Promise((r) => setTimeout(r, 1200)); // 等 ResizeObserver + rAF 那次重算
+  // 等 ResizeObserver → 去抖 250ms → 重排编译 → 再量一次画布
+  await new Promise((r) => setTimeout(r, 1800));
   return c.evaluate(previewProbe);
 }
 
-const WIN = 1040; // 中等窗口：100% 时预览栏就比页面自然尺寸窄，走"铺满"分支（正是被吃掉的那一支）
+const WIN = 1040; // 中等窗口：100% 时预览栏比 A4 自然尺寸窄，正是过去要横滚的那一支
 const base = await loadPreviewAt(WIN, 1);
 check(
-  "100% 时画布铺满预览栏（窄栏自适应照旧）",
-  base.canvasCss !== null && Math.abs(base.canvasCss - base.container) <= 2 && base.overflowX <= 1,
+  "重排后的页宽确实传给了后端（previewWidthPt ≈ 栏宽 × 11/14）",
+  base.lastPreviewWidthPt !== null &&
+    Math.abs(base.lastPreviewWidthPt - (base.container * 11) / 14) <= 2,
+  `栏宽 ${base.container} → 请求页宽 ${base.lastPreviewWidthPt}pt`,
+);
+check(
+  "重排生效：产物页宽 = 请求页宽（假 SVG 的 viewBox 跟着走）",
+  base.viewBoxW !== null &&
+    base.lastPreviewWidthPt !== null &&
+    Math.abs(base.viewBoxW - base.lastPreviewWidthPt) <= 1,
+  `viewBox ${base.viewBoxW} vs 请求 ${base.lastPreviewWidthPt}`,
+);
+check(
+  "画布铺满预览栏但**不超出**（永不横向滚动条）",
+  base.canvasCss !== null && Math.abs(base.canvasCss - base.container) <= 2 && base.overflowX <= 0,
   JSON.stringify(base),
+);
+check(
+  "预览字号与编辑器一致（用户单位→CSS px ≈ 14/11 ≈ 1.273）",
+  base.unitScale !== null && Math.abs(base.unitScale - 14 / 11) < 0.05,
+  `unitScale=${base.unitScale}`,
 );
 
 const zoom150 = await loadPreviewAt(Math.round(WIN / 1.5), 1.5);
 check(
-  "150%：画布物理尺寸放大 1.5 倍（预览框和里面的字都变大了）",
-  zoom150.canvasPhys / base.canvasPhys > 1.4,
-  `物理 ${base.canvasPhys} → ${zoom150.canvasPhys}（比 ${(zoom150.canvasPhys / base.canvasPhys).toFixed(3)}）`,
+  "150%：仍然一根横向滚动条都没有（这是这次要修的那件事）",
+  zoom150.overflowX <= 0,
+  `栏宽 ${zoom150.container}，画布 ${zoom150.canvasCss}，横向溢出 ${zoom150.overflowX}px`,
 );
 check(
-  "150%：画布 CSS 宽度不再跟着窄栏缩水（就是「预览一点没变」那条）",
-  zoom150.canvasCss >= base.canvasCss * 0.95,
-  `CSS ${base.canvasCss} → ${zoom150.canvasCss}，栏宽 ${base.container} → ${zoom150.container}`,
+  "150%：预览里的字物理上变大了（预览跟着界面缩放一起变大，没被重排吃掉）",
+  zoom150.textPhysPx !== null && base.textPhysPx !== null && zoom150.textPhysPx / base.textPhysPx > 1.3,
+  `字高 物理 ${base.textPhysPx}px → ${zoom150.textPhysPx}px（比 ${(zoom150.textPhysPx / base.textPhysPx).toFixed(3)}）`,
+);
+check(
+  "150%：纸张宽度 = 栏宽（重排的必然：恒铺满栏宽，物理宽度不随缩放变；变大的是字不是纸张越界）",
+  zoom150.canvasCss !== null && zoom150.container !== null && Math.abs(zoom150.canvasCss - zoom150.container) <= 2,
+  `画布 CSS ${zoom150.canvasCss} vs 栏宽 ${zoom150.container}（物理都 ≈ 窗口的一半栏宽）`,
+);
+check(
+  "150%：预览字号没缩水（重排的是排版，不是把页面缩小——旧实现这里会掉到 ~0.6）",
+  zoom150.unitScale !== null && Math.abs(zoom150.unitScale - base.unitScale) < 0.05,
+  `unitScale ${base.unitScale} → ${zoom150.unitScale}`,
 );
 
 const zoom250 = await loadPreviewAt(Math.round(WIN / 2.5), 2.5);
 check(
-  "250%：物理尺寸继续跟着放大（≈2.5 倍），且比栏宽大（这就是要横向滚的那部分）",
-  zoom250.canvasPhys / base.canvasPhys > 2.2 && zoom250.overflowX > 0,
-  `物理比 ${(zoom250.canvasPhys / base.canvasPhys).toFixed(3)}，横向溢出 ${zoom250.overflowX}px`,
+  "250%：依然不横滚（高倍缩放下栏很窄，最容易被撑出滚动条）",
+  zoom250.overflowX <= 0,
+  `栏宽 ${zoom250.container}，画布 ${zoom250.canvasCss}，横向溢出 ${zoom250.overflowX}px`,
 );
 check(
-  "放大溢出时页面左缘仍然可达（margin-inline: auto 在负剩余空间下退化成左对齐）",
-  zoom250.leftGap >= -1 && zoom250.scrollLeft === 0,
-  `左缘偏移 ${zoom250.leftGap}px（≥0 = 没被顶出滚动区），scrollLeft=${zoom250.scrollLeft}`,
+  "250%：窄栏下页数变多 = 正文真的重排了（不是裁掉/缩小）",
+  zoom250.pages > base.pages,
+  `页数 ${base.pages} → ${zoom250.pages}`,
 );
-await c.screenshot(SHOT("wysiwyg-30-preview-zoom"));
+check(
+  "250%：画布左缘对齐栏内（不越界、不需要横向滚）",
+  zoom250.leftGap !== null && zoom250.leftGap >= -1 && zoom250.scrollLeft === 0,
+  `左缘偏移 ${zoom250.leftGap}px，scrollLeft=${zoom250.scrollLeft}`,
+);
+check(
+  "三档缩放下预览字号逐档变大（100% → 150% → 250%，「预览跟着缩放变大」这条没有丢）",
+  base.textPhysPx !== null &&
+    zoom150.textPhysPx !== null &&
+    zoom250.textPhysPx !== null &&
+    base.textPhysPx < zoom150.textPhysPx &&
+    zoom150.textPhysPx < zoom250.textPhysPx,
+  `字高 物理 ${base.textPhysPx} → ${zoom150.textPhysPx} → ${zoom250.textPhysPx} px`,
+);
+
+// 文档自己写了 #set page(...) 时注入会被覆盖 → 必须退回等比缩放，而不是硬套重排假设
+const fallback = await loadPreviewAt(WIN, 2.5, "&reflowfail=1");
+check(
+  "文档自带纸型（注入被覆盖）时退回等比缩放路径，不假装重排生效",
+  fallback.canvasCss !== null &&
+    fallback.container !== null &&
+    Math.abs(fallback.canvasCss - fallback.container) > 2,
+  `画布 ${fallback.canvasCss} vs 栏宽 ${fallback.container}（退回等比缩放 ⇒ 画布不再等于栏宽）`,
+);
+await c.screenshot(SHOT("wysiwyg-30-preview-reflow"));
 await c.send("Emulation.clearDeviceMetricsOverride");
 
 // ---------------------------------------------------------------------------

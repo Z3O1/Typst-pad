@@ -114,6 +114,8 @@ describe("compileToSvg（invoke 已 mock）", () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("compile_doc", {
       src: "#let x = 1",
       documentPath: SAVED_DOC_PATH,
+      // 预览页宽（预览重排）缺省为 null = 不重排（导出 PDF 走 export_pdf，不受它影响）
+      previewWidthPt: null,
       fontFamilies: null,
       fontDirs: null,
     });
@@ -125,6 +127,7 @@ describe("compileToSvg（invoke 已 mock）", () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("compile_doc", {
       src: "x",
       documentPath: null,
+      previewWidthPt: null,
       fontFamilies: null,
       fontDirs: null,
     });
@@ -283,6 +286,28 @@ describe("字体命令包装（设置里的下拉数据源）", () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith(
       "compile_math",
       expect.objectContaining({ sizePt: 12, fontFamilies: ["SimSun"], fontDirs: [] }),
+    );
+  });
+});
+
+// 预览重排（2026-09-14）：页宽是**编译期输入**，必须原样传给 compile_doc
+// （Rust 侧据此在编译源最前面注入 #set page(width/height/margin) 重新排版预览）
+describe("compileToSvg：预览重排的页宽透传", () => {
+  it("给了页宽就随本次编译一起发出（单位 pt，不换算）", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ok: true, pages: ["<svg>p1</svg>"] });
+    await compileToSvg("x", null, undefined, 312.5);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "compile_doc",
+      expect.objectContaining({ previewWidthPt: 312.5 }),
+    );
+  });
+
+  it("没给页宽时传 null（= 不重排，走旧的等比缩放路径）", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ok: true, pages: ["<svg>p1</svg>"] });
+    await compileToSvg("x", null);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "compile_doc",
+      expect.objectContaining({ previewWidthPt: null }),
     );
   });
 });

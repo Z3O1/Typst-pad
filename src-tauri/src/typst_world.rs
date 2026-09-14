@@ -525,6 +525,36 @@ pub fn resolve_fonts_dir(app: &tauri::AppHandle) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts")
 }
 
+/// A4 尺寸（pt）：预览重排按它的比例缩放页宽/页高/边距
+const A4_WIDTH_PT: f64 = 595.28;
+const A4_HEIGHT_PT: f64 = 841.89;
+/// 预览重排的边距比例：A4 的默认边距（2.5cm ≈ 70.87pt）占页宽的比例，按同比例缩放
+const PREVIEW_MARGIN_RATIO: f64 = 70.87 / A4_WIDTH_PT;
+/// 预览页宽的允许范围（pt）：太窄会把正文挤成一列碎字，超过 A4 没有意义（前端也会夹）
+const PREVIEW_PAGE_MIN_PT: f64 = 180.0;
+
+/// 预览重排用的页设置语句（typst 源码，**一行**）。
+///
+/// 为什么要它：预览画布是一张**固定版心**的页面（A4），界面放大后它比预览栏宽，
+/// 用户就得横向拖动才能看完一行（2026-09-14 反馈「预览模式还是有横的拖动的条」）。
+/// 这一行把预览的纸张改成"和预览栏一样宽、字号不变"——正文**按新宽度重新排版**，
+/// 于是画布正好铺满预览栏、永不出现横向滚动条，而且预览字号仍与编辑器一致。
+/// 代价：预览的换行/分页不再等于导出的 PDF（用户明确选择接受）。
+///
+/// 注意它放在编译源的**最前面**：文档自己写 `#set page(...)`（后写的赢）就会覆盖它，
+/// 那时预览退回旧的"按栏宽等比缩放"路径——前端用返回 SVG 的实际页宽判断是否生效。
+fn preview_page_setup(width_pt: f64) -> Option<String> {
+    if !width_pt.is_finite() {
+        return None;
+    }
+    let width = width_pt.clamp(PREVIEW_PAGE_MIN_PT, A4_WIDTH_PT);
+    let height = width * A4_HEIGHT_PT / A4_WIDTH_PT;
+    let margin = width * PREVIEW_MARGIN_RATIO;
+    Some(format!(
+        "#set page(width: {width:.2}pt, height: {height:.2}pt, margin: {margin:.2}pt)"
+    ))
+}
+
 /// 编译文档为每页 SVG（pages 按页序，含 <svg> 标签）。
 /// 失败时返回诊断列表；成功但带警告时 warnings 附加返回。
 pub fn compile(
@@ -533,7 +563,22 @@ pub fn compile(
     fonts_dir: &Path,
     font_config: &FontConfig,
 ) -> CompileOutput {
-    // 未保存文档时预检相对 include，给出明确诊断（编译阶段只会得到笼统的 file not found）
+    compile_with_page_width(src, document_path, fonts_dir, font_config, None)
+}
+
+/// 同 [`compile`]，但可以指定**预览页宽**（pt）：`Some(w)` 时在编译源最前面注入一行
+/// [`preview_page_setup`]，让预览按预览栏宽度重新排版（见那里的说明）。
+/// 主源诊断的行号会**减回**注入的那一行，所以前端的位置映射逻辑完全不用改；
+/// include 文件（path 非空）的诊断行号不动。
+pub fn compile_with_page_width(
+    src: String,
+    document_path: Option<String>,
+    fonts_dir: &Path,
+    font_config: &FontConfig,
+    preview_width_pt: Option<f64>,
+) -> CompileOutput {
+    // 未保存文档时预检相对 include，给出明确诊断（编译阶段只会得到笼统的 file not found）。
+    // **在注入页设置之前做**：这些诊断的行号直接来自用户文档，不该被注入的行影响。
     if document_path.is_none() {
         if let Some(diags) = check_relative_imports(&src) {
             return CompileOutput {
@@ -544,6 +589,13 @@ pub fn compile(
             };
         }
     }
+
+    let injected = preview_width_pt.and_then(preview_page_setup);
+    let main_line_offset = if injected.is_some() { 1 } else { 0 };
+    let src = match injected {
+        Some(setup) => format!("{setup}\n{src}"),
+        None => src,
+    };
 
     let world = TypstWorld::new(src, document_path, fonts_dir, font_config);
     match typst::compile::<PagedDocument>(&world) {
@@ -556,7 +608,7 @@ pub fn compile(
                 ok: true,
                 pages,
                 diagnostics: Vec::new(),
-                warnings: collect_diagnostics(&world, warnings.into_iter()),
+                warnings: collect_diagnostics(&world, warnings.into_iter(), main_line_offset),
             }
         }
         typst::diag::Warned {
@@ -565,7 +617,7 @@ pub fn compile(
         } => CompileOutput {
             ok: false,
             pages: Vec::new(),
-            diagnostics: collect_diagnostics(&world, errors.into_iter()),
+            diagnostics: collect_diagnostics(&world, errors.into_iter(), main_line_offset),
             warnings: Vec::new(),
         },
     }
@@ -917,7 +969,10 @@ pub fn compile_to_pdf_bytes(
             warnings: _,
         } => {
             // 导出失败时给出第一条诊断的可读信息
-            let first = errors.into_iter().find_map(|d| to_diagnostic(&world, &d));
+            // PDF 导出不做预览重排注入（偏移恒为 0）
+            let first = errors
+                .into_iter()
+                .find_map(|d| to_diagnostic(&world, &d, 0));
             return Err(first.map_or_else(
                 || "编译失败".to_string(),
                 |d| format!("{}: 行 {} 列 {}", d.message, d.line, d.column),
@@ -927,7 +982,10 @@ pub fn compile_to_pdf_bytes(
     match typst_pdf::pdf(&document, &PdfOptions::default()) {
         Ok(bytes) => Ok(bytes),
         Err(errors) => {
-            let first = errors.into_iter().find_map(|d| to_diagnostic(&world, &d));
+            // PDF 导出不做预览重排注入（偏移恒为 0）
+            let first = errors
+                .into_iter()
+                .find_map(|d| to_diagnostic(&world, &d, 0));
             Err(first.map_or_else(
                 || "PDF 导出失败".to_string(),
                 |d| format!("PDF 导出失败: {}: 行 {} 列 {}", d.message, d.line, d.column),
@@ -941,14 +999,23 @@ pub fn compile_to_pdf_bytes(
 fn collect_diagnostics(
     world: &TypstWorld,
     diags: impl IntoIterator<Item = SourceDiagnostic>,
+    main_line_offset: u32,
 ) -> Vec<Diagnostic> {
     diags
         .into_iter()
-        .filter_map(|d| to_diagnostic(world, &d))
+        .filter_map(|d| to_diagnostic(world, &d, main_line_offset))
         .collect()
 }
 
-fn to_diagnostic(world: &TypstWorld, diag: &SourceDiagnostic) -> Option<Diagnostic> {
+/// `main_line_offset` = 编译源最前面注入的行数（预览重排的 `#set page(...)`，见
+/// [`preview_page_setup`]）：**只对主源**（path 为 None）的诊断把行号减回去，
+/// 这样前端"编译源行号 → 用户文档行号"的映射不需要知道注入这件事；
+/// include 文件的行号本来就是那个文件自己的，不动。
+fn to_diagnostic(
+    world: &TypstWorld,
+    diag: &SourceDiagnostic,
+    main_line_offset: u32,
+) -> Option<Diagnostic> {
     let severity = match diag.severity {
         Severity::Error => "error",
         Severity::Warning => "warning",
@@ -977,12 +1044,15 @@ fn to_diagnostic(world: &TypstWorld, diag: &SourceDiagnostic) -> Option<Diagnost
         .map(|(_, p)| p.trim_end_matches(')').to_string())
         .or_else(|| world.path_of(id));
 
+    // 主源诊断的行号减回注入的行（include 文件的行号是它自己的，不动）
+    let shift = if path.is_none() { main_line_offset } else { 0 };
+
     Some(Diagnostic {
         message: diag.message.to_string(),
         severity: severity.to_string(),
-        line: start.0 as u32 + 1,
+        line: (start.0 as u32).saturating_sub(shift) + 1,
         column: start.1 as u32 + 1,
-        end_line: Some(end.0 as u32 + 1),
+        end_line: Some((end.0 as u32).saturating_sub(shift) + 1),
         end_column: Some(end.1 as u32 + 1),
         path,
     })
@@ -1192,6 +1262,75 @@ mod tests {
         let start = svg.find("viewBox=\"")? + "viewBox=\"".len();
         let end = svg[start..].find('"')? + start;
         svg[start..end].split_whitespace().nth(3)?.parse().ok()
+    }
+
+    /// 从 SVG 头部取 viewBox 的宽度（pt）
+    fn view_box_width(svg: &str) -> Option<f64> {
+        let start = svg.find("viewBox=\"")? + "viewBox=\"".len();
+        let end = svg[start..].find('"')? + start;
+        svg[start..end].split_whitespace().nth(2)?.parse().ok()
+    }
+
+    /// 预览重排（2026-09-14 用户要求「预览不要横向滚动条」）：
+    /// 给定页宽时产物页宽应等于它（越界夹到 180..=A4），并且**正文真的重排了**
+    /// ——同一段文字在窄页上会排到更多页；不传页宽时仍是文档自己的 A4。
+    #[test]
+    fn compile_with_page_width_reflows_preview() {
+        let body = "中文测试内容，用于验证按栏宽重新排版。".repeat(120);
+        let src = format!("= 标题\n\n{body}\n");
+
+        let wide = compile_with_page_width(src.clone(), None, &fonts_dir(), &FontConfig::default(), None);
+        assert!(wide.ok, "A4 编译应成功: {:?}", wide.diagnostics);
+        let wide_pt = view_box_width(&wide.pages[0]).expect("应有 viewBox");
+        assert!(
+            (wide_pt - A4_WIDTH_PT).abs() < 1.0,
+            "不传页宽时应是文档默认的 A4（实测 {wide_pt}pt）"
+        );
+
+        let narrow =
+            compile_with_page_width(src.clone(), None, &fonts_dir(), &FontConfig::default(), Some(300.0));
+        assert!(narrow.ok, "窄页编译应成功: {:?}", narrow.diagnostics);
+        let narrow_pt = view_box_width(&narrow.pages[0]).expect("应有 viewBox");
+        assert!(
+            (narrow_pt - 300.0).abs() < 1.0,
+            "页宽应等于请求值（实测 {narrow_pt}pt）"
+        );
+        assert!(
+            narrow.pages.len() > wide.pages.len(),
+            "重排应当发生：窄页页数应多于 A4（窄 {} vs A4 {}）",
+            narrow.pages.len(),
+            wide.pages.len()
+        );
+
+        // 越界请求要被夹住（前端也会夹，这里保证后端不信任上游）
+        let tiny = compile_with_page_width(src, None, &fonts_dir(), &FontConfig::default(), Some(10.0));
+        let tiny_pt = view_box_width(&tiny.pages[0]).expect("应有 viewBox");
+        assert!(
+            (tiny_pt - PREVIEW_PAGE_MIN_PT).abs() < 1.0,
+            "过窄的请求应夹到下限（实测 {tiny_pt}pt）"
+        );
+    }
+
+    /// 注入的页设置**不能**让诊断行号漂移：错误在第 2 行，注入一行后报的仍是第 2 行
+    /// （前端"编译源行号 → 用户文档行号"的映射完全不知道有注入这件事）。
+    #[test]
+    fn compile_with_page_width_keeps_diagnostic_lines() {
+        let src = "= 标题\n#不存在的函数()\n".to_string();
+        let plain = compile_with_page_width(src.clone(), None, &fonts_dir(), &FontConfig::default(), None);
+        let with_setup =
+            compile_with_page_width(src, None, &fonts_dir(), &FontConfig::default(), Some(300.0));
+        assert!(!plain.ok && !with_setup.ok, "两者都应编译失败");
+        assert_eq!(
+            plain.diagnostics[0].line, 2,
+            "不注入时错误在第 2 行（实测 {:?}）",
+            plain.diagnostics[0]
+        );
+        assert_eq!(
+            with_setup.diagnostics[0].line, 2,
+            "注入页设置后错误行号不得漂移（实测 {:?}）",
+            with_setup.diagnostics[0]
+        );
+        assert!(with_setup.pages.is_empty(), "失败时不该有页面产物");
     }
 
     /// 前缀（context）参与公式编译，但公式字号恒为编辑器字号（前缀里的 text(size) 不得带偏）

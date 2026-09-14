@@ -145,24 +145,34 @@ function docToLines(doc: string): string[] {
 }
 
 /** 渲染单页 SVG 字符串（结构模仿 typst 的 SVG 输出：一个 svg 根 + 一组 text） */
-function renderPage(lines: string[], pageIndex: number, pageCount: number): string {
+function renderPage(
+  lines: string[],
+  pageIndex: number,
+  pageCount: number,
+  pageWidthPt: number = PAGE_WIDTH,
+): string {
+  // 预览重排：**纸张宽度变窄、字号不变**（这正是"重排"与"等比缩小"的区别——真实后端由
+  // typst 按新页宽重排正文，`#set page(width:)` 不改 text size）。页高与边距按 A4 比例缩放
+  // （与 Rust 侧 preview_page_setup 一致），行高与字号保持原值 → 窄页排下更多行、页数变多。
+  const ratio = pageWidthPt / PAGE_WIDTH;
+  const width = pageWidthPt;
+  const height = PAGE_HEIGHT * ratio;
+  const margin = MARGIN * ratio;
   const parts: string[] = [];
   parts.push(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${PAGE_WIDTH}" height="${PAGE_HEIGHT}" viewBox="0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}">`
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
   );
-  parts.push(
-    `<rect x="0" y="0" width="${PAGE_WIDTH}" height="${PAGE_HEIGHT}" fill="#ffffff"/>`
-  );
+  parts.push(`<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`);
   lines.forEach((line, i) => {
     if (line.trim() === "") return;
-    const y = MARGIN + (i + 1) * LINE_HEIGHT;
+    const y = margin + (i + 1) * LINE_HEIGHT;
     parts.push(
-      `<text x="${MARGIN}" y="${y}" font-family="Noto Serif CJK SC, Songti SC, serif" font-size="${FONT_SIZE}" fill="#111111">${escapeXml(line)}</text>`
+      `<text x="${margin}" y="${y}" font-family="Noto Serif CJK SC, Songti SC, serif" font-size="${FONT_SIZE}" fill="#111111">${escapeXml(line)}</text>`
     );
   });
   // 页脚页号：便于确认多页拼接与 page-separator 分隔生效
   parts.push(
-    `<text x="${PAGE_WIDTH / 2}" y="${PAGE_HEIGHT - MARGIN / 2}" text-anchor="middle" font-family="Noto Serif CJK SC, serif" font-size="10" fill="#666666">${pageIndex + 1} / ${pageCount}</text>`
+    `<text x="${width / 2}" y="${height - margin / 2}" text-anchor="middle" font-family="Noto Serif CJK SC, serif" font-size="10" fill="#666666">${pageIndex + 1} / ${pageCount}</text>`
   );
   parts.push("</svg>");
   return parts.join("");
@@ -228,15 +238,22 @@ export function warnFakeRendering(): void {
   );
 }
 
-/** 当前文档 → 假 SVG 页数组 */
-export function fakePages(doc: string): string[] {
+/** 当前文档 → 假 SVG 页数组；pageWidthPt = 预览重排请求的页宽（缺省 A4） */
+export function fakePages(doc: string, pageWidthPt?: number): string[] {
   const lines = docToLines(doc);
+  // 预览重排（compile_doc 的 previewWidthPt）在假实现里也要有可见效果：页更窄 → 同一段文字
+  // 排到更多页（真实后端由 typst 重排，见 typst_world::preview_page_setup）
+  const width = typeof pageWidthPt === "number" && pageWidthPt > 0 ? pageWidthPt : PAGE_WIDTH;
+  // 每页行数按"纸张高度（随宽度等比缩放）− 边距"算：字号与行高不变 → 窄页排得下的行更少、页数更多
+  const ratio = width / PAGE_WIDTH;
+  const usableHeight = PAGE_HEIGHT * ratio - 2 * MARGIN * ratio;
+  const perPage = Math.max(1, Math.floor(usableHeight / LINE_HEIGHT));
   const pages: string[][] = [];
-  for (let i = 0; i < lines.length; i += LINES_PER_PAGE) {
-    pages.push(lines.slice(i, i + LINES_PER_PAGE));
+  for (let i = 0; i < lines.length; i += perPage) {
+    pages.push(lines.slice(i, i + perPage));
   }
   if (pages.length === 0) pages.push([""]);
-  return pages.map((pageLines, i) => renderPage(pageLines, i, pages.length));
+  return pages.map((pageLines, i) => renderPage(pageLines, i, pages.length, width));
 }
 
 // ---------------------------------------------------------------------------
@@ -305,16 +322,22 @@ async function handleCommand(
           ]
         : [];
       // 记录最近一次 compile_doc 入参 + 调用次数：验收靠它断言「保存设置 → 立即重编译」
-      // 与「字体配置确实传下去了」（假 SVG 本身看不出字体）
+      // 与「字体配置确实传下去了」（假 SVG 本身看不出字体），以及「预览重排的页宽传对了」
       const w = window as unknown as Record<string, unknown>;
       w.__browserDevCompileCount = ((w.__browserDevCompileCount as number) ?? 0) + 1;
       w.__browserDevLastCompile = {
         src,
         fontFamilies: Array.isArray(a.fontFamilies) ? a.fontFamilies : null,
         fontDirs: Array.isArray(a.fontDirs) ? a.fontDirs : null,
+        previewWidthPt: typeof a.previewWidthPt === "number" ? a.previewWidthPt : null,
       };
+      // 预览重排：请求了页宽就让假页按它重排（页更窄 → 页数更多）。
+      // `&reflowfail=1` 模拟"文档自己写了 #set page(...)"那台机器：注入被覆盖、产物页宽
+      // 仍是 A4 —— 前端据此退回旧的等比缩放路径（见 preview-scale.isReflowApplied）。
+      const requested = typeof a.previewWidthPt === "number" && a.previewWidthPt > 0 ? a.previewWidthPt : undefined;
+      const honored = new URLSearchParams(window.location.search).has("reflowfail") ? undefined : requested;
       // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
-      return { ok: true, pages: fakePages(src), warnings };
+      return { ok: true, pages: fakePages(src, honored), warnings };
     }
     case "compile_math": {
       notify(command);

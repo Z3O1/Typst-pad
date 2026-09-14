@@ -80,6 +80,9 @@ struct CompileState {
 
 /// 编译文档为每页 SVG（compile_doc）：src 为主文档源码，document_path 为磁盘路径
 /// （None = 未保存，相对导入会报"需要先保存文档"）。
+/// preview_width_pt = 预览页宽（pt，可选）：给了就按它**重新排版**预览（见
+/// typst_world::preview_page_setup）——预览栏多宽、纸张就多宽，正文重排、字号不变，
+/// 于是预览永不出现横向滚动条；导出 PDF 走 export_pdf，**不受它影响**。
 /// 返回 CompileOutput：成功 { ok, pages }，失败 { ok, diagnostics }，成功且带警告时附加 warnings。
 /// 编译在 spawn_blocking 中执行（不阻塞 UI），内部互斥锁串行化。
 /// Err 仅用于编译任务本身异常终止（正常编译失败仍走 Ok(ok:false)）。
@@ -88,6 +91,7 @@ async fn compile_doc(
     state: tauri::State<'_, CompileState>,
     src: String,
     document_path: Option<String>,
+    preview_width_pt: Option<f64>,
     font_families: Option<Vec<String>>,
     font_dirs: Option<Vec<String>>,
 ) -> Result<typst_world::CompileOutput, String> {
@@ -96,7 +100,7 @@ async fn compile_doc(
     let fonts = typst_world::FontConfig::new(font_families, font_dirs);
     Ok(tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        typst_world::compile(src, document_path, &fonts_dir, &fonts)
+        typst_world::compile_with_page_width(src, document_path, &fonts_dir, &fonts, preview_width_pt)
     })
     .await
     .unwrap_or_else(|_| typst_world::CompileOutput::internal_error("编译任务异常终止")))

@@ -169,16 +169,23 @@ export function composePages(pages: string[]): string {
 /**
  * 编译 Typst 源码为 SVG 预览。失败返回错误结果对象（调用方保留上次成功预览），
  * 不抛异常；invoke/IPC 异常也收敛为错误结果（errors 为空，error 带原始消息）。
+ *
+ * `previewWidthPt`（可选）= 预览页宽（pt）：给了就按它**给预览重新排版**
+ * （Rust 侧在编译源最前面注入 `#set page(width/height/margin)`，见
+ * typst_world::preview_page_setup）——预览栏多宽、纸张就多宽，正文重排、字号不变，
+ * 于是预览永不出现横向滚动条。**只影响预览**：导出 PDF 走 export_pdf，不受它影响。
  */
 export async function compileToSvg(
   source: string,
   documentPath: string | null,
   fonts?: FontConfigArgs,
+  previewWidthPt?: number,
 ): Promise<CompileResult> {
   try {
     const out = await invoke<CompileOutput>("compile_doc", {
       src: source,
       documentPath,
+      previewWidthPt: previewWidthPt ?? null,
       ...fontArgs(fonts),
     });
     if (out.ok) {

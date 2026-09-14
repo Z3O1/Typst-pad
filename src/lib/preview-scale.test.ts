@@ -9,6 +9,11 @@ import {
   previewScale,
   previewCanvasWidth,
   viewBoxWidthPt,
+  previewPageWidthPt,
+  reflowCanvasWidth,
+  isReflowApplied,
+  PREVIEW_PAGE_MIN_PT,
+  PREVIEW_PAGE_MAX_PT,
 } from "./preview-scale";
 
 /** A4 页面物理宽度（pt）——Typst 默认页面尺寸 */
@@ -169,5 +174,73 @@ describe("viewBoxWidthPt（SVG viewBox → 页宽 pt）", () => {
     expect(viewBoxWidthPt("")).toBeNaN();
     expect(viewBoxWidthPt("0 0 x 841")).toBeNaN();
     expect(viewBoxWidthPt("0 0")).toBeNaN();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 预览**按栏宽重新排版**（2026-09-14 用户反馈「预览模式还是有横的拖动的条」）：
+// 栏宽 → 页宽（pt）→ 画布宽度，三者必须自洽：**画布恒 ≤ 栏宽**（这是"永不横滚"的保证），
+// 且重排生效时预览字号与编辑器一致（用户单位→CSS px = 14/11）。
+// ---------------------------------------------------------------------------
+describe("previewPageWidthPt（栏宽 → 重排页宽）", () => {
+  it("页宽 = 栏宽 × 11/14（于是画布 1:1 铺满栏宽时，正文渲染成 14px）", () => {
+    expect(previewPageWidthPt(700)).toBeCloseTo((700 * TYPST_DEFAULT_TEXT_PT) / EDITOR_FONT_PX, 6);
+  });
+
+  it("重排后 1:1 铺满，等价于 naturalScale 的字号对齐", () => {
+    const container = 512;
+    const pagePt = previewPageWidthPt(container);
+    // 画布 = 栏宽 ÷ 页宽 = 每 pt 多少 CSS px，应等于 14/11
+    expect(container / pagePt).toBeCloseTo(EDITOR_FONT_PX / TYPST_DEFAULT_TEXT_PT, 6);
+  });
+
+  it("页宽夹在 180..=A4 之间（栏太窄不会挤成碎字，太宽不会行长过长）", () => {
+    expect(previewPageWidthPt(100)).toBe(PREVIEW_PAGE_MIN_PT);
+    expect(previewPageWidthPt(2000)).toBe(PREVIEW_PAGE_MAX_PT);
+  });
+
+  it("容器不可测（0 / 负数 / NaN）→ NaN（调用方据此关掉重排）", () => {
+    expect(previewPageWidthPt(0)).toBeNaN();
+    expect(previewPageWidthPt(-10)).toBeNaN();
+    expect(previewPageWidthPt(Number.NaN)).toBeNaN();
+  });
+});
+
+describe("reflowCanvasWidth（重排画布宽度）", () => {
+  it("**恒 ≤ 容器宽**——栏从宽到窄扫一遍都不许溢出（永不横滚）", () => {
+    for (const container of [240, 320, 480, 700, 900, 1400]) {
+      const pagePt = previewPageWidthPt(container);
+      const canvas = reflowCanvasWidth(container, pagePt);
+      expect(canvas).toBeLessThanOrEqual(container + 1e-9);
+    }
+  });
+
+  it("栏宽在上下限之内时正好铺满栏宽", () => {
+    expect(reflowCanvasWidth(700, previewPageWidthPt(700))).toBeCloseTo(700, 6);
+  });
+
+  it("栏极窄（页宽被夹到下限量）时仍不溢出：画布退到栏宽", () => {
+    expect(reflowCanvasWidth(150, previewPageWidthPt(150))).toBeCloseTo(150, 6);
+  });
+
+  it("容器/页宽非法 → NaN", () => {
+    expect(reflowCanvasWidth(0, 300)).toBeNaN();
+    expect(reflowCanvasWidth(500, Number.NaN)).toBeNaN();
+  });
+});
+
+describe("isReflowApplied（注入的页设置是否生效）", () => {
+  it("产物页宽 = 请求页宽（±1pt）→ 生效", () => {
+    expect(isReflowApplied(300, 300)).toBe(true);
+    expect(isReflowApplied(300.5, 300)).toBe(true);
+  });
+
+  it("文档自己 #set page 覆盖了注入（产物仍是 A4）→ 不生效，退回等比缩放", () => {
+    expect(isReflowApplied(A4_WIDTH_PT, 300)).toBe(false);
+  });
+
+  it("测量失败（NaN）→ 不生效", () => {
+    expect(isReflowApplied(Number.NaN, 300)).toBe(false);
+    expect(isReflowApplied(300, Number.NaN)).toBe(false);
   });
 });
