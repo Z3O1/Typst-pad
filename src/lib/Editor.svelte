@@ -216,6 +216,64 @@
     });
   });
 
+  /**
+   * 切换界面模式时"把光标留在原处"用的锚点（用户要求：「切换模式不应该改变光标位置」）。
+   *
+   * 背景：写作模式 ↔ 源码模式换的是**整套布局**（单栏 16px / 行距 1.9 / 正文衬线 ↔ 双栏
+   * 14px / 等宽 + 折行开关 + 编辑区只剩一半宽），而 CodeMirror 的滚动锚点是"最上面那条可见行"，
+   * 不是光标。于是切完之后光标常被甩出视口：实测 40 行文档、光标在第 30 行（视口 y=415）时
+   * 切一次模式，`scroller.scrollTop` 归零，切回写作模式后光标在 **y=920**（视口只有 800）——
+   * 用户看到的就是"光标位置变了 / 光标不见了"。
+   * （注意：**不是**折行重配导致的：源码模式下单独按 Alt+Z 切换折行，scrollTop 2920 纹丝不动。）
+   *
+   * 做法：切换**前**记下光标在视口里的偏移（由页面在改 viewMode 之前调 `captureCaretAnchor`），
+   * 布局换完之后把滚动调回去，让光标回到原来的屏幕高度；调到文档端点时会被夹住，但仍在视口内。
+   * 光标切换前本来就在视口外（用户手动滚走了）时**不做任何事** —— 那是用户的意图，别把他拽回来。
+   */
+  let caretAnchor: { pos: number; offsetFromTop: number } | null = null;
+
+  /** 记下光标当前在视口里的高度（页面在改 viewMode **之前**调用；见 restoreCaretAnchor） */
+  export function captureCaretAnchor(): void {
+    if (!view) return;
+    const pos = view.state.selection.main.head;
+    const caret = view.coordsAtPos(pos);
+    if (!caret) return;
+    const offsetFromTop = caret.top - view.scrollDOM.getBoundingClientRect().top;
+    // 视口外（含贴边）不接管：那是用户自己滚出去的位置
+    if (offsetFromTop < 0 || offsetFromTop > view.scrollDOM.clientHeight) return;
+    caretAnchor = { pos, offsetFromTop };
+  }
+
+  /** 换完布局把滚动调回去，让光标回到原来的屏幕高度（越界时夹在视口内） */
+  function restoreCaretAnchor(): void {
+    const anchor = caretAnchor;
+    caretAnchor = null;
+    if (!view || !anchor) return;
+    const scroller = view.scrollDOM;
+    const caret = view.coordsAtPos(view.state.selection.main.head);
+    if (!caret) return;
+    const current = caret.top - scroller.getBoundingClientRect().top;
+    const target = Math.max(0, Math.min(anchor.offsetFromTop, scroller.clientHeight - 1));
+    const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const next = Math.max(0, Math.min(maxScroll, scroller.scrollTop + (current - target)));
+    if (Math.abs(next - scroller.scrollTop) > 1) {
+      dbg.log(
+        "editor",
+        `模式切换：把光标调回视口 y≈${Math.round(target)}（滚动 ${Math.round(scroller.scrollTop)} → ${Math.round(next)}）`,
+      );
+      scroller.scrollTop = next;
+    }
+  }
+
+  // 界面模式变化 → 下一帧（再下一帧，等 CodeMirror 自己的 measure 跑完）把光标调回原处
+  let appliedMode: "write" | "source" | null = null;
+  $effect(() => {
+    if (!view) return;
+    if (appliedMode === mode) return;
+    appliedMode = mode;
+    requestAnimationFrame(() => requestAnimationFrame(restoreCaretAnchor));
+  });
+
   // 编译错误（diagnostics）/ 前缀代码（prefixCode）变化：通过 Compartment 重配，
   // 刷新波浪线与 hover 提示（reconfigure 会重跑 StateField.create，见 diagnostics-utils）
   $effect(() => {

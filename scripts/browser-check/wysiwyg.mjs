@@ -1581,5 +1581,121 @@ await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await new Promise((r) => setTimeout(r, 400));
 
+// ---------------------------------------------------------------------------
+// 第 33 组：切换模式不改变光标位置（用户要求：「切换模式不应该改变光标位置」）
+// 根因：写作模式 ↔ 源码模式换的是**整套布局**（单栏 16px / 行距 1.9 ↔ 双栏 14px 等宽 +
+// 折行开关 + 编辑区只剩一半宽），而 CodeMirror 的滚动锚点是"最上面那条可见行"、不是光标 ——
+// 实测 40 行文档、光标在第 30 行（视口 y=415）时切一次模式，`scroller.scrollTop` 归零，
+// 切回写作模式后光标在 **y=920**（视口只有 800）：光标跑到屏幕外 = "位置变了"。
+// 不是折行重配导致的：源码模式下单独按 Alt+Z 切换折行，scrollTop 2920 纹丝不动。
+// 修法：切换前记下光标在视口里的高度（toggleViewMode 调 Editor.captureCaretAnchor），
+// 布局换完后把滚动调回去（被文档端点夹住时也仍在视口内）。
+// 注意量法：CM6 只渲染视口内的行，DOM 里的行序号**不是**文档行号 —— 逻辑位置要看
+// 源码模式状态栏的「行/列」（写作模式不显示行列），视觉位置看光标相对滚动容器的 y。
+// ---------------------------------------------------------------------------
+console.log("33) 切换模式不改变光标位置");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+await c.click(400, 300);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await c.type(Array.from({ length: 120 }, (_, i) => `第 ${i + 1} 行内容 abcdefghij`).join("\n"));
+await new Promise((r) => setTimeout(r, 700));
+
+/** 光标相对滚动容器的高度 + 是否在视口内（两种模式都能量） */
+const caretProbe = `(() => {
+  const sc = document.querySelector(".cm-scroller");
+  const sel = document.getSelection();
+  const rect = sel && sel.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
+  const scRect = sc.getBoundingClientRect();
+  return {
+    mode: document.querySelector(".statusbar .mode-tag")?.textContent ?? "",
+    offset: rect ? Math.round(rect.top - scRect.top) : null,
+    visible: rect ? rect.top >= scRect.top - 1 && rect.bottom <= scRect.bottom + 1 : false,
+    status: document.querySelector(".status-text")?.textContent ?? "",
+    clientHeight: Math.round(sc.clientHeight),
+    scrollTop: Math.round(sc.scrollTop),
+    maxScroll: Math.round(sc.scrollHeight - sc.clientHeight),
+  };
+})()`;
+const cursorRow = `(() => {
+  const m = (document.querySelector(".statusbar").innerText.match(/行\\s*(\\d+)/) || [])[1];
+  return m ? Number(m) : null;
+})()`;
+
+// 先滚到文档中段，再在视口中部点一下：这样光标的屏幕高度上下都有调节余地，测得出"保不保持"
+const center = await c.evaluate(`(() => {
+  const r = document.querySelector(".editor-pane").getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+})()`);
+// 滚到**文档中段**再点视口中部：光标上方下方都要有足够内容，否则"保持屏幕高度"在几何上
+// 不可能（实测踩过：锚点落在文档末尾附近时，源码模式内容更短，滚到底也抬不回原来的高度 ——
+// 那种情况只能保证"仍在视口内"，即下面第一条断言）。
+// 滚动用直接赋 scrollTop 而不是滚轮：无头环境里 CDP 滚轮的加速不可控（实测 6 格就冲到文末）。
+const scrolled = await c.evaluate(`(() => {
+  const sc = document.querySelector(".cm-scroller");
+  sc.scrollTop = 900;
+  return Math.round(sc.scrollTop);
+})()`);
+await new Promise((r) => setTimeout(r, 400));
+await c.click(center.x, 420);
+await new Promise((r) => setTimeout(r, 400));
+const caretWrite = await c.evaluate(caretProbe);
+check(
+  "起手：写作模式里光标可见、位于视口中部（上下都有滚动余地）",
+  caretWrite.visible === true &&
+    caretWrite.offset > 100 &&
+    caretWrite.scrollTop > 100 &&
+    caretWrite.scrollTop < caretWrite.maxScroll - 200,
+  `scrollTop=${scrolled}，${JSON.stringify(caretWrite)}`,
+);
+
+// ① 写作 → 源码
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 900));
+const caretSource = await c.evaluate(caretProbe);
+const rowSource = await c.evaluate(cursorRow);
+check(
+  "切到源码模式后光标仍在视口内（修前会被甩到屏幕外）",
+  caretSource.visible === true,
+  `${JSON.stringify(caretSource)}（切换前 y=${caretWrite.offset}）`,
+);
+check(
+  "切到源码模式后光标的屏幕高度基本不变（±40px 内）",
+  caretSource.offset !== null && Math.abs(caretSource.offset - caretWrite.offset) <= 40,
+  `y ${caretWrite.offset} → ${caretSource.offset}`,
+);
+
+// ② 源码 → 写作
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 900));
+const caretBackWrite = await c.evaluate(caretProbe);
+check(
+  "切回写作模式后光标仍在视口内、屏幕高度也回到原处",
+  caretBackWrite.visible === true &&
+    caretBackWrite.offset !== null &&
+    Math.abs(caretBackWrite.offset - caretSource.offset) <= 40,
+  `y ${caretSource.offset} → ${caretBackWrite.offset}`,
+);
+
+// ③ 再回源码：逻辑位置（状态栏的「行」）必须与第一次切过去时一致
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 900));
+const rowBack = await c.evaluate(cursorRow);
+check(
+  "来回一趟后文档内的逻辑位置没变（状态栏行号一致）",
+  rowBack !== null && rowSource !== null && rowBack === rowSource,
+  `行 ${rowSource} → ${rowBack}`,
+);
+await c.screenshot(SHOT("wysiwyg-33-mode-switch-caret"));
+
+// 收尾：清回空文档并回写作模式
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 400));
+
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
 c.close();

@@ -99,6 +99,8 @@
     execCommand(cmd: "cut" | "copy" | "paste"): void;
     /** 写作模式的格式命令（见 write-commands.ts） */
     runWriteCommand(command: WriteCommand): void;
+    /** 切换模式前记下光标在视口里的高度（用户要求：切换模式不改变光标位置，见 Editor.svelte） */
+    captureCaretAnchor(): void;
   }
 
   /** MenuBar 组件实例方法（右键菜单弹出前联动收起） */
@@ -579,6 +581,10 @@
 
   /** 写作模式 ↔ 源码模式（仿 Typora 的"源代码模式"）：预览栏随模式联动 */
   function toggleViewMode() {
+    // 切换前先记下光标在屏幕上的高度：两种模式的字号/行距/栏宽完全不同，CodeMirror 的滚动
+    // 锚点（最上面那条可见行）会让光标被甩出视口 —— 用户反馈「切换模式不应该改变光标位置」。
+    // 必须在改 viewMode **之前**记（改完布局就换了，量到的已经是新布局）。见 Editor.svelte。
+    editorRef?.captureCaretAnchor();
     viewMode = viewMode === "write" ? "source" : "write";
     // 写作模式单栏（编辑区即排版结果）；源码模式双栏（源码 + 整页预览对照）
     showPreview = viewMode === "source";
