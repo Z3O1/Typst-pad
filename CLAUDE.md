@@ -12,7 +12,14 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 
 - 版本 `0.7.3`（**首个带自动更新的版本**），`main` 与 `origin/main` 同步，tag `v0.7.3` 已推（`release.yml` 构建草稿 Release）。
 - **发行状态（2026-09-14 实测）：`v0.7.3` 已发布并标记 Latest（首个带自动更新的版本，资产含 `latest.json` + 安装包 + `.sig`）；`v0.7.2`、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）。发版时 `release.yml` 建的仍是**草稿**，**必须手动 Publish**（或按下方约定直接发）——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效。
-  - 发布后建议验一次：`gh api repos/Z3O1/Typst-pad/releases/latest --jq .tag_name` 应为新 tag；清单内容用 `gh api repos/Z3O1/Typst-pad/releases/assets/<latest.json 的 id> -H "Accept: application/octet-stream"` 取回核对（version / url / signature）。**注意：本仓库是私有的（`gh api repos/Z3O1/Typst-pad --jq .private` → true），匿名请求一律 404**（仓库首页 / api / raw / release 资产都 404，连 GitHub 自己的 404 页都带 `Server: github.com`）——所以**客户端的自动更新在仓库转公开之前必然失败**（updater 是匿名请求，不带凭据；插件对非 2xx 只记日志、最后统一报 `Could not fetch a valid release JSON from the remote`）。2026-09-14 曾把这件事误判成「本机网络过滤」，别重犯：先用 `gh` 看 `.private`。
+  - 发布后建议验一次：`gh api repos/Z3O1/Typst-pad/releases/latest --jq .tag_name` 应为新 tag；清单内容用 `gh api repos/Z3O1/Typst-pad/releases/assets/<latest.json 的 id> -H "Accept: application/octet-stream"` 取回核对（version / url / signature）。**匿名可达性是自动更新的硬前提，验这条最直接**：
+    ```bash
+    /mnt/c/Windows/System32/curl.exe -sL -o NUL -w '%{http_code}\n' https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json   # 期望 200
+    ```
+  - **2026-09-14：仓库已从私有转为公开**（用户当时选了"转公开，一条命令就通"）。转公开前自动更新**必然失败**：updater 是匿名请求、不带任何 GitHub 凭据，私有仓库对匿名一律 404（仓库首页 / api / raw / release 资产全 404，连 GitHub 的 404 页都带 `Server: github.com`），而插件对**非 2xx 只记日志**、最后统一报 `Could not fetch a valid release JSON from the remote` —— 用户看到的状态栏原话是「检查更新失败：没有取到更新清单（latest.json）…原始错误：Could not fetch a valid release JSON from the remote」。
+    - **别把它误判成「本机网络过滤」**（2026-09-14 犯过一次，已经改回来）：判断顺序是 ① `gh api repos/Z3O1/Typst-pad --jq .private`（现在应为 `false`）→ ② 上面那条 curl 的 `%{http_code}` → ③ 才轮到网络。同一个教训还有第二层：**仓库转公开之前，连安装包都是别人下载不到的**（不只是自动更新）。
+    - 转公开前查过历史里没有任何私钥/密钥文件（`git log --diff-filter=A --name-only` 无 `.key`/`.env`/`secret`，`git grep 'minisign encrypted secret key'` 全历史无命中），`.updater-keys/` 一直是 gitignore —— 所以转公开**没有**泄露签名私钥，红线 10 的密钥仍然是安全的。
+    - 仓库公开后 GitHub 的 secret scanning / push protection 会生效：**今后任何把私钥 commit 进去的操作会被直接拒绝推送**，别把这条拒绝误读成 SSH 或权限坏了。
 - **自动更新已接入（0.7.3）**：`tauri-plugin-updater` + 更新弹窗/状态栏提示/设置开关；签名密钥已生成并设进仓库 Secrets，`latest.json` 由 CI 生成。**注意顺序**：`tauri.conf.json` 里已经有 pubkey，所以任何 `tauri build`（含 main 的 CI）都必须拿得到私钥，**不要删那两个 Secrets**；0.7.3 之前的版本里没有 updater，**要手动装一次 0.7.3 才进入自动更新通道**（之后 0.7.4 起才能自动升）。细节见「自动更新（tauri-plugin-updater）数据流」与「CI / 发布约定」。
 - 最近几轮（都在 0.7.3 之后、**未发版**）：**界面缩放**（Ctrl+滚轮，`zoom.ts` + webview `setZoom`）与**正文字体设置**（含额外字体目录、中文回退修复）；0.7.2→0.7.3 是**自动更新**（含签名密钥约束与 `latest.json` 发版链路）；0.7.1→0.7.2 修的是「写作模式」的可用性 bug（Alt 抢焦点、装饰异常导致编辑区卡死、空正文标题崩溃、整行选区底色凸出）。**这些经验都在下面「改动前的红线」和各章节的"勿回退"里，动编辑器/装饰代码前先扫一遍。**
 
