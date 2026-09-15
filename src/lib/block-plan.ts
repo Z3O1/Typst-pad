@@ -5,6 +5,7 @@
 //
 // 本模块只做决策，不碰 CodeMirror：把"块表 + 当前选区 + 文档长度"算成
 // "哪些区间要被 widget 覆盖"，落成装饰由 live-preview.ts 负责。
+import type { Text } from "@codemirror/state";
 import type { BlockCrop } from "./typst-engine";
 import { byteOffsetsToPositions } from "./block-offsets";
 
@@ -126,28 +127,38 @@ export interface BlockCover {
 /**
  * 给块表算"覆盖格"：**每块一格，格子首尾相接铺满全文**（`cover_i.to === cover_{i+1}.from`）。
  *
- * 为什么格子要吃掉块前面的空白：块与块之间的空行在编辑器里本来占一行高（写作模式行距 1.9），
- * 而排版里的段落间距已经算进切片高度（相邻块各分到一半间距）——若只替换块自身，这些空行会
- * 额外叠出空白，摞起来就不等于原版式。把空白交给**下面那一块**的 widget，切片按序摞起来
- * 才是"和真实 typst 一样"。
+ * **格子必须落在整行边界上**（这是 CodeMirror 的硬要求，也是实测踩出来的坑）：
+ * 块 widget 是 `Decoration.replace({block: true})`，而"块级替换"要求区间整行对齐 ——
+ * 只给"块最后一个字符"当终点时，CM 既插入了 widget **又保留了原文**（真实浏览器验收
+ * `writing-blibcks` 抓到：切片在、正文也还在）。仓库里既有的数学块 widget 同样是整行
+ * 范围（`first.from .. last.to`，见 live-preview.blockRangeFor）。
  *
- * 不可渲染的块（`#let` / `#show` / 注释行）保持可见、永不被 widget 覆盖：它们的格子不并入
- * 邻居（格子边界仍然按"上一块终点"切），所以源码透镜上看到的永远是"代码碎片留在原处"。
+ * 格子吃掉的是**块尾的空行**（块与块之间的空行归上一块），于是：
+ *  - 格子铺满全文、首尾相接 ⇒ 永远恰好有一块是源码形态，光标不会无处可去；
+ *  - 排版里的段落间距已经算进切片高度（相邻块各分到一半间距），空行若再单独占一行
+ *    就会叠出多余空白，摞起来就不等于原版式。
+ *
+ * 不可渲染的块（`#let` / `#show` / 注释行）保持可见、永不被 widget 覆盖。
  */
-export function planBlockCovers(
-  blocks: readonly Block[] | null,
-  docLength: number,
-): BlockCover[] {
+export function planBlockCovers(blocks: readonly Block[] | null, doc: Text): BlockCover[] {
   if (!blocks || blocks.length === 0) return [];
   const covers: BlockCover[] = [];
+  /** 块的最后一行行号（`to` 落在行首时取上一行） */
+  const lastLine = (b: Block) =>
+    doc.lineAt(Math.max(b.from, Math.min(b.to, doc.length) - 1)).number;
+  /** 块之后那一行的起点 = 这一格该盖到哪儿（到文档末尾就是末尾） */
+  const afterLastLine = (b: Block) => {
+    const n = lastLine(b) + 1;
+    return n > doc.lines ? doc.length : doc.line(n).from;
+  };
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
-    const coverFrom = i > 0 ? blocks[i - 1].to : 0;
-    const coverTo = i + 1 < blocks.length ? block.to : Math.max(docLength, block.to);
+    const coverFrom = i > 0 ? afterLastLine(blocks[i - 1]) : 0;
+    const coverTo = i + 1 < blocks.length ? afterLastLine(block) : doc.length;
     covers.push({
       block,
-      coverFrom: Math.min(coverFrom, block.from),
-      coverTo: Math.max(coverTo, block.to),
+      coverFrom,
+      coverTo,
       renderable: block.found && block.svg !== "" && block.heightPt > 0.5,
       revealed: false, // 由 applyBlockSelection 填入
     });
@@ -167,12 +178,25 @@ export function planBlockCovers(
 export function applyBlockSelection(
   covers: BlockCover[],
   selections: readonly { from: number; to: number }[],
+  docLength = Number.POSITIVE_INFINITY,
 ): boolean {
   let changed = false;
+  /**
+   * 光标在格子边界上时**只展开后面那一格**（格子按半开区间 [coverFrom, coverTo) 判）：
+   * 整行对齐之后相邻格子在行首共享边界，若两端都算命中，点一下段落开头会把上一段也展开。
+   * 文档末尾是唯一的例外（那里没有"后面那一格"）。
+   */
+  const touches = (cover: BlockCover, sel: { from: number; to: number }): boolean => {
+    if (sel.from === sel.to) {
+      return (
+        sel.from >= cover.coverFrom &&
+        (sel.from < cover.coverTo || cover.coverTo === docLength)
+      );
+    }
+    return sel.from < cover.coverTo && sel.to > cover.coverFrom;
+  };
   for (const cover of covers) {
-    const hit =
-      !cover.renderable ||
-      selections.some((s) => s.from <= cover.coverTo && s.to >= cover.coverFrom);
+    const hit = !cover.renderable || selections.some((sel) => touches(cover, sel));
     if (hit !== cover.revealed) {
       cover.revealed = hit;
       changed = true;

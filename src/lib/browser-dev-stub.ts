@@ -21,6 +21,20 @@ export function isBrowserDev(): boolean {
   return new URLSearchParams(window.location.search).has("browserdev");
 }
 
+/**
+ * 假块级渲染（compile_blocks）的开关：`?browserdev=1&blocks=1` —— **只给验收脚本用**。
+ *
+ * 为什么默认关：块切片会把"非光标块"整块换成图片，于是写作模式下那一块里的
+ * `.cm-markup-heading` / 公式 widget 等**都不再存在于 DOM**（设计如此）。既有的
+ * `wysiwyg.mjs`（209 项）断言的是"标记装饰"世界，默认开着它就会整片变红、把回归信号淹掉。
+ * 所以：默认关 = 走原来的公式/标记路径（既有验收的回归网原样有效），
+ * 专门验块级渲染的用例走 `scripts/browser-check/writing-blocks.mjs`（带 &blocks=1）。
+ */
+function blocksStubEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("blocks");
+}
+
 /** 是否额外开启"假的可更新版本"（?browserdev=1&fakeupdate=1）——只给验收脚本用 */
 function isFakeUpdateEnabled(): boolean {
   if (typeof window === "undefined") return false;
@@ -393,10 +407,19 @@ export function fakeBlocks(doc: string): {
     const rows = j - i;
     const heightPt = rows * LINE_HEIGHT + 6;
     const kind = isHeading ? "Heading" : isList ? "ListItem" : isFence ? "Raw" : "Paragraph";
-    // 假切片：与整页 SVG 同构（svg 根 + 若干 text），尺寸按块自身高度
+    // 假切片：与整页 SVG 同构（svg 根 + 若干 text），尺寸按块自身高度。
+    // **标记要抹掉**（`= ` 标题、`- ` 列表符号、围栏、行间公式的 `$`）：真实 typst 渲染
+    // 出来的就是"没有标记"的样子；验收也正是靠这一点断言"被切片盖住的块不再是源码形态"
+    // （留着标记的话，切片内文本与源码文本无法区分）。
     const texts = lines
       .slice(i, j)
-      .map((t, k) => {
+      .filter((t) => !t.trimStart().startsWith("```"))
+      .map((raw, k) => {
+        const t = raw
+          .replace(/^\s*=+\s*/, "")
+          .replace(/^\s*[-+]\s+/, "• ")
+          .replace(/^\s*\$\s*/, "")
+          .replace(/\s*\$\s*$/, "");
         const esc = t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         return `<text x="${MARGIN}" y="${MARGIN + (k + 1) * LINE_HEIGHT - 6}" font-size="14">${esc}</text>`;
       })
@@ -489,6 +512,7 @@ async function handleCommand(
       return { ok: true, pages: fakePages(src, honored), warnings };
     }
     case "compile_blocks": {
+      if (!blocksStubEnabled()) return null; // 默认关：见 blocksStubEnabled 的说明
       // 写作模式的块级渲染（阶段 1）：桩只做"结构正确"的假切片，见 fakeBlocks 的说明。
       const src = typeof a.src === "string" ? a.src : "";
       const docOffset = typeof a.docOffset === "number" ? a.docOffset : 0;

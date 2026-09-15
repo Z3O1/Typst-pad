@@ -282,13 +282,14 @@ function buildBlockCovers(
   const blocks = opts.blocks?.() ?? null;
   if (!blocks || blocks.length === 0) return [];
   const docLength = state.doc.length;
-  const covers = planBlockCovers(blocks, docLength).filter(
+  const covers = planBlockCovers(blocks, state.doc).filter(
     (c) =>
       c.coverFrom >= 0 && c.coverTo <= docLength && c.coverTo > c.coverFrom && c.block.from < docLength,
   );
   applyBlockSelection(
     covers,
     state.selection.ranges.map((r) => ({ from: r.from, to: r.to })),
+    docLength,
   );
   return covers;
 }

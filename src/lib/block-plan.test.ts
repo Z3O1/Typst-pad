@@ -5,6 +5,7 @@
 //  2. **不可渲染的块（`#let` / `#show` / 注释行）永远保持可见**（源码透镜里它是"代码碎片"）；
 //  3. **永远至少有一格是源码形态**（否则用户没法打字）。
 import { describe, it, expect } from "vitest";
+import { Text } from "@codemirror/state";
 import {
   applyBlockSelection,
   carryOverCrops,
@@ -62,28 +63,38 @@ describe("toBlockTable", () => {
 });
 
 describe("planBlockCovers", () => {
-  it("格子首尾相接铺满全文（首格起 0、末格到文档末尾）", () => {
+  it("格子铺满全文、首尾相接，且**落在整行边界**（CM 的块级替换要求整行）", () => {
+    // 行：[0,3) aaa / [4,4) 空 / [5,8) bbb / [9,9) 空 / [10,13) ccc / [14,14) 空；doc.length = 14
     const doc = "aaa\n\nbbb\n\nccc\n";
+    const text = Text.of(doc.split("\n"));
     const table = asciiTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]);
-    const covers = planBlockCovers(table.blocks, doc.length);
+    const covers = planBlockCovers(table.blocks, text);
     expect(covers).toHaveLength(3);
     expect(covers[0].coverFrom).toBe(0);
-    expect(covers[0].coverTo).toBe(3);
-    expect(covers[1].coverFrom).toBe(3); // 上一块的终点 = 这一格的起点（吃掉中间的空行）
-    expect(covers[1].coverTo).toBe(8);
-    expect(covers[2].coverFrom).toBe(8);
+    expect(covers[0].coverTo).toBe(4); // 盖到"块尾那行 + 紧随的空行"的整行边界
+    expect(covers[1].coverFrom).toBe(4); // 上一格的终点 = 这一格的起点（首尾相接）
+    expect(covers[1].coverTo).toBe(9);
+    expect(covers[2].coverFrom).toBe(9);
     expect(covers[2].coverTo).toBe(doc.length); // 末格延伸到文档末尾
+    // 每个边界都必须是行首（CM 的块级替换要求整行对齐，否则原文会与 widget 并存）
+    const lineStarts = new Set<number>([0]);
+    for (let n = 1; n <= text.lines; n++) lineStarts.add(text.line(n).from);
+    for (const cover of covers) {
+      expect(lineStarts.has(cover.coverFrom)).toBe(true);
+      expect(lineStarts.has(cover.coverTo)).toBe(true);
+    }
   });
 
   it("列表为空时没有格子", () => {
-    expect(planBlockCovers(null, 10)).toEqual([]);
-    expect(planBlockCovers([], 10)).toEqual([]);
+    const text = Text.of(["hello"]);
+    expect(planBlockCovers(null, text)).toEqual([]);
+    expect(planBlockCovers([], text)).toEqual([]);
   });
 
   it("renderable 的判据是「有 SVG 且有高度」——`#let` 那种没有渲染结果的块不算", () => {
     const doc = "aaa\n\nccc\n";
     const table = asciiTable(doc, [crop(0, 3, { found: false, svg: "" }), crop(5, 8)]);
-    const covers = planBlockCovers(table.blocks, doc.length);
+    const covers = planBlockCovers(table.blocks, Text.of(doc.split("\n")));
     expect(covers[0].renderable).toBe(false);
     expect(covers[1].renderable).toBe(true);
   });
@@ -94,19 +105,32 @@ describe("applyBlockSelection", () => {
   function three(): { covers: BlockCover[]; doc: string } {
     const doc = "aaa\n\nbbb\n\nccc\n";
     const table = asciiTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]);
-    return { covers: planBlockCovers(table.blocks, doc.length), doc };
+    // 整行对齐后的格子：[0,4) [4,9) [9,14)
+    return { covers: planBlockCovers(table.blocks, Text.of(doc.split("\n"))), doc };
   }
 
   it("光标在中间块里 → 只有它展开源码（其余两块保持切片）", () => {
-    const { covers } = three();
-    applyBlockSelection(covers, [{ from: 6, to: 6 }]);
+    const { covers, doc } = three();
+    applyBlockSelection(covers, [{ from: 6, to: 6 }], doc.length);
     expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
   });
 
   it("光标在块之间的空行里 → 展开**下面**那一块（空行归属后一格）", () => {
-    const { covers } = three();
-    applyBlockSelection(covers, [{ from: 4, to: 4 }]); // 第 4 位落在第一格尾部（块 0 的终点之后）
+    const { covers, doc } = three();
+    applyBlockSelection(covers, [{ from: 4, to: 4 }], doc.length); // 第 4 位 = 第二格行首
     expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
+  });
+
+  it("光标正好落在格子边界 → 只展开后面那一格（否则点段落开头会把上一段也展开）", () => {
+    const { covers, doc } = three();
+    applyBlockSelection(covers, [{ from: 9, to: 9 }], doc.length);
+    expect(covers.map((c) => c.revealed)).toEqual([false, false, true]);
+  });
+
+  it("光标在文档末尾（末格是闭区间）→ 展开最后一格", () => {
+    const { covers, doc } = three();
+    applyBlockSelection(covers, [{ from: doc.length, to: doc.length }], doc.length);
+    expect(covers.map((c) => c.revealed)).toEqual([false, false, true]);
   });
 
   it("不可渲染的块永远展开（`#let` / `#show` 必须看得见）", () => {
@@ -116,28 +140,28 @@ describe("applyBlockSelection", () => {
       crop(5, 15, { kind: "Code", found: false, svg: "" }),
       crop(17, 20),
     ]);
-    const covers = planBlockCovers(table.blocks, doc.length);
-    applyBlockSelection(covers, [{ from: 0, to: 0 }]);
+    const covers = planBlockCovers(table.blocks, Text.of(doc.split("\n")));
+    applyBlockSelection(covers, [{ from: 0, to: 0 }], doc.length);
     expect(covers.map((c) => c.revealed)).toEqual([true, true, false]);
   });
 
   it("跨块选区 → 涉及的格子全部展开（多展开永远是安全方向）", () => {
-    const { covers } = three();
-    applyBlockSelection(covers, [{ from: 2, to: 11 }]);
+    const { covers, doc } = three();
+    applyBlockSelection(covers, [{ from: 2, to: 11 }], doc.length);
     expect(covers.map((c) => c.revealed)).toEqual([true, true, true]);
   });
 
   it("永远至少有一格展开源码（不然整篇被切片盖住，光标无处可去）", () => {
-    const { covers } = three();
-    applyBlockSelection(covers, [{ from: 999, to: 999 }]); // 越界选区
+    const { covers, doc } = three();
+    applyBlockSelection(covers, [{ from: 999, to: 999 }], doc.length); // 越界选区
     expect(covers.some((c) => c.revealed)).toBe(true);
   });
 
   it("返回值表示 revealed 是否真的变了（供调用方决定要不要重建装饰）", () => {
-    const { covers } = three();
-    expect(applyBlockSelection(covers, [{ from: 6, to: 6 }])).toBe(true);
-    expect(applyBlockSelection(covers, [{ from: 6, to: 6 }])).toBe(false);
-    expect(applyBlockSelection(covers, [{ from: 12, to: 12 }])).toBe(true);
+    const { covers, doc } = three();
+    expect(applyBlockSelection(covers, [{ from: 6, to: 6 }], doc.length)).toBe(true);
+    expect(applyBlockSelection(covers, [{ from: 6, to: 6 }], doc.length)).toBe(false);
+    expect(applyBlockSelection(covers, [{ from: 12, to: 12 }], doc.length)).toBe(true);
   });
 
   it("没有块时返回空、不抛异常", () => {
