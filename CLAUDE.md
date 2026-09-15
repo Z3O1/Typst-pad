@@ -151,7 +151,8 @@ node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成�
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物）
-npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价（真实产物）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价（真实产物，56 项）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，40 项）
 ```
 
 ## 架构
@@ -254,9 +255,15 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   只给"块最后一个字符"当终点时，Chromium 里 CM **既插入 widget 又保留原文**（jsdom 的用例
   恰好都落在整行上，所以单测全绿、只有真浏览器验收抓到了它）。格子因此按"整行 + 吃掉块尾空行"
   计算（`block-plan.planBlockCovers`），相邻格子共享行首边界，光标落在边界上时**只展开后面那一格**。
-- **已知不足**：脚注所在块的切带会把脚注正文一起框进来（按 y 序中点切带的代价）；
-  `#let`/`#show`/注释行这类不可渲染的块保持源码（设计如此）；切片是图片，
-  跨块选择/复制要等二期的文字层；**真机（tauri dev）手感与性能尚未验证**。
+- **块的纵向区间必须"夹紧到 y 序下一个块的顶"（红线，实测踩过）**：typst 允许把内容排到远处
+  （脚注正文在页底、`#place` 在别处），而块的墨迹包围盒是**并集** —— 带脚注的段落会得到一个
+  一直伸到页底的高盒子（实测 88pt），把后面几块的中点切带压扁：代码块被压到 ≤0.5pt → 切片被
+  丢弃 → 回退成源码/旧代码块 widget，而它的内容又被那张超长切片又画了一遍（**代码块和表格各
+  出现两次 + 76px 空隙**，截图与夹具都留过证）。现在 `compile_blocks` 的第 2b 步把每块的
+  bottom 夹到下一个块的 top，带高退化时留最小带而**不是丢块**（丢块会让前端当成"不可渲染"）。
+- **已知不足**：**脚注正文（页底装饰）在写作模式里不显示**（夹紧后它落在所有带之外；
+  要显示得单独切一块"页底装饰"，属阶段 3）；`#let`/`#show`/注释行这类不可渲染的块保持源码
+  （设计如此）；切片是图片，跨块选择/复制要等二期的文字层；**真机（tauri dev）手感与性能尚未验证**。
 
 ### 所见即所得（编辑器内联渲染）数据流
 
@@ -527,5 +534,11 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - ⑥ **收尾绝不要跑 `taskkill /IM chrome.exe /F` 这种全量杀进程**（2026-09-14 犯过：把用户自己开着的 Chrome 窗口全部杀掉，用户直接炸了）。只杀**我启动的那一个 headless 实例**：启动时用 PowerShell 拿到 PID 并存到 `.browser-check/chrome.pid`（`powershell.exe -Command "Start-Process -FilePath 'C:\Program Files\Google\Chrome\Application\chrome.exe' -ArgumentList '--headless=new','--remote-debugging-port=9333',... -PassThru | Select-Object -ExpandProperty Id"`），收尾时**按 user-data-dir 精确挑出自己那几个 PID**（实测可行的写法，`powershell.exe` 不在 PATH 上，必须用绝对路径）：`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object { $_.CommandLine -like '*dsh-chrome-typstpad*' } | Select-Object -ExpandProperty ProcessId"` → 再逐个 `taskkill /PID <pid> /T /F`。（`Start-Process -PassThru` 那条路在本机没跑通：拿不到 PID。CDP 的 `/json/version` 也不暴露 PID，所以按 user-data-dir 反查最稳。）**同理适用于任何"清理现场"的动作：只动自己创建的东西**（进程、文件、端口、git 暂存）。
   - `writing-blocks.mjs`：**写作模式块级渲染的验收**（23 项，带 `&blocks=1`）。为什么单独一套：块切片会把非光标块整块换成图片，那块里的 `.cm-markup-heading`、公式 widget 等**在 DOM 里不复存在**（设计如此），`wysiwyg.mjs` 那 209 项断言的是"标记装饰"世界，默认开着块渲染会整片变红、把回归信号淹掉 —— 所以桩里 `compile_blocks` **默认返回"没有这个命令"**（页面自动退回整页预览路径），只有 `&blocks=1` 时才给假切片（见 `browser-dev-stub.ts` 的 `blocksStubEnabled`）。这套验的是：非光标块被切片取代（**按 `.cm-line` 判"还是不是源码形态"** —— 不能用 `.cm-content.textContent`，切片的 SVG 里也有文字，实测踩过）、切片铺满正文列宽、点击切片→光标落到该块起点且原活动块变切片、活动块内可正常输入、Ctrl+/ 切源码模式无切片且切回恢复、暗色挂 `cm-block-crop-dark`、长文档窗口化后滚动仍补渲出切片。
   - `writing-blocks-visual.mjs`：**块级切片的几何等价验收（真实产物，24 项）**。先 `npm run fixtures:blocks`（Rust `dump_block_fixtures`）导出每块的真实区间/几何/SVG，导航前注入 `window.__DEV_BLOCK_FIXTURES`，桩命中同文档夹具时给真实产物；然后断言"切片摞起来 == 原版式"：每块高度与真实排版一致（实测偏差 **0.01px**）、相邻切片首尾相接（**0.00px**）、总跨度等于真实纵向跨度、铺满正文列宽、高宽比未被拉伸、被盖住的块不在源码形态里。**这条是"和真实 typst 一样"的唯一数字证据**，改块级渲染后必须跑。
+  - `writing-mode-scenes.mjs`：**写作模式的场景验收（真实产物，40 项）**。按文档形态逐场景过一遍
+    （标题层级 / 中文长段落 / 列表与嵌套 / 公式 / 代码与表格脚注 / 文档级 `#set` 对照），
+    每场景断言切片数、列宽、逐块高度、相邻缝，并存一张截图 `.browser-check/scene-<场景名>.png`
+    —— **这几张图就是"文档模式现在长什么样"的直接证据**（无需真机就能看）；最后一个场景还走
+    "编辑 → 重编译 → Ctrl+/ 往返"。它抓到的第一个真 bug 就是脚注场景的重复渲染（见
+    「写作模式的块级渲染」那节的红线）。
   - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`（**两种字号各一份**：12pt 写作模式 / 10.5pt 源码模式，桩按 body+display+**sizePt** 匹配，字号对不上宁可退回假 SVG），再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
   - 浏览器开发模式（`?browserdev=1`，见 `src/lib/browser-dev-stub.ts`）里的 `compile_doc` 是假实现（假分页 SVG），`compile_math` 在没有注入夹具时也是假 SVG；文件/PDF 等 Tauri 命令同样是假的。**真实 typst 排版可用夹具链路上浏览器验证**，只有 Tauri IPC / WebView2 那一层必须桌面端（Windows）确认。

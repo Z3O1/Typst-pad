@@ -498,6 +498,30 @@ pub fn compile_blocks(
         (ga.page, ga.top).partial_cmp(&(gb.page, gb.top)).unwrap()
     });
 
+    // 2b) **越界夹紧**：块自己的纵向区间不许越过它在 y 序里的下一个块的顶。
+    //
+    // 为什么需要：typst 允许把内容排到远处（脚注正文在页底、`#place` 的内容在别处），而块的
+    // 墨迹包围盒是**并集** —— 带脚注的段落因此会得到一个一直伸到页底的高盒子，把后面几块的
+    // 中点切带全压扁：实测代码块被压到 ≤0.5pt（切片被丢弃 → 回退成源码/旧 widget），
+    // 而它的内容又被脚注段那张超长切片吞进去又画了一遍（截图里代码块出现两次）。
+    // 夹紧后各块的带仍首尾相接，且不会有哪一块被压没。
+    for pos in 0..order.len() {
+        let idx = order[pos];
+        let next_same_page = order
+            .get(pos + 1)
+            .and_then(|n| geoms[*n].as_ref())
+            .filter(|n| n.page == geoms[idx].as_ref().unwrap().page)
+            .map(|n| n.top);
+        let cur = geoms[idx].as_mut().unwrap();
+        let limit = next_same_page.unwrap_or(f64::INFINITY);
+        if cur.bottom > limit - 0.25 {
+            cur.bottom = (limit - 0.25).max(cur.top + 0.5);
+        }
+        if cur.bottom <= cur.top {
+            cur.bottom = cur.top + 0.5;
+        }
+    }
+
     let mut crops: Vec<Option<BlockCrop>> = Vec::with_capacity(blocks.len());
     crops.resize_with(blocks.len(), || None);
     for (pos, idx) in order.iter().enumerate() {
@@ -514,10 +538,9 @@ pub fn compile_blocks(
             None => g.bottom,
         };
         let band_top = band_top.max(0.0);
-        let height = band_bottom - band_top;
-        if height <= 0.5 {
-            continue;
-        }
+        // 带高退化（极端文档）时留一条最小带，而不是把这块丢掉 —— 丢掉会让前端把它当成
+        // "不可渲染"，回退到源码/旧 widget，看起来就是"这块没渲染"
+        let height = (band_bottom - band_top).max(0.75);
         // 横向切**正文列**（不是墨迹外接盒）：列表缩进、居中公式、段首缩进都在列内，
         // 按墨迹切会把它们挤掉。
         let rect = Rect::new(
@@ -1237,12 +1260,13 @@ mod tests {
         }
     }
 
-    /// 供"切片几何等价"验收用的样例文档（真实产物夹具与不变量测试共用）
+    /// 供"切片几何等价"验收用的样例文档（真实产物夹具与不变量测试共用）。
+    /// **每条都是一行字面量**：用源码续行（`\` 换行）写会被续行的缩进带进文档文本，
+    /// 而 typst 把缩进 4+ 空格的段落当代码块 → 直接编译报错（实测踩过）。
     const GEOMETRY_DOCS: &[(&str, &str)] = &[
         (
             "段落与标题",
-            "= 第一章\n\n第一段正文，两行以上比较好，用来观察块间距是否被正确分到相邻两块。\n\
-             继续这一段的第二行文字。\n\n== 小节\n\n第二段正文。\n",
+            "= 第一章\n\n第一段正文，两行以上比较好，用来观察块间距是否被正确分到相邻两块。继续这一段的第二行文字。\n\n== 小节\n\n第二段正文。\n",
         ),
         (
             "列表",
@@ -1250,8 +1274,40 @@ mod tests {
         ),
         (
             "公式与代码",
-            "= 公式\n\n行内 $a^2 + b^2$ 与行间：\n\n$ integral_0^1 f(x) dif x = 1 $\n\n\
-             ```rust\nfn main() {}\n```\n\n代码之后的段落。\n",
+            "= 公式\n\n行内 $a^2 + b^2$ 与行间：\n\n$ integral_0^1 f(x) dif x = 1 $\n\n```rust\nfn main() {}\n```\n\n代码之后的段落。\n",
+        ),
+    ];
+
+    /// **场景集**：写作模式要覆盖的文档形态（只用于按需导出的真实产物夹具；常驻测试不跑这些）。
+    /// 见 `scripts/browser-check/writing-mode-scenes.mjs`。同上有意写成单行字面量。
+    const SCENE_DOCS: &[(&str, &str)] = &[
+        (
+            "标题层级",
+            "= 一级标题\n\n一级标题下的段落。\n\n== 二级标题\n\n二级标题下的段落。\n\n=== 三级标题\n\n三级标题下的段落，用来对比三级字号的梯度。\n",
+        ),
+        (
+            "中文长段落",
+            "= 长段落\n\n排版是引擎算出来的：同一段文字在不同宽度下的断行位置、行末的伸缩、标点前后的留白，都由引擎的行断算法决定，而不是浏览器说了算。这一段故意写得很长，用来观察写作模式下的切片是不是把好几行都完整切进来，以及相邻块之间的间距有没有被正确分到两块里。再补一句收尾，让这一段至少有四五行的长度，好在截图里看出断行的节奏。\n",
+        ),
+        (
+            "列表与嵌套",
+            "= 清单\n\n- 第一项：无序列表\n- 第二项：带嵌套\n  - 嵌套一\n  - 嵌套二\n- 第三项\n\n+ 有序一\n+ 有序二\n+ 有序三\n\n列表之后的收尾段落。\n",
+        ),
+        (
+            "公式",
+            "= 公式\n\n行内公式 $a^2 + b^2 = c^2$ 要与正文基线对齐。\n\n行间公式：\n\n$ sum_(i=1)^n i = frac(n(n+1), 2) $\n\n带下沉的 $integral_0^1 f(x) dif x$ 与下标 $a_0 = 0$ 也要完整。\n",
+        ),
+        (
+            "代码与表格",
+            "= 结构与脚注\n\n正文里有一个脚注#footnote[脚注正文会被排到页底]，这是写作模式的已知不足点。\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n#table(\n  columns: 2,\n  [甲], [乙],\n  [1], [2],\n)\n\n表格之后的段落。\n",
+        ),
+        (
+            "文档级设置（默认字号）",
+            "= 设置对照\n\n这一段用来和下一篇对照：两篇正文完全相同，只有文档开头那条设置语句不同。\n",
+        ),
+        (
+            "文档级设置（12pt）",
+            "#set text(size: 12pt)\n\n= 设置对照\n\n这一段用来和上一篇对照：两篇正文完全相同，只有文档开头那条设置语句不同。\n",
         ),
     ];
 
@@ -1315,15 +1371,49 @@ mod tests {
         }
     }
 
+    /// 临时诊断：场景文档里每个块匹配到的帧项数量与源区间（排查"某些块 found=false"）。
+    #[test]
+    #[ignore = "按需运行：块 ↔ 帧项的匹配诊断"]
+    fn dump_scene_item_matching() {
+        const COLUMN_PT: f64 = 371.25;
+        for (name, src) in SCENE_DOCS {
+            let injected = "#set page(width: 487.30pt, height: auto, margin: 58.02pt)\n";
+            let compiled = format!("{injected}{src}");
+            let doc_start = injected.len();
+            let world = TypstWorld::new(compiled, None, &fonts_dir(), &FontConfig::default());
+            let typst::diag::Warned { output: Ok(doc), .. } = typst::compile::<PagedDocument>(&world) else {
+                println!("SCENE[{name}] 编译失败");
+                continue;
+            };
+            let (items, _) = collect_geometry(&world, &doc);
+            println!("\nSCENE[{name}] 帧项 {} 个", items.len());
+            for b in source_blocks(src) {
+                let range = (b.range.start + doc_start)..(b.range.end + doc_start);
+                let hit = items.iter().filter(|i| i.range.start < range.end && i.range.end >= range.start).count();
+                let first = items.iter().find(|i| i.range.start < range.end && i.range.end >= range.start);
+                println!(
+                    "  {} [{}..{}) 项 {} 首个项区间 {:?}（文档坐标 {:?}..{:?}）",
+                    b.kind,
+                    b.range.start,
+                    b.range.end,
+                    hit,
+                    first.map(|i| (i.range.start, i.range.end)),
+                    first.map(|i| i.range.start.saturating_sub(doc_start)),
+                    first.map(|i| i.range.end.saturating_sub(doc_start)),
+                );
+            }
+        }
+    }
+
     /// 「切片几何等价」验收用的**真实产物夹具**（按需导出，浏览器端注入）：
     ///   `npm run fixtures:blocks`
     /// 每条 = 一篇文档 + 编译用的正文列宽 + 每块的区间/几何/SVG。浏览器侧会把同一篇文档
     /// 打进编辑器（桩按文档原文命中夹具，给真实产物），再断言"摞起来 == 原版式"。
     #[test]
-    #[ignore = "按需运行：导出块级切片的真实产物夹具"]
+    #[ignore = "按需运行：导出块级切片的真实产物夹具（场景集）"]
     fn dump_block_fixtures() {
         const COLUMN_PT: f64 = 371.25;
-        for (name, src) in GEOMETRY_DOCS {
+        for (name, src) in SCENE_DOCS {
             let out = compile_blocks(
                 src.to_string(),
                 0,
