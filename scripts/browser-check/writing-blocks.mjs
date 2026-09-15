@@ -445,22 +445,9 @@ console.log("12) 块内按 Enter 插入新块：旧表那段时间里刚打的�
 // 为什么单独一组：真实的 typst 编译要几十到几百毫秒，而**块表是上一次编译的产物** ——
 // 这段"旧表 + 新文档"的窗口里，旧坐标放在新文档上会算错行，于是要么刚打的字被旁边那张旧切片
 // 盖住（看不见）、要么同一段文字既在切片里又露成源码（重复）。桩的假编译是瞬时的，默认复现不出来。
-/** 带重试的导航：换 URL（加 &blockslow=1）时偶发被上一次导航打断，重试两次即可 */
-const gotoSlow = async (url) => {
-  for (let i = 0; i < 3; i++) {
-    await c.goto(url);
-    try {
-      await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 8000 });
-      return;
-    } catch {
-      /* 重试 */
-    }
-  }
-  throw new Error("慢编译页面加载失败（三次都没等到 .cm-content）");
-};
 /** 控制台事件从这一组开始算（c.events 是整场累积的，别把前面几组的旧记录算进来） */
 const consoleMark = c.events.length;
-await gotoSlow(`${URL_BLOCKS}&blockslow=1`);
+await c.goto(`${URL_BLOCKS}&blockslow=1`);
 await c.click(400, 300);
 await c.selectAll();
 await c.type("第一段。\n\n第二段。\n\n第三段。\n");
