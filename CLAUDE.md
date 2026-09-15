@@ -34,7 +34,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（34 个文件 / 549 项）
+npm test                 # 前端 + 脚本单测（34 个文件 / 555 项）
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（45 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
@@ -49,7 +49,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 15 项�
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
 
 # 写作模式「块级渲染」三套（需要 headless Chromium，见「环境备忘」；CDP_PORT 默认 9333）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，50 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，65 项）
 npm run fixtures:blocks                                                                   # 导出真实切片 + 点击探针
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs # 几何等价（64 项）
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击→精确字符（24 项 / 125 次点击）
@@ -158,7 +158,7 @@ node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成�
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
 npm run fixtures:blocks         # 导出真实块切片 + 几何 + 点击探针到 .browser-check/（块级渲染验收用）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，50 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，65 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/块内 Enter）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价（真实产物，64 项）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击 → 精确字符（真实探针，24 项 / 125 次点击全中）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，45 项）
@@ -258,8 +258,25 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
     `notifyBlocksNeeded` 里的 `!cover.revealed` 永远为假 —— **滚动到没渲过的区域一次都不会补渲**，
     要等用户敲一个字。判据只该是 `found && svg === ""`。另配"同一个窗口不重复编译"的防抖
     （`lastBlocksWindow`），否则后端渲染不出来时会每 150ms 编译一次。
-- **块表过期时沿用旧表**（不做位置映射）：编辑只发生在已展开的那一格，其它格的边界都落在
-  空白处，偏一两个字符无害；"文档一变就退回源码"会让每敲一个字都闪一次源码。
+- **编辑期间必须让块表"跟着走"（红线，用户报过「在一块内 Enter 插入块的时候会有问题」）**：
+  块表与切片是上一次编译的产物（**旧文档坐标**），而格子边界是按"块的最后一行之后"算的
+  —— 插入换行会改变行结构，旧坐标放在新文档上会落到**错误的行**，于是：
+  ① 旁边那张**内容对不上的旧切片**会盖住这段时期里被移动的正文（实测：在文档开头插入一个新块后，
+  `第二段。` 整行凭空消失 —— 被"第三段"的旧切片吞了；真机编译有几十~几百毫秒延迟，看得见；
+  编译失败时更不会自愈）；② 同一块只被盖住一部分时，那截文字既在旧切片里又露成源码（重复显示）。
+  修法：**每次编辑都跑 `remapBlocksThroughEdit`**（前后缀差分：没被碰到的块原样/平移、被碰到的
+  退回源码、改动落在块与块之间时归给"格子里放着它的那一块"），跑完 `blocksVersion++` 让编辑器
+  按新表重建装饰（不重建的话这一帧渲染的还是旧表的格子）。代价是每次编辑算一次前后缀差分
+  （O(n) 双指针比较，微秒级）—— **别退回"编译失败时才平移"**。
+  - **`planBlockCovers` 必须容忍越界**（表比文档旧是必然存在的中间态）：过滤掉落在当前文档之外的块，
+    **绝不抛异常**。实测踩过：文档大幅缩短（全选重打 / 删一大段 / 撤销）时旧块起点 116 落在 17 字符的
+    新文档上 → `doc.lineAt(116)` 抛 `RangeError: Invalid position 116 in document of length 17`
+    → 装饰整篇退化成源码，而且**在 ViewPlugin 里抛出会被 CM 记成 "CodeMirror plugin crashed"**
+    （`collectRequests` 因此也整体包了 try/catch）。
+  - 验收：`writing-blocks.mjs` 第 12 组（`&blockslow=1` 用 350ms 假延迟模拟真机编译窗口：插入新块后
+    **正文一行都不许丢**、不许重复显示、控制台不许出现 RangeError / 插件崩了 / 装饰重建失败）
+    + `block-plan.test.ts` 里"任意位置插入换行/空行/文字"的不变量枚举（改动必须落在已展开的格子里、
+    格子边界必须落在行首、未展开的格子必须把那一块正文完整盖住）。**两条都别删。**
 - **文档切换（打开/新建/重读）必须 `resetBlocks()`**：旧块区间套在新文档上会**盖住正文**
   （比公式缓存过期的危害大得多），见 `resetBlocks` 的注释。
 - **版心宽是编译期输入**：`page(width: 列宽/(1-2×页边距比例), height: auto)`，所以窗口尺寸 /

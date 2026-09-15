@@ -964,8 +964,35 @@
     doc = newDoc;
     editorDoc = newDoc; // 镜像同步（见 editorDoc 声明处）：陈旧镜像 = 切模式/重挂载时丢内容
     dirty = true;
+    remapBlocksForEdit(newDoc);
     scheduleCompile();
     schedulePersist();
+  }
+
+  /**
+   * **每次编辑都让块表跟上**（阶段 2 补的，修"在块内按 Enter 之后会出问题"）：
+   *
+   * 块表与切片是上一次编译的产物，位置是**旧文档的坐标**。此前只有在编译失败时才用前后缀差分
+   * 平移一次，编辑期间则原样沿用（"偏一两个字符无害"）。但**插入换行会改变行结构**，
+   * 而格子的边界是按"块的最后一行之后"算的 —— 旧坐标放在新文档上会算到错误的行，
+   * 于是出现两类可见毛病：① 用户刚打的那一行落进**旁边那张旧切片**里（被图片盖住 = 字看不见，
+   * 编译失败时更不会自愈）；② 同一段文字既出现在旧切片里、又有一部分露成源码（看起来像重复）。
+   *
+   * 做法与"编译失败保留切片"完全相同（`remapBlocksThroughEdit`：前后缀差分 → 没被碰到的块
+   * 原样平移、被碰到的块退回源码），只是**每次编辑都跑**（O(n) 一次双指针比较，微秒级）。
+   * 跑完自增 `blocksVersion` 让编辑器按新表重建装饰（不然这一帧渲染出来的还是旧表的格子）。
+   *
+   * 注意：平移**不**等于"精确"——几何（y/高度）与 Rust 侧的命中测试缓存都还是上一次编译的，
+   * 所以点击精确定位的闸门（`writingBlocksExact`）在这里置回 false，等编译回来再打开。
+   */
+  function remapBlocksForEdit(newDoc: string) {
+    if (!writingBlocks || writingBlocks.length === 0) return;
+    if (writingBlocksDoc === newDoc) return;
+    const remap = remapBlocksThroughEdit(writingBlocks, writingBlocksDoc, newDoc);
+    writingBlocks = remap.blocks;
+    writingBlocksDoc = newDoc;
+    writingBlocksExact = false;
+    blocksVersion++;
   }
 
   /** 有未保存修改时请求确认（打开/拖放/关联打开/重新读取前） */

@@ -16,7 +16,7 @@ import {
   toBlockTable,
   verticalBlockTarget,
 } from "./block-plan";
-import type { BlockCover } from "./block-plan";
+import type { Block, BlockCover } from "./block-plan";
 import type { BlockCrop } from "./typst-engine";
 
 /** 造一块 Rust 侧的产物：`start`/`end` 是**字节**偏移 */
@@ -299,16 +299,34 @@ describe("changedSpan / remapBlocksThroughEdit（编译失败时保留没被改�
     expect(span.delta).toBe(1);
   });
 
-  it("在块之间插入：改动段之前的块原样、之后的位置平移、剩下的切片都还在", () => {
+  it("在块之间插入整块：新文本所在的下一块退回源码，其余原样/平移", () => {
     const before = "aaa\n\nbbb\n\nccc\n";
     const after = "aaa\n\nXX\n\nbbb\n\nccc\n"; // 在第二块之前插入一整块
     const out = remapBlocksThroughEdit(table(before), before, after);
     expect(out.blocks.length).toBe(3); // 铺满全文的约束：块数不变
+    // 第一块没被碰到：区间不变、切片照用
     expect(out.blocks[0]).toMatchObject({ from: 0, to: 3, svg: "<svg/>" });
-    // 后两块整体平移 +4（插入的 "XX\n\n" 的字节长度）
-    expect(out.blocks[1].from).toBe(5 + 4);
+    // 第二块：新文本落在**它的格子**里（块与块之间的空行归后一格）→ 它退回源码
+    expect(out.blocks[1]).toMatchObject({ from: 5 + 4, found: false, svg: "" });
     expect(out.blocks[2].from).toBe(10 + 4);
-    expect(out.kept).toBe(3);
+    expect(out.blocks[2].svg).toBe("<svg/>");
+    expect(out.kept).toBe(2);
+  });
+
+  it("在段落之间那条空行上打字：后一块退回源码（新字不会被它的旧切片盖住）", () => {
+    const before = "aaa\n\nbbb\n";
+    const after = "aaa\nX\nbbb\n"; // 在空行上打一个字（不改变块结构）
+    const out = remapBlocksThroughEdit(table(before), before, after);
+    const middle = out.blocks.find((b) => b.found === false);
+    expect(middle, "至少要有一块退回源码").toBeTruthy();
+    expect(middle!.svg).toBe("");
+  });
+
+  it("在文末追加：最后一块退回源码（末格的 coverTo 是文末，新字会被它盖住）", () => {
+    const before = "aaa\n\nbbb\n";
+    const after = "aaa\n\nbbb\n新段落";
+    const out = remapBlocksThroughEdit(table(before), before, after);
+    expect(out.blocks[out.blocks.length - 1].found).toBe(false);
   });
 
   it("改动落在某一块内部：那一块退回源码（区间放宽），其它块不受影响", () => {
@@ -331,12 +349,14 @@ describe("changedSpan / remapBlocksThroughEdit（编译失败时保留没被改�
     }
   });
 
-  it("在文档最开头插入：所有块平移，切片全保留", () => {
+  it("在文档最开头插入：块整体平移；第一块退回源码（新文本落在它的格子里）", () => {
     const before = "aaa\n\nbbb\n\nccc\n";
     const after = "ZZ\naaa\n\nbbb\n\nccc\n";
     const out = remapBlocksThroughEdit(table(before), before, after);
-    expect(out.kept).toBe(3);
-    expect(out.blocks[0].from).toBe(3);
+    expect(out.blocks[0]).toMatchObject({ from: 3, found: false, svg: "" });
+    expect(out.blocks[1].from).toBe(5 + 3);
+    expect(out.blocks[2].from).toBe(10 + 3);
+    expect(out.kept).toBe(2);
   });
 
   it("文档没变 → 原样返回（不产生新对象数组内容变化）", () => {
@@ -385,4 +405,116 @@ describe("revealBlocksWithDiagnostics（错误位置不许被切片盖住）", (
     covers[1].revealed = true;
     expect(revealBlocksWithDiagnostics(covers, [{ from: 6, to: 7 }])).toBe(0);
   });
+});
+
+describe("编辑后的增量平移：改动不许落进旧切片里（修「块内 Enter 出问题」）", () => {
+  /**
+   * 真实形状的块表：文档字面量 + 按顺序列出各块的正文（测试自己按文本定位算出**字节**区间，
+   * 不手写偏移、也不依赖夹具文件，所以 CI 里也能跑）。覆盖标题 / 段落 / 列表（项与项之间没有空行）
+   * / 跨行的行间公式。
+   */
+  const DOCS: { name: string; doc: string; pieces: string[] }[] = [
+    {
+      name: "标题 + 两段",
+      doc: "= 标题\n\n第一段。\n\n第二段。\n",
+      pieces: ["= 标题", "第一段。", "第二段。"],
+    },
+    {
+      name: "列表（每项一块，项间没有空行）",
+      doc: "- 甲\n- 乙\n- 丙\n\n尾段。\n",
+      pieces: ["- 甲", "- 乙", "- 丙", "尾段。"],
+    },
+    {
+      name: "跨行的行间公式",
+      doc: "前文。\n\n$ a + b \\\n  + c $\n\n后文。\n",
+      pieces: ["前文。", "$ a + b \\\n  + c $", "后文。"],
+    },
+    {
+      name: "块前有两个空行",
+      doc: "= 标题\n\n\n正文。\n",
+      pieces: ["= 标题", "正文。"],
+    },
+  ];
+
+  /** 按顺序在文档里定位每个块的**字节**区间 */
+  const byteRanges = (doc: string, pieces: string[]): [number, number][] => {
+    const enc = new TextEncoder();
+    let cursor = 0;
+    return pieces.map((p) => {
+      const at = doc.indexOf(p, cursor);
+      expect(at, `文档里应找得到块 ${JSON.stringify(p)}`).toBeGreaterThanOrEqual(0);
+      const start = enc.encode(doc.slice(0, at)).length;
+      cursor = at + p.length;
+      return [start, start + enc.encode(p).length] as [number, number];
+    });
+  };
+
+  /** 与 +page.svelte 的 remapBlocksForEdit 同款：按前后缀差分平移旧表，再重建格子 */
+  const edit = (
+    doc: string,
+    blocks: Block[],
+    pos: number,
+    insert: string,
+  ): { doc: string; caret: number; covers: BlockCover[] } => {
+    const next = doc.slice(0, pos) + insert + doc.slice(pos);
+    const caret = pos + insert.length;
+    const remap = remapBlocksThroughEdit(blocks, doc, next);
+    const covers = planBlockCovers(remap.blocks, Text.of(next.split("\n")));
+    applyBlockSelection(covers, [{ from: caret, to: caret }], next.length);
+    return { doc: next, caret, covers };
+  };
+
+  for (const d of DOCS) {
+    it(`${d.name}：任意位置按 Enter（含连按两次 = 插入新块）、任意位置打字都不出问题`, () => {
+      const blocks = toBlockTable(
+        d.doc,
+        byteRanges(d.doc, d.pieces).map(([s, e]) => crop(s, e, { xPt: 58, yPt: 40 })),
+      ).blocks;
+      let checked = 0;
+      for (let pos = 0; pos <= d.doc.length; pos++) {
+        for (const insert of ["\n", "\n\n", "字"]) {
+          const { doc: next, caret, covers } = edit(d.doc, blocks, pos, insert);
+          const span = changedSpan(d.doc, next);
+          const newSpan = { from: span.from, to: span.from + insert.length };
+          // ① 改动必须落在**已展开**的格子里（用户刚打的字看得见）
+          for (const c of covers) {
+            if (!c.revealed && newSpan.from < c.coverTo && newSpan.to > c.coverFrom) {
+              throw new Error(
+                `pos=${pos} 插入 ${JSON.stringify(insert)}：改动落在未展开的格子里 ` +
+                  `[${c.coverFrom},${c.coverTo}) 块=[${c.block.from},${c.block.to}) ` +
+                  `上下文=${JSON.stringify(next.slice(Math.max(0, pos - 8), pos + 8))}`,
+              );
+            }
+          }
+          // ② 格子边界必须落在行首（CM 的块级替换硬要求，错一个字符就会"既插 widget 又留原文"）
+          const lineStarts = new Set<number>();
+          let off = 0;
+          for (const line of next.split("\n")) {
+            lineStarts.add(off);
+            off += line.length + 1;
+          }
+          for (const c of covers) {
+            if (!lineStarts.has(c.coverFrom) || (c.coverTo !== next.length && !lineStarts.has(c.coverTo))) {
+              throw new Error(
+                `pos=${pos} 插入 ${JSON.stringify(insert)}：格子边界不在行首 [${c.coverFrom},${c.coverTo})`,
+              );
+            }
+          }
+          // ③ 不许"重复"：未展开的格子必须把那一块的正文**完整**盖住
+          //    （只盖一半的话，那半截既显示在旧切片里、又露成源码）
+          for (const c of covers) {
+            if (c.revealed || !c.renderable) continue;
+            if (c.block.from >= c.coverFrom && c.block.to <= c.coverTo) continue;
+            throw new Error(
+              `pos=${pos} 插入 ${JSON.stringify(insert)}：块 [${c.block.from},${c.block.to}) 只被格子 ` +
+                `[${c.coverFrom},${c.coverTo}) 盖住一部分（会重复显示）`,
+            );
+          }
+          expect(caret).toBeGreaterThanOrEqual(0);
+          checked++;
+        }
+      }
+      expect(checked).toBeGreaterThan(30);
+    });
+  }
 });

@@ -152,19 +152,29 @@ export interface BlockCover {
  */
 export function planBlockCovers(blocks: readonly Block[] | null, doc: Text): BlockCover[] {
   if (!blocks || blocks.length === 0) return [];
+  /**
+   * **块表可能已经是"上一次编译"的坐标**（编辑期间它本来就是旧的），所以这里必须先滤掉
+   * 落在当前文档之外的块 —— 而且**绝不能抛异常**：调用方在 CodeMirror 的装饰计算与插件更新里，
+   * 抛出去会让整篇退回源码、并在控制台留下 "CodeMirror plugin crashed"。
+   * 实测踩过：文档大幅缩短（全选重打、删一大段、撤销）时旧块起点 116 落在 17 字符的新文档上
+   * → `doc.lineAt(116)` 抛 RangeError。
+   * 数量级：几十个块，一次 filter 是常数级开销（`toBlockTable` 已经保证了区间合法，
+   * 这里只是给"表比文档旧"这个必然存在的中间态兜底）。
+   */
+  const usable = blocks.filter((b) => b.from >= 0 && b.from < b.to && b.to <= doc.length);
+  if (usable.length === 0) return [];
   const covers: BlockCover[] = [];
   /** 块的最后一行行号（`to` 落在行首时取上一行） */
-  const lastLine = (b: Block) =>
-    doc.lineAt(Math.max(b.from, Math.min(b.to, doc.length) - 1)).number;
+  const lastLine = (b: Block) => doc.lineAt(b.to - 1).number;
   /** 块之后那一行的起点 = 这一格该盖到哪儿（到文档末尾就是末尾） */
   const afterLastLine = (b: Block) => {
     const n = lastLine(b) + 1;
     return n > doc.lines ? doc.length : doc.line(n).from;
   };
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
-    const coverFrom = i > 0 ? afterLastLine(blocks[i - 1]) : 0;
-    const coverTo = i + 1 < blocks.length ? afterLastLine(block) : doc.length;
+  for (let i = 0; i < usable.length; i++) {
+    const block = usable[i];
+    const coverFrom = i > 0 ? afterLastLine(usable[i - 1]) : 0;
+    const coverTo = i + 1 < usable.length ? afterLastLine(block) : doc.length;
     covers.push({
       block,
       coverFrom,
@@ -290,9 +300,28 @@ export function remapBlocksThroughEdit(
   if (blocks.length === 0) return { blocks: [], kept: 0 };
   if (before === after) return { blocks: [...blocks], kept: blocks.length };
   const span = changedSpan(before, after);
+  /**
+   * 改动**落在块与块之间**（空行上打字、段落之间插字、文末追加）时没有任何块与它相交 ——
+   * 但那段新文本会落进**相邻块的格子**：块与块之间的空行按 `planBlockCovers` 归**后面那一块**
+   * （`cover_i` 从"上一块的最后一行之后"开始），文末则归最后一块（末格的 `coverTo` 是文末）。
+   * 只要光标一离开，新文本就被那张旧切片盖住（编译失败时更不会自愈）。
+   * 所以把它归给"**格子里放着它的那一块**"——即改动之后的第一个块，没有就是最后一块 —— 让它退回源码。
+   * 宁可多露出一块源码，也不让用户刚打的字消失。 */
+  const noIntersect = !blocks.some((b) => b.from < span.to && b.to > span.from);
+  const fallback = noIntersect
+    ? (blocks.find((b) => b.from >= span.to) ?? blocks[blocks.length - 1])
+    : null;
   const out: Block[] = [];
   let kept = 0;
+  /** 这一块是不是"被改动落到格子里"的那一块（要退回源码，但位置照样要平移） */
+  const isFallback = (b: Block) =>
+    fallback !== null && b.from === fallback.from && b.to === fallback.to;
+  const revealed = (b: Block): Block => ({ ...b, found: false, svg: "", heightPt: 0 });
   for (const b of blocks) {
+    if (isFallback(b)) {
+      out.push(revealed(b.from >= span.to ? { ...b, from: b.from + span.delta, to: b.to + span.delta } : b));
+      continue;
+    }
     // 改动段之后：整体平移
     if (b.from >= span.to) {
       const shifted = { ...b, from: b.from + span.delta, to: b.to + span.delta };

@@ -572,11 +572,29 @@ const FAKE_FONT_FAMILIES_DEFAULT = [
   "Microsoft YaHei",
 ];
 
+/**
+ * 模拟"编译不是瞬时完成"的那段窗口（`?browserdev=1&blockslow=1`）——**只给验收脚本用**。
+ *
+ * 真实的 typst 编译要几十到几百毫秒（debug 构建的长文档更久），而块表是**上一次编译的产物**：
+ * 这中间的"旧表 + 新文档"窗口里最容易出毛病（刚打的字被旧切片盖住、同一段文字重复显示）。
+ * 桩默认瞬时返回，这些毛病在浏览器里根本复现不出来，所以给一个显式的慢编译开关。
+ */
+function blockslowEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("blockslow");
+}
+
+/** 假编译的耗时（ms）：只在 blockslow 打开时生效 */
+const SLOW_COMPILE_MS = 350;
+
 async function handleCommand(
   command: string,
   args: Record<string, unknown> | undefined
 ): Promise<unknown> {
   const a = args ?? {};
+  if (blockslowEnabled() && (command === "compile_blocks" || command === "compile_doc")) {
+    await new Promise((r) => setTimeout(r, SLOW_COMPILE_MS));
+  }
   switch (command) {
     case "compile_doc": {
       const src = typeof a.src === "string" ? a.src : "";

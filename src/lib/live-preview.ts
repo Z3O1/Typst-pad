@@ -816,8 +816,27 @@ export function livePreview(opts: LivePreviewOptions): Extension {
     }
   }
 
-  /** 收集「视口附近 + 尚未拿到结果」的公式渲染请求（父组件另有去重，重复调用无副作用） */
+  /**
+   * 收集「视口附近 + 尚未拿到结果」的公式渲染请求（父组件另有去重，重复调用无副作用）。
+   *
+   * **整体 try/catch**（与 StateField 的 collect 同级）：这个函数跑在 CodeMirror 的
+   * ViewPlugin.update 里，抛异常会被 CM 记成 "CodeMirror plugin crashed" 并让这次插件更新作废。
+   * 实测踩过：块表还是旧文档坐标时（文档刚缩短）`planBlockCovers` 内的 `lineAt` 抛 RangeError
+   * —— 现在那条路径已经加了越界过滤，这里再兜一道，绝不让异常冒进 CM 的更新流程。
+   */
   const collectRequests = (
+    state: EditorState,
+    visible: readonly { from: number; to: number }[],
+    context: string,
+  ) => {
+    try {
+      collectRequestsInner(state, visible, context);
+    } catch (e) {
+      console.error("[live-preview] 渲染请求收集失败（已跳过这一轮）：", e);
+    }
+  };
+
+  const collectRequestsInner = (
     state: EditorState,
     visible: readonly { from: number; to: number }[],
     context: string,

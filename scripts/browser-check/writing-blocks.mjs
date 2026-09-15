@@ -32,6 +32,7 @@ function check(name, ok, detail = "") {
 
 const c = await connect();
 await c.send("Page.enable");
+await c.send("Runtime.enable"); // 第 12 组要读控制台（"装饰重建失败 / 插件崩了"）
 await c.evaluate(`localStorage.clear()`);
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
@@ -435,6 +436,141 @@ if (target) {
     );
   }
 }
+
+
+console.log("12) 块内按 Enter 插入新块：旧表那段时间里刚打的字不许被切片吞掉（真机编译有延迟，桩用 &blockslow=1 模拟）");
+// 为什么单独一组：真实的 typst 编译要几十到几百毫秒，而**块表是上一次编译的产物** ——
+// 这段"旧表 + 新文档"的窗口里，旧坐标放在新文档上会算错行，于是要么刚打的字被旁边那张旧切片
+// 盖住（看不见）、要么同一段文字既在切片里又露成源码（重复）。桩的假编译是瞬时的，默认复现不出来。
+/** 带重试的导航：换 URL（加 &blockslow=1）时偶发被上一次导航打断，重试两次即可 */
+const gotoSlow = async (url) => {
+  for (let i = 0; i < 3; i++) {
+    await c.goto(url);
+    try {
+      await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 8000 });
+      return;
+    } catch {
+      /* 重试 */
+    }
+  }
+  throw new Error("慢编译页面加载失败（三次都没等到 .cm-content）");
+};
+/** 控制台事件从这一组开始算（c.events 是整场累积的，别把前面几组的旧记录算进来） */
+const consoleMark = c.events.length;
+await gotoSlow(`${URL_BLOCKS}&blockslow=1`);
+await c.click(400, 300);
+await c.selectAll();
+await c.type("第一段。\n\n第二段。\n\n第三段。\n");
+await new Promise((r) => setTimeout(r, 1200)); // 等慢编译落地
+const slowCrops = await c.evaluate(CROPS);
+check("慢编译下切片仍然出来（块级渲染没被延迟搞坏）", slowCrops >= 2, `实际 ${slowCrops}`);
+
+/** 标记文本此刻**看得见吗**：要么在源码行里，要么在"渲染时确实包含了它"的切片里 */
+const MARK_VISIBLE = (mark) => `(() => {
+  const inSource = Array.from(document.querySelectorAll(".cm-line")).some((el) => (el.textContent || "").includes(${JSON.stringify(mark)}));
+  const inCrop = Array.from(document.querySelectorAll(".cm-block-crop")).some((el) => (el.textContent || "").includes(${JSON.stringify(mark)}));
+  return { inSource, inCrop, visible: inSource || inCrop };
+})()`;
+
+/**
+ * **文字跑哪去了**探针：文档里每个**非空行**要么在源码行里、要么在某张切片渲染的内容里
+ * （假切片的 SVG 里有 `<text>`，正文就是它渲染的文本）。两者都找不到 = 那一行被一张
+ * **内容对不上的旧切片**盖住了 —— 用户看到的是"我刚按了 Enter，某一段文字变成了别的段落的样子"。
+ * 这正是"旧表 + 新文档"那段时间最容易出的毛病（真机编译有延迟，桩用 &blockslow=1 模拟）。
+ *
+ * 另外一条：源码行**不该**同时出现在某张切片渲染的文本里（那是"同一段文字既在切片里又露成源码"，
+ * 看起来像重复）。两条合起来就是"不多不少"。
+ */
+const TEXT_MISMATCH = `(() => {
+  const crops = Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => (el.textContent || "").trim());
+  const lines = Array.from(document.querySelectorAll(".cm-line")).map((el) => (el.textContent || "").trim());
+  const view = document.querySelector(".cm-content").cmTile.root.view;
+  const docLines = view.state.doc.toString().split("\\n").map((t) => t.trim()).filter((t) => t.length >= 2);
+  const missing = docLines.filter((t) => !lines.includes(t) && !crops.some((crop) => crop && crop.includes(t)));
+  const dup = lines.filter((t) => t.length >= 2 && crops.some((crop) => crop && crop.includes(t)));
+  return { missing, dup };
+})()`;
+
+// 场景 A：在文档**开头**插入一个新块（先 Ctrl+Home 把光标放到第一块之前）
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+await new Promise((r) => setTimeout(r, 40));
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+await new Promise((r) => setTimeout(r, 40));
+const headMark = "开头插入的新块。";
+await c.type(headMark);
+await new Promise((r) => setTimeout(r, 80)); // 仍在慢编译窗口里
+const headDuring = await c.evaluate(MARK_VISIBLE(headMark));
+check("在文档开头插入新块：刚打的字立刻可见", headDuring.visible, JSON.stringify(headDuring));
+const mismatch = await c.evaluate(TEXT_MISMATCH);
+check(
+  "插入新块后正文一行都没丢（要么在源码里、要么在渲染了它的切片里）",
+  mismatch.missing.length === 0,
+  JSON.stringify(mismatch),
+);
+check("也没有「重复显示」（同一段文字既在切片里又露成源码）", mismatch.dup.length === 0, JSON.stringify(mismatch.dup.slice(0, 2)));
+await new Promise((r) => setTimeout(r, 900)); // 等慢编译回来
+
+// 场景 B：点进第二段中间（让它展开成源码），再按 Enter 拆成两行，然后马上打字（编译还没回来）
+const midCrop2 = await c.evaluate(MIDDLE_CROP);
+check("慢编译下仍能点进某一块", midCrop2 !== null, JSON.stringify(midCrop2));
+if (midCrop2) {
+  await c.click(Math.round(midCrop2.left + midCrop2.width * 0.35), Math.round(midCrop2.top + midCrop2.height * 0.5));
+  await new Promise((r) => setTimeout(r, 400));
+  await c.key("Enter", { code: "Enter", keyCode: 13 });
+  await new Promise((r) => setTimeout(r, 60));
+  const mark = "新插入的段落";
+  await c.type(mark);
+  await new Promise((r) => setTimeout(r, 80)); // 仍然在慢编译的窗口里
+  const during = await c.evaluate(MARK_VISIBLE(mark));
+  check("编译还没回来时，刚打的字立刻可见（没有被旧切片吞掉）", during.visible, JSON.stringify(during));
+  await new Promise((r) => setTimeout(r, 900)); // 等这一轮慢编译回来
+  const afterSlow = await c.evaluate(MARK_VISIBLE(mark));
+  check("编译回来后仍然看得见（源码或渲染时含它的切片）", afterSlow.visible, JSON.stringify(afterSlow));
+  const linesWithMark = await c.evaluate(
+    `Array.from(document.querySelectorAll(".cm-line")).map((el) => el.textContent).filter((t) => t.includes(${JSON.stringify(mark)})).length`,
+  );
+  check("标记文本只出现一处，不重复（隐藏的那份 + 露出的一份）", linesWithMark <= 1, `出现在 ${linesWithMark} 行`);
+  const slowCropsNow = await c.evaluate(CROPS);
+  check("插入新块之后仍然有切片（其余块照旧渲染）", slowCropsNow >= 2, `实际 ${slowCropsNow}`);
+  const mismatchBefore = await c.evaluate(MARK_VISIBLE(mark));
+  const mismatch2 = await c.evaluate(TEXT_MISMATCH);
+  check("块内拆行之后正文一行都没丢", mismatch2.missing.length === 0, JSON.stringify(mismatch2));
+  check("块内拆行也没有「重复显示」", mismatch2.dup.length === 0, JSON.stringify(mismatch2.dup.slice(0, 2)));
+  check("拆行后的标记文本仍然可见", mismatchBefore.visible, JSON.stringify(mismatchBefore));
+  await c.screenshot(SHOT("writing-blocks-enter"));
+}
+
+// 场景 C：文档**大幅缩短**（全选重打 / 删一大段 / 撤销）——旧块表的坐标落在新文档之外，
+// 一拍没接住就会在 CodeMirror 里抛 RangeError（"Invalid position 116 in document of length 17"），
+// 表现是整篇退回源码 + 控制台一片红。
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 200));
+await c.selectAll();
+await c.type("短文档。\n\n第二段。\n");
+await new Promise((r) => setTimeout(r, 900));
+const shortState = await c.evaluate(`(() => {
+  const view = document.querySelector(".cm-content").cmTile.root.view;
+  return { len: view.state.doc.length, head: view.state.selection.main.head };
+})()`);
+check("全选重打之后文档确实变短了", shortState.len < 40, JSON.stringify(shortState));
+const shortVisible = await c.evaluate(`document.querySelector(".cm-content").textContent.includes("短文档")`);
+check("缩短后的正文看得见（没有整篇卡在源码/空白）", shortVisible);
+
+// 控制台不许出现"装饰重建失败 / 插件崩了"——那段"旧表 + 新文档"的窗口最容易把它们引出来
+const badConsole = [];
+for (const ev of c.events.slice(consoleMark)) {
+  if (ev.method !== "Runtime.consoleAPICalled") continue;
+  const txt = (ev.params.args ?? []).map((a) => a.value ?? a.description ?? "").join(" ");
+  if (/plugin crashed|装饰重建失败|Invalid position/.test(txt)) badConsole.push(txt.slice(0, 700));
+}
+if (badConsole.length) console.log("  控制台原文：\n" + badConsole.join("\n---\n"));
+check(
+  "整组过程中没有「装饰重建失败 / CodeMirror plugin crashed / Invalid position」",
+  badConsole.length === 0,
+  JSON.stringify(badConsole.slice(0, 1)),
+);
 
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
 process.exit(process.exitCode ?? 0);
