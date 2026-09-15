@@ -35,6 +35,25 @@ function blocksStubEnabled(): boolean {
   return new URLSearchParams(window.location.search).has("blocks");
 }
 
+/**
+ * 注入的**真实**块级切片夹具（`npm run fixtures:blocks` 产出，验收脚本用
+ * `Page.addScriptToEvaluateOnNewDocument` 放进来）——命中时桩返回真实产物，
+ * 于是"切片摞起来 == 原版式"这条能在浏览器里按真实几何验（见 writing-blocks-visual.mjs）。
+ */
+interface BlockFixture {
+  name: string;
+  doc: string;
+  contentWidthPt: number;
+  pageWidthPt: number;
+  blocks: unknown[];
+}
+
+function injectedBlockFixtures(): BlockFixture[] | null {
+  if (typeof window === "undefined") return null;
+  const injected = (window as unknown as Record<string, unknown>).__DEV_BLOCK_FIXTURES;
+  return Array.isArray(injected) ? (injected as BlockFixture[]) : null;
+}
+
 /** 是否额外开启"假的可更新版本"（?browserdev=1&fakeupdate=1）——只给验收脚本用 */
 function isFakeUpdateEnabled(): boolean {
   if (typeof window === "undefined") return false;
@@ -519,6 +538,15 @@ async function handleCommand(
       // 只取用户文档那一段（前缀不属于编辑器内容）——真实后端返回的块偏移也是文档坐标
       const docStart = byteOffsetsToPositions(src, [docOffset])[0];
       const doc = src.slice(docStart);
+      // 注入了**真实产物**夹具且文档与夹具一致 → 返回真实切片（见 writing-blocks-visual.mjs）
+      const fixtures = injectedBlockFixtures();
+      if (fixtures) {
+        const hit = fixtures.find((f) => f.doc === doc);
+        if (hit) {
+          notify(command);
+          return { ok: true, blocks: hit.blocks, pages: 1, pageWidthPt: hit.pageWidthPt };
+        }
+      }
       const out = fakeBlocks(doc);
       // 窗口化：桩也要遵守（否则验收会以为"窗口过滤"没生效）
       const wantFrom = typeof a.wantFrom === "number" ? a.wantFrom : null;

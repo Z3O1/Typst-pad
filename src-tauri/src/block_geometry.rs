@@ -1123,10 +1123,64 @@ mod tests {
         assert!(out_win.blocks.iter().filter(|b| b.found).count() >= 3);
     }
 
-    /// 大文档开销探针：块级渲染每按键要付多少（IPC 字节数 + 渲染时间）。
-    /// 运行：`cargo test --manifest-path src-tauri/Cargo.toml dump_long_doc_blocks -- --ignored --nocapture`
+    /// **窗口化回归网**：窗口外的块不许出 SVG（否则长文档每按键要传十几 MB）。
+    ///
+    /// 断言用**产物字节数与块数**（确定性），不用耗时（机器/构建不同会飘）——
+    /// 耗时只在下面 `dump_long_doc_blocks` 里按需打印。
     #[test]
-    #[ignore = "按需运行：长文档下的块级渲染开销"]
+    fn windowing_keeps_payload_bounded() {
+        let mut src = String::from("= 长文档\n\n");
+        for i in 0..160 {
+            src.push_str(&format!(
+                "第 {i} 段正文，用来把文档撑长，观察窗口化是否真的把产物压住了。这一段里放一个行内公式 $a_{i} + b_{i}$，\n                 再补一句普通中文，让每个段落都有两三行。\n\n"
+            ));
+        }
+        let column = 371.25;
+        // 全渲（对照）：这是**不许**出现在按键路径上的量级
+        let all = compile_blocks(src.clone(), 0, None, &fonts_dir(), &FontConfig::default(), column, None, None);
+        assert!(all.ok, "{:?}", all.diagnostics);
+        let all_blocks = all.blocks.iter().filter(|b| !b.svg.is_empty()).count();
+        let all_bytes: usize = all.blocks.iter().map(|b| b.svg.len()).sum();
+        assert!(all_blocks > 100, "对照用例应有大量块，实际 {all_blocks}");
+
+        // 窗口化：只给中间 4000 个字节（模拟视口窗口）
+        let win = compile_blocks(
+            src.clone(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            column,
+            Some(8000),
+            Some(12000),
+        );
+        assert!(win.ok, "{:?}", win.diagnostics);
+        let win_blocks = win.blocks.iter().filter(|b| !b.svg.is_empty()).count();
+        let win_bytes: usize = win.blocks.iter().map(|b| b.svg.len()).sum();
+        assert!(
+            win_blocks * 20 < all_blocks * 3,
+            "窗口内的块数应远少于全渲：{win_blocks} vs {all_blocks}"
+        );
+        assert!(
+            win_bytes * 10 < all_bytes * 2,
+            "窗口化产物应压到全渲的 20% 以下：{win_bytes} vs {all_bytes} 字节"
+        );
+        // 窗口外的块仍要回几何（前端靠它判断"这块能渲染，只是还没渲"）
+        assert_eq!(
+            win.blocks.iter().filter(|b| b.found).count(),
+            all.blocks.iter().filter(|b| b.found).count(),
+            "窗口化不该丢掉任何块的几何"
+        );
+        println!(
+            "WINDOWING: 全渲 {all_blocks} 块 / {}KB，窗口内 {win_blocks} 块 / {}KB",
+            all_bytes / 1024,
+            win_bytes / 1024
+        );
+    }
+
+    /// 大文档开销探针（只打印，不作断言）：`--ignored --nocapture` 按需跑。
+    #[test]
+    #[ignore = "按需运行：长文档下的块级渲染开销（窗口化的实测数据）"]
     fn dump_long_doc_blocks() {
         for paragraphs in [20usize, 60, 120, 200] {
             let mut src = String::from("= 长文档\n\n");
@@ -1141,14 +1195,154 @@ mod tests {
             assert!(out.ok, "编译应成功: {:?}", out.diagnostics);
             let rendered: Vec<&BlockCrop> = out.blocks.iter().filter(|b| !b.svg.is_empty()).collect();
             let bytes: usize = rendered.iter().map(|b| b.svg.len()).sum();
+            // 同一份文档再来一次"只渲中间窗口"，对比量级
+            let t2 = Instant::now();
+            let win = compile_blocks(
+                src.clone(),
+                0,
+                None,
+                &fonts_dir(),
+                &FontConfig::default(),
+                371.25,
+                Some(src.len() / 2),
+                Some(src.len() / 2 + 4000),
+            );
+            let win_ms = t2.elapsed().as_secs_f64() * 1000.0;
+            let win_bytes: usize = win.blocks.iter().map(|b| b.svg.len()).sum();
             println!(
-                "LONGDOC: 段落 {paragraphs} / 字符 {} / 块 {}（渲染 {}）/ 块切片合计 {:.1}KB / 编译+切片 {:.1}ms",
+                "LONGDOC: 段落 {paragraphs} / 字符 {} / 块 {}（渲染 {}）/ 全渲 {:.1}KB {:.1}ms ←→ 窗口化 {}KB {:.1}ms",
                 src.chars().count(),
                 out.blocks.len(),
                 rendered.len(),
                 bytes as f64 / 1024.0,
-                ms
+                ms,
+                win_bytes as f64 / 1024.0,
+                win_ms
             );
+            // 对照：整页渲一次有多大（＝源码模式预览每按键都要传的量级）
+            let world = TypstWorld::new(
+                format!("#set page(width: 487.30pt, height: auto, margin: 58.02pt)\n{src}"),
+                None,
+                &fonts_dir(),
+                &FontConfig::default(),
+            );
+            if let typst::diag::Warned { output: Ok(doc), .. } = typst::compile::<PagedDocument>(&world) {
+                let page_bytes: usize = doc
+                    .pages()
+                    .iter()
+                    .map(|p| typst_svg::svg(p, &SvgOptions::default()).len())
+                    .sum();
+                println!("LONGDOC-PAGE: 同一文档整页 SVG {:.1}KB", page_bytes as f64 / 1024.0);
+            }
+        }
+    }
+
+    /// 供"切片几何等价"验收用的样例文档（真实产物夹具与不变量测试共用）
+    const GEOMETRY_DOCS: &[(&str, &str)] = &[
+        (
+            "段落与标题",
+            "= 第一章\n\n第一段正文，两行以上比较好，用来观察块间距是否被正确分到相邻两块。\n\
+             继续这一段的第二行文字。\n\n== 小节\n\n第二段正文。\n",
+        ),
+        (
+            "列表",
+            "= 清单\n\n- 第一项\n- 第二项\n  - 嵌套项\n\n+ 有序一\n+ 有序二\n\n收尾段落。\n",
+        ),
+        (
+            "公式与代码",
+            "= 公式\n\n行内 $a^2 + b^2$ 与行间：\n\n$ integral_0^1 f(x) dif x = 1 $\n\n\
+             ```rust\nfn main() {}\n```\n\n代码之后的段落。\n",
+        ),
+    ];
+
+    /// **切片几何不变量**（真实引擎产物，常驻测试）：
+    ///  ① 每块宽度 = 正文列宽（横向切的是列不是墨迹）；
+    ///  ② 各块高度之和 = 首块顶到底块底的纵向跨度（相邻块按中点分间距 ⇒ 摞起来不丢高度）；
+    ///  ③ 按 y 序相邻块不重叠（能像积木一样堆叠）；
+    ///  ④ 块区间按源码顺序递增不重叠（前端靠它切"源码透镜"的边界）。
+    #[test]
+    fn block_crop_geometry_invariants() {
+        const COLUMN_PT: f64 = 371.25;
+        for (name, src) in GEOMETRY_DOCS {
+            let out = compile_blocks(
+                src.to_string(),
+                0,
+                None,
+                &fonts_dir(),
+                &FontConfig::default(),
+                COLUMN_PT,
+                None,
+                None,
+            );
+            assert!(out.ok, "[{name}] 编译应成功：{:?}", out.diagnostics);
+            let rendered: Vec<&BlockCrop> = out.blocks.iter().filter(|b| !b.svg.is_empty()).collect();
+            assert!(rendered.len() >= 3, "[{name}] 应切出多块，实际 {}", rendered.len());
+
+            for b in &rendered {
+                assert!(
+                    (b.width_pt - COLUMN_PT).abs() < 0.5,
+                    "[{name}] 切片宽度应等于正文列宽：{} vs {COLUMN_PT}",
+                    b.width_pt
+                );
+                assert!(b.height_pt > 0.5, "[{name}] 切片高度应为正：{}", b.height_pt);
+            }
+
+            // ② 高度之和 = 纵向跨度（首块顶 → 末块底）
+            let mut by_y: Vec<&BlockCrop> = rendered.clone();
+            by_y.sort_by(|a, b| a.y_pt.partial_cmp(&b.y_pt).unwrap());
+            let span = by_y.last().unwrap().y_pt + by_y.last().unwrap().height_pt - by_y[0].y_pt;
+            let total: f64 = by_y.iter().map(|b| b.height_pt).sum();
+            assert!(
+                (total - span).abs() < 1.0,
+                "[{name}] 各块高度之和 {total:.2} 应等于纵向跨度 {span:.2}（中点切带不丢高度）"
+            );
+
+            // ③ 相邻块不重叠（允许 0.5pt 的浮点误差）
+            for pair in by_y.windows(2) {
+                let prev_bottom = pair[0].y_pt + pair[0].height_pt;
+                assert!(
+                    pair[1].y_pt >= prev_bottom - 0.5,
+                    "[{name}] 相邻块重叠了：{:?} 底 {prev_bottom:.2} → 下一块顶 {:.2}",
+                    pair[0].kind,
+                    pair[1].y_pt
+                );
+            }
+
+            // ④ 源码顺序递增不重叠
+            for pair in out.blocks.windows(2) {
+                assert!(pair[0].end <= pair[1].start, "[{name}] 块区间应递增不重叠");
+            }
+        }
+    }
+
+    /// 「切片几何等价」验收用的**真实产物夹具**（按需导出，浏览器端注入）：
+    ///   `npm run fixtures:blocks`
+    /// 每条 = 一篇文档 + 编译用的正文列宽 + 每块的区间/几何/SVG。浏览器侧会把同一篇文档
+    /// 打进编辑器（桩按文档原文命中夹具，给真实产物），再断言"摞起来 == 原版式"。
+    #[test]
+    #[ignore = "按需运行：导出块级切片的真实产物夹具"]
+    fn dump_block_fixtures() {
+        const COLUMN_PT: f64 = 371.25;
+        for (name, src) in GEOMETRY_DOCS {
+            let out = compile_blocks(
+                src.to_string(),
+                0,
+                None,
+                &fonts_dir(),
+                &FontConfig::default(),
+                COLUMN_PT,
+                None,
+                None,
+            );
+            assert!(out.ok, "[{name}] 编译应成功：{:?}", out.diagnostics);
+            let json = serde_json::json!({
+                "name": name,
+                "doc": src,
+                "contentWidthPt": COLUMN_PT,
+                "pageWidthPt": out.page_width_pt,
+                "blocks": out.blocks,
+            });
+            println!("BLOCKFIXTURE:{}", json);
         }
     }
 

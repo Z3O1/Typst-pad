@@ -34,8 +34,8 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（30 个文件 / 469 项）
-cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（36 passed / 1 ignored）
+npm test                 # 前端 + 脚本单测（32 个文件 / 508 项）
+cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（42 passed / 4 ignored；那 4 个是按需跑的探针/夹具）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 本地打包需要更新签名私钥（配置里已有 pubkey → 缺私钥打包会直接失败）：
@@ -150,7 +150,8 @@ node scripts/check-fonts.mjs    # 校验 src-tauri/fonts 字体有效性
 node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成更新清单（发版用，CI 里自动跑）
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染验收（见「写作模式的块级渲染」）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价（真实产物）
 ```
 
 ## 架构
@@ -525,5 +526,6 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
   - **实测坑（都踩过）**：① `Page.navigate` 对**相同 URL** 不重新加载，上一次停在 500 错误页时会一直复现 → `goto()` 先跳 `about:blank`；② 截图必须由 Node 写进**工作区**（写 `/mnt/c/...` 会被文件沙箱拒绝，报 EROFS），别交给 Chrome 写；③ **Windows 的 headless Chrome 必须加 `--no-proxy-server`**，否则 localhost 会被系统代理吞掉、页面报"无法访问此网站"，看起来像"WSL 端口转发坏了"（判断连通性更干净的判据是 Windows 自带 `curl.exe`：`/mnt/c/Windows/System32/curl.exe -s -o NUL -w '%{http_code}' http://localhost:1420/`）；④ 验收脚本开始前**必须清 localStorage 再重新加载**，否则上一轮遗留的「源代码模式」会让页面不渲染公式，第一条断言莫名超时；⑤ 找菜单项要限定在 `.menu-dropdown .menu-item` 里，别在全页找同名文字（状态栏会显示"源代码模式"这类同名状态文字）。
   - ⑥ **收尾绝不要跑 `taskkill /IM chrome.exe /F` 这种全量杀进程**（2026-09-14 犯过：把用户自己开着的 Chrome 窗口全部杀掉，用户直接炸了）。只杀**我启动的那一个 headless 实例**：启动时用 PowerShell 拿到 PID 并存到 `.browser-check/chrome.pid`（`powershell.exe -Command "Start-Process -FilePath 'C:\Program Files\Google\Chrome\Application\chrome.exe' -ArgumentList '--headless=new','--remote-debugging-port=9333',... -PassThru | Select-Object -ExpandProperty Id"`），收尾时**按 user-data-dir 精确挑出自己那几个 PID**（实测可行的写法，`powershell.exe` 不在 PATH 上，必须用绝对路径）：`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object { $_.CommandLine -like '*dsh-chrome-typstpad*' } | Select-Object -ExpandProperty ProcessId"` → 再逐个 `taskkill /PID <pid> /T /F`。（`Start-Process -PassThru` 那条路在本机没跑通：拿不到 PID。CDP 的 `/json/version` 也不暴露 PID，所以按 user-data-dir 反查最稳。）**同理适用于任何"清理现场"的动作：只动自己创建的东西**（进程、文件、端口、git 暂存）。
   - `writing-blocks.mjs`：**写作模式块级渲染的验收**（23 项，带 `&blocks=1`）。为什么单独一套：块切片会把非光标块整块换成图片，那块里的 `.cm-markup-heading`、公式 widget 等**在 DOM 里不复存在**（设计如此），`wysiwyg.mjs` 那 209 项断言的是"标记装饰"世界，默认开着块渲染会整片变红、把回归信号淹掉 —— 所以桩里 `compile_blocks` **默认返回"没有这个命令"**（页面自动退回整页预览路径），只有 `&blocks=1` 时才给假切片（见 `browser-dev-stub.ts` 的 `blocksStubEnabled`）。这套验的是：非光标块被切片取代（**按 `.cm-line` 判"还是不是源码形态"** —— 不能用 `.cm-content.textContent`，切片的 SVG 里也有文字，实测踩过）、切片铺满正文列宽、点击切片→光标落到该块起点且原活动块变切片、活动块内可正常输入、Ctrl+/ 切源码模式无切片且切回恢复、暗色挂 `cm-block-crop-dark`、长文档窗口化后滚动仍补渲出切片。
+  - `writing-blocks-visual.mjs`：**块级切片的几何等价验收（真实产物，24 项）**。先 `npm run fixtures:blocks`（Rust `dump_block_fixtures`）导出每块的真实区间/几何/SVG，导航前注入 `window.__DEV_BLOCK_FIXTURES`，桩命中同文档夹具时给真实产物；然后断言"切片摞起来 == 原版式"：每块高度与真实排版一致（实测偏差 **0.01px**）、相邻切片首尾相接（**0.00px**）、总跨度等于真实纵向跨度、铺满正文列宽、高宽比未被拉伸、被盖住的块不在源码形态里。**这条是"和真实 typst 一样"的唯一数字证据**，改块级渲染后必须跑。
   - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`（**两种字号各一份**：12pt 写作模式 / 10.5pt 源码模式，桩按 body+display+**sizePt** 匹配，字号对不上宁可退回假 SVG），再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
   - 浏览器开发模式（`?browserdev=1`，见 `src/lib/browser-dev-stub.ts`）里的 `compile_doc` 是假实现（假分页 SVG），`compile_math` 在没有注入夹具时也是假 SVG；文件/PDF 等 Tauri 命令同样是假的。**真实 typst 排版可用夹具链路上浏览器验证**，只有 Tauri IPC / WebView2 那一层必须桌面端（Windows）确认。
