@@ -760,6 +760,9 @@ const SNAPSHOT = `(() => {
   const v = document.querySelector(".cm-content").cmTile.root.view;
   const sel = v.state.selection.main;
   const lines = Array.from(document.querySelectorAll(".cm-line")).map((el) => el.textContent);
+  const selectedEl = document.querySelector(".cm-block-crop-selected");
+  const tint = selectedEl ? selectedEl.querySelector(".cm-block-crop-tint") : null;
+  const svg = selectedEl ? selectedEl.querySelector("svg") : null;
   return {
     sel: [sel.from, sel.to, sel.head],
     selText: v.state.sliceDoc(sel.from, sel.to),
@@ -768,6 +771,15 @@ const SNAPSHOT = `(() => {
     rawCrops: document.querySelectorAll('.cm-block-crop[data-block-kind="Raw"]').length,
     fenceInSource: lines.some((t) => t.includes("\`\`\`rust")),
     codeInSource: lines.some((t) => t.includes("fn main()")),
+    // 选中态的**可见性**：染色层必须存在、不透明、盖住整张切片，而且**不许有描边**
+    //（曾经只给容器加背景色 + 1px outline：切片 SVG 自带不透明白纸底 → 只看得到描边，
+    //  相邻切片描边相接，全选时整页变成蓝色网格，用户截图「太丑了」）
+    tintBg: tint ? getComputedStyle(tint).backgroundColor : null,
+    tintCoversSvg: !!(tint && svg) &&
+      Math.abs(tint.getBoundingClientRect().width - svg.getBoundingClientRect().width) <= 1 &&
+      Math.abs(tint.getBoundingClientRect().height - svg.getBoundingClientRect().height) <= 1,
+    tintNoPointer: tint ? getComputedStyle(tint).pointerEvents === "none" : null,
+    outline: selectedEl ? getComputedStyle(selectedEl).outlineStyle : null,
   };
 })()`;
 
@@ -806,6 +818,16 @@ if (paras.first && paras.last) {
     JSON.stringify(a),
   );
   check("它挂上了「整块被选中」的淡色底", a.selected >= 1, JSON.stringify(a));
+  check(
+    "淡色底**真的看得见**（染色层盖在 SVG 之上、不拦事件）",
+    a.tintBg !== null && a.tintBg !== "rgba(0, 0, 0, 0)" && a.tintCoversSvg === true && a.tintNoPointer === true,
+    JSON.stringify(a),
+  );
+  check(
+    "选中态**没有描边**（切片铺满整块，描边相接会把整页画成网格 —— 用户截图「太丑了」）",
+    a.outline === "none",
+    JSON.stringify(a),
+  );
   check("围栏没有露出来", a.fenceInSource === false, JSON.stringify(a));
   check(
     `选区内容照旧是源码（可复制）：${JSON.stringify(a.selText.slice(0, 18))}…`,

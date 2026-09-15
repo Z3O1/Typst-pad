@@ -200,8 +200,10 @@ check(
   JSON.stringify(markup.lines),
 );
 check(
-  "标题字号大于正文（所见即所得的分级标题）",
-  markup.headingSize > markup.bodySize * 1.3,
+  // h1 = 1.4em（typst 的 heading 梯度，见 Editor.svelte 的注释）：这里锁住"确实按 typst 放大"，
+  // 而不是任意放大 —— 曾经是 1.8em，比块切片大 40%（用户报「在标题所在块，标题就会变的很大」）
+  "标题字号 = 正文 × 1.4（typst 的 heading 梯度）",
+  Math.abs(markup.headingSize / markup.bodySize - 1.4) < 0.02,
   `heading=${markup.headingSize} body=${markup.bodySize}`,
 );
 // 标题正文不许有下划线（2026-09-14 用户反馈「`== 1` 在写作模式有下划线」）：
@@ -519,7 +521,12 @@ const headingSize = await c.evaluate(`(() => {
   const el = document.querySelector(".cm-markup-heading");
   return el ? parseFloat(getComputedStyle(el).fontSize) : null;
 })()`);
-check("标题在写作模式下字号显著放大", headingSize !== null && headingSize > 24, String(headingSize));
+check(
+  // 1.4em × 16px = 22.4px（typst 的一级标题）；**不是**"随便放大"就行 —— 梯度必须与切片一致
+  "标题在写作模式下按 typst 梯度放大（1.4em = 22.4px）",
+  headingSize !== null && Math.abs(headingSize - 22.4) < 0.5,
+  String(headingSize),
+);
 await c.screenshot(SHOT("wysiwyg-19-write-format"));
 
 console.log("20) 模式切换不丢内容：写作 ↔ 源码 双向切换（含在源码模式里继续输入）");

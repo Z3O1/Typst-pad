@@ -286,7 +286,7 @@ class BlockCropWidget extends WidgetType {
       const wrap = document.createElement("div");
       const classes = ["cm-block-crop"];
       if (this.dark) classes.push("cm-block-crop-dark");
-      // 整块被选中时保持切片外观，用一层淡色底表示"选中了"（见 block-plan 的 selected 说明）
+      // 整块被选中时保持切片外观，用一层淡色表示"选中了"（见 block-plan 的 selected 说明）
       if (this.cover.selected) classes.push("cm-block-crop-selected");
       wrap.className = classes.join(" ");
       wrap.title = `${this.cover.block.kind}（点击编辑源码）`;
@@ -300,6 +300,14 @@ class BlockCropWidget extends WidgetType {
         svg.setAttribute("width", "100%");
         svg.setAttribute("height", "auto");
         svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      }
+      // 选中色**必须铺在 SVG 之上**（见 .cm-block-crop-selected 的注释）：切片的 SVG 自带
+      // 不透明的白纸底，只给容器加背景色是**看不见**的 —— 只在相邻切片的缝隙里漏出一两条细蓝线，
+      // 看起来像整页被画上了网格（用户截图「太丑了」就是这么来的）。
+      if (this.cover.selected) {
+        const tint = document.createElement("div");
+        tint.className = "cm-block-crop-tint";
+        wrap.appendChild(tint);
       }
       // **不挂 mousedown**：切片的点击与拖选统一由 CodeMirror 的 mouseSelectionStyle 接管
       // （见 cropMouseSelection）。自己再挂一个会与它抢同一次事件。
@@ -1275,10 +1283,21 @@ const mathWidgetTheme = EditorView.theme({
   ".cm-block-crop:hover": {
       backgroundColor: "rgba(128, 128, 128, 0.06)",
   },
-  // 整块被选中（没展开）：整张切片罩一层淡色，表示"这块在选区里"
-  ".cm-block-crop-selected": {
-      backgroundColor: "rgba(64, 120, 255, 0.18)",
-      outline: "1px solid rgba(64, 120, 255, 0.35)",
+  // 整块被选中（没展开）：整张切片罩一层淡色，表示"这块在选区里"。
+  // 两条硬约束（都踩过，用户直接发来截图说「太丑了」）：
+  // ① **不能只给容器加背景色**：切片 SVG 自带不透明的白纸底，容器背景只在相邻切片的缝里漏出来，
+  //    整页看上去是一张细蓝线网格。所以选中色由 .cm-block-crop-tint 铺在 **SVG 之上**（见 toDOM）。
+  // ② **不要 outline**：切片上下相邻、描边首尾相接，全选时同样变成网格。
+  // 颜色取编辑器自己的选区底色（CodeMirror 默认 #d7d4f0）→ "被选中的切片"与"被选中的源码"
+  // 看上去是同一件事，相邻切片连成一片浅紫，像一段正常选区。
+  // （容器本身已经是 position: relative，见 .cm-block-crop —— 链接热区也靠它定位。）
+  ".cm-block-crop-tint": {
+      position: "absolute",
+      inset: "0",
+      backgroundColor: "rgba(122, 112, 205, 0.3)",
+      // 只负责"染色"，不拦事件：切片的点击/拖选由 mouseSelectionStyle 处理，
+      // 链接热区也是绝对定位铺在上面的（pointer-events: none 才不会挡住它们）。
+      pointerEvents: "none",
   },
   ".cm-block-crop svg": {
       display: "block",
@@ -1302,10 +1321,10 @@ const mathWidgetTheme = EditorView.theme({
       backgroundColor: "rgba(128, 128, 128, 0.18)",
   },
   // 选区**完整盖住**这个公式时保持渲染外观（用户要求「选中整个公式请不要展开」）：
-  // 用一层淡色底表示"它在选区里" —— 与块切片的 .cm-block-crop-selected 同一套视觉。
-  // 只给底色、不加 outline：行内公式夹在正文里，描一圈边在整行文字中显得碎。
+  // 用一层淡色底表示"它在选区里" —— 与块切片的 .cm-block-crop-selected 同一套视觉
+  //（= 编辑器选区底色 #d7d4f0）；只给底色、不加 outline，行内公式描边在整行文字里显得碎。
   ".cm-math-selected": {
-      backgroundColor: "rgba(64, 120, 255, 0.18)",
+      backgroundColor: "rgba(122, 112, 205, 0.3)",
   },
   ".cm-math-widget svg": {
       display: "block",
@@ -1379,11 +1398,13 @@ const mathWidgetTheme = EditorView.theme({
       backgroundColor: "rgba(128, 128, 128, 0.18)",
       borderRadius: "2px",
   },
-  // 标题字号：级别越高越大（1.6em → 1.06em），行高随之变化是预期内的
-  ".cm-markup-heading-1": { fontSize: "1.6em", lineHeight: "1.5" },
-  ".cm-markup-heading-2": { fontSize: "1.4em", lineHeight: "1.45" },
-  ".cm-markup-heading-3": { fontSize: "1.25em", lineHeight: "1.4" },
-  ".cm-markup-heading-4": { fontSize: "1.15em" },
-  ".cm-markup-heading-5": { fontSize: "1.08em" },
+  // 标题字号梯度**必须跟 typst 一致**（heading.rs 的 ShowSet：1.4 / 1.2 / 1.0em，level 3 起只加粗），
+  // 否则块级切片与"光标进入后展开的源码"字号对不上（用户报「在标题所在块，标题就会变的很大」）。
+  // 写作模式下 Editor.svelte 的同名规则（带 .editor-host.write 前缀，优先级更高）会覆盖这里。
+  ".cm-markup-heading-1": { fontSize: "1.4em", lineHeight: "1.5" },
+  ".cm-markup-heading-2": { fontSize: "1.2em", lineHeight: "1.45" },
+  ".cm-markup-heading-3": { fontSize: "1em", lineHeight: "1.4" },
+  ".cm-markup-heading-4": { fontSize: "1em" },
+  ".cm-markup-heading-5": { fontSize: "1em" },
   ".cm-markup-heading-6": { fontSize: "1em" },
 });

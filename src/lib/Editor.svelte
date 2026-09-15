@@ -577,26 +577,33 @@
     caret-color: var(--typora-caret, currentColor);
   }
 
-  /* 标题：Typora 式的字号梯度与上下留白 */
+  /* 标题：字号梯度**必须跟 typst 一致**（`typst-library/src/model/heading.rs` 的 ShowSet：
+     level 1 = 1.4em、level 2 = 1.2em、level 3 及以下 = 1.0em，只加粗、不再变大）。
+     以前这里是仿 Typora 的 1.8 / 1.5 / 1.25 / 1.08em —— 块级渲染落地后就露馅了：光标进标题块时
+     那一块展开成源码，标题**比切片里大 36%~40%**（用户报「在标题所在块，标题就会变的很大」）。
+     改完之后各级与切片的差只剩正文本身那 9%（编辑区 16px vs typst 默认 11pt = 14.67px），
+     不再有"标题特别大"的跳变。
+     line-height 保持原值：实测量出来正好接近 typst 的标题行盒（1.65em × 标题字号）——
+     h1 1.45×22.4 = 32.5px vs 33.9px、h2 1.5×19.2 = 28.8px vs 29.0px、h3 1.55×16 = 24.8px vs 24.2px。 */
   .editor-host.write :global(.cm-line:has(.cm-markup-heading)) {
     padding-top: 0.6em;
     padding-bottom: 0.2em;
   }
 
   .editor-host.write :global(.cm-markup-heading-1) {
-    font-size: 1.8em;
+    font-size: 1.4em;
     line-height: 1.45;
     font-weight: 700;
   }
 
   .editor-host.write :global(.cm-markup-heading-2) {
-    font-size: 1.5em;
+    font-size: 1.2em;
     line-height: 1.5;
     font-weight: 700;
   }
 
   .editor-host.write :global(.cm-markup-heading-3) {
-    font-size: 1.25em;
+    font-size: 1em;
     line-height: 1.55;
     font-weight: 600;
   }
@@ -604,7 +611,7 @@
   .editor-host.write :global(.cm-markup-heading-4),
   .editor-host.write :global(.cm-markup-heading-5),
   .editor-host.write :global(.cm-markup-heading-6) {
-    font-size: 1.08em;
+    font-size: 1em;
     font-weight: 600;
   }
 

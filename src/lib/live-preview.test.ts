@@ -610,6 +610,15 @@ describe("livePreview 块级切片", () => {
     // 光标那一块必须展开成源码 —— 否则 DOM 里没有真实文本，打字会失灵（实测踩过）
     expect(host.querySelectorAll(".cm-block-crop").length).toBe(2);
     expect(host.querySelectorAll(".cm-block-crop-selected").length).toBe(2);
+    // 选中色必须是一层**铺在 SVG 之上**的染色元素：切片 SVG 自带不透明白纸底，
+    // 只给容器加背景色是看不见的（曾经还配了 1px outline → 全选时整页变网格，用户说「太丑了」）
+    for (const el of Array.from(host.querySelectorAll(".cm-block-crop-selected"))) {
+      const tint = el.querySelector(".cm-block-crop-tint");
+      expect(tint).not.toBeNull();
+      // 染色层必须是最后一个子节点之后仍能盖住 SVG（DOM 顺序在 svg 之后）
+      const svgIndex = Array.from(el.children).indexOf(el.querySelector("svg") as Element);
+      expect(Array.from(el.children).indexOf(tint as Element)).toBeGreaterThan(svgIndex);
+    }
     expect(content()).toContain("ccc"); // 第三块展开成了源码
     expect(content()).not.toContain("aaa");
     expect(asked[0]).toBe(0); // 第一次命中问的是"按下去的那一块"

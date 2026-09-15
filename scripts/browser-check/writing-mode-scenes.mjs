@@ -112,7 +112,64 @@ for (const fx of fixtures) {
   });
 }
 
-// 文档级 #set 对照：同一段文字，12pt 的切片必须比默认字号高（CSS 那套做不到这一点）
+// 标题字号梯度必须跟 typst 一致（用户报「在标题所在块，标题就会变的很大」）：
+// 切片是引擎画的（h1 = 1.4em、h2 = 1.2em、h3 及以下 = 1.0em，只加粗），光标进标题块时那一块
+// 展开成源码 —— 源码透镜若用另一套梯度（曾经是 1.8/1.5/1.25em），标题就会突然放大 36%~40%。
+console.log("\n=== 标题字号梯度对齐 typst（源码透镜 vs 切片）");
+const headings = fixtures.find((f) => f.name === "标题层级");
+if (!headings) {
+  check("找到「标题层级」场景夹具", false, "夹具缺失");
+} else {
+  await loadScene(headings.doc);
+  /** 把光标放进含 needle 的那一行，返回该行标题的实际字号（px）与 typst 应有的字号 */
+  const measureHeading = async (needle, level) => {
+    await c.evaluate(`(() => {
+      const v = document.querySelector(".cm-content").cmTile.root.view;
+      const d = v.state.doc.toString();
+      v.dispatch({ selection: { anchor: d.indexOf(${JSON.stringify(needle)}) + ${JSON.stringify(needle)}.length } });
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    return c.evaluate(`(() => {
+      const el = document.querySelector(${JSON.stringify(`[class*="cm-markup-heading-${level}"]`)});
+      // 该夹具文档没有 #set text(size:)，切片用的是 typst 默认 11pt；1pt = 4/3px
+      const ladder = { 1: 1.4, 2: 1.2, 3: 1.0 }[${level}];
+      return el ? {
+        className: el.className,
+        sourcePx: parseFloat(getComputedStyle(el).fontSize),
+        typstPx: ladder * 11 * 4 / 3,
+      } : null;
+    })()`);
+  };
+  const h1 = await measureHeading("一级标题", 1);
+  const h2 = await measureHeading("二级标题", 2);
+  const h3 = await measureHeading("三级标题", 3);
+  check("三级标题都能量到（切片展开成了源码）", !!h1 && !!h2 && !!h3, JSON.stringify({ h1, h2, h3 }));
+  if (h1 && h2 && h3) {
+    // ① 梯度本身（与正文基准无关，只看各级之间的比例）：必须正好是 typst 的 1.4 / 1.2 / 1.0
+    check(
+      `h1/h3 = ${(h1.sourcePx / h3.sourcePx).toFixed(3)}（typst 1.4）`,
+      Math.abs(h1.sourcePx / h3.sourcePx - 1.4) < 0.02,
+      JSON.stringify({ h1: h1.sourcePx, h3: h3.sourcePx }),
+    );
+    check(
+      `h2/h3 = ${(h2.sourcePx / h3.sourcePx).toFixed(3)}（typst 1.2）`,
+      Math.abs(h2.sourcePx / h3.sourcePx - 1.2) < 0.02,
+      JSON.stringify({ h2: h2.sourcePx, h3: h3.sourcePx }),
+    );
+    // ② 与切片里的绝对字号也不许差太多（剩下的差只应来自"编辑区正文 16px vs typst 默认 11pt"）
+    for (const [name, m] of [["h1", h1], ["h2", h2], ["h3", h3]]) {
+      const ratio = m.sourcePx / m.typstPx;
+      check(
+        `${name} 与切片字号之比 ${ratio.toFixed(3)}（1.0~1.15，别再有"标题特别大"）`,
+        ratio >= 0.98 && ratio <= 1.15,
+        JSON.stringify(m),
+      );
+    }
+  }
+}
+
+
 console.log("\n=== 对照：文档级 #set 是否真的进到切片里");
 const plain = fixtures.find((f) => f.name === "文档级设置（默认字号）");
 const bigger = fixtures.find((f) => f.name === "文档级设置（12pt）");

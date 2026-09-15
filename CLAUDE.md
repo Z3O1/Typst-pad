@@ -391,6 +391,16 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
     看起来就像代码块而不像 markdown 源码。
   - 非空选区时**不做**"兜底展开第一格"（那会把不相干的一块变成源码，凭空多一次版式变化）；
     兜底只在"都是空选区（光标）"时生效。
+  - **"被选中"的视觉：染色层必须铺在切片 SVG 之上，而且不许有描边（红线，用户截了张图说「太丑了」）**。
+    切片的 SVG 自带**不透明的白纸底**，所以给容器加 `background-color` 是**看不见**的 ——
+    只在相邻切片的缝隙里漏出一两条细线；当时还配了 `1px outline`，两者叠起来就是"整页被画上蓝色网格"
+    （Ctrl+A 全选的截图就是这个样子）。现在：`toDOM` 里额外插一个 `.cm-block-crop-tint`
+    （`position: absolute; inset: 0; pointer-events: none`，**排在 SVG 之后**才能盖住它），
+    颜色取 CodeMirror 自己的选区底色（`#d7d4f0` ≈ `rgba(122,112,205,0.3)`），
+    于是"被选中的切片"与"被选中的源码"看起来是同一件事、相邻切片连成一片，**不要 outline**。
+    `.cm-math-selected`（公式）同理 —— 公式 SVG 是透明的，用底色就够，不必再加一层。
+    验收：`writing-blocks.mjs` 第 15 组的「淡色底真的看得见」「没有描边」两条 + jsdom 用例里的
+    染色层顺序断言（**别删**）。
 - **链接可点（阶段 3）**：typst 的 `#link("https://…")[文字]` 会画成 `FrameItem::Link(目标, 方框)` ——
   它**不带源位置**但带目标与方框，Rust 侧（`collect_geometry_with_links` → `BlockCrop.links`）
   把它收成"带内相对 pt"的热区（**夹到带内**：链接方框有时比墨迹包围盒略高，不夹会溢出切片一两像素），
@@ -418,6 +428,7 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 - **字号**：`MATH_TEXT_PT = 10.5`（Rust）/ 编辑器正文 14px = 10.5pt，故 SVG 的 pt 与编辑器 CSS 的 pt **1:1**，前端直接写 `width/height: Npt` + `vertical-align: -(height-baseline)pt`。改字号要两侧同步。
 - **暗色主题**：typst 产物是黑字透明底，暗色下看不见 → widget 带 `cm-math-dark` 类整体 `filter: invert(1)`。**不要用 `&dark` 选择器**：`EditorView.theme` 不支持该前缀（实测抛 `RangeError: Unsupported selector: &dark`，SvelteKit 会整页渲染成 500 错误页，表现为"应用没渲染"）。
 - **展开规则**：`selectionTouchesRange`（光标落在区间内含两端即展开，非空选区相交即展开）。标记类构造的展开范围必须是**标记 + 正文的并集**——标题/列表只有前导标记，只取标记范围会导致光标落在正文里时 `= ` 不露出（实测踩过）。
+- **标题字号梯度必须跟 typst 一致：1.4 / 1.2 / 1.0em（红线，用户报「在标题所在块，标题就会变的很大」）**。typst 的 heading（`heading.rs` 的 ShowSet）是 level 1 = 1.4em、level 2 = 1.2em、level 3 及以下 = 1.0em（**只加粗，不再变大**）。以前这里仿 Typora 写的是 1.8 / 1.5 / 1.25 / 1.08em（`Editor.svelte` 写作模式那几条 + `live-preview.ts` 主题里同名的那几条），块级渲染落地后就变成 bug：光标一进标题块，那一块展开成源码、由我们的 CSS 画，**标题比切片大 36%~40%**（详见调研文档第十三节之 4 的对照表）。`line-height` 保持 1.45 / 1.5 / 1.55 —— 换成新字号后它们正好接近 typst 的标题行盒（1.65em × 标题字号）。**剩下的 +9% 是"编辑区正文 16px vs typst 默认 11pt = 14.67px"，与块类型无关，别再去动标题梯度去凑它。** 验收：`writing-mode-scenes.mjs` 的「标题字号梯度对齐 typst」（h1/h3 = 1.4、h2/h3 = 1.2、与切片字号之比 ≤ 1.15）**别删**。
 - **选中整个公式不展开（用户要求「选中整个公式请写不展开」）**：与块级同一套规则（`math-ranges.mathRevealDecision` + `selectionCoversRange`）——选区**完整盖住**公式 → 保持渲染 + 淡色底 `.cm-math-selected`；只盖住一部分、或光标在公式里 → 照旧展开。**别把它套到跨行行间公式上**（`inlinePresentation: false`）：那种公式只能整行 `block: true` 替换，widget 是 `contenteditable=false` 的顶层 `div`，被选区完整盖住后打字**会把字符插到下一行**（实测 `$ x^2 $\n后文` → `$ x^2 $\nz后文`，文档本身没变）。所以**单行**行间公式已改成"装饰只盖公式本身 + widget 落在行内 + 行级居中"（`MathBlockWidget` 的 `inline` 形态 → `span.cm-math-block-inline` + `Decoration.line({class: "cm-math-line"})`），落在 `.cm-line` 里就没有这个问题（实测打字正确替换选区）。**别把单行行间公式改回整行 block 替换**（理由同上，实测数据在调研文档第十三节之 3）。**判据是"装饰实际盖住的区间"**（`decorated = block ?? 公式区间`），不是只看公式本身：单行行间公式连行首行尾空白一起盖（`  $ x $  ` 才居中），若只按公式范围判"完整盖住"，就会出现"选区盖住公式、widget 只被盖住一部分"——DOM 里 widget 是原子节点，浏览器只能在边缘插入，**实测字符被插到行尾**（`  $ x^2 $  ` 选中 `$ x^2 $` 打字 → `  $ x^2 $  z`），所以那种情况照旧展开。`buildMathDecorations` 与 `collectRequestsInner` 两处的判据必须用同一个 `decorated`。
 - **输入 `$` 自动配对**（用户要求「加入功能：自动补全 $$」，2026-09-14）：敲一个 `$` 就把定界符补成一对、光标落在中间，判定全在 `auto-pair.ts`（纯函数可单测），落事务在 `Editor.svelte` 的 `EditorView.inputHandler`（只在"空选区 + 输入内容恰好是 `$`"时介入，不碰粘贴 / IME / 选中替换；任何抛错都 `return false` 退回默认输入，绝不吞按键）。
   - **独占一行 → 补 `$  $`（行间公式脚手架）**：typst 的行间公式是**定界符内侧两侧留白**的 `$ x $`，所以脚手架是"两个空格 + 光标在中间"——敲一个字直接得到 `$ x $`，光标移开后由块级 widget 居中渲染（验收里断言桩收到 `display: true`）。行内（同行还有别的字）→ 补 `$$`，敲字得到 `$x$`。
