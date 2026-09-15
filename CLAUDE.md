@@ -34,8 +34,8 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（32 个文件 / 508 项）
-cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（42 passed / 4 ignored；那 4 个是按需跑的探针/夹具）
+npm test                 # 前端 + 脚本单测（34 个文件 / 549 项）
+cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（45 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 本地打包需要更新签名私钥（配置里已有 pubkey → 缺私钥打包会直接失败）：
@@ -47,6 +47,13 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 209 项�
 npm run fixtures:math
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 15 项真实排版视觉验收
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
+
+# 写作模式「块级渲染」三套（需要 headless Chromium，见「环境备忘」；CDP_PORT 默认 9333）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，50 项）
+npm run fixtures:blocks                                                                   # 导出真实切片 + 点击探针
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs # 几何等价（64 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击→精确字符（24 项 / 125 次点击）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs   # 场景截图（45 项）
 ```
 
 **改动前的红线（都是踩过的，勿回退）**
@@ -149,10 +156,12 @@ cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（typst_world/p
 node scripts/check-fonts.mjs    # 校验 src-tauri/fonts 字体有效性
 node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成更新清单（发版用，CI 里自动跑）
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
+npm run fixtures:blocks         # 导出真实块切片 + 几何 + 点击探针到 .browser-check/（块级渲染验收用）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物）
-npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价（真实产物，56 项）
-npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，40 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，50 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价（真实产物，64 项）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击 → 精确字符（真实探针，24 项 / 125 次点击全中）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，45 项）
 ```
 
 ## 架构
@@ -190,12 +199,14 @@ src/lib/updater.ts          # 自动更新包装层：check → 可判别结果�
 src/lib/update-utils.ts     # 自动更新纯逻辑：启动检查延迟 / 进度换算 / 字节格式化 / 错误文案（可单测；**没有检查节流**，见「自动更新数据流」）
 src/lib/update-notes.ts     # 更新说明的 Markdown 渲染（受控子集 → 安全 HTML，先整体转义再生成标签；可单测）
 src/lib/block-offsets.ts    # 字节偏移 ↔ CodeMirror 位置（UTF-16）换算：CJK 一个字 3 字节 / emoji 4 字节，直接当位置用会整篇错位（可单测）
-src/lib/block-plan.ts       # 写作模式块级渲染的**规划**纯逻辑：块表 → "哪些格子被切片覆盖 / 哪一块展开源码 / 窗口外沿用上一轮切片"（可单测）
+src/lib/block-plan.ts       # 写作模式块级渲染的**规划**纯逻辑：块表 → "哪些格子被切片覆盖 / 哪一块展开源码 / 窗口外沿用上一轮切片 / 跨块竖直移动落点 / 编译失败保留哪些切片 / 诊断块展开"（可单测）
+src/lib/block-hit.ts        # 点击定位的坐标纯逻辑：切片内的点 → 页面坐标（pt，只依赖 DOM 实测矩形）+ 命中结果钳回块内（可单测）
+src/lib/scroll-anchor.ts    # 滚动锚定：把"光标该落在屏幕哪个高度"变成 CodeMirror 自己的 scrollIntoView 目标（**别自己写 scrollTop**，见「写作模式的块级渲染」）（可单测）
 src/lib/debug.ts            # 调试日志通道 dbg（dev 默认开；--debug / ?debug=1 / localStorage 可开）
 src/lib/browser-dev-stub.ts # 浏览器开发桩：假 __TAURI_INTERNALS__ + 假编译，供 ?browserdev=1 用（仅开发）
 src/routes/+layout.ts       # SPA 模式（ssr = false），配合 adapter-static 的 index.html fallback
-src-tauri/src/lib.rs        # Rust 壳：read/write/write_binary/list_dir_typ/take_pending_files/compile_doc/compile_math/export_pdf 命令 + opener/dialog 插件
-src-tauri/src/block_geometry.rs # **写作模式的块级渲染**：源块划分（语法树顶层）+ 帧遍历（字形 Span → 源字节区间）+ 按 y 序中点切带 + 切一块渲成 SVG（见「写作模式的块级渲染」那节）
+src-tauri/src/lib.rs        # Rust 壳：read/write/write_binary/list_dir_typ/take_pending_files/compile_doc/compile_blocks/block_hit_test/compile_math/export_pdf 命令 + opener/dialog 插件
+src-tauri/src/block_geometry.rs # **写作模式的块级渲染**：源块划分（语法树顶层）+ 帧遍历（字形 Span → 源字节区间）+ 按 y 序中点切带 + 切一块渲成 SVG + **点击命中测试**（pick_hit / HIT_CACHE）（见「写作模式的块级渲染」那节）
 src-tauri/src/packages.rs   # 包系统：@local 本地包读取 / @preview 自动下载缓存（目录规范与 CLI 一致 + 安全解压）
 src-tauri/src/typst_world.rs # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 包解析接线 / 诊断转换（SVG/PDF）
 src-tauri/src/main.rs       # 桌面入口（调用 lib.rs 的 run）
@@ -226,7 +237,8 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 
 写作模式下，**非光标所在块显示成 typst 引擎自己画的那一块切片**，光标所在块展开成源码 ——
 即 Typora 形态，但排版来自真引擎（断词/字距/`#set`/宏/包全都在切片里）。调研与实测见
-`docs/文档模式渲染保真-调研.md`（含生态、许可证、API 逐条出处）。
+`docs/文档模式渲染保真-调研.md`（含生态、许可证、API 逐条出处、阶段 0/1/2 的实测数据）。
+阶段 1 = 能看（切片 + 源码透镜），阶段 2 = 能用（点击精确字符、滚动锚定、翻页、出错不整篇退回）。
 
 - **链路**：`+page.svelte` 的 `runCompile` 在写作模式走 `compile_blocks`（Rust 侧
   `block_geometry::compile_blocks`：整篇编译一次 → 每个源块切一块 SVG），
@@ -241,6 +253,11 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   所以只渲**视口窗口**内的块（视口 ± 4000 字符；短文档 ≤ 8000 字符全渲），窗口外的块
   按"块类型 + 源码文本相同"沿用上一轮切片（`carryOverCrops`），滚动到没渲过的区域先显示
   源码、去抖 150ms 后按新窗口重编译。**别把它改回"每次都全渲"。**
+  - **"有没有块缺切片"要直接看块表，不能看 `buildBlockCovers` 的结果（红线，实际踩过）**：
+    那条路会把"能渲染但这一轮没拿到 svg"的块标成 `revealed`（它当下确实显示源码），于是
+    `notifyBlocksNeeded` 里的 `!cover.revealed` 永远为假 —— **滚动到没渲过的区域一次都不会补渲**，
+    要等用户敲一个字。判据只该是 `found && svg === ""`。另配"同一个窗口不重复编译"的防抖
+    （`lastBlocksWindow`），否则后端渲染不出来时会每 150ms 编译一次。
 - **块表过期时沿用旧表**（不做位置映射）：编辑只发生在已展开的那一格，其它格的边界都落在
   空白处，偏一两个字符无害；"文档一变就退回源码"会让每敲一个字都闪一次源码。
 - **文档切换（打开/新建/重读）必须 `resetBlocks()`**：旧块区间套在新文档上会**盖住正文**
@@ -270,10 +287,36 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 - **竖直移动必须自己接管（红线，用户报过「在最后一块按上跳回文档开头」）**：CodeMirror 的
   `moveVertically` 是逐像素扫到**文本行**才停，而 `posAtCoords` 对 widget（非文本块）**直接跳过**
   —— 写作模式的切片全是 widget，于是"往上"会一路跳过所有切片、扫到内容顶部返回**位置 0**。
-  修法：写作模式下用 `Prec.high` 接管 ArrowUp/ArrowDown（连带 PageUp/PageDown，同一条
-  `moveVertically`）：默认结果仍在当前格内就交回默认（块内逐行、保留目标列），会跨格就把光标
-  放到相邻格边界（向上 = 上一格末尾，向下 = 下一格开头）。判定是纯函数
+  修法：写作模式下用 `Prec.high` 接管 ArrowUp/ArrowDown：默认结果仍落在**本块正文**内就交回默认
+  （块内逐行、保留目标列），一旦会走到块外就把光标放到相邻块**正文**的边界（向上 = 上一块末字符，
+  向下 = 下一块的 `block.from`）。**参照是"块"不是"格子"**：格子为了吃掉块前空行会往前扩一圈，
+  按格子判会让 ↓ 先停在段落之间那条空行上（段段之间多一拍）。判定是纯函数
   `block-plan.verticalBlockTarget`，浏览器验收第 8 组锁住（**别删**）。
+- **翻页（PageUp/PageDown，含 Shift 扩选）自己实现**（`live-preview.ts` 的 `pageMove`）：
+  CM 默认翻页 = `moveVertically(视口高)`，同样会跳过所有 widget → 直接跳文档首/尾。做法：把光标
+  当前的屏幕高度平移一屏作为查询点取位置，再**用滚动目标把光标钉回原来的屏幕高度**（内容走一屏、
+  光标不动）。没有块级渲染（源码模式）时交回默认。
+- **点击定位（阶段 2）**：点切片 → 光标落到**点到的那个字符**。链路 =
+  切片内相对位置 → 页面坐标（pt，`block-hit.ts`，只依赖 DOM 实测矩形）→ Rust 侧
+  `block_hit_test` 在排版帧里找最近的字形（`block_geometry::pick_hit`，几何来自上一次编译的
+  `HIT_CACHE`，**不进编译互斥锁**）→ 字节偏移 → CodeMirror 位置。任何一步失败都退回"落到块首"，
+  **绝不吞掉点击**。两道闸门：块表必须与当前文档一致（`writingBlocksDoc === doc`）、且是
+  **精确**的（`writingBlocksExact`，编译失败后沿用旧切片时区间是估算的）。
+- **滚动锚定不要自己写 `scrollDOM.scrollTop`（红线，实测被 CM 覆盖）**：CodeMirror 的 measure
+  循环里**自己也有锚定**（anchor diff），我们在 mousedown 里算完 `scrollTop += Δ` 之后它还会再改一次
+  —— 实测我们设 1771、它拉回 1680，点击落点偏了 **91px**；改成把 CM 自己的
+  `EditorView.scrollIntoView(pos, { y: "start", yMargin })`（`scroll-anchor.ts`）放进**同一个事务**
+  后偏差 **4px**（行高 30px）。装饰重整（窗口补渲 / 公式到货）引起的高度变化交给 CM 自己的锚定，
+  我们**不**再加一层（加了就是两次修正叠加）。
+- **编译失败不整篇作废（阶段 2）**：`block-plan.remapBlocksThroughEdit` 用前后缀差分
+  （`changedSpan`）判定哪些块没被碰到 —— 之前原样保留、之后整体平移、相交的退回源码
+  （区间**放宽**到并集：只多显示源码，绝不盖住新打的字）。以前一编译失败就整篇退回源码，
+  敲错一个字符整篇闪一下。**输出必须仍然铺满全文**（块数不变，相交的块只是变成不可渲染）。
+- **诊断所在块不许被切片盖住**：波浪线画在源码上，被图片盖住的块里看不见。
+  `block-plan.revealBlocksWithDiagnostics` 按**格子**区间判相交（格子含块前后的空行），
+  在 `applyBlockSelection` **之后**跑（否则会被选区判定覆盖回去）。
+- **切片 DOM 上有 `data-block-from` / `data-block-kind`**：浏览器验收靠它把"夹具里的第几块"
+  与"页面里的哪张切片"对上（按位置取，不依赖切片顺序）。别删（`writing-blocks-hit.mjs` 依赖它）。
 - **已知不足**：**脚注正文（页底装饰）在写作模式里不显示**（夹紧后它落在所有带之外；
   要显示得单独切一块"页底装饰"，属阶段 3）；`#let`/`#show`/注释行这类不可渲染的块保持源码
   （设计如此）；切片是图片，跨块选择/复制要等二期的文字层；**真机（tauri dev）手感与性能尚未验证**。
