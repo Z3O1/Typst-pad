@@ -307,19 +307,55 @@ export function remapBlocksThroughEdit(
    * 只要光标一离开，新文本就被那张旧切片盖住（编译失败时更不会自愈）。
    * 所以把它归给"**格子里放着它的那一块**"——即改动之后的第一个块，没有就是最后一块 —— 让它退回源码。
    * 宁可多露出一块源码，也不让用户刚打的字消失。 */
-  const noIntersect = !blocks.some((b) => b.from < span.to && b.to > span.from);
-  const fallback = noIntersect
-    ? (blocks.find((b) => b.from >= span.to) ?? blocks[blocks.length - 1])
-    : null;
+  /**
+   * 改动落在块的**正文之外、但同一行上**（典型：在标题/列表项的末尾接着打字、在段末按下 Enter）
+   * 时，按正文区间看"没相交"，可那一行**整行都在这一块的格子里** —— 不放它出来，刚打的字就被
+   * 那张旧切片盖住了。所以这里按**行**判：改动起点落在 [本块首行行首, 本块末行行尾] 之间就算碰到它。
+   */
+  const lineStartAt = (p: number) => after.lastIndexOf("\n", Math.max(0, p - 1)) + 1;
+  const lineEndAt = (p: number) => {
+    const i = after.indexOf("\n", p);
+    return i < 0 ? after.length : i;
+  };
+  const touchesLine = (b: Block) => {
+    const from = b.from + (b.from >= span.to ? span.delta : 0);
+    const to = b.to + (b.to > span.from ? span.delta : 0);
+    const start = lineStartAt(Math.max(0, Math.min(from, after.length)));
+    const end = lineEndAt(Math.max(0, Math.min(to, after.length)));
+    return span.from >= start && span.from <= end;
+  };
+  /** 改动落在**它自己那一行**上的块（行内、正文之外也算）：那一行整行都在它的格子里，必须放它出来 */
+  const byLine = blocks.filter(touchesLine);
+  /**
+   * 改动既不在任何块的正文里、也不在任何块的行上（段落之间的空行上打字、文末追加）——
+   * 那它一定落在**某个块的格子**里（空行归后一格、文末归末格），把那一块放出来。
+   */
+  const gapTarget =
+    byLine.length > 0 || blocks.some((b) => b.from < span.to && b.to > span.from)
+      ? null
+      : (blocks.find((b) => b.from + (b.from >= span.to ? span.delta : 0) >= span.to) ??
+        blocks[blocks.length - 1]);
+  const fallback = gapTarget;
   const out: Block[] = [];
   let kept = 0;
-  /** 这一块是不是"被改动落到格子里"的那一块（要退回源码，但位置照样要平移） */
-  const isFallback = (b: Block) =>
-    fallback !== null && b.from === fallback.from && b.to === fallback.to;
+  /** 这一块要不要退回源码（改动落在它的正文里 / 它那一行上 / 它的格子里）——但位置照样要平移 */
+  const revealedBy = (b: Block) =>
+    fallback !== null
+      ? b.from === fallback.from && b.to === fallback.to
+      : byLine.some((x) => x.from === b.from && x.to === b.to) ||
+        (b.from < span.to && b.to > span.from);
   const revealed = (b: Block): Block => ({ ...b, found: false, svg: "", heightPt: 0 });
   for (const b of blocks) {
-    if (isFallback(b)) {
-      out.push(revealed(b.from >= span.to ? { ...b, from: b.from + span.delta, to: b.to + span.delta } : b));
+    if (revealedBy(b)) {
+      const after = b.from >= span.to;
+      const from = after ? b.from + span.delta : b.from < span.to && b.to > span.from ? Math.min(b.from, span.from) : b.from;
+      const to = after
+        ? b.to + span.delta
+        : b.from < span.to && b.to > span.from
+          ? // 与改动段相交：区间**放宽**到"自己 ∪ 改动段"，只多显示源码，绝不盖住新打的字
+            Math.max(from, b.to + span.delta, span.to + span.delta)
+          : b.to;
+      out.push(revealed({ ...b, from, to }));
       continue;
     }
     // 改动段之后：整体平移
@@ -329,22 +365,9 @@ export function remapBlocksThroughEdit(
       if (shifted.svg !== "" && shifted.found) kept++;
       continue;
     }
-    // 改动段之前：原样保留
-    if (b.to <= span.from) {
-      out.push(b);
-      if (b.svg !== "" && b.found) kept++;
-      continue;
-    }
-    // 与改动段相交：退回源码（区间放宽到"自己 ∪ 改动段"，只多显示源码，不会盖住正文）
-    const from = Math.min(b.from, span.from);
-    out.push({
-      ...b,
-      from,
-      to: Math.max(from, b.to + span.delta, span.to + span.delta),
-      found: false,
-      svg: "",
-      heightPt: 0,
-    });
+    // 改动段之前（或已经不相干）：原样保留
+    out.push(b);
+    if (b.svg !== "" && b.found) kept++;
   }
   return { blocks: out, kept };
 }

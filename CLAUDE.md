@@ -34,7 +34,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（34 个文件 / 555 项）
+npm test                 # 前端 + 脚本单测（35 个文件 / 623 项）
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（45 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
@@ -49,7 +49,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 15 项�
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
 
 # 写作模式「块级渲染」三套（需要 headless Chromium，见「环境备忘」；CDP_PORT 默认 9333）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，65 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，79 项）
 npm run fixtures:blocks                                                                   # 导出真实切片 + 点击探针
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs # 几何等价（64 项）
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击→精确字符（24 项 / 125 次点击）
@@ -158,7 +158,7 @@ node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成�
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
 npm run fixtures:blocks         # 导出真实块切片 + 几何 + 点击探针到 .browser-check/（块级渲染验收用）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，65 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/块内 Enter）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，79 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/块内 Enter/各种输入）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价（真实产物，64 项）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击 → 精确字符（真实探针，24 项 / 125 次点击全中）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，45 项）
@@ -273,10 +273,18 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
     新文档上 → `doc.lineAt(116)` 抛 `RangeError: Invalid position 116 in document of length 17`
     → 装饰整篇退化成源码，而且**在 ViewPlugin 里抛出会被 CM 记成 "CodeMirror plugin crashed"**
     （`collectRequests` 因此也整体包了 try/catch）。
-  - 验收：`writing-blocks.mjs` 第 12 组（`&blockslow=1` 用 350ms 假延迟模拟真机编译窗口：插入新块后
-    **正文一行都不许丢**、不许重复显示、控制台不许出现 RangeError / 插件崩了 / 装饰重建失败）
-    + `block-plan.test.ts` 里"任意位置插入换行/空行/文字"的不变量枚举（改动必须落在已展开的格子里、
-    格子边界必须落在行首、未展开的格子必须把那一块正文完整盖住）。**两条都别删。**
+  - 验收（**别删**）：
+    - `writing-blocks.mjs` **第 12 组**（`&blockslow=1` 用 350ms 假延迟模拟真机编译窗口）：插入新块后
+      **正文一行都不许丢**、不许重复显示、控制台不许出现 RangeError / 插件崩了 / 装饰重建失败；
+      外加"文档大幅缩短"（旧坐标越界那条）。
+    - `writing-blocks.mjs` **第 13 组**（**各种输入**，12 个动作：段中打字 / 段尾回车 / 段首回车 /
+      段中拆行 / 连按两次回车 / 退格合并两段 / 删掉一整段 / 打字后 Ctrl+Z / 粘贴多段 / Tab 缩进 /
+      输入 `$` 起行间公式 / 全选重打）：每个动作之后都要「标记词看得见 + 一行都没丢 + 不重复 +
+      编译回来后切片还在 + 控制台干净」。**去掉修复时这组有 9/12 会红**（"第二段。"整行消失）。
+    - `block-plan-edits.test.ts`（**68 项**）：4 篇真实形状文档 × **每个位置** × 17 种编辑动作
+      （打字 / 回车 1~3 次 / `$` / 围栏 / 粘贴 / Tab / 退格 / Delete / 删整行 / 选区替换 /
+      全选换短文档换长文档 / 撤销）→ 四条不变量（旧表不抛异常、改动落在已展开的格子里、
+      格子边界落在行首、未展开的格子必须把那一块正文完整盖住且格子首尾相接铺满全文）。
 - **文档切换（打开/新建/重读）必须 `resetBlocks()`**：旧块区间套在新文档上会**盖住正文**
   （比公式缓存过期的危害大得多），见 `resetBlocks` 的注释。
 - **版心宽是编译期输入**：`page(width: 列宽/(1-2×页边距比例), height: auto)`，所以窗口尺寸 /

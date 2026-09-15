@@ -33,7 +33,10 @@ function check(name, ok, detail = "") {
 const c = await connect();
 await c.send("Page.enable");
 await c.send("Runtime.enable"); // 第 12 组要读控制台（"装饰重建失败 / 插件崩了"）
-await c.evaluate(`localStorage.clear()`);
+// 先导航一次再清存档：冷启动时页面还停在 about:blank，那里读 localStorage 会抛 SecurityError
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.evaluate(`localStorage.clear()`); // 清掉上一轮验收留下的存档（可能是一篇长文档）
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 800));
@@ -570,6 +573,92 @@ check(
   "整组过程中没有「装饰重建失败 / CodeMirror plugin crashed / Invalid position」",
   badConsole.length === 0,
   JSON.stringify(badConsole.slice(0, 1)),
+);
+
+
+console.log("13) 各种输入：打字 / 回车 / 退格 / 删除 / 撤销 / 粘贴 / 缩进 / 公式 / 全选重打 —— 每个动作之后正文都得看得见");
+// 与第 12 组同一套判据（那段"旧表 + 新文档"的窗口），但把**常见编辑动作**逐个走一遍：
+// 每做完一个动作就立刻打一个标记词，然后检查「标记看得见 / 一行都没丢 / 不重复 / 切片还在 / 控制台干净」。
+const CONSOLE_MARK = c.events.length;
+const BASE_DOC = "第一段。\n\n第二段。\n\n第三段。\n";
+
+const home = () => c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home → 文首
+const end = () => c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 文末
+const right = async (n = 1) => {
+  for (let i = 0; i < n; i++) {
+    await c.key("ArrowRight", { code: "ArrowRight", keyCode: 39 });
+    await new Promise((r) => setTimeout(r, 40));
+  }
+};
+const resetDoc = async () => {
+  await c.click(400, 300);
+  await c.selectAll();
+  await c.type(BASE_DOC);
+  await new Promise((r) => setTimeout(r, 800)); // 等这一轮慢编译落地
+};
+
+const SCENARIOS = [
+  { name: "段中打字", act: async () => { await home(); await right(3); await c.type("插字"); } },
+  { name: "段尾回车（新建一段）", act: async () => { await home(); await right(4); await c.key("Enter", { code: "Enter", keyCode: 13 }); } },
+  { name: "段首回车（前面插一段）", act: async () => { await home(); await c.key("Enter", { code: "Enter", keyCode: 13 }); } },
+  { name: "段中回车（把一段拆成两行）", act: async () => { await home(); await right(2); await c.key("Enter", { code: "Enter", keyCode: 13 }); } },
+  { name: "连按两次回车（插入新块）", act: async () => { await home(); await right(4); await c.key("Enter", { code: "Enter", keyCode: 13 }); await c.key("Enter", { code: "Enter", keyCode: 13 }); } },
+  { name: "退格吃掉上一行的换行（两段合并）", act: async () => { await home(); await right(4); await right(1); await c.key("Backspace", { code: "Backspace", keyCode: 8 }); } },
+  { name: "选中一整段删掉", act: async () => { await home(); await right(3); await c.key("End", { code: "End", keyCode: 35 }); await c.key("Backspace", { code: "Backspace", keyCode: 8 }); } },
+  { name: "打完字再撤销（Ctrl+Z）", act: async () => { await home(); await right(2); await c.type("临时"); await new Promise((r) => setTimeout(r, 120)); await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 }); } },
+  { name: "粘贴多段文本（一次插入一大段）", act: async () => { await home(); await c.type("新段一。\n\n新段二。\n\n"); } },
+  { name: "Tab 缩进行首", act: async () => { await home(); await c.key("Tab", { code: "Tab", keyCode: 9 }); } },
+  { name: "输入 `$` 起一个行间公式", act: async () => { await home(); await c.key("Enter", { code: "Enter", keyCode: 13 }); await c.type("$"); await new Promise((r) => setTimeout(r, 200)); } },
+  { name: "全选重打（换一份短文档）", act: async () => { await c.selectAll(); await c.type("短。\n\n又一段。\n"); } },
+];
+
+let inputChecks = 0;
+let inputBad = 0;
+for (const [i, sc] of SCENARIOS.entries()) {
+  await resetDoc();
+  await sc.act();
+  await new Promise((r) => setTimeout(r, 60));
+  const mark = `标记${i}号`;
+  await c.type(mark);
+  await new Promise((r) => setTimeout(r, 80)); // 仍然在慢编译窗口里
+  const during = await c.evaluate(MARK_VISIBLE(mark));
+  const mismatch = await c.evaluate(TEXT_MISMATCH);
+  await new Promise((r) => setTimeout(r, 700)); // 等这一轮慢编译落地
+  const afterMark = await c.evaluate(MARK_VISIBLE(mark));
+  const cropsAfter = await c.evaluate(CROPS);
+  const bad = [];
+  if (!during.visible) bad.push("打字后立刻看不见");
+  if (!afterMark.visible) bad.push("编译回来后看不见");
+  if (mismatch.missing.length) bad.push(`丢行:${JSON.stringify(mismatch.missing.slice(0, 2))}`);
+  if (mismatch.dup.length) bad.push(`重复:${JSON.stringify(mismatch.dup.slice(0, 2))}`);
+  // 切片数量在**编译回来之后**看：改动期间"相关块全退回源码"是设计如此
+  if (cropsAfter < 1) bad.push("编译回来后切片全没了");
+  inputChecks++;
+  if (bad.length) {
+    inputBad++;
+    console.log(`  ✗ ${sc.name}：${bad.join("；")}`);
+  } else {
+    console.log(`  ✓ ${sc.name}`);
+  }
+}
+
+const consoleBad = [];
+for (const ev of c.events.slice(CONSOLE_MARK)) {
+  if (ev.method !== "Runtime.consoleAPICalled") continue;
+  const txt = (ev.params.args ?? []).map((a) => a.value ?? a.description ?? "").join(" ");
+  if (/plugin crashed|装饰重建失败|Invalid position/.test(txt)) consoleBad.push(txt.slice(0, 300));
+}
+passed += inputChecks - inputBad;
+process.exitCode = inputBad > 0 || consoleBad.length > 0 ? 1 : process.exitCode;
+check(
+  `${inputChecks} 种输入动作之后正文都看得见、不丢行、不重复、切片还在`,
+  inputBad === 0,
+  `失败 ${inputBad} 项`,
+);
+check(
+  "这一组也没有「装饰重建失败 / CodeMirror plugin crashed / Invalid position」",
+  consoleBad.length === 0,
+  JSON.stringify(consoleBad.slice(0, 1)),
 );
 
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
