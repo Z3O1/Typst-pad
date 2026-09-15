@@ -379,6 +379,8 @@ export function fakeBlocks(doc: string): {
     kind: string;
     found: boolean;
     pages: number;
+    page: number;
+    xPt: number;
     yPt: number;
     widthPt: number;
     heightPt: number;
@@ -453,6 +455,8 @@ export function fakeBlocks(doc: string): {
       kind,
       found: true,
       pages: 1,
+      page: 1,
+      xPt: MARGIN,
       yPt: y,
       widthPt: PAGE_WIDTH,
       heightPt,
@@ -463,6 +467,83 @@ export function fakeBlocks(doc: string): {
     i = j;
   }
   return { ok: true, blocks: out, pages: 1, pageWidthPt: PAGE_WIDTH };
+}
+
+// ---------------------------------------------------------------------------
+// 假"点击定位"（block_hit_test 的桩）
+//
+// 真实实现（src-tauri/src/block_geometry.rs 的 pick_hit）在**排版引擎的帧**里找最近的字形，
+// 浏览器里没有帧，所以分两条路：
+//
+// ① **注入了真实夹具**（writing-blocks-hit.mjs / writing-blocks-visual.mjs 那种）：夹具里带着
+//    `hitProbes` —— 每个探针点 (x, y) 的答案都是 Rust 侧**真实几何**上算出来的字节偏移。
+//    这里返回离点击点最近的探针的答案。**只有探针点上的答案是真实的**，验收脚本就照探针点
+//    原样点下去（这正是"端到端验真实几何"的做法：期望值来自 Rust，链路在浏览器里跑）。
+// ② 假切片（&blocks=1 的交互验收）：按"等宽字符 + 均分行高"的粗略模型算 —— 足够验
+//    "点左边 → 靠前、点下面 → 靠后、结果钳在块内"这些**交互性质**，精度不作数。
+// ---------------------------------------------------------------------------
+interface FakeBlockRecord {
+  start: number;
+  end: number;
+  xPt: number;
+  yPt: number;
+  widthPt: number;
+  heightPt: number;
+}
+
+/** 最近一次假编译的文档与块（假命中测试要用它做坐标 ↔ 字符的换算） */
+let lastFake: { doc: string; blocks: FakeBlockRecord[] } | null = null;
+
+/** 真实夹具里的探针：返回 null = 夹具里没有这个块/这些点 */
+function fixtureHit(args: Record<string, unknown>): number | null {
+  const fixtures = injectedBlockFixtures();
+  if (!fixtures || !lastFake) return null;
+  const fx = fixtures.find((f) => f.doc === lastFake!.doc) as
+    | (BlockFixture & { hitProbes?: { b: number; x: number; y: number; o: number }[] })
+    | undefined;
+  const probes = fx?.hitProbes;
+  if (!probes || probes.length === 0) return null;
+  const index = (fx!.blocks as FakeBlockRecord[]).findIndex(
+    (b) => b.start === args.start && b.end === args.end,
+  );
+  if (index < 0) return null;
+  const x = Number(args.xPt);
+  const y = Number(args.yPt);
+  let best: { o: number } | null = null;
+  let bestDist = Infinity;
+  for (const p of probes) {
+    if (p.b !== index) continue;
+    const d = (p.x - x) ** 2 + (p.y - y) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      best = p;
+    }
+  }
+  return best ? best.o : null;
+}
+
+/** 假切片上的粗略定位：等宽字符 + 均分行高（只保证"方向对、钳在块内"） */
+function syntheticHit(args: Record<string, unknown>): number | null {
+  if (!lastFake) return null;
+  const block = lastFake.blocks.find(
+    (b) => b.start === args.start && b.end === args.end,
+  );
+  if (!block) return null;
+  const bytes = new TextEncoder().encode(lastFake.doc);
+  const src = new TextDecoder().decode(bytes.slice(block.start, block.end));
+  const lines = src.split("\n");
+  const rows = Math.max(1, lines.length);
+  const rowH = block.heightPt / rows;
+  const row = Math.min(rows - 1, Math.max(0, Math.floor((Number(args.yPt) - block.yPt) / rowH)));
+  const line = Array.from(lines[row] ?? "");
+  const maxChars = Math.max(1, ...lines.map((l) => Array.from(l).length));
+  const charW = block.widthPt / maxChars;
+  const col = Math.min(line.length, Math.max(0, Math.round((Number(args.xPt) - block.xPt) / charW)));
+  const before = new TextEncoder();
+  const inLine = before.encode(line.slice(0, col).join("")).length;
+  const rowStart = before.encode(lines.slice(0, row).join("\n")).length + (row > 0 ? 1 : 0);
+  const offset = block.start + rowStart + inLine;
+  return Math.min(block.end, Math.max(block.start, offset));
 }
 
 /**
@@ -538,16 +619,47 @@ async function handleCommand(
       // 只取用户文档那一段（前缀不属于编辑器内容）——真实后端返回的块偏移也是文档坐标
       const docStart = byteOffsetsToPositions(src, [docOffset])[0];
       const doc = src.slice(docStart);
+      // **假编译错误**（`@err` 标记）：写作模式"编译失败时保留没被改到的切片 + 错误块退回源码"
+      // 这条链路没法用真引擎在浏览器里触发（桩的编译永远成功），所以留一个显式开关：
+      // 文档里出现 `@err` 就按"这一行有错"返回失败（见 writing-blocks.mjs 第 11 组）。
+      const errAt = doc.indexOf("@err");
+      if (errAt >= 0) {
+        lastFake = null;
+        notify(command);
+        const before = doc.slice(0, errAt);
+        const line = before.split("\n").length;
+        const column = errAt - (before.lastIndexOf("\n") + 1) + 1;
+        return {
+          ok: false,
+          // **必须带 blocks:[]**：前端的 compileBlocks 用"blocks 是不是数组"判断后端有没有
+          // 这个命令（形状不对 = 旧版本/桩 → 退回整页预览路径）。少了它，这条失败会被
+          // 当成"后端不支持"而**走不到**失败分支（实测踩过）。
+          blocks: [],
+          diagnostics: [
+            {
+              message: "假编译错误（@err 标记）：验证「错误所在块必须看得见」",
+              severity: "error",
+              line,
+              column,
+              endLine: line,
+              endColumn: column + 4,
+            },
+          ],
+        };
+      }
       // 注入了**真实产物**夹具且文档与夹具一致 → 返回真实切片（见 writing-blocks-visual.mjs）
       const fixtures = injectedBlockFixtures();
       if (fixtures) {
         const hit = fixtures.find((f) => f.doc === doc);
         if (hit) {
           notify(command);
+          // 记下来：假命中测试要按这份产物回答（见 fixtureHit）
+          lastFake = { doc, blocks: hit.blocks as FakeBlockRecord[] };
           return { ok: true, blocks: hit.blocks, pages: 1, pageWidthPt: hit.pageWidthPt };
         }
       }
       const out = fakeBlocks(doc);
+      lastFake = { doc, blocks: out.blocks as FakeBlockRecord[] };
       // 窗口化：桩也要遵守（否则验收会以为"窗口过滤"没生效）
       const wantFrom = typeof a.wantFrom === "number" ? a.wantFrom : null;
       const wantTo = typeof a.wantTo === "number" ? a.wantTo : null;
@@ -575,6 +687,13 @@ async function handleCommand(
       const sizePt = typeof a.sizePt === "number" ? a.sizePt : 12;
       const real = realMath(body, a.display === true, sizePt);
       return real ? { ok: true, ...real } : fakeMath(body, a.display === true);
+    }
+    // 点击定位（阶段 2）：真实实现在 Rust 侧（帧里找最近字形），这里按上面两条路模拟
+    case "block_hit_test": {
+      if (!blocksStubEnabled()) return null;
+      notify(command);
+      const fromFixture = fixtureHit(a);
+      return fromFixture !== null ? fromFixture : syntheticHit(a);
     }
     case "write_file": {
       const path = typeof a.path === "string" ? a.path : FAKE_PATH;

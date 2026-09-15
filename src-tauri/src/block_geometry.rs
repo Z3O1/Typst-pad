@@ -22,6 +22,7 @@
 
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use serde::Serialize;
@@ -396,6 +397,11 @@ pub struct BlockCrop {
     pub found: bool,
     /// 内容分布在几页（单张长页正常为 1；>1 = 文档自己分页了，此时只切首页那部分）
     pub pages: usize,
+    /// 切片所在页（1-based）。点击定位要把"页面坐标"告诉 Rust 侧的命中测试
+    pub page: usize,
+    /// 裁剪带的左缘（pt）= 页边距。切片自己的坐标系原点在带的左上角，
+    /// 所以页面坐标 = (x_pt + 切片内相对 x, y_pt + 切片内相对 y)
+    pub x_pt: f64,
     /// 裁剪带在页面上的纵向范围（pt），仅调试/核查用
     pub y_pt: f64,
     /// 裁剪带宽度（pt）= 正文列宽；高度（pt）含与相邻块的半个间距，
@@ -599,6 +605,8 @@ pub fn compile_blocks(
             kind: blocks[*idx].kind.to_string(),
             found: true,
             pages: g.pages,
+            page: g.page,
+            x_pt: rect.min.x.to_pt(),
             y_pt: band_top,
             width_pt: rect.size().x.to_pt(),
             height_pt: height,
@@ -616,6 +624,8 @@ pub fn compile_blocks(
             kind: block.kind.to_string(),
             found: false,
             pages: 0,
+            page: 0,
+            x_pt: 0.0,
             y_pt: 0.0,
             width_pt: content_width_pt,
             height_pt: 0.0,
@@ -623,6 +633,10 @@ pub fn compile_blocks(
             svg: String::new(),
         }));
     }
+
+    // 字形几何进缓存，供"点击 → 精确字符"的命中测试用（见 HIT_CACHE）。
+    // 放在最后：前面的几何计算都借用了 items，这里把所有权交出去，不再多一份拷贝。
+    store_hit_geometry(items, doc_start);
 
     BlocksOutput {
         ok: true,
@@ -982,6 +996,105 @@ fn rects_intersect(a: Rect, b: Rect) -> bool {
     a.min.x <= b.max.x && a.max.x >= b.min.x && a.min.y <= b.max.y && a.max.y >= b.min.y
 }
 
+// ---------------------------------------------------------------------------
+// 点击定位（阶段 2）：把"切片上的一个点"映射回"源码里的第几个字符"
+// ---------------------------------------------------------------------------
+
+/// 上一次成功编译的字形几何缓存（**文档坐标**：已减掉注入行与编译前缀）。
+///
+/// 为什么不随 `compile_blocks` 一起把字形逐个返回给前端：逐块 SVG 已经约 58 字节/源字符，
+/// 再让每个按键的载荷多三成代价太大；而点击只在用户真的点下去那一刻发生一次。
+/// 缓存里只有"字形 → 源字节区间 + 版面矩形"，一次命中测试是线性扫一遍（微秒级）。
+///
+/// **陈旧是可接受的**：前端只在"块表与当前文档一致"时才发命中测试（见 +page.svelte 的
+/// `handleCropClick`），而块表的区间正是这份几何的来源；编译失败时前端沿用旧块表，
+/// 缓存里也还是上一次成功编译的几何 —— 两者同源。
+static HIT_CACHE: Mutex<Option<Vec<PlacedItem>>> = Mutex::new(None);
+
+/// 把编译源坐标的字形几何换成**用户文档坐标**并缓存（丢弃注入行 / 前缀里的项）。
+pub fn store_hit_geometry(items: Vec<PlacedItem>, doc_start: usize) {
+    let converted: Vec<PlacedItem> = items
+        .into_iter()
+        .filter(|i| i.range.start >= doc_start && i.range.end > doc_start)
+        .map(|mut i| {
+            i.range.start -= doc_start;
+            i.range.end -= doc_start;
+            i
+        })
+        .collect();
+    if let Ok(mut guard) = HIT_CACHE.lock() {
+        *guard = Some(converted);
+    }
+}
+
+/// 点到区间的距离（落在区间内为 0）—— 用来挑"最近的一行 / 行里最近的一个字"
+fn gap(min: Abs, max: Abs, v: Abs) -> Abs {
+    if v < min {
+        min - v
+    } else if v > max {
+        v - max
+    } else {
+        Abs::zero()
+    }
+}
+
+/// 命中测试（纯函数，可单测）：在 `start..end`（**用户文档字节区间**，即一个块）里，
+/// 给出页 `page` 上离 `(x, y)`（**页面坐标，pt**）最近的**字形**，返回光标该落在哪个字节偏移。
+///
+/// 规则是"先选行、再在行里选字"的直白实现：所有候选字形按 (纵向距离, 横向距离) 取最小 ——
+/// 纵向距离为 0 的就是"点在这一行的高度里"，于是横向距离自然决定选哪个字。
+/// 落点在字形左半 → 光标在它之前，右半 → 在它之后；点在整行右侧空白处时，
+/// 最近的必然是行末那个字，于是光标落在**行尾**（而不是块尾）——与所见即所得一致。
+///
+/// 返回值钳在 `start..end` 内：点击永远只影响被点的那一块。
+pub fn pick_hit(
+    items: &[PlacedItem],
+    start: usize,
+    end: usize,
+    page: usize,
+    x: Abs,
+    y: Abs,
+) -> Option<usize> {
+    if end <= start {
+        return None;
+    }
+    let mut best: Option<(&PlacedItem, Abs, Abs)> = None;
+    for item in items {
+        if item.page != page {
+            continue;
+        }
+        // 半开区间相交：字形的源区间要落在块内
+        if item.range.start >= end || item.range.end < start {
+            continue;
+        }
+        let dy = gap(item.rect.min.y, item.rect.max.y, y);
+        let dx = gap(item.rect.min.x, item.rect.max.x, x);
+        let take = match best {
+            None => true,
+            // 同距时保留先遇到的（帧遍历顺序稳定 ⇒ 结果可复现）
+            Some((_, bdy, bdx)) => dy < bdy || (dy == bdy && dx < bdx),
+        };
+        if take {
+            best = Some((item, dy, dx));
+        }
+    }
+    let (item, _, _) = best?;
+    let mid = (item.rect.min.x + item.rect.max.x) / 2.0;
+    let offset = if x < mid { item.range.start } else { item.range.end };
+    Some(offset.clamp(start, end))
+}
+
+/// Tauri 命令的入口：`(x_pt, y_pt)` 是**页面坐标**（与 `BlockCrop` 的 x_pt/y_pt 同一坐标系）。
+/// 没有缓存（还没编译过）或参数非法时返回 None，前端退回"落到块首"的老行为。
+pub fn hit_test(start: usize, end: usize, page: usize, x_pt: f64, y_pt: f64) -> Option<usize> {
+    if !x_pt.is_finite() || !y_pt.is_finite() {
+        return None;
+    }
+    let guard = HIT_CACHE.lock().ok()?;
+    let items = guard.as_ref()?;
+    pick_hit(items, start, end, page, Abs::pt(x_pt), Abs::pt(y_pt))
+}
+
 fn merge_ranges(mut v: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     v.sort_unstable();
     let mut out: Vec<(usize, usize)> = Vec::new();
@@ -1027,6 +1140,150 @@ mod tests {
 
     fn fonts_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts")
+    }
+
+    /// 造一个字形项：源区间 + 版面矩形（页面坐标）
+    fn item(page: usize, range: Range<usize>, x0: f64, y0: f64, x1: f64, y1: f64) -> PlacedItem {
+        PlacedItem {
+            page,
+            range,
+            rect: Rect::new(
+                Point::new(Abs::pt(x0), Abs::pt(y0)),
+                Point::new(Abs::pt(x1), Abs::pt(y1)),
+            ),
+        }
+    }
+
+    /// **命中测试的纯逻辑**（合成几何，不依赖编译）：
+    /// 横向按字形的左右半决定"光标在字前还是字后"，点的位置落在行外时先选最近的行。
+    #[test]
+    fn pick_hit_chooses_the_clicked_glyph() {
+        // 一行三个 CJK 字（各 3 字节）：0..3 / 3..6 / 6..9，x = 0..10 / 10..20 / 20..30
+        // 第二行：9..12 / 12..15，y = 30..40
+        let items = vec![
+            item(1, 0..3, 0.0, 10.0, 10.0, 20.0),
+            item(1, 3..6, 10.0, 10.0, 20.0, 20.0),
+            item(1, 6..9, 20.0, 10.0, 30.0, 20.0),
+            item(1, 9..12, 0.0, 30.0, 10.0, 40.0),
+            item(1, 12..15, 10.0, 30.0, 20.0, 40.0),
+            // 别的页 / 别的块：都不该被选中
+            item(2, 0..3, 0.0, 10.0, 10.0, 20.0),
+            item(1, 100..103, 0.0, 10.0, 10.0, 20.0),
+        ];
+        let hit = |x: f64, y: f64| pick_hit(&items, 0, 15, 1, Abs::pt(x), Abs::pt(y));
+        // 第一行：左半 → 字前，右半 → 字后
+        assert_eq!(hit(2.0, 15.0), Some(0), "第一个字左半 → 偏移 0");
+        assert_eq!(hit(8.0, 15.0), Some(3), "第一个字右半 → 偏移 3（第二个字之前）");
+        assert_eq!(hit(25.0, 15.0), Some(9), "第三个字右半 → 偏移 9（= 行尾）");
+        // 行外：右侧空白 → 行尾；左侧空白 → 行首
+        assert_eq!(hit(200.0, 15.0), Some(9), "点在这一行右边很远 → 行尾");
+        assert_eq!(hit(-50.0, 15.0), Some(0), "点在这一行左边很远 → 行首");
+        // 第二行（y 决定选哪一行）
+        assert_eq!(hit(2.0, 35.0), Some(9), "第二行行首");
+        assert_eq!(hit(15.0, 35.0), Some(15), "第二行第二个字");
+        // 块之外的项不参与：第二个块的区间不许被点出来
+        assert_eq!(
+            pick_hit(&items, 0, 9, 1, Abs::pt(2.0), Abs::pt(15.0)),
+            Some(0)
+        );
+        let outside = pick_hit(&items, 1000, 1003, 1, Abs::pt(2.0), Abs::pt(15.0));
+        assert_eq!(outside, None, "块区间外没有任何字形 → None");
+        assert_eq!(
+            pick_hit(&items, 0, 15, 9, Abs::pt(2.0), Abs::pt(15.0)),
+            None,
+            "没有这一页 → None"
+        );
+    }
+
+    /// **真实引擎几何 + 真实字节偏移**：单行块的左缘 → 块首，右缘 → 块尾（含 CJK 3 字节）。
+    #[test]
+    fn hit_test_on_real_layout_maps_edges_to_block_bounds() {
+        const COLUMN_PT: f64 = 371.25;
+        // 一行的短段落（不折行）+ 一个会折成好几行的长段落
+        let doc = "甲乙丙丁戊己庚辛\n\n这是一段很长的中文正文，它会在版心宽度里折成好几行，用来验证纵向的命中判定：点的位置越往下，落在源码里的字符就应该越靠后，而横向的点则决定光标落在字的哪一侧。收尾。\n";
+        let out = compile_blocks(
+            doc.to_string(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
+        let single = &out.blocks[0];
+        let para = &out.blocks[1];
+        assert!(single.found && para.found);
+
+        // 单行块：横向两端必定落在块首 / 块尾（y 取带里任意高度都行 —— 同一行的字形纵向距离相同）
+        let y = single.y_pt + single.height_pt * 0.5;
+        let left = hit_test(single.start, single.end, single.page, single.x_pt + 0.5, y);
+        let right = hit_test(
+            single.start,
+            single.end,
+            single.page,
+            single.x_pt + single.width_pt - 0.5,
+            y,
+        );
+        assert_eq!(left, Some(single.start), "左缘 → 块首");
+        assert_eq!(right, Some(single.end), "右缘 → 块尾（= 该行行尾）");
+
+        // 多行块：越往下，偏移越大（纵向判定真的在看 y）
+        let x = para.x_pt + 4.0;
+        let top = hit_test(
+            para.start,
+            para.end,
+            para.page,
+            x,
+            para.y_pt + para.height_pt * 0.12,
+        )
+        .expect("上部的点应该命中");
+        let bottom = hit_test(
+            para.start,
+            para.end,
+            para.page,
+            x,
+            para.y_pt + para.height_pt * 0.88,
+        )
+        .expect("下部的点应该命中");
+        assert!(
+            top >= para.start && bottom <= para.end,
+            "结果必须钳在块区间内：{top}/{bottom} vs {}..{}",
+            para.start,
+            para.end
+        );
+        assert!(
+            bottom > top + 10,
+            "越往下偏移越大（上 {top} / 下 {bottom}，块 {}..{}）",
+            para.start,
+            para.end
+        );
+
+        // 前缀偏移：块的区间是**文档坐标**，命中结果也必须是（不会把前缀的字节算进来）
+        let prefix = "#set text(size: 12pt)\n";
+        let src = format!("{prefix}{doc}");
+        let out2 = compile_blocks(
+            src,
+            prefix.len(),
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(out2.ok);
+        assert_eq!(out2.blocks[0].start, 0, "块区间是文档坐标");
+        let y2 = out2.blocks[0].y_pt + out2.blocks[0].height_pt * 0.5;
+        let hit2 = hit_test(
+            out2.blocks[0].start,
+            out2.blocks[0].end,
+            out2.blocks[0].page,
+            out2.blocks[0].x_pt + 0.5,
+            y2,
+        );
+        assert_eq!(hit2, Some(0), "带前缀时命中结果仍是文档坐标");
     }
 
     /// 真实文档样例：覆盖标题 / 段落 / 列表 / 行内与行间公式 / 围栏代码 / 表格 / 图 / 脚注 /
@@ -1337,6 +1594,10 @@ mod tests {
             "文档级设置（12pt）",
             "#set text(size: 12pt)\n\n= 设置对照\n\n这一段用来和上一篇对照：两篇正文完全相同，只有文档开头那条设置语句不同。\n",
         ),
+        (
+            "混排与 emoji",
+            "= 混排\n\n中文 ASCII 🚀 混在一行里：émoji 与 a_0 = 0 都要能点对位置。\n\n第二段用纯中文写长一点，用来验证整段折行之后的纵向定位是不是仍然准确。\n",
+        ),
     ];
 
     /// **分块判据必须跟 typst 语义走**（真实文档咬过一次：`$x$` 是行内公式，哪怕独占整行也
@@ -1582,15 +1843,53 @@ mod tests {
                 None,
             );
             assert!(out.ok, "[{name}] 编译应成功：{:?}", out.diagnostics);
+            let probes = hit_probes(&out);
             let json = serde_json::json!({
                 "name": name,
                 "doc": src,
                 "contentWidthPt": COLUMN_PT,
                 "pageWidthPt": out.page_width_pt,
                 "blocks": out.blocks,
+                // 点击定位的探针：每块在带内取网格点，记录**真实几何上 Rust 给出的字节偏移**。
+                // 浏览器验收照这些点原样点下去，断言光标落到的字符与这里记的一致
+                // （见 scripts/browser-check/writing-blocks-hit.mjs）。
+                "hitProbes": probes,
             });
             println!("BLOCKFIXTURE:{}", json);
         }
+    }
+
+    /// 生成点击探针：在每个可渲染块的裁剪带里取「横向 5 × 纵向 3」个网格点，
+    /// 每个点都过一遍**真实的** `hit_test`，把答案记下来当期望值。
+    ///
+    /// 为什么用网格而不是"每个字形取一个点"：夹具要能在**浏览器里原样复现**，
+    /// 网格点是任意的 (x, y)，不依赖前端知道字形的位置；而期望值来自真实几何，
+    /// 端到端验的还是"点在哪儿 → 光标落在哪个字符"。
+    fn hit_probes(out: &BlocksOutput) -> Vec<serde_json::Value> {
+        const XF: &[f64] = &[0.06, 0.3, 0.5, 0.7, 0.98];
+        const YF: &[f64] = &[0.2, 0.55, 0.85];
+        let mut probes = Vec::new();
+        for (idx, b) in out.blocks.iter().enumerate() {
+            if !b.found || b.svg.is_empty() || b.height_pt <= 0.5 {
+                continue;
+            }
+            for &yf in YF {
+                for &xf in XF {
+                    let x = b.x_pt + b.width_pt * xf;
+                    let y = b.y_pt + b.height_pt * yf;
+                    if let Some(offset) = hit_test(b.start, b.end, b.page, x, y) {
+                        // 保留两位小数：浏览器侧按这个值算视口坐标，误差 < 0.01pt 不会改变命中结果
+                        probes.push(serde_json::json!({
+                            "b": idx,
+                            "x": (x * 100.0).round() / 100.0,
+                            "y": (y * 100.0).round() / 100.0,
+                            "o": offset,
+                        }));
+                    }
+                }
+            }
+        }
+        probes
     }
 
     /// 写作模式的块级渲染：区块要切得出来、宽度等于正文列宽、高度之和 ≈ 版心高度

@@ -156,6 +156,26 @@ async fn compile_blocks(
     .map_err(|_| "块级编译任务异常终止".to_string())?)
 }
 
+/// 点击定位（阶段 2）：把写作模式切片上的一个点映射回**源码字节偏移**。
+///
+/// 输入是页面坐标（pt）：切片自己的坐标系原点是裁剪带左上角，前端用 `BlockCrop` 的
+/// `x_pt` / `y_pt` / `width_pt` / `height_pt` 把 CSS 像素换算过来（见 block-hit.ts）。
+/// `start` / `end` 是**用户文档字节区间**（那个块），返回值也钳在这个区间里。
+///
+/// 几何来自上一次成功编译的缓存（见 block_geometry 的 HIT_CACHE）：点击不需要重新编译，
+/// 一次命中测试是微秒级，所以这里**不加编译互斥锁**（不占编译通道）。
+/// 没有缓存 / 参数非法 → None，前端退回"光标落到块首"的老行为。
+#[tauri::command]
+fn block_hit_test(
+    start: usize,
+    end: usize,
+    page: usize,
+    x_pt: f64,
+    y_pt: f64,
+) -> Option<usize> {
+    block_geometry::hit_test(start, end, page, x_pt, y_pt)
+}
+
 /// 渲染单个公式为紧致 SVG（compile_math）：编辑器内联渲染（所见即所得）用。
 /// body = 公式源码（不含定界 `$`），display = 是否行间（display 风格），
 /// context = 编译前缀（设置里的前缀代码，与整篇编译同源，宏与字体设置生效），
@@ -523,6 +543,7 @@ pub fn run() {
             get_debug_flag,
             compile_doc,
             compile_blocks,
+            block_hit_test,
             compile_math,
             export_pdf,
             list_font_families,

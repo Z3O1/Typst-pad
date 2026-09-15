@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { EditorView, Decoration, hoverTooltip } from "@codemirror/view";
   import { EditorState, Compartment, StateField } from "@codemirror/state";
+  import type { Text } from "@codemirror/state";
   import { indentUnit } from "@codemirror/language";
   import type { DecorationSet } from "@codemirror/view";
   import { basicSetup } from "codemirror";
@@ -19,6 +20,7 @@
   import { planForCommand } from "./write-commands";
   import type { WriteCommand } from "./write-commands";
   import { mark } from "./startup-timing";
+  import { anchorPosEffect } from "./scroll-anchor";
   import { dbg } from "./debug";
 
   interface Props {
@@ -57,6 +59,18 @@
     /** 视口内出现"能渲染但还没有切片"的块：父组件去抖后按新窗口重编译 */
     onBlocksNeeded?: () => void;
     /**
+     * **点击定位**（阶段 2）：点在某张切片上的 `(xPt, yPt)`（页面坐标，pt）→ 光标位置。
+     * 父组件负责换算（字节 ↔ 位置）与 IPC（Rust 侧 `block_hit_test`）；返回 null =
+     * 定不了位，编辑器退回"光标落到块首"。见 block-hit.ts 与 live-preview 的说明。
+     */
+    onCropClick?: (req: {
+      page: number;
+      xPt: number;
+      yPt: number;
+      from: number;
+      to: number;
+    }) => Promise<number | null>;
+    /**
      * 自动换行（源码模式 Alt+Z 切换，状态与持久化由父组件持有）。
      * 打开时给内容加 CodeMirror 的 `cm-lineWrapping`（`white-space: break-spaces` + 断词），
      * 长行折行显示、不再需要横向滚动。
@@ -80,6 +94,7 @@
     blocks = null,
     blocksVersion = 0,
     onBlocksNeeded,
+    onCropClick,
     wrap = false,
   }: Props = $props();
 
@@ -107,6 +122,18 @@
     // 块级切片：只在写作模式交给渲染层，源码模式一律 null（要看到真正的源码）
     blocks: () => (mode === "write" ? (blocks ?? null) : null),
     onBlocksNeeded: () => onBlocksNeeded?.(),
+    // 点击定位（阶段 2）：父组件换算成字节偏移后问 Rust，编辑器只负责落光标
+    onCropClick: (req: { page: number; xPt: number; yPt: number; from: number; to: number }) =>
+      onCropClick?.(req) ?? Promise.resolve(null),
+    // 编译错误所在的块不许被切片盖住（波浪线画在源码上，见 live-preview 的说明）。
+    // 用参数里的 doc：StateField 计算时 view 上的 state 还是旧的
+    diagnosticRanges: (doc: Text) =>
+      diagState.list.length === 0
+        ? []
+        : squiggleRanges(doc, diagState.list, diagState.prefix).map((r) => ({
+            from: r.from,
+            to: r.to,
+          })),
   };
 
   /**
@@ -315,6 +342,10 @@
   /**
    * 所见即所得：开关切换、渲染结果到货（mathVersion 自增）、前缀变化（缓存键变化）
    * 时重整公式装饰。读这三个响应式值即建立依赖。
+   *
+   * 滚动锚定交给 CodeMirror 自己（它的 measure 循环里就有 anchor diff，装饰换掉 widget 导致的
+   * 高度变化会被它补偿）—— 第一版在这里又加了一层自己的锚定，结果与它叠加（见 scroll-anchor.ts
+   * 的说明）。只有"把光标钉在某个屏幕高度"（点击定位 / 翻页）才需要我们显式给滚动目标。
    */
   $effect(() => {
     if (!view) return;

@@ -229,6 +229,10 @@ export interface BlockCrop {
   found: boolean;
   /** 内容分布在几页（单张长页为 1） */
   pages: number;
+  /** 切片所在页（1-based）—— 点击定位要在同一页里找字形 */
+  page: number;
+  /** 裁剪带在页面上的左缘 / 上缘（pt）：切片 SVG 的坐标系原点就是带的左上角 */
+  xPt: number;
   yPt: number;
   widthPt: number;
   heightPt: number;
@@ -335,6 +339,40 @@ export async function compileBlocks(
     error: first ? formatDiagnostic(first) : "编译失败：未生成产物",
     errors,
   };
+}
+
+/**
+ * **点击定位**（阶段 2）：把一个页面坐标点映射回"这个块里的哪个字节偏移"。
+ *
+ * 几何来自 Rust 侧上一次成功编译的缓存（`block_geometry::HIT_CACHE`），不重新编译，
+ * 也不占编译通道 —— 一次调用是微秒级的线性扫描。
+ *
+ * * `fromByte` / `toByte` = 被点那个块的**文档字节区间**（`block_hit_test` 的钳制范围）；
+ * * 返回值同样是**文档字节偏移**，由调用方换算成 CodeMirror 位置（见 block-offsets.ts）。
+ *
+ * 失败 / 后端没有这个命令（浏览器开发桩、旧安装包）/ 还没编译过 → null，
+ * 调用方退回"光标落到块首"的老行为，绝不因为定位失败而吞掉这次点击。
+ */
+export async function hitTestBlock(
+  fromByte: number,
+  toByte: number,
+  page: number,
+  xPt: number,
+  yPt: number,
+): Promise<number | null> {
+  try {
+    const out = await invoke<number | null>("block_hit_test", {
+      start: fromByte,
+      end: toByte,
+      page,
+      xPt,
+      yPt,
+    });
+    return typeof out === "number" && Number.isFinite(out) ? out : null;
+  } catch (e) {
+    dbg.log("hit-test", "block_hit_test 不可用，退回块首", e);
+    return null;
+  }
 }
 
 /**

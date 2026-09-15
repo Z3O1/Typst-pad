@@ -4,7 +4,7 @@
 //
 // 注意：不引入 typst() 语言扩展（其 wasm 解析器在 Node 下处理文档变更会 panic，
 // 见 editor-keymap.test.ts 的说明）。
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { basicSetup } from "codemirror";
@@ -284,6 +284,9 @@ describe("livePreview 块级切片", () => {
     kind: "Paragraph",
     found: true,
     pages: 1,
+    page: 1,
+    xPt: 58,
+    yPt: 0,
     widthPt: 371,
     heightPt: 20,
     svg: blockSvg("b"),
@@ -322,6 +325,20 @@ describe("livePreview 块级切片", () => {
     host?.remove();
   });
 
+  /**
+   * jsdom 没实现 `Range.getClientRects`，而 CodeMirror 测量文本尺寸时会用到它 ——
+   * 点击类用例走了 CM 自己的 mousedown 处理（`basicMouseSelection` → 测量），
+   * 于是会在 jsdom 里抛一个与业务无关的异常（真实浏览器里不存在）。补一个空实现。
+   */
+  beforeEach(() => {
+    if (typeof Range !== "undefined" && !Range.prototype.getClientRects) {
+      Range.prototype.getClientRects = function () {
+        const rect = document.createElement("div").getBoundingClientRect();
+        return Object.assign([rect], { item: (i: number) => (i === 0 ? rect : null) }) as unknown as DOMRectList;
+      };
+    }
+  });
+
   const crops = () => host.querySelectorAll(".cm-block-crop");
   const content = () => host.querySelector(".cm-content")?.textContent ?? "";
 
@@ -357,6 +374,123 @@ describe("livePreview 块级切片", () => {
     expect(view.state.selection.main.head).toBe(0); // aaa 的起点
     expect(content()).toContain("aaa"); // 展开后源码可见
     expect(crops().length).toBe(2); // 换成 bbb 与 ccc 被替换
+  });
+
+  it("点击切片 → 命中测试给出精确位置（阶段 2）：光标落在回调返回的位置，不是块首", async () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    // 一块的"页面坐标"：左 58pt、上 100pt、宽 371.25pt、高 20pt
+    const geo = {
+      page: 1,
+      xPt: 58,
+      yPt: 100,
+      widthPt: 371.25,
+      heightPt: 20,
+    };
+    const asked: { page: number; xPt: number; yPt: number; from: number; to: number }[] = [];
+    // jsdom 没有布局：把 rect 量成"100px 宽 = 371.25pt"的假矩形，点击落在 75% 处
+    const rect = { left: 0, top: 0, width: 100, height: 50, right: 100, bottom: 50, x: 0, y: 0, toJSON: () => ({}) };
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(rect as DOMRect);
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3, geo), crop(5, 8, geo), crop(10, 13, geo)],
+            onCropClick: async (req) => {
+              asked.push(req);
+              return 7; // 假命中结果：第三块（被点的第一块是 aaa，7 落在 bbb 里）
+            },
+          }),
+        ],
+      }),
+    });
+    const first = crops()[0] as HTMLElement;
+    first.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }));
+    await new Promise((r) => setTimeout(r, 0));
+    // ① 页面坐标换算：x = 58 + 371.25 × 0.75、y = 100 + 20 × 0.5
+    expect(asked.length).toBe(1);
+    expect(asked[0].xPt).toBeCloseTo(58 + 371.25 * 0.75, 3);
+    expect(asked[0].yPt).toBeCloseTo(110, 3);
+    expect(asked[0].page).toBe(1);
+    expect(asked[0]).toMatchObject({ from: 0, to: 3 });
+    // ② 光标落在回调给的位置（而不是块首 0）
+    expect(view.state.selection.main.head).toBe(7);
+    spy.mockRestore();
+  });
+
+  it("命中测试失败（返回 null）→ 退回块首，点击不会被吞掉", async () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    const geo = { page: 1, xPt: 58, yPt: 100, widthPt: 371.25, heightPt: 20 };
+    const rect = { left: 0, top: 0, width: 100, height: 50, right: 100, bottom: 50, x: 0, y: 0, toJSON: () => ({}) };
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(rect as DOMRect);
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3, geo), crop(5, 8, geo), crop(10, 13, geo)],
+            onCropClick: async () => null,
+          }),
+        ],
+      }),
+    });
+    (crops()[0] as HTMLElement).dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.state.selection.main.head).toBe(0);
+    spy.mockRestore();
+  });
+
+  it("编译错误所在的块不被切片盖住（波浪线才看得见）", () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 0 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3), crop(5, 8), crop(10, 13)],
+            // 诊断落在第二块（位置 6）
+            diagnosticRanges: () => [{ from: 6, to: 7 }],
+          }),
+        ],
+      }),
+    });
+    // 光标在 aaa（第一块，本来就是源码），第二块因为错误也必须是源码、第三块仍是切片
+    expect(content()).toContain("bbb");
+    expect(content()).not.toContain("ccc");
+    expect(crops().length).toBe(1);
   });
 
   it("块切片与公式 widget 不会重叠：被切片盖住的公式不再单独渲染", () => {

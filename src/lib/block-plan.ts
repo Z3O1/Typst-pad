@@ -30,6 +30,10 @@ export interface Block {
   heightPt: number;
   /** 内容分布在几页（单张长页为 1） */
   pages: number;
+  /** 切片所在页（1-based）与裁剪带在页面上的原点（pt）—— 点击定位用，见 block-hit.ts */
+  page: number;
+  xPt: number;
+  yPt: number;
 }
 
 /**
@@ -41,7 +45,10 @@ export interface Block {
  */
 export function toBlockTable(
   doc: string,
-  raw: Pick<BlockCrop, "start" | "end" | "kind" | "found" | "svg" | "widthPt" | "heightPt" | "pages">[],
+  raw: Pick<
+    BlockCrop,
+    "start" | "end" | "kind" | "found" | "svg" | "widthPt" | "heightPt" | "pages" | "page" | "xPt" | "yPt"
+  >[],
 ): BlockTable {
   const offsets: number[] = [];
   for (const b of raw) {
@@ -64,6 +71,9 @@ export function toBlockTable(
       widthPt: b.widthPt,
       heightPt: b.heightPt,
       pages: b.pages ?? 1,
+      page: typeof b.page === "number" && b.page > 0 ? b.page : 1,
+      xPt: typeof b.xPt === "number" ? b.xPt : 0,
+      yPt: typeof b.yPt === "number" ? b.yPt : 0,
     });
   }
   return { doc, blocks };
@@ -219,9 +229,15 @@ export function applyBlockSelection(
  * 写作模式的切片全是 widget，于是"往上"时它会一路跳过所有切片、扫到内容顶部，
  * 然后返回**位置 0** —— 用户看到的就是「在 `== 6` 前面按上，跳回文档开头」（实测复现）。
  *
- * 规则：默认结果**仍落在当前格内**（块内多行移动）时不接管，交回 CodeMirror；
- * 一旦会跨格，就把光标放到相邻格的边界上 —— 向上 = 上一格源码的末尾（`coverTo - 1`），
- * 向下 = 下一格源码的开头（`coverFrom`）。这样"上一块/下一块"像 Typora 一样一块一块走。
+ * 规则（阶段 2 起按"视觉上的下一块"判定，不再按格子）：
+ *  - 默认结果**仍在当前块的正文里**（多行块内逐行移动）→ 不接管，交回 CodeMirror；
+ *  - 一旦会走到块外（含格子那一圈"块前后的空行"）→ 接管，落到相邻块**正文**的边界上：
+ *    向下 = 下一块的 `block.from`（下一段正文的开头，而不是格子里那条空行）、
+ *    向上 = 上一块的末字符。
+ *
+ * 为什么要看 `block` 而不是 `cover`：格子为了吃掉块前的空行会往前扩一圈，于是"往下走一格"
+ * 会先落在两个段落之间那条空行上（第一次按 ↓ 停在空行、第二次才进下一段，"一次一段"的手感
+ * 断成两拍）。块与块之间的空行在排版里本来只是段落间距，视觉上不该停一拍。
  *
  * 返回 null = 不接管（调用方把按键交回默认行为）。
  */
@@ -235,13 +251,135 @@ export function verticalBlockTarget(
   const idx = covers.findIndex((c) => pos >= c.coverFrom && pos < c.coverTo);
   if (idx < 0) return null;
   const cur = covers[idx];
-  // 默认结果仍在当前格内 → 块内移动，交回默认
-  if (defaultTarget >= cur.coverFrom && defaultTarget < cur.coverTo) return null;
+  // 默认结果仍落在**本块正文**内 → 块内移动，交回默认（多行块逐行走）
+  if (defaultTarget >= cur.block.from && defaultTarget < cur.block.to) return null;
   const next = dir > 0 ? idx + 1 : idx - 1;
   if (next < 0 || next >= covers.length) return null;
   return dir > 0
-    ? covers[next].coverFrom
-    : Math.max(0, covers[next].coverTo - 1);
+    ? covers[next].block.from // 下一段正文的开头（跳过块前那条空行）
+    : Math.max(0, covers[next].coverTo - 1); // 上一段的最后一个字符
+}
+
+/**
+ * **编译出错时保留"没被改到"的切片**（纯函数，阶段 2）。
+ *
+ * 背景：块切片与块表是**同一次编译的产物**，一编译失败就没有新表 —— 原先的做法是整表作废
+ * （`writingBlocks = null`），于是写作模式里敲错一个字符，**整篇文档**瞬间从真排版退回源码，
+ * 改好才回来（闪烁且没法读数；用户报的"警告/错误看不见"也和这条有关：退回源码虽然能看到
+ * 波浪线，但代价是整篇都退回）。
+ *
+ * 现在改成：用**前后缀差分**（不回退到逐字符 diff，够用且便宜）算出"改了哪一段"，
+ *  - 完全在改动段**之前**的块：区间不变、切片照用；
+ *  - 完全在改动段**之后**的块：区间整体平移 `delta`、切片照用（源码文本没变 ⇒ 排版结果照旧）；
+ *  - 与改动段**相交**的块：标成不可渲染（`found:false` + 清空 svg）→ 它那一格退回源码，
+ *    用户正在编辑的地方本来就是源码。
+ *
+ * 两条硬约束（错了会盖住正文，比不渲染严重得多）：
+ *  1. **块表必须仍然铺满全文**（`planBlockCovers` 靠"每块一格、首尾相接"来切边界）：
+ *     所以相交的块**保留在数组里**（只是不可渲染），不能凭空删掉；
+ *  2. 相交块的区间取"自己 ∪ 改动段"的**并集（放宽）**：区间只会变大，它那一格顶多显示
+ *     更多源码，绝不会把旁边还在渲染的切片盖到新打的字上面。
+ *
+ * 返回 `kept` = 仍然可以显示切片的块数（日志用）。
+ */
+export function remapBlocksThroughEdit(
+  blocks: readonly Block[],
+  before: string,
+  after: string,
+): { blocks: Block[]; kept: number } {
+  if (blocks.length === 0) return { blocks: [], kept: 0 };
+  if (before === after) return { blocks: [...blocks], kept: blocks.length };
+  const span = changedSpan(before, after);
+  const out: Block[] = [];
+  let kept = 0;
+  for (const b of blocks) {
+    // 改动段之后：整体平移
+    if (b.from >= span.to) {
+      const shifted = { ...b, from: b.from + span.delta, to: b.to + span.delta };
+      out.push(shifted);
+      if (shifted.svg !== "" && shifted.found) kept++;
+      continue;
+    }
+    // 改动段之前：原样保留
+    if (b.to <= span.from) {
+      out.push(b);
+      if (b.svg !== "" && b.found) kept++;
+      continue;
+    }
+    // 与改动段相交：退回源码（区间放宽到"自己 ∪ 改动段"，只多显示源码，不会盖住正文）
+    const from = Math.min(b.from, span.from);
+    out.push({
+      ...b,
+      from,
+      to: Math.max(from, b.to + span.delta, span.to + span.delta),
+      found: false,
+      svg: "",
+      heightPt: 0,
+    });
+  }
+  return { blocks: out, kept };
+}
+
+/**
+ * 两段文本的**改动区间**（纯函数）：共同前缀 + 共同后缀之外的那一段。
+ *
+ * 返回的 `from` / `to` 是**改动前**的坐标（`[from, to)` 这段被换掉了），
+ * `delta` = 新长度 − 旧长度（旧文本里 `>= to` 的位置，在新文本里都要 +delta）。
+ * 代价 O(n)，不做逐字符 diff —— 我们只需要"哪些块完全没被碰过"，粗糙一点反而更保守。
+ */
+export function changedSpan(before: string, after: string): { from: number; to: number; delta: number } {
+  const max = Math.min(before.length, after.length);
+  let p = 0;
+  while (p < max && before[p] === after[p]) p++;
+  // 代理对不能被切开（emoji 的一半会让位置落在字符中间）
+  if (p > 0 && isLowSurrogate(after[p]) && isHighSurrogate(after[p - 1])) p--;
+  let s = 0;
+  while (
+    s < max - p &&
+    before[before.length - 1 - s] === after[after.length - 1 - s]
+  ) {
+    s++;
+  }
+  if (s > 0 && isLowSurrogate(before[before.length - s])) s--;
+  return { from: p, to: before.length - s, delta: after.length - before.length };
+}
+
+function isHighSurrogate(ch: string | undefined): boolean {
+  if (!ch) return false;
+  const c = ch.charCodeAt(0);
+  return c >= 0xd800 && c <= 0xdbff;
+}
+
+function isLowSurrogate(ch: string | undefined): boolean {
+  if (!ch) return false;
+  const c = ch.charCodeAt(0);
+  return c >= 0xdc00 && c <= 0xdfff;
+}
+
+/**
+ * **有诊断（编译错误）的块不许被切片盖住**（纯函数，阶段 2）。
+ *
+ * 波浪线是画在**源码**上的装饰，而被切片盖住的块在 DOM 里只剩一张图片 ——
+ * 错误落在那种块里时，用户看到的是"状态栏说有几处错误，但正文里哪儿也找不到"。
+ * 这里把与诊断区间相交的格子标成"展开源码"，于是错误位置一定看得见（代价是那一块退回源码，
+ * 而那正是需要改的地方）。
+ */
+export function revealBlocksWithDiagnostics(
+  covers: BlockCover[],
+  ranges: readonly { from: number; to: number }[],
+): number {
+  if (ranges.length === 0) return 0;
+  let revealed = 0;
+  for (const cover of covers) {
+    if (cover.revealed || !cover.renderable) continue;
+    // 判据用**格子**区间而不是块自身区间：格子还包含块前后的空行，而诊断落在空行上时
+    // 同样会被切片盖住（半开区间：正好落在格子边界上的诊断归后一格，与选区的判法一致）
+    const hit = ranges.some((r) => r.from < cover.coverTo && r.to > cover.coverFrom);
+    if (!hit) continue;
+    cover.revealed = true;
+    revealed++;
+  }
+  return revealed;
 }
 
 /**

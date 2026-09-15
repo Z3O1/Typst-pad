@@ -18,8 +18,11 @@ import type { MarkupKind } from "./markup-ranges";
 import { scanNonMarkupRegions } from "./typst-lex";
 import type { Region } from "./typst-lex";
 import { buildMathContext } from "./math-context";
-import { applyBlockSelection, planBlockCovers, verticalBlockTarget } from "./block-plan";
+import { applyBlockSelection, planBlockCovers, revealBlocksWithDiagnostics, verticalBlockTarget } from "./block-plan";
 import type { Block, BlockCover } from "./block-plan";
+import { cropPagePoint } from "./block-hit";
+import { anchorPosEffect } from "./scroll-anchor";
+import { dbg } from "./debug";
 import { MATH_SIZE_PT } from "./typst-engine";
 import type { MathRender } from "./typst-engine";
 
@@ -67,6 +70,28 @@ export interface LivePreviewOptions {
    * 滚动到没渲过的区域会一直显示源码。
    */
   onBlocksNeeded?: () => void;
+  /**
+   * **点击定位**（阶段 2）：点在某张切片上的 `(xPt, yPt)`（页面坐标）→ 返回光标的
+   * CodeMirror 位置；返回 null = 定不了位，调用方退回"光标落到块首"。
+   *
+   * 真实实现在父组件（→ Rust 侧 `block_hit_test`，见 block-hit.ts / +page.svelte），
+   * 这里只负责"量出点击点在切片里的相对位置"并把结果落在事务里。
+   */
+  onCropClick?: (req: {
+    page: number;
+    xPt: number;
+    yPt: number;
+    /** 被点那块的源码范围（CodeMirror 位置） */
+    from: number;
+    to: number;
+  }) => Promise<number | null>;
+  /**
+   * 当前编译错误的区间（CodeMirror 位置）：**与诊断相交的块不许被切片盖住** ——
+   * 波浪线画在源码上，被图片盖住的块里看不见（用户会看到"状态栏说有错，正文里找不到"）。
+   * 入参是**正在算装饰的那个 state 的 doc**（不能取 `view.state`：StateField 计算时
+   * view 上的 state 还是旧的）。
+   */
+  diagnosticRanges?: (doc: Text) => readonly { from: number; to: number }[];
 }
 
 /** 渲染结果更新后刷新装饰（父组件收齐一批渲染结果时 dispatch 一次） */
@@ -210,19 +235,68 @@ class CodeBlockWidget extends WidgetType {
 }
 
 /**
+ * 点在一张切片上：**光标落到点到的那个字符**（阶段 2 的"点击定位"）。
+ *
+ * 阶段 1 的做法是"落到块首"，用起来像"点哪儿都回到段首"；现在把点击点在切片里的相对位置
+ * 换算成**页面坐标**（pt），交给父组件（→ Rust 侧 `block_hit_test`）在排版帧里找最近的字形，
+ * 换回源码位置。任何一步失败（没有后端命令 / 块表过期 / 还没编译过）都退回块首 ——
+ * **绝不因为定位失败而吞掉这次点击**。
+ *
+ * 点完之后做一次**滚动锚定**（`anchorPosAfterChange`）：被点的块会从切片变回源码，
+ * 高度一变，原来点到的那个字就会跑掉；锚定把它钉回"鼠标刚才所在的屏幕高度"，
+ * 于是"点哪里、哪里就亮起光标"这件事在视觉上成立。
+ */
+async function handleCropMousedown(
+  view: EditorView,
+  event: MouseEvent,
+  rect: DOMRect,
+  cover: BlockCover,
+  opts: LivePreviewOptions,
+): Promise<void> {
+  const block = cover.block;
+  const targetY = event.clientY;
+  let target = block.from;
+  const point = cropPagePoint(rect, { x: event.clientX, y: event.clientY }, block);
+  if (point && opts.onCropClick) {
+    try {
+      const hit = await opts.onCropClick({
+        page: point.page,
+        xPt: point.xPt,
+        yPt: point.yPt,
+        from: block.from,
+        to: block.to,
+      });
+      if (hit !== null && Number.isFinite(hit)) target = hit;
+    } catch (e) {
+      console.error("[live-preview] 点击定位失败，落到块首：", e);
+    }
+  }
+  // 期间文档可能已经变了（点击定位是一次 IPC 往返）：目标位置越界就退回块首
+  const docLength = view.state.doc.length;
+  if (target < 0 || target > docLength) target = Math.min(block.from, docLength);
+  // 滚动目标与选区**同一个事务**：让"光标所在那一行"留在鼠标底下（行盒中心对齐，
+  // 见 scroll-anchor.ts 为什么不能直接改 scrollTop）
+  const anchor = anchorPosEffect(view, target, targetY, "center");
+  view.dispatch({ selection: EditorSelection.cursor(target), effects: anchor ?? undefined });
+  view.focus();
+}
+
+/**
  * 块切片 widget（阶段 1 的"渲染表面"）：整格源码被替换成**引擎自己画的那一块**。
  *
  * 尺寸不给死值：切片 SVG 的 viewBox/尺寸就是版心的尺寸，CSS 让 svg 宽度铺满正文列、
  * 高度按固有比例自动算（见 livePreviewTheme 的 .cm-block-crop svg）—— 这样窗口宽度
  * 变化到下一次重编译之间也不会变形错位。
  *
- * 点击 = 光标落到该块源码起点 → 选区进入这一格 → 装饰撤掉、源码展开（与公式 widget 同款）。
+ * 点击 = 光标落到**点到的那个字符**（阶段 2 起按页面坐标做命中测试，见 handleCropMousedown）；
+ * 选区进入这一格 → 装饰撤掉、源码展开（与公式 widget 同款）。
  */
 class BlockCropWidget extends WidgetType {
   constructor(
     private readonly cover: BlockCover,
     private readonly raw: string,
     private readonly dark: boolean,
+    private readonly opts: LivePreviewOptions,
   ) {
     super();
   }
@@ -242,6 +316,10 @@ class BlockCropWidget extends WidgetType {
       const wrap = document.createElement("div");
       wrap.className = this.dark ? "cm-block-crop cm-block-crop-dark" : "cm-block-crop";
       wrap.title = `${this.cover.block.kind}（点击编辑源码）`;
+      // 块起点写在 DOM 上：浏览器验收要靠它把"夹具里的第几块"与"页面里的哪张切片"对上
+      // （按位置取最可靠，不依赖切片顺序；调试时也比数第几个 div 直观）
+      wrap.dataset.blockFrom = String(this.cover.block.from);
+      wrap.dataset.blockKind = this.cover.block.kind;
       wrap.innerHTML = this.cover.block.svg;
       const svg = wrap.querySelector("svg");
       if (svg) {
@@ -251,8 +329,9 @@ class BlockCropWidget extends WidgetType {
       }
       wrap.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        view.dispatch({ selection: { anchor: this.cover.block.from } });
-        view.focus();
+        // 位置在**事件触发时**量：装饰重建后 DOM 会被替换，别在异步回来后取
+        const rect = wrap.getBoundingClientRect();
+        void handleCropMousedown(view, e, rect, this.cover, this.opts);
       });
       return wrap;
     } catch (e) {
@@ -304,14 +383,19 @@ function notifyBlocksNeeded(
   state: EditorState,
   opts: LivePreviewOptions,
   visible: readonly { from: number; to: number }[],
-  doc: string,
+  _doc: string,
 ): void {
   if (!opts.enabled() || !opts.onBlocksNeeded) return;
-  const covers = buildBlockCovers(state, opts, doc);
-  for (const cover of covers) {
-    if (cover.revealed || cover.block.svg !== "" || !cover.block.found) continue;
+  // **直接看块表，不要走 buildBlockCovers**：那条路会把"能渲染但还没有切片"的块标成
+  // `revealed`（它们当下确实显示源码），于是"要不要补渲"的判据 `!cover.revealed` 永远为假 ——
+  // 滚动到没渲过的区域时**一次重编译都不会触发**（这段代码曾经就是这样：要么等着用户敲一个字，
+  // 要么永远显示源码）。判据只该是"这个块能渲染（found）但这一轮没拿到 svg"。
+  const blocks = opts.blocks?.() ?? null;
+  if (!blocks || blocks.length === 0) return;
+  for (const block of blocks) {
+    if (!block.found || block.svg !== "") continue;
     const near = visible.some(
-      (v) => cover.block.to >= v.from - PREFETCH_MARGIN && cover.block.from <= v.to + PREFETCH_MARGIN,
+      (v) => block.to >= v.from - PREFETCH_MARGIN && block.from <= v.to + PREFETCH_MARGIN,
     );
     if (near) {
       opts.onBlocksNeeded();
@@ -509,7 +593,7 @@ function buildBlockCropDecorations(
     if (to <= from) continue;
     out.push(
       Decoration.replace({
-        widget: new BlockCropWidget(cover, doc.slice(from, to), opts.dark()),
+        widget: new BlockCropWidget(cover, doc.slice(from, to), opts.dark(), opts),
         block: true,
       }).range(from, to),
     );
@@ -585,6 +669,17 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         const context = buildMathContext(opts.prefix(), doc);
         // 块级切片（写作模式）：先算"哪些格子要被切片盖住"，再让公式/标记装饰避开它们
         const covers = buildBlockCovers(state, opts, doc);
+        // 有编译错误的格子强制展开源码：波浪线画在源码上，被图片盖住就"哪儿也找不到错误"
+        // （必须在 applyBlockSelection **之后**跑，否则会被选区判定覆盖回去）
+        if (covers.length > 0) {
+          const revealed = revealBlocksWithDiagnostics(
+            covers,
+            opts.diagnosticRanges?.(state.doc) ?? [],
+          );
+          if (revealed > 0) {
+            dbg.log("blocks", `诊断所在块退回源码：${revealed} 块`);
+          }
+        }
         const covered = covers
           .filter((c) => !c.revealed)
           .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
@@ -628,11 +723,76 @@ export function livePreview(opts: LivePreviewOptions): Extension {
     keymap.of([
       { key: "ArrowUp", run: (view) => crossBlock(view, -1) },
       { key: "ArrowDown", run: (view) => crossBlock(view, 1) },
-      // PageUp/PageDown 走的是同一条 `moveVertically`，会有同样的"跳过 widget 跳到底"问题
-      { key: "PageUp", run: (view) => crossBlock(view, -1) },
-      { key: "PageDown", run: (view) => crossBlock(view, 1) },
+      // PageUp/PageDown 另有语义（整屏翻页），见 pageMove
+      {
+        key: "PageUp",
+        run: (view) => pageMove(view, false, false),
+        shift: (view) => pageMove(view, false, true),
+      },
+      {
+        key: "PageDown",
+        run: (view) => pageMove(view, true, false),
+        shift: (view) => pageMove(view, true, true),
+      },
     ]),
   );
+
+  /** 一次翻页走视口高度的多少（留一点重叠，跟浏览器/编辑器的习惯一致） */
+  const PAGE_SCROLL_RATIO = 0.85;
+
+  /**
+   * **翻页**（PageUp / PageDown）：光标连着视口一起走一屏，落到新位置最近的那个字符上。
+   *
+   * 为什么不能交给 CodeMirror 默认：它的翻页是 `moveVertically(distance = 视口高)`，而
+   * `moveVertically` 的扫描**跳过所有 widget**（见 `posAtCoords`）—— 写作模式的切片全是
+   * widget，于是"翻一页"会直接落到内容顶部（位置 0）或文档末尾，看起来像"跳回开头"。
+   * 阶段 1 的临时处置是"一次跨一块"，但那样翻页就不存在了。
+   *
+   * 这里的做法：把光标当前的屏幕 y 平移一屏得到目标 y，用**非精确**的 `posAtCoords`
+   * 取那个点的位置（对 widget 它会返回该 widget 的 `from`/`to`，也就是那一格的边界，
+   * 正好是"翻到这一块的开头"），再把光标放过去并按目标 y 做滚动锚定。
+   *
+   * 边界情况：到文档顶/底时目标位置不变，直接交回默认（不吞按键）。
+   */
+  function pageMove(view: EditorView, forward: boolean, extend: boolean): boolean {
+    try {
+      const covers = view.state.field(decoField).covers;
+      // 没有块级渲染（源码模式 / 没编译过）→ 默认翻页是对的，别接管
+      if (covers.length === 0) return false;
+      const sel = view.state.selection;
+      if (sel.ranges.length !== 1) return false;
+      const scroller = view.scrollDOM;
+      const box = scroller.getBoundingClientRect();
+      if (box.height <= 0) return false;
+      // 真正能滚的位移（到顶/到底时夹住；夹没了就交回默认）
+      const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      const dist = box.height * PAGE_SCROLL_RATIO;
+      const shift = Math.max(
+        -scroller.scrollTop,
+        Math.min(maxScroll - scroller.scrollTop, forward ? dist : -dist),
+      );
+      if (Math.abs(shift) < 4) return false;
+      const head = sel.main.head;
+      const caret = view.coordsAtPos(head, 1);
+      // 光标在视口里的屏幕高度：翻页后要让光标回到**同一个高度**（内容走一屏，光标不动）
+      const restY = caret ? caret.top : box.top + box.height / 2;
+      const x = caret ? caret.left + 1 : view.contentDOM.getBoundingClientRect().left + 2;
+      // 目标 = "滚过 shift 之后会出现在光标那个屏幕高度"的内容 → 现在是屏幕上的 restY + shift
+      const pos = view.posAtCoords({ x, y: restY + shift }, false);
+      if (pos === null) return false;
+      if (!extend && pos === head) return false; // 位置没动（到头了）：交回默认
+      // 把"一屏位移"表达成滚动目标：光标回到原来的屏幕高度 = 内容正好走了一屏
+      const anchor = anchorPosEffect(view, pos, restY, "center");
+      view.dispatch({
+        selection: extend ? EditorSelection.range(sel.main.anchor, pos) : EditorSelection.cursor(pos),
+        effects: anchor ?? undefined,
+      });
+      return true;
+    } catch (e) {
+      console.error("[live-preview] 翻页失败，交回默认：", e);
+      return false;
+    }
+  }
 
   function crossBlock(view: EditorView, dir: -1 | 1): boolean {
     try {

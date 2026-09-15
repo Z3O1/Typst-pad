@@ -9,7 +9,10 @@ import { Text } from "@codemirror/state";
 import {
   applyBlockSelection,
   carryOverCrops,
+  changedSpan,
   planBlockCovers,
+  remapBlocksThroughEdit,
+  revealBlocksWithDiagnostics,
   toBlockTable,
   verticalBlockTarget,
 } from "./block-plan";
@@ -24,7 +27,9 @@ function crop(start: number, end: number, opts: Partial<BlockCrop> = {}): BlockC
     kind: opts.kind ?? "Paragraph",
     found: opts.found ?? true,
     pages: 1,
-    yPt: 0,
+    page: opts.page ?? 1,
+    xPt: opts.xPt ?? 58,
+    yPt: opts.yPt ?? 0,
     widthPt: 371,
     heightPt: opts.heightPt ?? 20,
     bands: 1,
@@ -230,9 +235,29 @@ describe("verticalBlockTarget（跨块竖直移动：修「按上跳回开头」
     expect(verticalBlockTarget(c, 4, 0, -1)).toBe(3); // covers[0].coverTo - 1
   });
 
-  it("向下跨格 → 落到下一格源码的开头", () => {
+  it("向下跨格 → 落到下一块**正文**的开头（不是格子里那条空行）", () => {
     const c = covers();
-    expect(verticalBlockTarget(c, 8, 14, 1)).toBe(9); // covers[2].coverFrom
+    // 格子 [4,9) 里的正文是 bbb[5,8)：往下应当落到 10（第三块正文开头），而不是 coverFrom
+    expect(verticalBlockTarget(c, 8, 14, 1)).toBe(10);
+  });
+
+  it("从块尾按 ↓ → 一次就进下一段正文（不再先停在段落之间的空行上）", () => {
+    const c = covers();
+    // 位置 3 = 第一块正文的末尾；CodeMirror 的默认结果会是那条空行（位置 4），
+    // 它在第二格的范围里但**不在第二块正文里** → 接管，直接落到 bbb 的开头
+    expect(verticalBlockTarget(c, 3, 4, 1)).toBe(5);
+    // 光标已经在空行（位置 4）上时，默认结果 5 就是下一段正文的开头 → 不必接管
+    expect(verticalBlockTarget(c, 4, 5, 1)).toBeNull();
+  });
+
+  it("多行块内逐行移动仍然不接管（块内正文没走完）", () => {
+    const doc = "aaa\nline2\nline3\n\nbbb\n";
+    const table = toBlockTable(doc, [crop(0, 15), crop(17, 20)]);
+    const c = planBlockCovers(table.blocks, Text.of(doc.split("\n")));
+    // 光标在第一行，默认结果落到第二行（仍在第一块正文里）→ 不接管
+    expect(verticalBlockTarget(c, 0, 4, 1)).toBeNull();
+    // 从块尾往下 → 落到下一块正文开头
+    expect(verticalBlockTarget(c, 15, 17, 1)).toBe(17);
   });
 
   it("已经在第一/最后一格 → 不接管（保持默认：不动）", () => {
@@ -243,5 +268,121 @@ describe("verticalBlockTarget（跨块竖直移动：修「按上跳回开头」
 
   it("没有格子（源码模式）→ 永不接管", () => {
     expect(verticalBlockTarget([], 3, 0, -1)).toBeNull();
+  });
+});
+
+describe("changedSpan / remapBlocksThroughEdit（编译失败时保留没被改到的切片）", () => {
+  /** 造一张块表（纯 ASCII：字节偏移 == 位置） */
+  const table = (doc: string) =>
+    toBlockTable(doc, [
+      crop(0, 3, { kind: "Heading", xPt: 58, yPt: 10 }),
+      crop(5, 8, { xPt: 58, yPt: 40 }),
+      crop(10, 13, { xPt: 58, yPt: 70 }),
+    ]).blocks;
+
+  it("changedSpan：中间插入 → 改动段在插入点，delta 为正", () => {
+    expect(changedSpan("abcdef", "abcXYdef")).toEqual({ from: 3, to: 3, delta: 2 });
+  });
+
+  it("changedSpan：中间删除 → delta 为负", () => {
+    expect(changedSpan("abcXYdef", "abcdef")).toEqual({ from: 3, to: 5, delta: -2 });
+  });
+
+  it("changedSpan：整体替换", () => {
+    expect(changedSpan("abc", "xyz")).toEqual({ from: 0, to: 3, delta: 0 });
+  });
+
+  it("changedSpan：代理对不被切开（emoji 前后的共同前缀按整字符算）", () => {
+    // "🚀" 是 2 个码元；在后面插入 "!" 时前缀必须停在 emoji 之后，不能切进它中间
+    const span = changedSpan("🚀a", "🚀!a");
+    expect(span.from).toBe(2);
+    expect(span.delta).toBe(1);
+  });
+
+  it("在块之间插入：改动段之前的块原样、之后的位置平移、剩下的切片都还在", () => {
+    const before = "aaa\n\nbbb\n\nccc\n";
+    const after = "aaa\n\nXX\n\nbbb\n\nccc\n"; // 在第二块之前插入一整块
+    const out = remapBlocksThroughEdit(table(before), before, after);
+    expect(out.blocks.length).toBe(3); // 铺满全文的约束：块数不变
+    expect(out.blocks[0]).toMatchObject({ from: 0, to: 3, svg: "<svg/>" });
+    // 后两块整体平移 +4（插入的 "XX\n\n" 的字节长度）
+    expect(out.blocks[1].from).toBe(5 + 4);
+    expect(out.blocks[2].from).toBe(10 + 4);
+    expect(out.kept).toBe(3);
+  });
+
+  it("改动落在某一块内部：那一块退回源码（区间放宽），其它块不受影响", () => {
+    const before = "aaa\n\nbbb\n\nccc\n";
+    const after = "aaa\n\nbXbb\n\nccc\n"; // 第二块里插入一个字符
+    const out = remapBlocksThroughEdit(table(before), before, after);
+    const middle = out.blocks[1];
+    expect(middle.found).toBe(false);
+    expect(middle.svg).toBe("");
+    expect(middle.heightPt).toBe(0);
+    // 改动段之后的第三块平移 +1，切片照旧
+    expect(out.blocks[2]).toMatchObject({ from: 11, to: 14, svg: "<svg/>" });
+    expect(out.kept).toBe(2);
+    // 放宽之后的区间必须仍然包住**改动段在改动后坐标里的位置**（否则新打的字会被旁边的切片盖住）
+    expect(middle.from).toBeLessThanOrEqual(6);
+    expect(middle.to).toBeGreaterThanOrEqual(7);
+    // 首尾相接、递增不重叠的约束不能破
+    for (let i = 1; i < out.blocks.length; i++) {
+      expect(out.blocks[i].from).toBeGreaterThanOrEqual(out.blocks[i - 1].from);
+    }
+  });
+
+  it("在文档最开头插入：所有块平移，切片全保留", () => {
+    const before = "aaa\n\nbbb\n\nccc\n";
+    const after = "ZZ\naaa\n\nbbb\n\nccc\n";
+    const out = remapBlocksThroughEdit(table(before), before, after);
+    expect(out.kept).toBe(3);
+    expect(out.blocks[0].from).toBe(3);
+  });
+
+  it("文档没变 → 原样返回（不产生新对象数组内容变化）", () => {
+    const before = "aaa\n\nbbb\n\nccc\n";
+    const out = remapBlocksThroughEdit(table(before), before, before);
+    expect(out.kept).toBe(3);
+    expect(out.blocks[0].svg).toBe("<svg/>");
+  });
+
+  it("空块表 → 空结果", () => {
+    expect(remapBlocksThroughEdit([], "", "x")).toEqual({ blocks: [], kept: 0 });
+  });
+});
+
+describe("revealBlocksWithDiagnostics（错误位置不许被切片盖住）", () => {
+  const setup = () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    const table = toBlockTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]);
+    return planBlockCovers(table.blocks, Text.of(doc.split("\n")));
+  };
+
+  it("与诊断区间相交的格子被标成展开源码，其它格子不动", () => {
+    const covers = setup();
+    // 诊断落在第二块里（位置 6）
+    const revealed = revealBlocksWithDiagnostics(covers, [{ from: 6, to: 7 }]);
+    expect(revealed).toBe(1);
+    expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
+  });
+
+  it("没有诊断 → 一个都不展开", () => {
+    const covers = setup();
+    expect(revealBlocksWithDiagnostics(covers, [])).toBe(0);
+    expect(covers.every((c) => !c.revealed)).toBe(true);
+  });
+
+  it("诊断落在块与块之间的空行上 → 也是被盖住的范围，照样展开（宁可多展开）", () => {
+    const covers = setup();
+    // 位置 4 是空行 = 第二格的 coverFrom（格子也盖住它）
+    const revealed = revealBlocksWithDiagnostics(covers, [{ from: 4, to: 5 }]);
+    expect(revealed).toBe(1);
+    expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
+  });
+
+  it("已经展开 / 不可渲染的格子不重复计数", () => {
+    const covers = setup();
+    covers[1].revealed = true;
+    expect(revealBlocksWithDiagnostics(covers, [{ from: 6, to: 7 }])).toBe(0);
   });
 });

@@ -218,8 +218,8 @@ check("按到第一块后继续按上不出乱子（仍在第一块或不动）"
 check("状态栏没有脚本错误", !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"));
 
 // 向下：从文档开头连续按下 —— 只要求"单调前进、不跳到文档末尾、最终能走到最后一块"。
-// 已知的小毛病（如实记录，不假装完美）：从块的**开头**往下按，第一次会先在块内挪到块尾，
-// 第二次才跨到下一块 —— 因为 CodeMirror 的下扫在 widget 里能落回当前格，我们就不接管。
+// 阶段 2 起"下一次按 ↓ 就进下一段正文"（跨越段落之间那条空行，见 block-plan.verticalBlockTarget）：
+// 所以从第一段往下按一下就该看到第二段，而不是先停在空行上。
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home
 await new Promise((r) => setTimeout(r, 400));
 const down = [];
@@ -245,6 +245,196 @@ check(
 );
 check("按下最终能走到最后一块", ranks.includes(3), JSON.stringify(ranks));
 check("按下不会跳到文档开头/末尾（每一步都是某个块的开头）", ranks[0] <= 1 && monotone, JSON.stringify(ranks));
+check(
+  "按 ↓ 一次就进下一段（跨越段落之间的空行，段段之间不再停一拍）",
+  rank(tail(down[0])) >= 1,
+  JSON.stringify(down.slice(0, 2)),
+);
+
+
+// ---------------------------------------------------------------------------
+// 阶段 2：点击定位 / 点击与刷新时的滚动锚定 / 翻页 / 编译失败不整篇作废
+// ---------------------------------------------------------------------------
+/**
+ * 取数小工具（验收专用）：CodeMirror 的 EditorView 挂在内容元素的 DOM 瓦片上
+ * （`el.cmTile.root.view`），用它读光标位置、滚动量与视口高度 —— 比从 DOM 里反推可靠得多。
+ * 页面代码本身不依赖这个钩子（只有验收脚本用）。
+ */
+const VIEW = `(() => {
+  const el = document.querySelector(".cm-content");
+  const view = el && el.cmTile && el.cmTile.root && el.cmTile.root.view;
+  if (!view) return null;
+  const s = view.scrollDOM;
+  const head = view.state.selection.main.head;
+  const coords = view.coordsAtPos(head);
+  const line = document.querySelector(".cm-line");
+  return {
+    head,
+    anchor: view.state.selection.main.anchor,
+    docLength: view.state.doc.length,
+    scrollTop: s.scrollTop,
+    maxScroll: s.scrollHeight - s.clientHeight,
+    clientHeight: s.clientHeight,
+    caretY: coords ? (coords.top + coords.bottom) / 2 : null,
+    // 行高用 CodeMirror 自己的值：.cm-line 的矩形高度在折行段落里是"好几行"的高度
+    lineHeight: view.defaultLineHeight,
+    text: view.state.doc.toString(),
+  };
+})()`;
+
+/** 视口里"最完整地露在中间"的一张切片（矩形 + 块起点）—— 点击类用例都从它下手 */
+const MIDDLE_CROP = `(() => {
+  const list = Array.from(document.querySelectorAll(".cm-block-crop"))
+    .map((el) => ({ el, r: el.getBoundingClientRect() }))
+    .filter(({ r }) => r.height > 8 && r.bottom > 120 && r.top < innerHeight - 120)
+    .sort((a, b) => a.r.top - b.r.top);
+  const pick = list[0];
+  if (!pick) return null;
+  const { el, r } = pick;
+  return { from: Number(el.dataset.blockFrom), left: r.left, top: r.top, width: r.width, height: r.height };
+})()`;
+
+console.log("9) 点击定位：点切片上的字 → 光标落到那一块里的对应位置（+ 点击锚定）");
+await c.evaluate(`localStorage.setItem("typst-pad:state", JSON.stringify({ theme: "light" }))`);
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.click(400, 300);
+await c.selectAll();
+await c.type(longDoc);
+await new Promise((r) => setTimeout(r, 900));
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home：第一块成为活动块
+await new Promise((r) => setTimeout(r, 400));
+await c.wheel(700, 400, 1800); // 往下滚一段，让"目标块"上方还有内容（这样锚定才有滚动余量）
+await new Promise((r) => setTimeout(r, 1400)); // 等窗口化补渲
+
+const midCrop = await c.evaluate(MIDDLE_CROP);
+check("视口中间找得到一张切片", midCrop !== null, JSON.stringify(midCrop));
+if (midCrop) {
+  // 点在切片的下半部分（横向上偏左）：光标应当落到这一块里更靠后的字符上
+  const cx = Math.round(midCrop.left + midCrop.width * 0.3);
+  const cyLow = Math.round(midCrop.top + midCrop.height * 0.75);
+  await c.click(cx, cyLow);
+  await new Promise((r) => setTimeout(r, 400));
+  const st = await c.evaluate(VIEW);
+  // 块正文（从块起点到第一个空行）：命中结果必须落在它里面
+  const seg = st.text.slice(midCrop.from);
+  const blockEnd = seg.indexOf("\n\n");
+  const blockChars = blockEnd < 0 ? seg.length : blockEnd;
+  check(
+    "点击后光标落在被点的那一块里（不是块首、也不是别的块）",
+    st.head >= midCrop.from && st.head <= midCrop.from + blockChars,
+    JSON.stringify({ head: st.head, from: midCrop.from, blockChars }),
+  );
+  check(
+    "点在切片下半部分 → 光标落在该块靠后的位置（不是块首）",
+    st.head > midCrop.from,
+    JSON.stringify({ head: st.head, from: midCrop.from }),
+  );
+  const drift = st.caretY === null ? 0 : Math.abs(st.caretY - cyLow);
+  check(
+    `点击锚定：被点的字符仍留在鼠标那一带（偏移 ${drift.toFixed(0)}px / 行高 ${st.lineHeight.toFixed(0)}px，滚动 ${st.scrollTop.toFixed(0)}）`,
+    st.maxScroll > 0 && drift <= st.lineHeight * 0.8,
+    JSON.stringify({ drift, lineHeight: st.lineHeight, maxScroll: st.maxScroll, clickY: cyLow, caretY: st.caretY }),
+  );
+  const cropsAfterClick = await c.evaluate(
+    `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
+  );
+  check(
+    "被点的块变回源码（不再有切片）、别的块仍然是切片",
+    !cropsAfterClick.includes(midCrop.from) && cropsAfterClick.length > 0,
+    JSON.stringify({ cropsAfterClick: cropsAfterClick.length, from: midCrop.from }),
+  );
+  await c.screenshot(SHOT("writing-blocks-hit"));
+}
+
+console.log("10) 翻页：PageDown/PageUp 走一屏，不跳到文档末尾/开头");
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home
+await new Promise((r) => setTimeout(r, 400));
+const page0 = await c.evaluate(VIEW);
+await c.key("PageDown", { code: "PageDown", keyCode: 34 });
+await new Promise((r) => setTimeout(r, 500));
+const page1 = await c.evaluate(VIEW);
+check(
+  `PageDown 从开头翻到文档中段（位置 ${page0.head} → ${page1.head}，全文 ${page1.docLength}）`,
+  page1.head > page0.head && page1.head < page1.docLength * 0.6,
+  JSON.stringify({ head: page1.head, docLength: page1.docLength }),
+);
+check(
+  `PageDown 同时往下滚了（${page0.scrollTop.toFixed(0)} → ${page1.scrollTop.toFixed(0)}，视口 ${page1.clientHeight.toFixed(0)}px）`,
+  page1.scrollTop > page0.scrollTop + 100,
+  JSON.stringify({ from: page0.scrollTop, to: page1.scrollTop }),
+);
+check(
+  `PageDown 后光标仍停在原来的屏幕高度（${page0.caretY?.toFixed(0) ?? "?"} → ${page1.caretY?.toFixed(0) ?? "?"}）`,
+  page0.caretY === null || page1.caretY === null || Math.abs(page1.caretY - page0.caretY) <= page1.lineHeight * 1.5,
+  JSON.stringify({ before: page0.caretY, after: page1.caretY }),
+);
+await c.key("PageDown", { code: "PageDown", keyCode: 34 });
+await new Promise((r) => setTimeout(r, 400));
+await c.key("PageDown", { code: "PageDown", keyCode: 34 });
+await new Promise((r) => setTimeout(r, 400));
+const page3 = await c.evaluate(VIEW);
+check("连续 PageDown 单调前进", page3.head > page1.head && page3.scrollTop > page1.scrollTop, JSON.stringify({ h1: page1.head, h3: page3.head }));
+await c.key("PageUp", { code: "PageUp", keyCode: 33 });
+await new Promise((r) => setTimeout(r, 400));
+const pageUp = await c.evaluate(VIEW);
+check("PageUp 往回走（位置变小、滚动变小）", pageUp.head < page3.head && pageUp.scrollTop < page3.scrollTop, JSON.stringify({ up: pageUp.head, before: page3.head }));
+await c.key("PageUp", { code: "PageUp", keyCode: 33, modifiers: 8 }); // Shift+PageUp
+await new Promise((r) => setTimeout(r, 400));
+const shiftUp = await c.evaluate(VIEW);
+check("Shift+PageUp 仍然是选区扩展（anchor 不动、head 往回走）", shiftUp.anchor > shiftUp.head, JSON.stringify({ anchor: shiftUp.anchor, head: shiftUp.head }));
+
+console.log("11) 编译失败：保留没被改到的切片 + 错误所在块看得到（阶段 2）");
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.click(400, 300);
+await c.selectAll();
+await c.type("第一段正文，用来验证编译失败时的取舍。\n\n第二段正文。\n\n第三段正文。\n\n第四段正文。\n\n第五段正文。\n");
+await new Promise((r) => setTimeout(r, 900));
+const beforeErr = await c.evaluate(CROPS);
+check("失败前：非光标块是切片", beforeErr >= 3, `实际 ${beforeErr}`);
+// 点中间那张切片 → 光标进到那一块，再插入 @err（桩据此返回"这一行有编译错误"）
+const target = await c.evaluate(MIDDLE_CROP);
+if (target) {
+  await c.click(Math.round(target.left + target.width * 0.4), Math.round(target.top + target.height * 0.5));
+  await new Promise((r) => setTimeout(r, 350));
+  await c.type("@err");
+  await new Promise((r) => setTimeout(r, 900));
+  const cropsAfterErr = await c.evaluate(CROPS);
+  const cropFroms = await c.evaluate(
+    `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
+  );
+  const linesAfterErr = await c.evaluate(LINES_TEXT);
+  const statusText = await c.evaluate(`document.body.innerText`);
+  check("编译失败后**没有整篇退回源码**（其它块的切片还在）", cropsAfterErr >= 2, `实际 ${cropsAfterErr} 张（失败前 ${beforeErr}）`);
+  check("出错的那一块退回源码（它的起点不再有切片）", !cropFroms.includes(target.from), JSON.stringify({ cropFroms, from: target.from }));
+  check("出错的源码可见（能读到 @err）", linesAfterErr.includes("@err"), linesAfterErr.slice(0, 120));
+  check("状态栏仍然报出编译错误", /编译错误/.test(statusText), statusText.replace(/\s+/g, " ").slice(0, 120));
+  check(
+    "错误位置有红色波浪线（切片盖不住它，见 revealBlocksWithDiagnostics）",
+    (await c.evaluate(`document.querySelectorAll(".cm-diag-wavy").length`)) > 0,
+  );
+  await c.screenshot(SHOT("writing-blocks-compile-error"));
+  // 改好：删掉 4 个字符 → 编译恢复 → 点到别的块之后，之前那块也变回切片
+  for (let i = 0; i < 4; i++) {
+    await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  await new Promise((r) => setTimeout(r, 800));
+  const other = await c.evaluate(MIDDLE_CROP);
+  if (other) {
+    await c.click(Math.round(other.left + other.width * 0.4), Math.round(other.top + other.height * 0.5));
+    await new Promise((r) => setTimeout(r, 500));
+    const cropFromsFixed = await c.evaluate(
+      `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
+    );
+    check(
+      "改好之后那一块重新变回切片（编译恢复）",
+      cropFromsFixed.includes(target.from),
+      JSON.stringify({ cropFromsFixed, from: target.from }),
+    );
+  }
+}
 
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
 process.exit(process.exitCode ?? 0);

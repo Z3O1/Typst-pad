@@ -6,6 +6,7 @@
     compileBlocks,
     compileToPdf,
     compileMath,
+    hitTestBlock,
     listFontFamilies,
     defaultFontFamilies,
   } from "$lib/typst-engine";
@@ -17,8 +18,9 @@
     Diagnostic,
     MathRender,
   } from "$lib/typst-engine";
-  import { positionRangeToByteRange, utf8Length } from "$lib/block-offsets";
-  import { carryOverCrops, toBlockTable } from "$lib/block-plan";
+  import { byteOffsetsToPositions, positionRangeToByteRange, utf8Length } from "$lib/block-offsets";
+  import { carryOverCrops, remapBlocksThroughEdit, toBlockTable } from "$lib/block-plan";
+  import { clampHitOffset } from "$lib/block-hit";
   import type { Block } from "$lib/block-plan";
   import { buildFontFamilies, FONT_CHOICE_DEFAULT, normalizeFontDirs } from "$lib/font-settings";
   import { describeCompileWarning } from "$lib/font-warnings";
@@ -312,6 +314,15 @@
   /** 块切片代次（自增即通知编辑器重整块装饰） */
   let blocksVersion = $state(0);
   /**
+   * 块表对应的**文档原文**（= 生成这批切片时编译的那一份）与"能否精确定位"标记。
+   *
+   * `writingBlocksExact` 为 false 时说明区间是**估算**的（最近一次编译失败了，见
+   * applyBlocksResult 的失败分支：区间靠前后缀差分平移过来），这时不做点击精确定位 ——
+   * Rust 侧几何缓存里的字节区间还是失败前那一版的，混着用会点错地方（宁可退回块首）。
+   */
+  let writingBlocksDoc = $state("");
+  let writingBlocksExact = $state(false);
+  /**
    * 写作模式正文列宽（pt）：块级渲染的**版心宽**，随编辑器列宽走。
    * 0 = 还没量到（编辑器未挂载）→ 编译时用默认值兜底，量到之后 scheduleWritingReflow 会重编一次。
    */
@@ -320,7 +331,9 @@
   /** 量不到列宽时的兜底版心宽（495px = 371.25pt，写作模式常见列宽） */
   const DEFAULT_WRITING_WIDTH_PT = 371.25;
   /** "视口内出现没切片的块"的重编译定时器（去抖：滚动过程中会连着触发） */
-  let blocksNeededTimer: ReturnType<typeof setTimeout> | undefined;
+  let blocksTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 上一次**已经渲过**的窗口（`from:to` 或 `all`）：同一个窗口不重复编译，防抖成环 */
+  let lastBlocksWindow = $state("");
 
   /**
    * 视口内出现了"能渲染但还没有切片"的块 → 去抖 150ms 后按**新的视口窗口**重编译一次。
@@ -330,8 +343,51 @@
    */
   function handleBlocksNeeded() {
     if (viewMode !== "write") return;
-    clearTimeout(blocksNeededTimer);
-    blocksNeededTimer = setTimeout(() => void runCompile(), 150);
+    // 同一个窗口不重复编译：补渲后仍有块没拿到 svg（后端渲染不出来）时，
+    // 不去抖反复重编译（否则就是每 150ms 一次的编译循环）
+    const window = writingWindowBytes();
+    const key = window === null ? "all" : `${window.from}:${window.to}`;
+    if (key === lastBlocksWindow) return;
+    clearTimeout(blocksTimer);
+    blocksTimer = setTimeout(() => void runCompile(), 150);
+  }
+
+  /**
+   * **点击定位**（阶段 2）：切片上点到的那一点 → 源码位置。
+   *
+   * 链路（见 block-hit.ts 的说明）：编辑器量出点击点的页面坐标（pt）→ 这里把块的
+   * CodeMirror 位置换算成**文档字节偏移** → `block_hit_test` 在 Rust 侧的排版帧里找最近的
+   * 字形 → 返回的字节偏移再换算回位置。
+   *
+   * 两道"别乱点"的闸门：
+   *  ① 块表必须**与当前文档一致**（`writingBlocksDoc === doc`）：编译是异步的，刚敲完字
+   *     就点下去时旧区间可能已经偏移了几十字节，硬按旧区间定位会落到别的段落里；
+   *  ② 块表必须是**精确**的（见 writingBlocksExact）：编译失败后沿用旧切片时区间是估算的。
+   * 任一不满足 → 返回 null，编辑器退回"光标落到块首"。
+   */
+  async function handleCropClick(req: {
+    page: number;
+    xPt: number;
+    yPt: number;
+    from: number;
+    to: number;
+  }): Promise<number | null> {
+    if (!writingBlocksExact || writingBlocksDoc !== doc) return null;
+    const range = positionRangeToByteRange(doc, req.from, req.to);
+    if (range.to <= range.from) return null;
+    const bounds = { fromByte: range.from, toByte: range.to };
+    const hit = clampHitOffset(
+      await hitTestBlock(bounds.fromByte, bounds.toByte, req.page, req.xPt, req.yPt),
+      bounds,
+    );
+    if (hit === null) return null;
+    const pos = byteOffsetsToPositions(doc, [hit])[0];
+    if (!Number.isFinite(pos)) return null;
+    dbg.log(
+      "hit-test",
+      `点击 (${req.xPt.toFixed(1)}, ${req.yPt.toFixed(1)})pt → 字节 ${hit} → 位置 ${pos}（块 ${req.from}..${req.to}）`,
+    );
+    return pos;
   }
 
   /**
@@ -1331,8 +1387,10 @@
    * 新文档的编译结果（数十毫秒后）会填回来。
    */
   function resetBlocks() {
-    clearTimeout(blocksNeededTimer);
+    clearTimeout(blocksTimer);
     writingBlocks = null;
+    writingBlocksDoc = "";
+    writingBlocksExact = false;
     blocksVersion++;
   }
 
@@ -1532,13 +1590,16 @@
     // 写作模式：走块级编译（每个源块一张真实排版切片），不渲染整页预览 —— 整页 SVG 在写作
     // 模式下是看不见的（预览栏隐藏），省下的是同一量级的工作，换来的是"编辑区里就是真排版"。
     if (viewMode === "write") {
+      const window = writingWindowBytes();
+      // 记下这一轮渲的窗口：视口内仍有"没拿到切片"的块时，同一个窗口不重复编译（见 handleBlocksNeeded）
+      lastBlocksWindow = window === null ? "all" : `${window.from}:${window.to}`;
       const blocksResult = await compileBlocks(
         source,
         utf8Length(prefixEnabled ? ensureTrailingNewline(prefixCode) : ""),
         filePath,
         writingWidthPt > 0 ? writingWidthPt : DEFAULT_WRITING_WIDTH_PT,
         fontArgs(),
-        writingWindowBytes(),
+        window,
       );
       if (mySeq === 1) {
         // 首次编译完成 = 应用「可正常编辑/预览」就绪点（与整页预览路径同一打点）
@@ -1622,6 +1683,9 @@
       // 窗口化渲染：窗口外的块这轮没有 SVG，按"块类型 + 源码文本相同"沿用上一轮结果
       const carried = carryOverCrops(writingBlocks, table.blocks, doc);
       writingBlocks = carried.blocks;
+      // 这一批切片与这份文档、这份几何（Rust 侧 HIT_CACHE 也是同一次编译）严格对应
+      writingBlocksDoc = doc;
+      writingBlocksExact = true;
       blocksVersion++;
       if (carried.carried > 0 || carried.missing > 0) {
         dbg.log(
@@ -1648,7 +1712,17 @@
       );
       return;
     }
-    writingBlocks = null;
+    // 失败：**不整篇作废**，只把"被改动到的那一块"退回源码（阶段 2）。
+    // 旧表是上一次成功编译的产物（区间 + 切片成套），而块切片一旦丢掉，写作模式会整篇退回
+    // 源码 —— 敲错一个字符就看到整篇源码闪一下，改好才回来。用前后缀差分把没被碰到的块
+    // 原样留下/整体平移（见 block-plan.remapBlocksThroughEdit，含两条"别盖住正文"的约束）。
+    const remap = writingBlocks
+      ? remapBlocksThroughEdit(writingBlocks, writingBlocksDoc, doc)
+      : { blocks: [] as Block[], kept: 0 };
+    // 区间是**估算**的（平移过的），点击精确定位据此退出（见 writingBlocksExact 的说明）
+    writingBlocks = remap.blocks.length > 0 ? remap.blocks : null;
+    writingBlocksDoc = doc;
+    writingBlocksExact = false;
     blocksVersion++;
     editorDiagnostics = result.errors;
     errorCount = result.errors.length;
@@ -1660,7 +1734,9 @@
         : `编译错误：${result.errors.length} 处`;
     dbg.log(
       "compile",
-      `blocks fail errors:${result.errors.length} t:${(performance.now() - t0).toFixed(1)}ms`,
+      `blocks fail errors:${result.errors.length} 保留切片:${remap.kept}/${remap.blocks.length} t:${(
+        performance.now() - t0
+      ).toFixed(1)}ms`,
     );
   }
 
@@ -2220,6 +2296,7 @@
           blocks={writingBlocks}
           blocksVersion={blocksVersion}
           onBlocksNeeded={handleBlocksNeeded}
+          onCropClick={handleCropClick}
         />
       </div>
     </section>
