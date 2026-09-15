@@ -170,7 +170,7 @@ npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/br
 src/routes/+page.svelte     # 唯一页面：全部状态与调度中枢（菜单/文件/编译/持久化/快捷键）
 src/lib/Editor.svelte       # CodeMirror 6 封装：受控 doc、主题 Compartment、诊断波浪线、所见即所得接线
 src/lib/typst-lex.ts        # 源码区域扫描：markup / code / raw / comment / string（标记识别的前提，纯函数）
-src/lib/math-ranges.ts      # 公式范围扫描（$...$ / $ ... $）+ 缓存键 + 选区相交判定（纯函数）
+src/lib/math-ranges.ts      # 公式范围扫描（$...$ / $ ... $）+ 缓存键 + 选区判定（相交 / 完整盖住 → mathRevealDecision「选中整个公式不展开」，纯函数）
 src/lib/math-context.ts     # 公式编译上下文：前缀 + 文档内单行顶层 #let 定义（纯函数）
 src/lib/markup-ranges.ts    # 常用标记拆解（标题/粗体/斜体/行内代码/围栏代码块/列表符号/链接 → 标记 + 正文/块级范围，纯函数）
 src/lib/live-preview.ts     # 所见即所得 CM6 扩展：公式 replace widget + 标记隐藏 + 选区进出展开 + 渲染请求
@@ -418,6 +418,7 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 - **字号**：`MATH_TEXT_PT = 10.5`（Rust）/ 编辑器正文 14px = 10.5pt，故 SVG 的 pt 与编辑器 CSS 的 pt **1:1**，前端直接写 `width/height: Npt` + `vertical-align: -(height-baseline)pt`。改字号要两侧同步。
 - **暗色主题**：typst 产物是黑字透明底，暗色下看不见 → widget 带 `cm-math-dark` 类整体 `filter: invert(1)`。**不要用 `&dark` 选择器**：`EditorView.theme` 不支持该前缀（实测抛 `RangeError: Unsupported selector: &dark`，SvelteKit 会整页渲染成 500 错误页，表现为"应用没渲染"）。
 - **展开规则**：`selectionTouchesRange`（光标落在区间内含两端即展开，非空选区相交即展开）。标记类构造的展开范围必须是**标记 + 正文的并集**——标题/列表只有前导标记，只取标记范围会导致光标落在正文里时 `= ` 不露出（实测踩过）。
+- **选中整个公式不展开（用户要求「选中整个公式请写不展开」）**：与块级同一套规则（`math-ranges.mathRevealDecision` + `selectionCoversRange`）——选区**完整盖住**公式 → 保持渲染 + 淡色底 `.cm-math-selected`；只盖住一部分、或光标在公式里 → 照旧展开。**别把它套到跨行行间公式上**（`inlinePresentation: false`）：那种公式只能整行 `block: true` 替换，widget 是 `contenteditable=false` 的顶层 `div`，被选区完整盖住后打字**会把字符插到下一行**（实测 `$ x^2 $\n后文` → `$ x^2 $\nz后文`，文档本身没变）。所以**单行**行间公式已改成"装饰只盖公式本身 + widget 落在行内 + 行级居中"（`MathBlockWidget` 的 `inline` 形态 → `span.cm-math-block-inline` + `Decoration.line({class: "cm-math-line"})`），落在 `.cm-line` 里就没有这个问题（实测打字正确替换选区）。**别把单行行间公式改回整行 block 替换**（理由同上，实测数据在调研文档第十三节之 3）。**判据是"装饰实际盖住的区间"**（`decorated = block ?? 公式区间`），不是只看公式本身：单行行间公式连行首行尾空白一起盖（`  $ x $  ` 才居中），若只按公式范围判"完整盖住"，就会出现"选区盖住公式、widget 只被盖住一部分"——DOM 里 widget 是原子节点，浏览器只能在边缘插入，**实测字符被插到行尾**（`  $ x^2 $  ` 选中 `$ x^2 $` 打字 → `  $ x^2 $  z`），所以那种情况照旧展开。`buildMathDecorations` 与 `collectRequestsInner` 两处的判据必须用同一个 `decorated`。
 - **输入 `$` 自动配对**（用户要求「加入功能：自动补全 $$」，2026-09-14）：敲一个 `$` 就把定界符补成一对、光标落在中间，判定全在 `auto-pair.ts`（纯函数可单测），落事务在 `Editor.svelte` 的 `EditorView.inputHandler`（只在"空选区 + 输入内容恰好是 `$`"时介入，不碰粘贴 / IME / 选中替换；任何抛错都 `return false` 退回默认输入，绝不吞按键）。
   - **独占一行 → 补 `$  $`（行间公式脚手架）**：typst 的行间公式是**定界符内侧两侧留白**的 `$ x $`，所以脚手架是"两个空格 + 光标在中间"——敲一个字直接得到 `$ x $`，光标移开后由块级 widget 居中渲染（验收里断言桩收到 `display: true`）。行内（同行还有别的字）→ 补 `$$`，敲字得到 `$x$`。
   - **右侧已有闭合 `$` → 只把光标移过去**（跳过同行空白）：没有这条的话，`$  $` 里再按一次 `$` 会插出 `$ $|$  $` 这种垃圾（实测过），而连按两下 `$` 是很容易发生的手势。

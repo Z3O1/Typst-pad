@@ -11,7 +11,7 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, keymap } from "@codemir
 import type { DecorationSet, ViewUpdate } from "@codemirror/view";
 import { EditorSelection, Prec, StateEffect, StateField } from "@codemirror/state";
 import type { EditorState, Extension, Range, Text } from "@codemirror/state";
-import { mathCacheKey, scanMathRanges, selectionTouchesRange } from "./math-ranges";
+import { mathCacheKey, mathRevealDecision, scanMathRanges, selectionTouchesRange } from "./math-ranges";
 import type { MathRange } from "./math-ranges";
 import { scanMarkupDecorations } from "./markup-ranges";
 import type { MarkupKind } from "./markup-ranges";
@@ -144,6 +144,11 @@ class MathWidget extends WidgetType {
     private readonly render: MathRender,
     private readonly range: MathRange,
     private readonly dark: boolean,
+    /**
+     * 选区**完整盖住**了这个公式（用户要求「选中整个公式请不要展开」）：保持渲染外观，
+     * 用一层淡色底表示"它被选中了"（与块切片的 .cm-block-crop-selected 同一套做法）。
+     */
+    private readonly selected = false,
   ) {
     super();
   }
@@ -154,14 +159,18 @@ class MathWidget extends WidgetType {
       other.range.from === this.range.from &&
       other.range.to === this.range.to &&
       other.render.svg === this.render.svg &&
-      other.dark === this.dark
+      other.dark === this.dark &&
+      other.selected === this.selected
     );
   }
 
   toDOM(view: EditorView): HTMLElement {
     try {
       const wrap = document.createElement("span");
-      wrap.className = this.dark ? "cm-math-widget cm-math-dark" : "cm-math-widget";
+      const classes = ["cm-math-widget"];
+      if (this.dark) classes.push("cm-math-dark");
+      if (this.selected) classes.push("cm-math-selected");
+      wrap.className = classes.join(" ");
       // 尺寸直接用 pt：Rust 侧按编辑器字号（14px = 10.5pt）编译，故 pt 与编辑器 CSS pt 1:1
       wrap.style.width = `${this.render.widthPt}pt`;
       wrap.style.height = `${this.render.heightPt}pt`;
@@ -512,6 +521,14 @@ class MathBlockWidget extends WidgetType {
     private readonly render: MathRender,
     private readonly range: MathRange,
     private readonly dark: boolean,
+    /** 整行公式被选区完整盖住（见 MathWidget 的说明） */
+    private readonly selected = false,
+    /**
+     * **行内呈现**（单行行间公式用）：widget 落在 `.cm-line` 里、由所在行居中，
+     * 而不是做"整行 block 替换"。理由见 buildMathDecorations 里的那段说明
+     * （block widget 是 contenteditable=false 的顶层元素，被选区盖住时打字会插到下一行）。
+     */
+    private readonly inline = false,
   ) {
     super();
   }
@@ -521,14 +538,20 @@ class MathBlockWidget extends WidgetType {
       other.range.from === this.range.from &&
       other.range.to === this.range.to &&
       other.render.svg === this.render.svg &&
-      other.dark === this.dark
+      other.dark === this.dark &&
+      other.selected === this.selected &&
+      other.inline === this.inline
     );
   }
 
   toDOM(view: EditorView): HTMLElement {
     try {
-      const block = document.createElement("div");
-      block.className = this.dark ? "cm-math-block cm-math-dark" : "cm-math-block";
+      const block = document.createElement(this.inline ? "span" : "div");
+      const classes = ["cm-math-block"];
+      if (this.inline) classes.push("cm-math-block-inline");
+      if (this.dark) classes.push("cm-math-dark");
+      if (this.selected) classes.push("cm-math-selected");
+      block.className = classes.join(" ");
       block.title = `$${this.range.body}$（点击编辑源码）`;
       const box = document.createElement("span");
       box.className = "cm-math-block-box";
@@ -648,20 +671,53 @@ function buildMathDecorations(
   const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
   const decorations: Range<Decoration>[] = [];
   for (const range of ranges) {
-    // 光标 / 选区进入 → 展开源码（含块级：光标落在公式内即整行回到源码）
-    if (selectionTouchesRange(range, selections)) continue;
+    const block = blockRangeFor(state.doc, range);
+    // 呈现方式决定"整块被选中时能不能不展开"（见 mathRevealDecision 的说明）：
+    // 跨行的行间公式只能整行 block 替换，那种 widget 里没有可编辑的行容器。
+    const asBlockWidget = block !== null && range.multiline;
+    // 光标 / 部分选区进入 → 展开源码；**选区完整盖住公式**时不展开（保持渲染 + 淡色底，
+    // 用户要求「选中整个公式请不要展开」，判定与理由见 math-ranges.mathRevealDecision）
+    //
+    // 判据用的是**装饰实际盖住的区间**（`decorated`），不是只看公式本身：单行行间公式会把
+    // 行首行尾的空白一起盖掉（`  $ x $  ` 也居中），只按公式范围判"完整盖住"就会出现
+    // "选区盖住公式、但只盖住 widget 的一部分" —— DOM 里 widget 是原子节点，浏览器只能在它
+    // 边缘插入，实测结果是**字符被插到行尾**（`  $ x^2 $  ` 选中 `$ x^2 $` 打字 →
+    // `  $ x^2 $  z`）。这种"部分盖住 widget"必须展开源码。
+    const decorated = block ?? { from: range.from, to: range.to };
+    const decision = mathRevealDecision(decorated, selections, {
+      inlinePresentation: !asBlockWidget,
+    });
+    if (decision.reveal) continue;
     // 落在"已被块切片盖住"的区间里：整块已经由块 widget 呈现，这里不能再叠一层 replace
     if (insideCovered(range.from, range.to, covered)) continue;
     const render = opts.lookup(mathCacheKey(range.body, range.display, context, MATH_SIZE_PT));
     // 未渲染 / 渲染失败 → 保持源码显示
     if (!render?.ok) continue;
-    const block = blockRangeFor(state.doc, range);
-    if (block) {
-      // 独占整行的行间公式（含跨行）：整行 → 居中块级 widget
+    if (block && range.multiline) {
+      // 跨行行间公式：整行（多行）→ 块级 widget（inline 装饰不允许跨行）
       decorations.push(
         Decoration.replace({
-          widget: new MathBlockWidget(render, range, opts.dark()),
+          widget: new MathBlockWidget(render, range, opts.dark(), decision.selected),
           block: true,
+        }).range(block.from, block.to),
+      );
+      continue;
+    }
+    if (block) {
+      // **单行**行间公式（独占整行）：整行居中，但装饰是**行内** replace、widget 落在 `.cm-line` 里。
+      // 别退回"整行 block 替换"（实测踩过）：那样 widget 是 contenteditable=false 的顶层元素，
+      // 被选区完整盖住时打字会把字符插到**下一行**（浏览器找不到可编辑的行容器），
+      // 于是"选中整个公式不展开"就不能成立；落在 .cm-line 里的 inline widget 没有这个问题
+      // （浏览器删掉它、在同一位置插入文本，CodeMirror 能正常读到改动）。
+      // 替换区间用**整行**（block.from..block.to）而不是只盖公式：行内可能有前后空白
+      // （`  $ x $  ` 这种写法），一起盖掉才真的居中——widget 是 inline-box，留着空白会被推到一边。
+      decorations.push(
+        Decoration.line({ class: "cm-math-line" }).range(state.doc.lineAt(block.from).from),
+      );
+      decorations.push(
+        Decoration.replace({
+          widget: new MathBlockWidget(render, range, opts.dark(), decision.selected, true),
+          inclusive: false,
         }).range(block.from, block.to),
       );
       continue;
@@ -670,7 +726,7 @@ function buildMathDecorations(
     if (range.multiline) continue;
     decorations.push(
       Decoration.replace({
-        widget: new MathWidget(render, range, opts.dark()),
+        widget: new MathWidget(render, range, opts.dark(), decision.selected),
         inclusive: false,
       }).range(range.from, range.to),
     );
@@ -1130,7 +1186,13 @@ export function livePreview(opts: LivePreviewOptions): Extension {
     // selectionSet 会再跑一遍收集，那时才真正去渲。
     const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
     for (const range of scanMathRanges(doc)) {
-      if (selectionTouchesRange(range, selections)) continue;
+      // 展开成源码的那些不请求（见上）。**选区完整盖住公式时不展开**，所以那时照样要渲 ——
+      // 否则"选中一个还没渲过的公式"会一直停在源码（与 buildMathDecorations 的判定同源，
+      // 连"装饰实际盖住的区间"这个细节也必须一致，见那边的注释）。
+      const block = blockRangeFor(state.doc, range);
+      const asBlockWidget = block !== null && range.multiline;
+      const decorated = block ?? { from: range.from, to: range.to };
+      if (mathRevealDecision(decorated, selections, { inlinePresentation: !asBlockWidget }).reveal) continue;
       if (insideCovered(range.from, range.to, covered)) continue;
       // 跨行公式：只有行间（display）会整行渲染成块级 widget，行内跨行保持源码不请求
       if (range.multiline && !range.display) continue;
@@ -1239,6 +1301,12 @@ const mathWidgetTheme = EditorView.theme({
   ".cm-math-widget:hover": {
       backgroundColor: "rgba(128, 128, 128, 0.18)",
   },
+  // 选区**完整盖住**这个公式时保持渲染外观（用户要求「选中整个公式请不要展开」）：
+  // 用一层淡色底表示"它在选区里" —— 与块切片的 .cm-block-crop-selected 同一套视觉。
+  // 只给底色、不加 outline：行内公式夹在正文里，描一圈边在整行文字中显得碎。
+  ".cm-math-selected": {
+      backgroundColor: "rgba(64, 120, 255, 0.18)",
+  },
   ".cm-math-widget svg": {
       display: "block",
       width: "100%",
@@ -1256,6 +1324,14 @@ const mathWidgetTheme = EditorView.theme({
       padding: "4px 0",
       cursor: "text",
       lineHeight: "0",
+  },
+  // 单行行间公式：widget 落在行内（不是整行 block 替换），由所在行居中。
+  // 这样它在被选区完整盖住时可以保持渲染而不影响打字（见 buildMathDecorations 的说明）。
+  ".cm-math-block-inline": {
+      display: "inline-block",
+  },
+  ".cm-math-line": {
+      textAlign: "center",
   },
   ".cm-math-block:hover": {
       backgroundColor: "rgba(128, 128, 128, 0.12)",

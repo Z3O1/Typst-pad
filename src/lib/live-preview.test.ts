@@ -138,6 +138,76 @@ describe("livePreview 扩展", () => {
     expect(widgetCount()).toBe(1);
   });
 
+  // 用户要求「选中整个公式请不要展开」：与块级渲染同一套规则 —— 选区**完整盖住**公式时
+  // 保持渲染外观（挂 .cm-math-selected 淡色底），只盖住一部分才展开。
+  it("选区完整盖住公式 → 不展开，挂淡色底（用户要求「选中整个公式请不要展开」）", () => {
+    mount("前面的 $x^2$ 后面", { cache: true });
+    expect(widgetCount()).toBe(1);
+    view.dispatch({ selection: { anchor: 4, head: 9 } }); // 恰好盖住 `$x^2$`（4..9）
+    expect(widgetCount()).toBe(1);
+    expect(text()).not.toContain("$x^2$"); // 定界符仍不出现 = 没有展开成源码
+    expect(host.querySelector(".cm-math-widget")?.className).toContain("cm-math-selected");
+    // 选区移开 → 淡色底撤掉
+    view.dispatch({ selection: { anchor: 12 } });
+    expect(host.querySelector(".cm-math-widget")?.className).not.toContain("cm-math-selected");
+  });
+
+  it("选区只盖住公式一部分 → 照旧展开源码（半个公式要高亮到字符）", () => {
+    mount("前面的 $x^2$ 后面", { cache: true });
+    view.dispatch({ selection: { anchor: 5, head: 9 } }); // 只从 `x` 到公式末尾
+    expect(widgetCount()).toBe(0);
+    expect(text()).toContain("$x^2$");
+  });
+
+  it("整行公式被完整盖住 → 块级 widget 也保持渲染 + 淡色底", () => {
+    cache.set(mathCacheKey("x^2", true, "", MATH_SIZE_PT), render("x^2"));
+    mount("$ x^2 $\n正文");
+    const block = () => host.querySelector(".cm-math-block");
+    expect(block()).not.toBeNull();
+    view.dispatch({ selection: { anchor: 0, head: 7 } }); // 整行公式
+    expect(block()).not.toBeNull();
+    expect(block()?.className).toContain("cm-math-selected");
+    expect(text()).not.toContain("$ x^2 $");
+    // 光标点进公式内部 → 必须展开（不然 DOM 里没有真实文本，打字进不去）
+    view.dispatch({ selection: { anchor: 3 } });
+    expect(block()).toBeNull();
+    expect(text()).toContain("$ x^2 $");
+  });
+
+  it("跨行的行间公式（整行 block widget）被完整盖住时**仍然展开**：那种形态里打字会插到下一行", () => {
+    cache.set(mathCacheKey("a + b", true, "", MATH_SIZE_PT), render("a + b"));
+    mount("$\n  a + b\n$\n后文\n");
+    const block = () => host.querySelector(".cm-math-block");
+    expect(block()).not.toBeNull();
+    view.dispatch({ selection: { anchor: 0, head: 11 } }); // 完整盖住公式（0..11）
+    expect(block()).toBeNull();
+    expect(text()).toContain("$");
+  });
+
+  it("行首行尾带空白的行间公式：只选中公式（没盖住整行）时展开，不做「半盖住 widget」", () => {
+    // 装饰盖的是**整行**（连空白一起，才真的居中），而选区只盖公式本身 → widget 只被盖住一部分。
+    // DOM 里 widget 是原子节点，浏览器只能在它边缘插入 —— 实测那种情况打字会把字符插到行尾
+    //（`  $ x^2 $  ` → `  $ x^2 $  z`），所以必须展开源码。
+    cache.set(mathCacheKey("x^2", true, "", MATH_SIZE_PT), render("x^2"));
+    mount("前文\n\n  $ x^2 $  \n\n后文\n");
+    const block = () => host.querySelector(".cm-math-block");
+    expect(block()).not.toBeNull();
+    view.dispatch({ selection: { anchor: 6, head: 13 } }); // 只盖住 `$ x^2 $`
+    expect(block()).toBeNull();
+    expect(text()).toContain("$ x^2 $");
+    // 整行（含空白，4..15）都盖住 → 保持渲染 + 淡色底
+    view.dispatch({ selection: { anchor: 4, head: 15 } });
+    expect(block()).not.toBeNull();
+    expect(block()?.className).toContain("cm-math-selected");
+  });
+
+  it("选区完整盖住还没渲过的公式 → 仍然请求渲染（否则会一直停在源码）", () => {
+    mount("$y^2$\n", { cursor: 5 });
+    expect(requests.map((r) => r.body)).not.toContain("y^2");
+    view.dispatch({ selection: { anchor: 0, head: 5 } });
+    expect(requests.map((r) => r.body)).toContain("y^2");
+  });
+
   it("独占整行的行间公式 → 块级 widget（居中显示）", () => {
     cache.set(mathCacheKey("x^2", true, "", MATH_SIZE_PT), render("x^2"));
     mount("$ x^2 $\n正文");

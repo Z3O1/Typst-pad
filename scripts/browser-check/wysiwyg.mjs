@@ -2507,6 +2507,140 @@ await new Promise((r) => setTimeout(r, 400));
 const afterEscAbout = await c.evaluate(aboutProbe);
 check("Esc 关掉关于弹窗", !afterEscAbout.open, JSON.stringify(afterEscAbout));
 
+console.log("38) 选中整个公式不展开（用户要求「选中整个公式请写不展开」）：完整盖住 → 保持渲染 + 淡色底");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+await c.click(400, 300);
+
+/** 文档 + 选区 + 公式 widget 现状（一次取齐） */
+const MATH_SELECT_PROBE = `(() => {
+  const v = document.querySelector(".cm-content").cmTile.root.view;
+  const s = v.state.selection.main;
+  const w = document.querySelector(".cm-math-widget, .cm-math-block");
+  return {
+    doc: v.state.doc.toString(),
+    sel: [s.from, s.to],
+    selText: v.state.sliceDoc(s.from, s.to),
+    widgets: document.querySelectorAll(".cm-math-widget").length,
+    blocks: document.querySelectorAll(".cm-math-block").length,
+    tinted: document.querySelectorAll(".cm-math-selected").length,
+    inner: document.querySelector(".cm-content").innerText,
+  };
+})()`;
+
+/** 清空重来（全选 + 退格），再输入新文档 */
+async function retypeDoc(text, after = 900) {
+  await c.click(400, 300);
+  await c.selectAll();
+  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+  await new Promise((r) => setTimeout(r, 200));
+  await c.type(text);
+  await new Promise((r) => setTimeout(r, after));
+}
+
+// ① 行内公式：选区**完整盖住** → 保持渲染 + 淡色底（不再露出 `$x^2$` 源码）
+await retypeDoc("前文 $x^2$ 后文\n");
+await c.waitFor(`document.querySelectorAll(".cm-math-widget").length === 1`, { timeout: 8000 });
+const selInlineBefore = await c.evaluate(MATH_SELECT_PROBE);
+check("行内公式已渲染（初始）", selInlineBefore.widgets === 1 && !selInlineBefore.inner.includes("$x^2$"), JSON.stringify(selInlineBefore));
+await c.evaluate(`(() => {
+  const v = document.querySelector(".cm-content").cmTile.root.view;
+  const d = v.state.doc.toString();
+  const from = d.indexOf("$");
+  const to = d.indexOf("$", from + 1) + 1;
+  v.dispatch({ selection: { anchor: from, head: to } });
+  return [from, to];
+})()`);
+await new Promise((r) => setTimeout(r, 400));
+const selInlineCovered = await c.evaluate(MATH_SELECT_PROBE);
+check(
+  "选区完整盖住行内公式 → 仍是渲染形态（源码 `$x^2$` 不出现）",
+  selInlineCovered.widgets === 1 && !selInlineCovered.inner.includes("$x^2$"),
+  JSON.stringify(selInlineCovered),
+);
+check("整段盖住时挂了淡色底（.cm-math-selected）", selInlineCovered.tinted === 1, JSON.stringify(selInlineCovered));
+check("选中的内容仍然是源码（Ctrl+C 会复制到 `$x^2$`）", selInlineCovered.selText === "$x^2$", JSON.stringify(selInlineCovered.selText));
+
+// ② 只盖住一部分 → 照旧展开源码（半个公式要能精确高亮）
+await c.evaluate(`(() => {
+  const v = document.querySelector(".cm-content").cmTile.root.view;
+  const d = v.state.doc.toString();
+  const from = d.indexOf("$");
+  v.dispatch({ selection: { anchor: from + 2, head: from + 5 } });
+  return true;
+})()`);
+await new Promise((r) => setTimeout(r, 400));
+const selInlinePartial = await c.evaluate(MATH_SELECT_PROBE);
+check(
+  "只盖住一部分 → 展开成源码（看得见 `$`）",
+  selInlinePartial.widgets === 0 && selInlinePartial.inner.includes("$x^2$"),
+  JSON.stringify(selInlinePartial),
+);
+
+// ③ 整段盖住之后**打字**：必须替换掉选区（输入不能丢、更不能落到别处）
+await retypeDoc("前文 $x^2$ 后文\n");
+await c.waitFor(`document.querySelectorAll(".cm-math-widget").length === 1`, { timeout: 8000 });
+await c.evaluate(`(() => {
+  const v = document.querySelector(".cm-content").cmTile.root.view;
+  const d = v.state.doc.toString();
+  const from = d.indexOf("$");
+  v.dispatch({ selection: { anchor: from, head: d.indexOf("$", from + 1) + 1 } });
+  return true;
+})()`);
+await new Promise((r) => setTimeout(r, 400));
+await c.type("z");
+await new Promise((r) => setTimeout(r, 700));
+const selInlineTyped = await c.evaluate(MATH_SELECT_PROBE);
+check(
+  // 选区正好是 `$x^2$`（3..8），两侧的空格不在选区里 —— 所以结果是 `前文 z 后文`
+  "盖住整段行内公式后打字 → 选区被替换（`前文 z 后文`，输入真的落进文档）",
+  selInlineTyped.doc === "前文 z 后文\n",
+  JSON.stringify(selInlineTyped.doc),
+);
+
+// ④ 行间公式（独占整行）：整段盖住同样保持渲染；**打字必须替换到正确位置**
+//（改前这里是整行 block replace，widget 是 contenteditable=false 的顶层 div —— 实测打字会把
+// 字符插到**下一行**：`$ x^2 $\n后文` → `$ x^2 $\nz后文`）
+await retypeDoc("$ x^2 $\n后文\n");
+await c.waitFor(`document.querySelectorAll(".cm-math-block").length === 1`, { timeout: 8000 });
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+await c.key("End", { code: "End", keyCode: 35, modifiers: 8 }); // Shift+End：选中整行公式
+await new Promise((r) => setTimeout(r, 400));
+const selBlockCovered = await c.evaluate(MATH_SELECT_PROBE);
+check(
+  "整行公式被完整盖住 → 仍是渲染形态 + 淡色底",
+  selBlockCovered.blocks === 1 && selBlockCovered.tinted === 1 && !selBlockCovered.inner.includes("$ x^2 $"),
+  JSON.stringify(selBlockCovered),
+);
+await c.type("z");
+await new Promise((r) => setTimeout(r, 700));
+const selBlockTyped = await c.evaluate(MATH_SELECT_PROBE);
+check(
+  "盖住整段行间公式后打字 → 文档变成 `z\\n后文\\n`（不是插进下一行）",
+  selBlockTyped.doc === "z\n后文\n",
+  JSON.stringify(selBlockTyped.doc),
+);
+await c.screenshot(SHOT("wysiwyg-37-math-selected"));
+
+// ⑤ 跨行的行间公式仍然整行替换（inline 装饰不允许跨行），因此**照旧展开** —— 宁可展开，
+//    也不能让输入落到别处
+await retypeDoc("$\n  a+b\n$\n后文\n", 1200);
+await c.waitFor(`document.querySelectorAll(".cm-math-block").length === 1`, { timeout: 8000 });
+await c.evaluate(`(() => {
+  const v = document.querySelector(".cm-content").cmTile.root.view;
+  v.dispatch({ selection: { anchor: 0, head: v.state.doc.toString().indexOf("$", 1) + 1 } });
+  return true;
+})()`);
+await new Promise((r) => setTimeout(r, 400));
+const selMultiLine = await c.evaluate(MATH_SELECT_PROBE);
+check(
+  "跨行公式被完整盖住时**仍然展开**（那种 widget 里打字会插到别处）",
+  selMultiLine.blocks === 0 && selMultiLine.inner.includes("$"),
+  JSON.stringify(selMultiLine),
+);
+
 // 收尾：清回空文档并回写作模式
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
