@@ -151,10 +151,39 @@ describe("applyBlockSelection", () => {
     expect(covers.map((c) => c.revealed)).toEqual([true, true, false]);
   });
 
-  it("跨块选区 → 涉及的格子全部展开（多展开永远是安全方向）", () => {
+  it("跨块选区：**只盖住一部分**的格子展开源码（高亮才精确）", () => {
     const { covers, doc } = three();
+    // 2..11：第一块被切掉尾巴、第三块被切掉头 → 那两块展开，中间那块整块被盖住 → 保持切片
     applyBlockSelection(covers, [{ from: 2, to: 11 }], doc.length);
-    expect(covers.map((c) => c.revealed)).toEqual([true, true, true]);
+    expect(covers.map((c) => c.selected)).toEqual([false, true, false]);
+    expect(covers.map((c) => c.revealed)).toEqual([true, false, true]);
+  });
+
+  it("**整块被选中** → 不展开（保持切片外观），用 selected 标出来（用户要求：选中整个代码块不要展开）", () => {
+    const { covers, doc } = three();
+    // head=0：光标在第一块里（不是末尾那块）→ 除"光标那块"外都不展开
+    applyBlockSelection(covers, [{ from: 0, to: doc.length, head: 0 }], doc.length);
+    expect(covers.map((c) => c.selected)).toEqual([true, true, true]);
+    expect(covers.map((c) => c.revealed)).toEqual([true, false, false]);
+  });
+
+  it("**光标所在的那一块必须展开**（哪怕被整块选中）—— 否则打字会失灵", () => {
+    const { covers, doc } = three();
+    applyBlockSelection(covers, [{ from: 0, to: doc.length, head: 12 }], doc.length);
+    // 光标在第三块里 → 它展开（DOM 里得有真实文本，浏览器的输入事件才落得下去）
+    expect(covers.map((c) => c.revealed)).toEqual([false, false, true]);
+    expect(covers.map((c) => c.selected)).toEqual([true, true, true]);
+  });
+
+  it("只整块选中中间那一格：光标在里面 → 它展开；光标不在里面 → 它保持切片", () => {
+    const { covers, doc } = three();
+    applyBlockSelection(covers, [{ from: 5, to: 8, head: 8 }], doc.length);
+    expect(covers.map((c) => c.selected)).toEqual([false, true, false]);
+    expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
+    const again = planBlockCovers(three().covers[0].block ? toBlockTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]).blocks : [], Text.of(doc.split("\n")));
+    applyBlockSelection(again, [{ from: 5, to: 8, head: 12 }], doc.length);
+    expect(again.map((c) => c.selected)).toEqual([false, true, false]);
+    expect(again.map((c) => c.revealed)).toEqual([false, false, true]);
   });
 
   it("永远至少有一格展开源码（不然整篇被切片盖住，光标无处可去）", () => {

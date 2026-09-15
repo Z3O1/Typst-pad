@@ -34,7 +34,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（35 个文件 / 625 项）
+npm test                 # 前端 + 脚本单测（35 个文件 / 630 项）
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（45 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
@@ -49,7 +49,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 15 项�
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
 
 # 写作模式「块级渲染」三套（需要 headless Chromium，见「环境备忘」；CDP_PORT 默认 9333）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，85 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，95 项）
 npm run fixtures:blocks                                                                   # 导出真实切片 + 点击探针
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs # 几何等价 + 链接热区（75 项）
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击→精确字符（24 项 / 125 次点击）
@@ -158,7 +158,7 @@ node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成�
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
 npm run fixtures:blocks         # 导出真实块切片 + 几何 + 点击探针到 .browser-check/（块级渲染验收用）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，85 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/块内 Enter/各种输入/拖选复制）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，95 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/块内 Enter/各种输入/拖选复制/整块选中）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价 + 链接热区（真实产物，75 项）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击 → 精确字符（真实探针，24 项 / 125 次点击全中）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，50 项 / 9 篇）
@@ -239,7 +239,8 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 即 Typora 形态，但排版来自真引擎（断词/字距/`#set`/宏/包全都在切片里）。调研与实测见
 `docs/文档模式渲染保真-调研.md`（含生态、许可证、API 逐条出处、阶段 0/1/2 的实测数据）。
 阶段 1 = 能看（切片 + 源码透镜），阶段 2 = 能用（点击精确字符、滚动锚定、翻页、出错不整篇退回），
-阶段 3 = 好选好用（切片上拖选跨块 + Ctrl+C 复制、`#link` 可点）。**没有铺"每字形 span 的文字层"**——
+阶段 3 = 好选好用（切片上拖选跨块 + Ctrl+C 复制、`#link` 可点、整块选中保持切片外观）。
+另外：**打字期间不去抖编译**（见下方红线，用户报「输入手感很差」）。**没有铺"每字形 span 的文字层"**——
 浏览器查找 / 拼写检查 / 无障碍仍拿不到，取舍见调研文档第十二节。
 
 - **链路**：`+page.svelte` 的 `runCompile` 在写作模式走 `compile_blocks`（Rust 侧
@@ -327,6 +328,18 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   CM 默认翻页 = `moveVertically(视口高)`，同样会跳过所有 widget → 直接跳文档首/尾。做法：把光标
   当前的屏幕高度平移一屏作为查询点取位置，再**用滚动目标把光标钉回原来的屏幕高度**（内容走一屏、
   光标不动）。没有块级渲染（源码模式）时交回默认。
+- **打字期间不编译（红线，用户报「输入手感很差」）**：写作模式下**每一次按键**都会走一遍
+  `scheduleCompile` → 整篇编译 + 窗口内每块渲一张切片（debug 构建几十~几百毫秒），而三个编译命令
+  （`compile_doc` / `compile_blocks` / `compile_math`）**共用一把互斥锁** —— 实测在公式里打 12 个字符
+  会发出 **12 次 `compile_blocks` + 12 次 `compile_math`**，队列一直满着，"公式半天不显示"就是这么来的。
+  现在：写作模式的编译**去抖 150ms**（`WRITE_COMPILE_DEBOUNCE_MS`；源代码模式仍立即编译），
+  并且**有公式要渲时把挂着的块编译再往后推**（`MATH_COMPILE_HEADSTART_MS = 240`，让几毫秒的公式
+  先拿到锁）。改完实测同一场景：**12 个字符 → 1 次 `compile_blocks` + 1 次 `compile_math`**，
+  打字期间帧间隔最大 26ms（无 50ms 以上的掉帧）。**别把去抖去掉**：打字时正在编辑的那一块本来就是
+  源码形态，其它块的切片内容也没变，编译纯属浪费。
+- **光标所在的公式不请求渲染（同上）**：`collectRequests` 里先 `selectionTouchesRange` 跳过光标/选区
+  里的公式 —— 那一刻它是源码形态，请求渲染等于"每敲一个字编译一次公式"（实测 12 次）。
+  光标离开后 selectionSet 会再跑一遍收集，那时才渲。
 - **点击定位（阶段 2）**：点切片 → 光标落到**点到的那个字符**。链路 =
   切片内相对位置 → 页面坐标（pt，`block-hit.ts`，只依赖 DOM 实测矩形）→ Rust 侧
   `block_hit_test` 在排版帧里找最近的字形（`block_geometry::pick_hit`，几何来自上一次编译的
@@ -366,6 +379,18 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
     而 `EditorSelection.range()` / `.cursor()` 返回的是 **SelectionRange** —— 交了后者，
     CM 内部读 `undefined.length` 直接抛（"Cannot read properties of undefined"），
     拖选无声失效。`dispatch({selection})` 两种都能收，所以只有这里会踩。
+- **整块被选中时"不展开"（用户要求「选中整个代码块不要展开」）**：`applyBlockSelection` 里，
+  选区**完整盖住**某一块（`sel.from ≤ block.from && sel.to ≥ block.to`）时它**不展开**，
+  改用 `cover.selected` 让切片挂一层淡色底（`.cm-block-crop-selected`）；只盖住一部分才展开源码
+  （那样选中高亮才精确）。**两条硬约束**（都实测踩过）：
+  - **光标（选区 head）所在的那一块必须展开**，哪怕它被整块选中：整块不展开时那一格是一张图片，
+    图片里没有真实文本，浏览器把输入事件发给 DOM、CodeMirror 收不到 → **Ctrl+A 全选之后打字
+    一个字都进不去**（文档纹丝不动）。所以"整块选中不展开"只对**光标不在里面**的块成立。
+  - 因此"在代码块里拖选整块"（光标必然在里面）还是得展开 —— 那就**把两行围栏藏起来**
+    （`buildFenceHidingDecorations`：整行替换掉，含行尾换行），代码正文仍是真实文本，
+    看起来就像代码块而不像 markdown 源码。
+  - 非空选区时**不做**"兜底展开第一格"（那会把不相干的一块变成源码，凭空多一次版式变化）；
+    兜底只在"都是空选区（光标）"时生效。
 - **链接可点（阶段 3）**：typst 的 `#link("https://…")[文字]` 会画成 `FrameItem::Link(目标, 方框)` ——
   它**不带源位置**但带目标与方框，Rust 侧（`collect_geometry_with_links` → `BlockCrop.links`）
   把它收成"带内相对 pt"的热区（**夹到带内**：链接方框有时比墨迹包围盒略高，不夹会溢出切片一两像素），

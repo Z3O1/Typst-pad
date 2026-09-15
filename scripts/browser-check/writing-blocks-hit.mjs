@@ -133,6 +133,9 @@ for (const fx of withProbes) {
   await new Promise((r) => setTimeout(r, 700));
   // 光标挪到文档开头：第一块成为"活动块"（源码形态），其余块都是切片
   await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+  // 等切片真的出来：既有编译**去抖 150ms**，而首篇还会赶上"启动时恢复的长文档"那一轮编译，
+  // 不显式等就会偶发"所有探针都找不到切片"（实测踩过三次，都发生在首篇）
+  await c.waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 }).catch(() => {});
   await new Promise((r) => setTimeout(r, 350));
 
   // 按块分组（每块若干探针），轮转下单：点完一块它就变源码，所以下一次点**另一块**

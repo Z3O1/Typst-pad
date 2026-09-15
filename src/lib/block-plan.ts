@@ -148,6 +148,13 @@ export interface BlockCover {
   renderable: boolean;
   /** 是否展开源码（光标/选区落在它这一格，或它根本没法渲染） */
   revealed: boolean;
+  /**
+   * 选区是否**完整盖住**了这一块（`sel.from ≤ block.from && sel.to ≥ block.to`）。
+   * 此时这一块**不展开**（保持切片外观），改用一层淡色表示"被选中"——
+   * 用户要求：「选中整个代码块不要展开」（选中整块 = 通常是"整块复制"，展开成源码会露出 ``` 围栏、
+   * 高度也变，很跳）。只盖住一部分时照旧展开，那样选中高亮才精确。
+   */
+  selected: boolean;
 }
 
 /**
@@ -197,6 +204,7 @@ export function planBlockCovers(blocks: readonly Block[] | null, doc: Text): Blo
       coverTo,
       renderable: block.found && block.svg !== "" && block.heightPt > 0.5,
       revealed: false, // 由 applyBlockSelection 填入
+      selected: false, // 同上
     });
   }
   return covers;
@@ -213,7 +221,7 @@ export function planBlockCovers(blocks: readonly Block[] | null, doc: Text): Blo
  */
 export function applyBlockSelection(
   covers: BlockCover[],
-  selections: readonly { from: number; to: number }[],
+  selections: readonly { from: number; to: number; head?: number }[],
   docLength = Number.POSITIVE_INFINITY,
 ): boolean {
   let changed = false;
@@ -231,15 +239,45 @@ export function applyBlockSelection(
     }
     return sel.from < cover.coverTo && sel.to > cover.coverFrom;
   };
+  /** 选区是否**整块**盖住了它（见 BlockCover.selected 的说明） */
+  const coversWhole = (cover: BlockCover, sel: { from: number; to: number }): boolean =>
+    sel.from !== sel.to && sel.from <= cover.block.from && sel.to >= cover.block.to;
   for (const cover of covers) {
-    const hit = !cover.renderable || selections.some((sel) => touches(cover, sel));
-    if (hit !== cover.revealed) {
-      cover.revealed = hit;
-      changed = true;
-    }
+    const selected = selections.some((sel) => coversWhole(cover, sel));
+    /**
+     * **光标（选区 head）所在的那一格必须展开源码**，哪怕它被整块选中。
+     *
+     * 这条是硬约束，实测踩过：整块被选中且不展开时那一格是一张图片，**光标落在图片里根本没有
+     * 真实文本** —— 浏览器把输入事件发给 DOM，而 DOM 里那个位置没有字符，CodeMirror 收不到插入
+     * （实测：Ctrl+A 全选之后打字**一个字都进不去**，文档纹丝不动）。
+     * 所以"整块选中不展开"只对**光标不在里面**的块成立；光标那一块照旧展开（配上把围栏藏起来的
+     * 处理，见 live-preview 的 buildFenceHidingDecorations）。
+     */
+    const holdsHead = selections.some((sel) => {
+      const head = sel.head ?? sel.to;
+      return head >= cover.coverFrom && (head < cover.coverTo || cover.coverTo === docLength);
+    });
+    // 整块被选中 → 不展开（保持切片 + 淡色底）；只盖住一部分、或光标在里面 → 展开源码
+    const hit =
+      !cover.renderable ||
+      holdsHead ||
+      (selections.some((sel) => touches(cover, sel)) && !selected);
+    if (selected !== cover.selected || hit !== cover.revealed) changed = true;
+    cover.selected = selected;
+    cover.revealed = hit;
   }
-  // 一格都没命中（选区越界 / 文档为空）时兜底展开第一格：永远留一个可编辑的位置
-  if (covers.length > 0 && !covers.some((c) => c.revealed)) {
+  /**
+   * 一格都没命中（选区越界 / 文档为空）时兜底展开第一格：永远留一个可编辑的位置。
+   *
+   * **只在"都是空选区（光标）"时兜底**：非空选区时格子全不展开是**故意**的（整块被选中时保持
+   * 切片外观）—— 那时兜底会把**不相干的第一格**展开（选了中间那块代码块，结果第一段变成源码），
+   * 凭空多一次版式变化。而且非空选区时编辑也没问题：输入会替换整个选区。
+   */
+  if (
+    covers.length > 0 &&
+    !covers.some((c) => c.revealed) &&
+    selections.every((sel) => sel.from === sel.to)
+  ) {
     covers[0].revealed = true;
     changed = true;
   }

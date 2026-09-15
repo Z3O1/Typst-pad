@@ -102,13 +102,23 @@ describe("livePreview 扩展", () => {
   });
 
   it("未缓存的公式保持源码，并发出渲染请求", () => {
-    mount("$y^2$");
+    // 光标放在公式**之外**（第二行）：光标在公式里时按新规则不请求渲染（见下一条用例）
+    mount("$y^2$\n", { cursor: 6 });
     expect(widgetCount()).toBe(0);
     expect(text()).toContain("$y^2$");
     expect(requests.map((r) => r.body)).toContain("y^2");
     // 请求必须自带上下文（渲染是异步批处理，父组件不能到那时再取当前值）
     const req = requests.find((r) => r.body === "y^2");
     expect(req?.context).toBe("");
+  });
+
+  it("光标在公式里时不请求渲染（它此刻就是源码，编译纯属浪费 —— 用户反馈「输入手感很差（公式）」）", () => {
+    // 光标停在 `$y^2|$` 里：每敲一个字都会生成新的公式文本，旧行为会**每个按键编译一次公式**，
+    // 而它和整篇编译共用一把锁 → 打字时公式渲染排在后面，半天不显示。
+    mount("$y^2$", { cursor: 3 });
+    expect(requests.map((r) => r.body)).not.toContain("y^2");
+    expect(widgetCount()).toBe(0);
+    expect(text()).toContain("$y^2$");
   });
 
   it("渲染失败（ok:false）不显示 widget，保持源码", () => {
@@ -525,10 +535,13 @@ describe("livePreview 块级切片", () => {
     expect({ from: sel.from, to: sel.to }).toEqual({ from: 0, to: 13 });
     // 选出来的是**源码**（与 Typora 一致：复制出去也是源码）
     expect(view.state.sliceDoc(sel.from, sel.to)).toBe("aaa\n\nbbb\n\nccc");
-    // 被选区碰到的三块都展开成源码（切片让位，选区高亮才画得出来）
-    expect(host.querySelectorAll(".cm-block-crop").length).toBe(0);
-    expect(content()).toContain("aaa");
-    expect(content()).toContain("ccc");
+    // 三块都被**完整**盖住 → 除"光标（head=13，落在第三块里）那一块"外都保持切片外观
+    // （用户要求：选中整块不要展开），那些切片挂 selected 类表示"被选中"；
+    // 光标那一块必须展开成源码 —— 否则 DOM 里没有真实文本，打字会失灵（实测踩过）
+    expect(host.querySelectorAll(".cm-block-crop").length).toBe(2);
+    expect(host.querySelectorAll(".cm-block-crop-selected").length).toBe(2);
+    expect(content()).toContain("ccc"); // 第三块展开成了源码
+    expect(content()).not.toContain("aaa");
     expect(asked[0]).toBe(0); // 第一次命中问的是"按下去的那一块"
     expect(asked[asked.length - 1]).toBe(10); // 最后问的是"拖到的那一块"（第三块那张切片）
   });
@@ -577,6 +590,40 @@ describe("livePreview 块级切片", () => {
     overlays[0].dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     expect(opened).toEqual(["https://example.com/x"]); // 打开的是链接，不是"把光标挪过来"
     expect(view.state.selection.main.head).toBe(before);
+  });
+
+  it("整块选中的围栏代码块：展开时把两行 ``` 围栏藏起来（用户要求「选中整个代码块请不要展开」）", () => {
+    const doc = "开头。\n\n```rust\nfn main() {}\n```\n\n结尾。\n";
+    // 代码块 = 位置 4..24；光标（head）落在代码块里 → 它必须展开（否则打不了字），
+    // 但围栏不该露出来
+    const fenceFrom = doc.indexOf("```rust");
+    const fenceEnd = doc.indexOf("```", fenceFrom + 3);
+    const block = crop(fenceFrom, fenceEnd + 3, { kind: "Raw", xPt: 58, yPt: 40, heightPt: 40 });
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        // 整块选中（选区正好覆盖 block.from..block.to）→ selected=true；
+        // head 在块内 → 必须展开（DOM 里要有真实文本），此时围栏应当被藏起来
+        selection: { anchor: block.from, head: block.to },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3), block, crop(26, 29)],
+          }),
+        ],
+      }),
+    });
+    const shown = content();
+    expect(shown).toContain("fn main() {}"); // 代码正文在（可选中、可编辑）
+    expect(shown).not.toContain("```rust"); // 围栏被藏掉
+    expect(shown).not.toContain("```");
   });
 
   it("编译错误所在的块不被切片盖住（波浪线才看得见）", () => {

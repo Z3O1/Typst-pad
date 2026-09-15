@@ -1361,8 +1361,18 @@
     }
     if (!added) return;
     clearTimeout(mathTimer);
+    // 公式是小活（几毫秒），而写作模式的整篇编译是几十~几百毫秒，两者共用一把编译锁
+    // （见 Rust 侧命令层互斥锁）。所以**有公式要渲时，把挂着的块编译往后推**：
+    // 让公式先拿到锁 —— 否则"打完公式半天不显示"（实测慢编译桩下，版面对齐要等 338ms）。
+    if (viewMode === "write" && writeCompileTimer !== undefined) {
+      clearTimeout(writeCompileTimer);
+      writeCompileTimer = setTimeout(() => void runCompile(), MATH_COMPILE_HEADSTART_MS);
+    }
     mathTimer = setTimeout(drainMathQueue, 120);
   }
+
+  /** 公式渲染先跑：把挂着的块编译推到这个时刻（比公式自身的 120ms 去抖稍晚一点） */
+  const MATH_COMPILE_HEADSTART_MS = 240;
 
   /** 逐个渲染队列中的公式（Rust 侧编译本身串行），每完成一个就刷新装饰 */
   async function drainMathQueue() {
@@ -1492,8 +1502,27 @@
     );
   }
 
+  /** 写作模式"打字期间不编译"的去抖时长（见 scheduleCompile） */
+  const WRITE_COMPILE_DEBOUNCE_MS = 150;
+  let writeCompileTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * 内容变化后的编译调度。**两种模式走两条路**（用户反馈「输入手感很差（公式）」后改的）：
+   *
+   * - **源代码模式**：立即编译（原有行为）。右侧预览是另一块区域，晚一点没关系但要跟手。
+   * - **写作模式**：**去抖 150ms**。写作模式下的编译是"整篇编译一次 + 窗口内每个块渲一张切片"，
+   *   实测一次几十到几百毫秒（debug 构建更久），而且**每敲一个字都触发一次**：实测打 12 个字符
+   *   → 12 次 `compile_blocks`（外加公式那边 12 次 `compile_math`），三个编译命令共用一把互斥锁
+   *   → 打字时队列一直是满的，最直接的后果是"公式半天不出来"（公式渲染排在整篇编译后面）。
+   *   打字期间**不需要**编译：正在编辑的那一块本来就是源码形态，其它块的切片内容也没变。
+   */
   function scheduleCompile() {
-    runCompile(); // 立即编译：内容变化后直接编译，编译完即显示（无防抖延迟）
+    if (viewMode === "write") {
+      clearTimeout(writeCompileTimer);
+      writeCompileTimer = setTimeout(() => void runCompile(), WRITE_COMPILE_DEBOUNCE_MS);
+      return;
+    }
+    runCompile();
   }
 
   /** 打开设置弹窗：载入当前前缀配置副本，点“保存”才生效 */

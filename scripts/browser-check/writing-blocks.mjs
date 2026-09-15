@@ -596,7 +596,16 @@ const SCENARIOS = [
   { name: "粘贴多段文本（一次插入一大段）", act: async () => { await home(); await c.type("新段一。\n\n新段二。\n\n"); } },
   { name: "Tab 缩进行首", act: async () => { await home(); await c.key("Tab", { code: "Tab", keyCode: 9 }); } },
   { name: "输入 `$` 起一个行间公式", act: async () => { await home(); await c.key("Enter", { code: "Enter", keyCode: 13 }); await c.type("$"); await new Promise((r) => setTimeout(r, 200)); } },
-  { name: "全选重打（换一份短文档）", act: async () => { await c.selectAll(); await c.type("短。\n\n又一段。\n"); } },
+  {
+    name: "全选重打（换一份短文档）",
+    act: async () => {
+      await c.selectAll();
+      await c.type("短。\n\n又一段。\n");
+      // CDP 的整段 insertText 替换选区之后，浏览器会把插入的文本重新选中（真实打字是一键一字，
+      // 不会遇到）—— 这里显式把光标收到文末，免得后面的标记把它整段替换掉
+      await c.key("End", { code: "End", keyCode: 35, modifiers: 2 });
+    },
+  },
 ];
 
 let inputChecks = 0;
@@ -619,7 +628,15 @@ for (const [i, sc] of SCENARIOS.entries()) {
   if (mismatch.missing.length) bad.push(`丢行:${JSON.stringify(mismatch.missing.slice(0, 2))}`);
   if (mismatch.dup.length) bad.push(`重复:${JSON.stringify(mismatch.dup.slice(0, 2))}`);
   // 切片数量在**编译回来之后**看：改动期间"相关块全退回源码"是设计如此
-  if (cropsAfter < 1) bad.push("编译回来后切片全没了");
+  if (cropsAfter < 1) {
+    bad.push(
+      `编译回来后切片全没了（${JSON.stringify(await c.evaluate(`(() => {
+        const v = document.querySelector(".cm-content").cmTile.root.view;
+        const s = v.state.selection.main;
+        return { doc: v.state.doc.toString(), sel: [s.from, s.to, s.head], lines: Array.from(document.querySelectorAll(".cm-line")).map((e) => e.textContent) };
+      })()`))}）`,
+    );
+  }
   inputChecks++;
   if (bad.length) {
     inputBad++;
@@ -725,6 +742,105 @@ if (dragCrops.length >= 2) {
     afterType.text === "",
     JSON.stringify(afterType),
   );
+}
+
+
+console.log("15) 选中整块的规则（用户要求「选中整个代码块不要展开」）：整块被盖住时保持切片外观 + 一层淡色底");
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.click(400, 300);
+await c.selectAll();
+await c.type("#set text(size: 11pt)\n\n开头一段。\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n结尾一段。\n");
+await new Promise((r) => setTimeout(r, 900));
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // 光标回文首 → 代码块是切片
+await new Promise((r) => setTimeout(r, 400));
+
+/** 取某类切片 / 某段源码的现状 */
+const SNAPSHOT = `(() => {
+  const v = document.querySelector(".cm-content").cmTile.root.view;
+  const sel = v.state.selection.main;
+  const lines = Array.from(document.querySelectorAll(".cm-line")).map((el) => el.textContent);
+  return {
+    sel: [sel.from, sel.to, sel.head],
+    selText: v.state.sliceDoc(sel.from, sel.to),
+    crops: document.querySelectorAll(".cm-block-crop").length,
+    selected: document.querySelectorAll(".cm-block-crop-selected").length,
+    rawCrops: document.querySelectorAll('.cm-block-crop[data-block-kind="Raw"]').length,
+    fenceInSource: lines.some((t) => t.includes("\`\`\`rust")),
+    codeInSource: lines.some((t) => t.includes("fn main()")),
+  };
+})()`;
+
+const rectOf = async (kind) =>
+  c.evaluate(`(() => {
+    const el = Array.from(document.querySelectorAll(".cm-block-crop")).find((e) => e.dataset.blockKind === ${JSON.stringify(kind)});
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { left: Math.round(r.left), top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
+  })()`);
+
+// 场景 A：**整块被盖住、且光标不在里面** → 保持切片外观（不展开、不露围栏）
+//（拖选从"上一段"里起手、越过代码块、落进"下一段" —— 这是"把代码块整块圈进去"的手势）
+const paras = await c.evaluate(`(() => {
+  const list = Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => {
+    const r = el.getBoundingClientRect();
+    return { kind: el.dataset.blockKind, left: r.left, top: r.top, w: r.width, h: r.height };
+  });
+  const first = list.find((e) => e.kind === "Paragraph");
+  const last = [...list].reverse().find((e) => e.kind === "Paragraph" && e.top > (first ? first.top : 0));
+  return { first, last };
+})()`);
+check("场景 A 前：段落与代码块都在版面上", !!paras.first && !!paras.last, JSON.stringify(paras));
+if (paras.first && paras.last) {
+  await c.drag(
+    Math.round(paras.first.left + paras.first.w * 0.3),
+    Math.round(paras.first.top + paras.first.h * 0.5),
+    Math.round(paras.last.left + paras.last.w * 0.5),
+    Math.round(paras.last.top + paras.last.h * 0.5),
+  );
+  await new Promise((r) => setTimeout(r, 500));
+  const a = await c.evaluate(SNAPSHOT);
+  check(
+    `整块被圈住的代码块**保持切片外观**（raw 切片 ${a.rawCrops} 张）`,
+    a.rawCrops >= 1,
+    JSON.stringify(a),
+  );
+  check("它挂上了「整块被选中」的淡色底", a.selected >= 1, JSON.stringify(a));
+  check("围栏没有露出来", a.fenceInSource === false, JSON.stringify(a));
+  check(
+    `选区内容照旧是源码（可复制）：${JSON.stringify(a.selText.slice(0, 18))}…`,
+    a.selText.includes("fn main()"),
+    JSON.stringify(a.selText),
+  );
+  await c.evaluate(`(() => { window.__copied = null; document.addEventListener("copy", (e) => { try { window.__copied = e.clipboardData.getData("text/plain"); } catch {} }); return true; })()`);
+  await c.key("c", { code: "KeyC", keyCode: 67, modifiers: 2 });
+  await new Promise((r) => setTimeout(r, 300));
+  check("Ctrl+C 复制的是整块源码", (await c.evaluate(`window.__copied`)) === a.selText);
+  await c.screenshot(SHOT("writing-blocks-codeblock-kept"));
+}
+
+// 场景 B：**在代码块里**整块拖选（光标必然在里面）→ 必须展开（否则打不了字），但**围栏藏起来**
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 400));
+const rawRect = await rectOf("Raw");
+if (rawRect) {
+  await c.drag(
+    Math.round(rawRect.left + 2),
+    Math.round(rawRect.top + 3),
+    Math.round(rawRect.left + rawRect.w - 2),
+    Math.round(rawRect.top + rawRect.h - 3),
+  );
+  await new Promise((r) => setTimeout(r, 500));
+  const b = await c.evaluate(SNAPSHOT);
+  check("在代码块里拖整块：它展开成源码（光标在里面，不展开就打不了字）", b.codeInSource === true, JSON.stringify(b));
+  check("但**两行围栏被藏起来**（看不到 ```rust）", b.fenceInSource === false, JSON.stringify(b));
+  check("代码正文仍是真实文本、选区跨了整块", b.selText.includes("fn main()"), JSON.stringify(b.selText));
+  // 打字仍然有效（DOM 里得有真实文本 —— 这正是"光标那一块必须展开"的原因，实测踩过）
+  await c.type("// x");
+  await new Promise((r) => setTimeout(r, 600));
+  const typed = await c.evaluate(`document.querySelector(".cm-content").cmTile.root.view.state.doc.toString()`);
+  check("展开之后打字照样进得去", typed.includes("// x"), JSON.stringify(typed.slice(0, 40)));
+  await c.screenshot(SHOT("writing-blocks-codeblock-inside"));
 }
 
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);

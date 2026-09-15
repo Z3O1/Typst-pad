@@ -267,6 +267,7 @@ class BlockCropWidget extends WidgetType {
       other.cover.coverTo === this.cover.coverTo &&
       other.cover.block.from === this.cover.block.from &&
       other.cover.block.svg === this.cover.block.svg &&
+      other.cover.selected === this.cover.selected &&
       other.dark === this.dark
     );
   }
@@ -274,7 +275,11 @@ class BlockCropWidget extends WidgetType {
   toDOM(_view: EditorView): HTMLElement {
     try {
       const wrap = document.createElement("div");
-      wrap.className = this.dark ? "cm-block-crop cm-block-crop-dark" : "cm-block-crop";
+      const classes = ["cm-block-crop"];
+      if (this.dark) classes.push("cm-block-crop-dark");
+      // 整块被选中时保持切片外观，用一层淡色底表示"选中了"（见 block-plan 的 selected 说明）
+      if (this.cover.selected) classes.push("cm-block-crop-selected");
+      wrap.className = classes.join(" ");
       wrap.title = `${this.cover.block.kind}（点击编辑源码）`;
       // 块起点写在 DOM 上：浏览器验收要靠它把"夹具里的第几块"与"页面里的哪张切片"对上
       // （按位置取最可靠，不依赖切片顺序；调试时也比数第几个 div 直观）
@@ -362,7 +367,7 @@ function buildBlockCovers(
   );
   applyBlockSelection(
     covers,
-    state.selection.ranges.map((r) => ({ from: r.from, to: r.to })),
+    state.selection.ranges.map((r) => ({ from: r.from, to: r.to, head: r.head })),
     docLength,
   );
   return covers;
@@ -596,6 +601,41 @@ function buildBlockCropDecorations(
   return out;
 }
 
+/**
+ * **整块被选中的围栏代码块：把两行围栏藏起来**（用户要求「选中整个代码块请不要展开」）。
+ *
+ * 背景：整块被选中时那一块本来就不展开（保持切片外观，见 block-plan 的 selected）。但**光标
+ * 所在的那一块必须展开成源码**（DOM 里得有真实文本，浏览器的输入事件才落得下去 —— 否则
+ * Ctrl+A 之后打字一个字都进不去，实测踩过）。于是"选中整个代码块"最常见的那个手势
+ * （在代码块里拖一整块）会走到这一条路：展开是必须的，但**围栏没必要露出来**。
+ *
+ * 做法与写作模式隐藏 `= ` / `**` 一致：把围栏那两行**整行**替换掉（连行尾换行一起，
+ * 免得留两条空行），代码正文仍是可编辑、可选中的真实文本。
+ */
+function buildFenceHidingDecorations(state: EditorState, covers: BlockCover[]): Range<Decoration>[] {
+  const out: Range<Decoration>[] = [];
+  const isFenceLine = (text: string) => /^\s*(```|~~~)/.test(text);
+  /** 整行（含行尾换行）的范围；末行没有换行时到行尾为止 */
+  const wholeLine = (lineNo: number) => {
+    const line = state.doc.line(lineNo);
+    const to = lineNo < state.doc.lines ? state.doc.line(lineNo + 1).from : line.to;
+    return { from: line.from, to };
+  };
+  for (const cover of covers) {
+    if (!cover.selected || !cover.revealed || cover.block.kind !== "Raw") continue;
+    const from = Math.max(0, Math.min(cover.block.from, state.doc.length));
+    const to = Math.max(from, Math.min(cover.block.to, state.doc.length));
+    if (to <= from) continue;
+    const first = state.doc.lineAt(from);
+    const last = state.doc.lineAt(to - 1);
+    if (isFenceLine(first.text)) out.push(Decoration.replace({ block: true }).range(wholeLine(first.number).from, wholeLine(first.number).to));
+    if (last.number !== first.number && isFenceLine(last.text)) {
+      out.push(Decoration.replace({ block: true }).range(wholeLine(last.number).from, wholeLine(last.number).to));
+    }
+  }
+  return out;
+}
+
 /** 依据「文档 + 选区 + 渲染缓存」算出公式 widget 装饰集 */
 function buildMathDecorations(
   state: EditorState,
@@ -680,6 +720,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
           .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
         const all = [
           ...buildBlockCropDecorations(state, doc, covers, opts),
+          ...buildFenceHidingDecorations(state, covers),
           ...buildMathDecorations(state, opts, math, context, covered),
           ...buildMarkupDecorations(state, { opaque, math }, covered),
         ];
@@ -830,9 +871,13 @@ export function livePreview(opts: LivePreviewOptions): Extension {
       const current = this.view.state.selection.main;
       const anchor =
         extend && !current.empty ? current.anchor : this.anchor ?? this.cover.block.from;
-      // 拖动中：保持不动（等松手再落真选区，见 onUp）。这里也必须用 single —— cursor() 返回的
-      // 同样是 SelectionRange，交给 CM 的 MouseSelection 会读不到 .ranges
-      if (this.moved) return EditorSelection.single(anchor, anchor);
+      /**
+       * 拖动中：**保持不动**（等松手再落真选区，见 onUp / commit）。
+       * 这里返回"当前选区"而不是锚点光标：返回光标会让 CM 立刻把光标放到这一块里 →
+       * 那一块当场展开成源码 → 版式变 → 指针底下的内容跟着变（拖选会"倒着走"，
+       * 见 CLAUDE.md 那条红线）。返回当前选区时 CM 的比较会判定"没变化"，一次事务都不发。
+       */
+      if (this.moved) return this.view.state.selection;
       // 注意用 `single` 而不是 `range`：`EditorSelection.range()` 返回的是 **SelectionRange**
       // （没有 ranges/main，CM 的 MouseSelection 会拿它当 EditorSelection 用 → 读 undefined 崩掉）
       return extend && !current.empty
@@ -1079,7 +1124,13 @@ export function livePreview(opts: LivePreviewOptions): Extension {
       .filter((c) => !c.revealed)
       .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
     const requests: MathRequest[] = [];
+    // 光标/选区所在的公式**不请求渲染**：它此刻是源码形态（装饰里也跳过了），
+    // 请求它等于"每敲一个字编译一次公式"——实测在公式里打 12 个字符就是 12 次 compile_math，
+    // 而它和整篇编译共用一把锁（用户反馈「输入手感很差（公式）」）。光标离开后
+    // selectionSet 会再跑一遍收集，那时才真正去渲。
+    const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
     for (const range of scanMathRanges(doc)) {
+      if (selectionTouchesRange(range, selections)) continue;
       if (insideCovered(range.from, range.to, covered)) continue;
       // 跨行公式：只有行间（display）会整行渲染成块级 widget，行内跨行保持源码不请求
       if (range.multiline && !range.display) continue;
@@ -1161,6 +1212,11 @@ const mathWidgetTheme = EditorView.theme({
   },
   ".cm-block-crop:hover": {
       backgroundColor: "rgba(128, 128, 128, 0.06)",
+  },
+  // 整块被选中（没展开）：整张切片罩一层淡色，表示"这块在选区里"
+  ".cm-block-crop-selected": {
+      backgroundColor: "rgba(64, 120, 255, 0.18)",
+      outline: "1px solid rgba(64, 120, 255, 0.35)",
   },
   ".cm-block-crop svg": {
       display: "block",
