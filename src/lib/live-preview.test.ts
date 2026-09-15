@@ -9,6 +9,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import { livePreview } from "./live-preview";
+import type { Block } from "./block-plan";
 import { mathCacheKey } from "./math-ranges";
 import { MATH_SIZE_PT } from "./typst-engine";
 import type { MathRender } from "./typst-engine";
@@ -264,5 +265,159 @@ describe("livePreview 代码块（``` 围栏）", () => {
     view2.dispatch({ selection: { anchor: 4 } }); // 落在代码内容里
     expect(host2.querySelectorAll(".cm-raw-block").length).toBe(0);
     expect(host2.querySelector(".cm-content")?.textContent).toContain("```");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 块级切片（写作模式的"渲染表面"）：非光标块显示成引擎画的切片，光标所在块保持源码
+// 见 docs/文档模式渲染保真-调研.md 第三节。这里锁的是"装饰层"的行为，
+// 真实排版几何由 Rust 侧 block_geometry 的测试与浏览器验收负责。
+// ---------------------------------------------------------------------------
+describe("livePreview 块级切片", () => {
+  /** 假切片：真实契约里 svg 来自 Rust 的 compile_blocks */
+  const blockSvg = (tag: string) => `<svg viewBox="0 0 100 20" width="100pt" height="20pt"><g>${tag}</g></svg>`;
+  /** 父组件传下来的是**已换算成 CodeMirror 位置**的块（见 block-plan.toBlockTable）；
+   *  下面用纯 ASCII 文档，位置与字节偏移一致 */
+  const crop = (from: number, to: number, opts: Record<string, unknown> = {}): Block => ({
+    from,
+    to,
+    kind: "Paragraph",
+    found: true,
+    pages: 1,
+    widthPt: 371,
+    heightPt: 20,
+    svg: blockSvg("b"),
+    ...opts,
+  });
+
+  let host: HTMLElement;
+  let view: EditorView;
+
+  /** 用纯 ASCII 文档：字节偏移 == CodeMirror 位置，测试不必掺进换算噪音 */
+  function mount(doc: string, blocks: Block[] | null, sel?: number) {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    const list = blocks;
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: sel ?? doc.length },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => list,
+          }),
+        ],
+      }),
+    });
+  }
+
+  afterEach(() => {
+    view?.destroy();
+    host?.remove();
+  });
+
+  const crops = () => host.querySelectorAll(".cm-block-crop");
+  const content = () => host.querySelector(".cm-content")?.textContent ?? "";
+
+  it("非光标所在块被替换为切片，光标所在块保持源码", () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    // 三块：aaa[0,3) bbb[5,8) ccc[10,13)；光标落在 bbb 里
+    mount(doc, [crop(0, 3), crop(5, 8), crop(10, 13)], 6);
+    expect(crops().length).toBe(2); // 第一块与第三块
+    expect(content()).toContain("bbb"); // 光标所在块仍是源码
+    expect(content()).not.toContain("aaa");
+    expect(content()).not.toContain("ccc");
+  });
+
+  it("blocks 为 null（源码模式 / 后端不支持）时行为与加这个功能前一致：不动装饰", () => {
+    mount("aaa\n\nbbb\n", null, 0);
+    expect(crops().length).toBe(0);
+    expect(content()).toContain("aaa");
+  });
+
+  it("没有渲染结果的块（`#let` 这类）永远保持源码可见", () => {
+    // 偏移按真实文本：aaa[0,3) \n(3) \n(4) #let x = 1[5,15) \n(15) \n(16) bbb[17,20) \n(20)
+    const doc = "aaa\n\n#let x = 1\n\nbbb\n";
+    mount(doc, [crop(0, 3), crop(5, 15, { kind: "Code", found: false, svg: "" }), crop(17, 20)], 0);
+    expect(content()).toContain("#let x = 1");
+    expect(crops().length).toBe(1); // 只有最后一块被替换（aaa 是光标所在块）
+  });
+
+  it("点击切片 → 光标落到该块源码起点，切片随即展开为源码", () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    mount(doc, [crop(0, 3), crop(5, 8), crop(10, 13)], 6);
+    const first = crops()[0] as HTMLElement;
+    first.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(view.state.selection.main.head).toBe(0); // aaa 的起点
+    expect(content()).toContain("aaa"); // 展开后源码可见
+    expect(crops().length).toBe(2); // 换成 bbb 与 ccc 被替换
+  });
+
+  it("块切片与公式 widget 不会重叠：被切片盖住的公式不再单独渲染", () => {
+    // 行间公式自成一块且**已缓存**：如果两条装饰链各插一个 replace，CodeMirror 会抛
+    // "Overlapping replacement decorations" —— 这条是那个约束的回归网。
+    const doc = "aaa\n\n$ x^2 $\n\nccc\n";
+    const mathRender: MathRender = {
+      ok: true,
+      svg: `<svg viewBox="0 0 10 7" width="10pt" height="7pt"></svg>`,
+      widthPt: 10,
+      heightPt: 7,
+      baselinePt: 5,
+    };
+    const cache = new Map([[mathCacheKey("x^2", true, "", MATH_SIZE_PT), mathRender]]);
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    const blocks: Block[] = [crop(0, 3), crop(5, 12), crop(14, 17)];
+    expect(() => {
+      view = new EditorView({
+        parent: host,
+        state: EditorState.create({
+          doc,
+          selection: { anchor: 0 },
+          extensions: [
+            livePreview({
+              enabled: () => true,
+              prefix: () => "",
+              lookup: (key) => cache.get(key),
+              onRequest: () => {},
+              dark: () => false,
+              blocks: () => blocks,
+            }),
+          ],
+        }),
+      });
+    }).not.toThrow();
+    expect(host.querySelectorAll(".cm-block-crop").length).toBe(2);
+    expect(host.querySelectorAll(".cm-math-block").length).toBe(0); // 公式块已被切片覆盖
+  });
+
+  it("暗色主题给切片挂 cm-block-crop-dark（typst 产物是白底黑字，需整体反色）", () => {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    const blocks: Block[] = [crop(0, 3), crop(5, 8)];
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc: "aaa\n\nbbb\n",
+        selection: { anchor: 6 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => true,
+            blocks: () => blocks,
+          }),
+        ],
+      }),
+    });
+    expect(host.querySelectorAll(".cm-block-crop-dark").length).toBe(1);
   });
 });

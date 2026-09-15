@@ -124,6 +124,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 | 整体架构与模块清单 | 架构（含配置与辅助目录） |
 | 编译链路 / 诊断 / 导出 PDF | 编译数据流（核心链路） |
 | 所见即所得怎么实现、有哪些坑 | 所见即所得（编辑器内联渲染）数据流 |
+| 写作模式的"真实 typst 排版"是怎么回事、为什么必须窗口化 | `docs/文档模式渲染保真-调研.md` + 下方「写作模式的块级渲染」 |
 | 自动更新怎么工作、密钥怎么管、发版要注意什么 | 自动更新（tauri-plugin-updater）数据流、CI / 发布约定 |
 | 字体从哪来、为什么不放 static | 字体、原生编译后端 |
 | 文件操作与路径安全 | 文件操作与路径安全 |
@@ -185,10 +186,13 @@ src/lib/menu-keys.ts        # 菜单栏按键决策纯函数（Alt / accessKey /
 src/lib/updater.ts          # 自动更新包装层：check → 可判别结果、下载进度事件流、句柄释放（只包 Tauri）
 src/lib/update-utils.ts     # 自动更新纯逻辑：启动检查延迟 / 进度换算 / 字节格式化 / 错误文案（可单测；**没有检查节流**，见「自动更新数据流」）
 src/lib/update-notes.ts     # 更新说明的 Markdown 渲染（受控子集 → 安全 HTML，先整体转义再生成标签；可单测）
+src/lib/block-offsets.ts    # 字节偏移 ↔ CodeMirror 位置（UTF-16）换算：CJK 一个字 3 字节 / emoji 4 字节，直接当位置用会整篇错位（可单测）
+src/lib/block-plan.ts       # 写作模式块级渲染的**规划**纯逻辑：块表 → "哪些格子被切片覆盖 / 哪一块展开源码 / 窗口外沿用上一轮切片"（可单测）
 src/lib/debug.ts            # 调试日志通道 dbg（dev 默认开；--debug / ?debug=1 / localStorage 可开）
 src/lib/browser-dev-stub.ts # 浏览器开发桩：假 __TAURI_INTERNALS__ + 假编译，供 ?browserdev=1 用（仅开发）
 src/routes/+layout.ts       # SPA 模式（ssr = false），配合 adapter-static 的 index.html fallback
 src-tauri/src/lib.rs        # Rust 壳：read/write/write_binary/list_dir_typ/take_pending_files/compile_doc/compile_math/export_pdf 命令 + opener/dialog 插件
+src-tauri/src/block_geometry.rs # **写作模式的块级渲染**：源块划分（语法树顶层）+ 帧遍历（字形 Span → 源字节区间）+ 按 y 序中点切带 + 切一块渲成 SVG（见「写作模式的块级渲染」那节）
 src-tauri/src/packages.rs   # 包系统：@local 本地包读取 / @preview 自动下载缓存（目录规范与 CLI 一致 + 安全解压）
 src-tauri/src/typst_world.rs # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 包解析接线 / 诊断转换（SVG/PDF）
 src-tauri/src/main.rs       # 桌面入口（调用 lib.rs 的 run）
@@ -214,6 +218,39 @@ src-tauri/fonts/            # 打包字体（见"字体"：**不放 static/**）
 PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"）→ 前端弹原生"另存为"对话框 → `compileToPdf` invoke `export_pdf { src, documentPath, targetPath }`，Rust 侧编译 PDF 字节直接落盘（走 `validate_write_path`）。
 
 **诊断为 Rust 侧结构化对象**（`{ message, severity, line, column, endLine, endColumn, path }`，1-based 行列，`end` 为独占终点；`path` 空/缺失 = 主文档，include 文件给出其路径）——**不再有前端 range 字符串解析**（旧 `parseDiagnosticRange` 已随 wasm 编译移除）。`diagnostics-utils.ts` 现在的职责：编译源（前缀+文档）位置 → 用户文档位置映射（`mapCompiledPosToDoc`，前缀区错误跳过）与波浪线区间计算（`squiggleRanges`）。
+
+### 写作模式的块级渲染（"渲染表面 + 源码透镜"，0.8 未发布）
+
+写作模式下，**非光标所在块显示成 typst 引擎自己画的那一块切片**，光标所在块展开成源码 ——
+即 Typora 形态，但排版来自真引擎（断词/字距/`#set`/宏/包全都在切片里）。调研与实测见
+`docs/文档模式渲染保真-调研.md`（含生态、许可证、API 逐条出处）。
+
+- **链路**：`+page.svelte` 的 `runCompile` 在写作模式走 `compile_blocks`（Rust 侧
+  `block_geometry::compile_blocks`：整篇编译一次 → 每个源块切一块 SVG），
+  源码模式仍走 `compile_doc`（整页 SVG，不受影响）。后端没有这个命令（浏览器开发桩 /
+  旧安装包）时 `compile_blocks` 返回 `unavailable`，**自动退回原路径**。
+- **装饰**在 `live-preview.ts` 的同一个 StateField 里生成（块切片 + 公式 + 标记），
+  因为**CodeMirror 不允许重叠的 replace 装饰** —— 被切片盖住的公式/标记装饰必须跳过
+  （`insideCovered`）。块区间铺满全文、首尾相接（`block-plan.planBlockCovers`），
+  这样"永远恰好有一块是源码形态"，光标不会无处可去。
+- **窗口化不可省（红线，实测数据）**：逐块 SVG 各自复制字形轮廓，约 **58 字节/源字符**
+  —— 2 万字符文档全渲一次 **11.5MB / 3.7s（debug）**，而这是每按键一次的代价。
+  所以只渲**视口窗口**内的块（视口 ± 4000 字符；短文档 ≤ 8000 字符全渲），窗口外的块
+  按"块类型 + 源码文本相同"沿用上一轮切片（`carryOverCrops`），滚动到没渲过的区域先显示
+  源码、去抖 150ms 后按新窗口重编译。**别把它改回"每次都全渲"。**
+- **块表过期时沿用旧表**（不做位置映射）：编辑只发生在已展开的那一格，其它格的边界都落在
+  空白处，偏一两个字符无害；"文档一变就退回源码"会让每敲一个字都闪一次源码。
+- **文档切换（打开/新建/重读）必须 `resetBlocks()`**：旧块区间套在新文档上会**盖住正文**
+  （比公式缓存过期的危害大得多），见 `resetBlocks` 的注释。
+- **版心宽是编译期输入**：`page(width: 列宽/(1-2×页边距比例), height: auto)`，所以窗口尺寸 /
+  界面缩放 / 模式切换引起的列宽变化要重编译（`scheduleWritingReflow`，去抖 250ms）；
+  写作模式的 `.cm-scroller` 加了 `scrollbar-gutter: stable`，避免"重编译 → 高度变 →
+  滚动条变 → 列宽再变"的反馈环（预览区当年就是这么闪的）。
+- **暗色**：切片是白底黑字（页面自带白底），整体 `invert(1)` → 深色纸浅色字；文档自带颜色
+  会被反掉，与公式 widget 同一策略。
+- **已知不足**：脚注所在块的切带会把脚注正文一起框进来（按 y 序中点切带的代价）；
+  `#let`/`#show`/注释行这类不可渲染的块保持源码（设计如此）；切片是图片，
+  跨块选择/复制要等二期的文字层；**真机（tauri dev）手感与性能尚未验证**。
 
 ### 所见即所得（编辑器内联渲染）数据流
 

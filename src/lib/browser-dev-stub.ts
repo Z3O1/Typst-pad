@@ -12,6 +12,7 @@
 // 明确不提供的能力：真实 Typst 编译、include/包解析、字体度量、PDF 导出落盘。
 // 这些必须回到桌面版（Windows WebView2）验证 —— 见 CLAUDE.md 与 README。
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { byteOffsetsToPositions } from "./block-offsets";
 import type { Diagnostic } from "./typst-engine";
 
 /** 是否以"浏览器开发模式"启动（?browserdev=1） */
@@ -331,6 +332,98 @@ function notify(command: string): void {
 }
 
 /**
+ * 假块级渲染产物（`compile_blocks` 的桩）：**不是 typst 排版**，只用来在真实浏览器里
+ * 验证"块级切片"这条链路的交互（非光标块被替换、光标进入展开、点击回到源码、源码模式不受影响）。
+ *
+ * 切块规则与 Rust 侧 block_geometry 的"块"大致对应（空行分段、`=` 标题、`-`/`+` 列表项、
+ * 围栏代码块各自成块），足以让验收脚本构造出想要的结构。真实几何由 Rust 侧负责。
+ */
+export function fakeBlocks(doc: string): {
+  ok: true;
+  blocks: {
+    start: number;
+    end: number;
+    kind: string;
+    found: boolean;
+    pages: number;
+    yPt: number;
+    widthPt: number;
+    heightPt: number;
+    bands: number;
+    svg: string;
+  }[];
+  pages: number;
+  pageWidthPt: number;
+} {
+  const encoder = new TextEncoder();
+  const lines = doc.split("\n");
+  /** 行号 → 该行起始字节偏移 */
+  const lineStart: number[] = [];
+  let bytes = 0;
+  for (const line of lines) {
+    lineStart.push(bytes);
+    bytes += encoder.encode(line).length + 1; // +1 = 换行
+  }
+  const lineEnd = (i: number) => lineStart[i] + encoder.encode(lines[i]).length;
+
+  const out: ReturnType<typeof fakeBlocks>["blocks"] = [];
+  let i = 0;
+  let y = MARGIN;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      i++;
+      continue;
+    }
+    const isHeading = /^=+\s/.test(line);
+    const isList = /^\s*[-+]\s/.test(line);
+    const isFence = line.trimStart().startsWith("```");
+    let j = i;
+    if (isFence) {
+      j = i + 1;
+      while (j < lines.length && !lines[j].trimStart().startsWith("```")) j++;
+      if (j < lines.length) j++; // 收尾围栏
+    } else if (isHeading || isList) {
+      j = i + 1; // 标题/列表项：一行一块（列表不合并，便于验收精确断言）
+    } else {
+      // 段落：吃到空行为止
+      while (j + 1 < lines.length && lines[j + 1].trim() !== "" && !/^=+\s/.test(lines[j + 1])) j++;
+      j++;
+    }
+    const rows = j - i;
+    const heightPt = rows * LINE_HEIGHT + 6;
+    const kind = isHeading ? "Heading" : isList ? "ListItem" : isFence ? "Raw" : "Paragraph";
+    // 假切片：与整页 SVG 同构（svg 根 + 若干 text），尺寸按块自身高度
+    const texts = lines
+      .slice(i, j)
+      .map((t, k) => {
+        const esc = t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return `<text x="${MARGIN}" y="${MARGIN + (k + 1) * LINE_HEIGHT - 6}" font-size="14">${esc}</text>`;
+      })
+      .join("");
+    const svg =
+      `<svg viewBox="0 0 ${PAGE_WIDTH} ${heightPt}" width="${PAGE_WIDTH}pt" height="${heightPt}pt" ` +
+      `xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="white"/>` +
+      `<g data-block="${kind}">${texts}</g></svg>`;
+    out.push({
+      start: lineStart[i],
+      end: lineEnd(j - 1),
+      kind,
+      found: true,
+      pages: 1,
+      yPt: y,
+      widthPt: PAGE_WIDTH,
+      heightPt,
+      bands: rows,
+      svg,
+    });
+    y += heightPt;
+    i = j;
+  }
+  return { ok: true, blocks: out, pages: 1, pageWidthPt: PAGE_WIDTH };
+}
+
+/**
  * 浏览器开发模式下的假字体列表（设置 → 正文字体 的下拉数据源）。
  * 真实字体集由 Rust 侧 FontBook 提供（打包字体 + 系统字体 + 额外目录），浏览器里没有；
  * 这里给出与真实形状一致的数据，让验收脚本能覆盖"下拉/额外字体目录"这条 UI 链路。
@@ -394,6 +487,25 @@ async function handleCommand(
       const honored = new URLSearchParams(window.location.search).has("reflowfail") ? undefined : requested;
       // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
       return { ok: true, pages: fakePages(src, honored), warnings };
+    }
+    case "compile_blocks": {
+      // 写作模式的块级渲染（阶段 1）：桩只做"结构正确"的假切片，见 fakeBlocks 的说明。
+      const src = typeof a.src === "string" ? a.src : "";
+      const docOffset = typeof a.docOffset === "number" ? a.docOffset : 0;
+      // 只取用户文档那一段（前缀不属于编辑器内容）——真实后端返回的块偏移也是文档坐标
+      const docStart = byteOffsetsToPositions(src, [docOffset])[0];
+      const doc = src.slice(docStart);
+      const out = fakeBlocks(doc);
+      // 窗口化：桩也要遵守（否则验收会以为"窗口过滤"没生效）
+      const wantFrom = typeof a.wantFrom === "number" ? a.wantFrom : null;
+      const wantTo = typeof a.wantTo === "number" ? a.wantTo : null;
+      if (wantFrom !== null && wantTo !== null) {
+        for (const b of out.blocks) {
+          if (b.start >= wantTo || b.end < wantFrom) b.svg = "";
+        }
+      }
+      notify(command);
+      return out;
     }
     case "compile_math": {
       notify(command);

@@ -3,12 +3,23 @@
   import Editor from "$lib/Editor.svelte";
   import {
     compileToSvg,
+    compileBlocks,
     compileToPdf,
     compileMath,
     listFontFamilies,
     defaultFontFamilies,
   } from "$lib/typst-engine";
-  import type { CompileErrorLocation, Diagnostic, MathRender } from "$lib/typst-engine";
+  import type {
+    BlockCrop,
+    BlocksFail,
+    BlocksOk,
+    CompileErrorLocation,
+    Diagnostic,
+    MathRender,
+  } from "$lib/typst-engine";
+  import { positionRangeToByteRange, utf8Length } from "$lib/block-offsets";
+  import { carryOverCrops, toBlockTable } from "$lib/block-plan";
+  import type { Block } from "$lib/block-plan";
   import { buildFontFamilies, FONT_CHOICE_DEFAULT, normalizeFontDirs } from "$lib/font-settings";
   import { describeCompileWarning } from "$lib/font-warnings";
   import type { MathRequest } from "$lib/live-preview";
@@ -149,6 +160,10 @@
     runWriteCommand(command: WriteCommand): void;
     /** 切换模式前记下光标在视口里的高度（用户要求：切换模式不改变光标位置，见 Editor.svelte） */
     captureCaretAnchor(): void;
+    /** 写作模式正文列宽（CSS px）：块级渲染的版心宽据此换算（见 scheduleWritingReflow） */
+    contentWidthPx(): number;
+    /** 当前视口覆盖的文档范围（块级渲染窗口据此计算，见 compile_blocks 的窗口说明） */
+    visibleRange(): { from: number; to: number } | null;
   }
 
   /** MenuBar 组件实例方法（右键菜单弹出前联动收起） */
@@ -287,6 +302,53 @@
   let mathVersion = $state(0); // 渲染结果代次（自增即触发编辑器重整装饰）
   /** 公式渲染缓存条数上限（超出按插入顺序淘汰最早的） */
   const MATH_CACHE_LIMIT = 500;
+  // ---------------------------------------------------------------------------
+  // 写作模式的块级渲染（阶段 1）：整篇编译一次 → 每个源块切一张真实排版切片
+  // 见 docs/文档模式渲染保真-调研.md。后端没有 compile_blocks（浏览器开发桩 / 旧版本）
+  // 时自动退回"只渲染公式 + 整页预览"的老路径（compile_blocks 返回 unavailable）。
+  // ---------------------------------------------------------------------------
+  /** 最近一次编译产出的块切片（null = 未启用 / 后端不支持 → 编辑器保持源码显示） */
+  let writingBlocks = $state<Block[] | null>(null);
+  /** 块切片代次（自增即通知编辑器重整块装饰） */
+  let blocksVersion = $state(0);
+  /**
+   * 写作模式正文列宽（pt）：块级渲染的**版心宽**，随编辑器列宽走。
+   * 0 = 还没量到（编辑器未挂载）→ 编译时用默认值兜底，量到之后 scheduleWritingReflow 会重编一次。
+   */
+  let writingWidthPt = $state(0);
+  let writingReflowTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 量不到列宽时的兜底版心宽（495px = 371.25pt，写作模式常见列宽） */
+  const DEFAULT_WRITING_WIDTH_PT = 371.25;
+  /** "视口内出现没切片的块"的重编译定时器（去抖：滚动过程中会连着触发） */
+  let blocksNeededTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * 视口内出现了"能渲染但还没有切片"的块 → 去抖 150ms 后按**新的视口窗口**重编译一次。
+   *
+   * 窗口化渲染的正常中间态：滚动到没渲过的区域，那几块先是源码，这一轮回来后变成切片。
+   * 与公式渲染请求（handleMathRequest）同一套思路，只是这里整篇编译一次即含所有可见块。
+   */
+  function handleBlocksNeeded() {
+    if (viewMode !== "write") return;
+    clearTimeout(blocksNeededTimer);
+    blocksNeededTimer = setTimeout(() => void runCompile(), 150);
+  }
+
+  /**
+   * 块级渲染窗口（**文档坐标的字节偏移**）：视口范围 → 字节 + 前后各留一段预取。
+   * 取不到视口（编辑器未挂载）或文档很短（≤ 2×预取）时返回 null = 整篇都渲。
+   */
+  const BLOCK_WINDOW_MARGIN = 4000; // 字符
+  function writingWindowBytes(): { from: number; to: number } | null {
+    if (doc.length <= BLOCK_WINDOW_MARGIN * 2) return null; // 短文档：全渲，省一次换算
+    // 编辑器还没挂载（首帧编译）→ 从文档开头起一段：光标在启动时本来就在开头，
+    // 而"取不到视口就整篇渲"在长文档下会一次性渲出十几 MB（实测 58 字节/字符）。
+    const visible = editorRef?.visibleRange() ?? { from: 0, to: 0 };
+    const from = Math.max(0, visible.from - BLOCK_WINDOW_MARGIN);
+    const to = Math.min(doc.length, visible.to + BLOCK_WINDOW_MARGIN);
+    return positionRangeToByteRange(doc, from, to);
+  }
+
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
   let settingsPrefixEnabled = $state(false);
   let settingsPrefixCode = $state("");
@@ -812,6 +874,10 @@
     showPreview = viewMode === "source";
     schedulePersist();
     statusText = viewMode === "write" ? "写作模式" : "源代码模式";
+    // 两种模式的产物不通用（写作模式 = 每块切片，源码模式 = 整页 SVG），切换后立刻重编一次；
+    // 写作模式还要按新的列宽重量版心宽（换布局了，列宽也会变）
+    if (viewMode === "write") scheduleWritingReflow();
+    else scheduleCompile();
   }
 
   /**
@@ -881,6 +947,7 @@
       dirty = false;
       editorDoc = opened.content; // 触发编辑器替换全文
       resetMathCache();
+      resetBlocks();
       scheduleCompile();
       schedulePersist();
       statusText = "已打开";
@@ -929,6 +996,7 @@
       dirty = false;
       editorDoc = opened.content; // 触发编辑器替换全文
       resetMathCache();
+      resetBlocks();
       scheduleCompile();
       schedulePersist();
       statusText = "已重新读取";
@@ -1030,6 +1098,7 @@
     // 从存档里抹掉（副窗口自己的内容是空的，后面 schedulePersist 也只写设置）
     if (!isSecondaryWindow) clearState();
     resetMathCache();
+    resetBlocks();
     scheduleCompile();
     statusText = "已新建";
   }
@@ -1257,6 +1326,17 @@
   }
 
   /**
+   * 文档切换时**块切片必须立刻清空**：块区间是上一个文档的坐标，套在新文档上会盖住正文
+   * （比公式缓存的危害大得多 —— 那是"渲染错内容"，这是"看不到内容"）。
+   * 新文档的编译结果（数十毫秒后）会填回来。
+   */
+  function resetBlocks() {
+    clearTimeout(blocksNeededTimer);
+    writingBlocks = null;
+    blocksVersion++;
+  }
+
+  /**
    * 当前字体设置 → 传给 Rust 的字体配置。每次编译都要带：设置改了必须同时作用于
    * 正文预览、公式 widget 与 PDF 导出（三者都走 Rust 侧同一个注入）。
    */
@@ -1448,6 +1528,35 @@
     // 预览重排的页宽是**编译期输入**（Rust 侧据此注入 #set page），所以随本次编译一起发出；
     // 请求值只在结果落地时记进 previewPageWidthUsed（与产物一一对应，见 applyPreviewScale）
     const requestedPreviewWidthPt = previewPageWidthRequest;
+
+    // 写作模式：走块级编译（每个源块一张真实排版切片），不渲染整页预览 —— 整页 SVG 在写作
+    // 模式下是看不见的（预览栏隐藏），省下的是同一量级的工作，换来的是"编辑区里就是真排版"。
+    if (viewMode === "write") {
+      const blocksResult = await compileBlocks(
+        source,
+        utf8Length(prefixEnabled ? ensureTrailingNewline(prefixCode) : ""),
+        filePath,
+        writingWidthPt > 0 ? writingWidthPt : DEFAULT_WRITING_WIDTH_PT,
+        fontArgs(),
+        writingWindowBytes(),
+      );
+      if (mySeq === 1) {
+        // 首次编译完成 = 应用「可正常编辑/预览」就绪点（与整页预览路径同一打点）
+        mark("first-compile-result");
+        reportStartup();
+      }
+      if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
+      if (!blocksResult.unavailable) {
+        applyBlocksResult(blocksResult, t0);
+        // 预览栏被手动打开时（视图菜单可以单独开），整页预览也要跟上：接着走下面的
+        // compile_doc 路径把预览填上。只在写作模式额外付一次编译 —— 那是用户显式要的。
+        if (!showPreview) return;
+      }
+      // 后端没有这个命令（浏览器开发桩 / 旧版本）→ 落到下面的整页预览路径，
+      // 行为与加这个功能之前完全一致（块切片保持 null，编辑器只做公式内联渲染）。
+      dbg.log("compile", "compile_blocks 不可用，退回整页预览路径");
+    }
+
     const result = await compileToSvg(
       source,
       filePath,
@@ -1497,6 +1606,84 @@
       // 调试日志：编译失败摘要（错误数/耗时），错误详情见 compile-diagnostics
       dbg.log("compile", `fail errors:${result.errors.length} t:${(performance.now() - t0).toFixed(1)}ms`);
     }
+  }
+
+  /**
+   * 写作模式块级编译的结果落地：成功 → 换上新切片；失败 → **块切片作废**（旧表的区间
+   * 已经对不上新文档），编辑器退回源码 + 波浪线，状态栏照旧显示错误数。
+   *
+   * 与整页预览路径的差别只有一处：整页预览在编译失败时**保留上一次成功产物**，而块切片
+   * 必须立刻撤掉 —— 位置对不上的 widget 会盖住错的正文。
+   */
+  function applyBlocksResult(result: BlocksOk | BlocksFail, t0: number) {
+    if (result.ok) {
+      // 字节偏移 → CodeMirror 位置（只在这里做一次，编辑器侧直接用位置）
+      const table = toBlockTable(doc, result.blocks);
+      // 窗口化渲染：窗口外的块这轮没有 SVG，按"块类型 + 源码文本相同"沿用上一轮结果
+      const carried = carryOverCrops(writingBlocks, table.blocks, doc);
+      writingBlocks = carried.blocks;
+      blocksVersion++;
+      if (carried.carried > 0 || carried.missing > 0) {
+        dbg.log(
+          "compile",
+          `切片窗口：新渲 ${result.blocks.filter((b) => b.svg).length} / 沿用 ${carried.carried} / 待渲 ${carried.missing}`,
+        );
+      }
+      pageCount = result.pageCount;
+      previewStatus = "ready";
+      editorDiagnostics = [];
+      errorCount = 0;
+      lastNonPosError = null;
+      charCount = doc.length;
+      compileWarnings = result.warnings ?? [];
+      statusText =
+        compileWarnings.length > 0
+          ? truncateStatus(`警告：${describeCompileWarning(compileWarnings[0].message)}`)
+          : "就绪";
+      dbg.log(
+        "compile",
+        `blocks ok blocks:${result.blocks.length} 页宽:${result.pageWidthPt.toFixed(1)}pt t:${(
+          performance.now() - t0
+        ).toFixed(1)}ms`,
+      );
+      return;
+    }
+    writingBlocks = null;
+    blocksVersion++;
+    editorDiagnostics = result.errors;
+    errorCount = result.errors.length;
+    compileWarnings = [];
+    lastNonPosError = result.errors.length === 0 ? result.error : null;
+    statusText =
+      result.errors.length === 0 && result.error
+        ? formatCompileFailMessage(0, result.error)
+        : `编译错误：${result.errors.length} 处`;
+    dbg.log(
+      "compile",
+      `blocks fail errors:${result.errors.length} t:${(performance.now() - t0).toFixed(1)}ms`,
+    );
+  }
+
+  /**
+   * 写作模式正文列宽（pt）的测量 + **重编译**（去抖 250ms）。
+   *
+   * 版心宽是**编译期输入**（Rust 侧按列宽注入 `#set page(width: …)`），所以窗口尺寸、
+   * 界面缩放、模式切换引起的列宽变化都要重排一次 —— 与源码模式预览的
+   * schedulePreviewReflow 同一套思路。阈值 1.5pt：避免像素级抖动引起的无意义重编译。
+   * （滚动条槽位在写作模式下常驻，见 Editor.svelte 的 scrollbar-gutter，所以不会出现
+   * "重编译 → 高度变 → 滚动条变 → 列宽再变"的反馈环。）
+   */
+  function scheduleWritingReflow() {
+    clearTimeout(writingReflowTimer);
+    writingReflowTimer = setTimeout(() => {
+      const px = editorRef?.contentWidthPx() ?? 0;
+      if (!(px > 0)) return;
+      const next = px * 0.75; // CSS px → pt（1pt = 4/3 px）
+      if (Math.abs(next - writingWidthPt) <= 1.5) return;
+      writingWidthPt = next;
+      dbg.log("writing-reflow", `版心宽 ${next.toFixed(1)}pt（列宽 ${px}px）`);
+      void runCompile();
+    }, 250);
   }
 
   /** 窗口标题同步为“文件名 - Typst-pad”；未保存修改时文件名后加圆点（Tauri） */
@@ -1862,6 +2049,8 @@
     // 复核就会把"引擎接受了"读成"引擎没动"（用户第五次反馈的「界面缩放未生效」就是这个）。
     // 所以判据交给纯函数 shouldRebaselineZoom：复核在跑、或还在沉降窗口内 → 不校。
     const onWindowResize = () => {
+      // 写作模式的版心宽跟着编辑器列宽走：窗口/分栏变化后复核一次（去抖在函数里）
+      scheduleWritingReflow();
       const allowed = shouldRebaselineZoom({
         now: Date.now(),
         settlingUntil: zoomSettlingUntil,
@@ -1900,6 +2089,8 @@
       });
     });
     if (previewBodyEl) previewResizeObserver.observe(previewBodyEl); // bind:this 已在 onMount 前赋值
+    // 写作模式的版心宽要等编辑器挂载后才能量到：量到就重排一次（首帧编译用的是兜底值）
+    scheduleWritingReflow();
 
     // Tauri 内：支持拖放打开 / 关联双击打开 / 跨实例转发打开
     const unlisteners: Array<() => void> = [];
@@ -2026,6 +2217,9 @@
           lookupMath={(key) => mathCache.get(key)}
           onMathRequest={handleMathRequest}
           mathVersion={mathVersion}
+          blocks={writingBlocks}
+          blocksVersion={blocksVersion}
+          onBlocksNeeded={handleBlocksNeeded}
         />
       </div>
     </section>

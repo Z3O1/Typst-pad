@@ -18,6 +18,8 @@ import type { MarkupKind } from "./markup-ranges";
 import { scanNonMarkupRegions } from "./typst-lex";
 import type { Region } from "./typst-lex";
 import { buildMathContext } from "./math-context";
+import { applyBlockSelection, planBlockCovers } from "./block-plan";
+import type { Block, BlockCover } from "./block-plan";
 import { MATH_SIZE_PT } from "./typst-engine";
 import type { MathRender } from "./typst-engine";
 
@@ -52,6 +54,19 @@ export interface LivePreviewOptions {
   onRequest: (requests: MathRequest[]) => void;
   /** 是否暗色主题（typst 产物是黑字透明底，暗色下需反色；见 mathWidgetTheme） */
   dark: () => boolean;
+  /**
+   * 写作模式的**块级渲染**：整篇编译出的"每块一张切片"（父组件每次 compile_blocks 后更新）。
+   * 返回 null / 空数时整体关闭 —— 那时的行为与加这个功能之前**逐字节一致**
+   * （源码模式、浏览器开发桩、后端没有该命令时都走这条路）。
+   * 见 docs/文档模式渲染保真-调研.md。
+   */
+  blocks?: () => Block[] | null;
+  /**
+   * 视口内出现了"**能渲染但还没有切片**"的块（窗口化渲染的正常中间态）：
+   * 父组件去抖后按新的视口窗口重编译一次。不传则永远等着下一次按键 —— 长文档里
+   * 滚动到没渲过的区域会一直显示源码。
+   */
+  onBlocksNeeded?: () => void;
 }
 
 /** 渲染结果更新后刷新装饰（父组件收齐一批渲染结果时 dispatch 一次） */
@@ -194,6 +209,134 @@ class CodeBlockWidget extends WidgetType {
   }
 }
 
+/**
+ * 块切片 widget（阶段 1 的"渲染表面"）：整格源码被替换成**引擎自己画的那一块**。
+ *
+ * 尺寸不给死值：切片 SVG 的 viewBox/尺寸就是版心的尺寸，CSS 让 svg 宽度铺满正文列、
+ * 高度按固有比例自动算（见 livePreviewTheme 的 .cm-block-crop svg）—— 这样窗口宽度
+ * 变化到下一次重编译之间也不会变形错位。
+ *
+ * 点击 = 光标落到该块源码起点 → 选区进入这一格 → 装饰撤掉、源码展开（与公式 widget 同款）。
+ */
+class BlockCropWidget extends WidgetType {
+  constructor(
+    private readonly cover: BlockCover,
+    private readonly raw: string,
+    private readonly dark: boolean,
+  ) {
+    super();
+  }
+
+  eq(other: BlockCropWidget): boolean {
+    return (
+      other.cover.coverFrom === this.cover.coverFrom &&
+      other.cover.coverTo === this.cover.coverTo &&
+      other.cover.block.from === this.cover.block.from &&
+      other.cover.block.svg === this.cover.block.svg &&
+      other.dark === this.dark
+    );
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    try {
+      const wrap = document.createElement("div");
+      wrap.className = this.dark ? "cm-block-crop cm-block-crop-dark" : "cm-block-crop";
+      wrap.title = `${this.cover.block.kind}（点击编辑源码）`;
+      wrap.innerHTML = this.cover.block.svg;
+      const svg = wrap.querySelector("svg");
+      if (svg) {
+        svg.setAttribute("width", "100%");
+        svg.setAttribute("height", "auto");
+        svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      }
+      wrap.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        view.dispatch({ selection: { anchor: this.cover.block.from } });
+        view.focus();
+      });
+      return wrap;
+    } catch (e) {
+      // 兜底：任何异常都退回**源码文本**（绝不把异常抛回渲染流程，见 fallbackTextDom 的说明）
+      return fallbackTextDom(this.raw, e);
+    }
+  }
+
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
+/**
+ * 把块表算成"当前文档下要覆盖哪些区间"（块表已是 CodeMirror 位置，见 block-plan.toBlockTable）。
+ * 越界 / 反序的格子直接丢掉（文档在编译期间被大改时可能出现）——宁可少渲染，不可乱渲染。
+ *
+ * 注意：这里**特意不做"文档变了就退回源码"**。块表在编译结果回来之前是旧的，而编辑只发生在
+ * 已展开的那一格；其它格的边界都落在空白处（上一块的源码终点），偏一两个字符既不会露出来
+ * 也不会吃掉正文。反过来"一变就退回"会让每敲一个字都闪一次源码（见 block-plan 的说明）。
+ */
+function buildBlockCovers(
+  state: EditorState,
+  opts: LivePreviewOptions,
+  _doc: string,
+): BlockCover[] {
+  const blocks = opts.blocks?.() ?? null;
+  if (!blocks || blocks.length === 0) return [];
+  const docLength = state.doc.length;
+  const covers = planBlockCovers(blocks, docLength).filter(
+    (c) =>
+      c.coverFrom >= 0 && c.coverTo <= docLength && c.coverTo > c.coverFrom && c.block.from < docLength,
+  );
+  applyBlockSelection(
+    covers,
+    state.selection.ranges.map((r) => ({ from: r.from, to: r.to })),
+  );
+  return covers;
+}
+
+/**
+ * 视口附近有没有"能渲染却没有切片"的块 —— 有的话通知父组件按新窗口重编译。
+ *
+ * 窗口化渲染（见 block-plan.carryOverCrops 的说明）下这是常态：滚动到没渲过的区域时，
+ * 那几块先是源码，等这一轮窗口编译回来就变成切片。
+ */
+function notifyBlocksNeeded(
+  state: EditorState,
+  opts: LivePreviewOptions,
+  visible: readonly { from: number; to: number }[],
+  doc: string,
+): void {
+  if (!opts.enabled() || !opts.onBlocksNeeded) return;
+  const covers = buildBlockCovers(state, opts, doc);
+  for (const cover of covers) {
+    if (cover.revealed || cover.block.svg !== "" || !cover.block.found) continue;
+    const near = visible.some(
+      (v) => cover.block.to >= v.from - PREFETCH_MARGIN && cover.block.from <= v.to + PREFETCH_MARGIN,
+    );
+    if (near) {
+      opts.onBlocksNeeded();
+      return;
+    }
+  }
+}
+
+/** 区间是否落在某个"已被块 widget 盖住"的格子里（covered 已按 from 递增且不重叠） */
+function insideCovered(
+  from: number,
+  to: number,
+  covered: readonly { from: number; to: number }[],
+): boolean {
+  let lo = 0;
+  let hi = covered.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const c = covered[mid];
+    if (to <= c.from) hi = mid - 1;
+    else if (from >= c.to) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+
 /** markup 装饰对应的 CSS 类（样式见 livePreviewTheme） */
 const MARKUP_CLASS: Record<MarkupKind, string> = {
   heading: "cm-markup-heading",
@@ -214,6 +357,7 @@ const MARKUP_CLASS: Record<MarkupKind, string> = {
 function buildMarkupDecorations(
   state: EditorState,
   scan: { opaque: Region[]; math: MathRange[] },
+  covered: readonly { from: number; to: number }[] = [],
 ): Range<Decoration>[] {
   const doc = state.doc.toString();
   const marks = scanMarkupDecorations(doc, scan);
@@ -222,6 +366,7 @@ function buildMarkupDecorations(
   for (const item of marks) {
     // 块级结构（代码块）：整段替换为 widget；光标/选区进入即整段回到源码
     if (item.block) {
+      if (insideCovered(item.block.from, item.block.to, covered)) continue;
       const reveal = selectionTouchesRange(item.block, selections);
       if (!reveal) {
         decorations.push(
@@ -238,6 +383,7 @@ function buildMarkupDecorations(
     // 粗体/斜体/行内代码的标记分列两侧，取并集同样正确。
     const from = Math.min(item.content.from, ...item.markers.map((m) => m.from));
     const to = Math.max(item.content.to, ...item.markers.map((m) => m.to));
+    if (insideCovered(from, to, covered)) continue; // 整块已由切片呈现，别再叠标记隐藏
     // 选区进入整个构造（含标记）→ 露出标记符号，便于编辑源码
     const reveal = selectionTouchesRange({ from, to }, selections);
     // 标题额外带级别类（字号按级别递增，见 livePreviewTheme）
@@ -341,12 +487,42 @@ function blockRangeFor(doc: Text, range: MathRange): { from: number; to: number 
   return { from: first.from, to: last.to };
 }
 
+/**
+ * 块切片装饰集：**未展开且可渲染**的格子整格替换成块 widget。
+ *
+ * 边界都取自"已铺满全文、彼此首尾相接"的格子（见 block-plan.planBlockCovers），所以
+ * 这些 replace 区间互不重叠 —— CodeMirror 拒绝重叠的替换装饰（会抛
+ * "Overlapping replacement decorations"），这条是硬约束。
+ */
+function buildBlockCropDecorations(
+  state: EditorState,
+  doc: string,
+  covers: BlockCover[],
+  opts: LivePreviewOptions,
+): Range<Decoration>[] {
+  const out: Range<Decoration>[] = [];
+  for (const cover of covers) {
+    if (cover.revealed || !cover.renderable) continue;
+    const from = Math.max(0, cover.coverFrom);
+    const to = Math.min(cover.coverTo, state.doc.length);
+    if (to <= from) continue;
+    out.push(
+      Decoration.replace({
+        widget: new BlockCropWidget(cover, doc.slice(from, to), opts.dark()),
+        block: true,
+      }).range(from, to),
+    );
+  }
+  return out;
+}
+
 /** 依据「文档 + 选区 + 渲染缓存」算出公式 widget 装饰集 */
 function buildMathDecorations(
   state: EditorState,
   opts: LivePreviewOptions,
   ranges: MathRange[],
   context: string,
+  covered: readonly { from: number; to: number }[] = [],
 ): Range<Decoration>[] {
   if (!opts.enabled()) return [];
   const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
@@ -354,6 +530,8 @@ function buildMathDecorations(
   for (const range of ranges) {
     // 光标 / 选区进入 → 展开源码（含块级：光标落在公式内即整行回到源码）
     if (selectionTouchesRange(range, selections)) continue;
+    // 落在"已被块切片盖住"的区间里：整块已经由块 widget 呈现，这里不能再叠一层 replace
+    if (insideCovered(range.from, range.to, covered)) continue;
     const render = opts.lookup(mathCacheKey(range.body, range.display, context, MATH_SIZE_PT));
     // 未渲染 / 渲染失败 → 保持源码显示
     if (!render?.ok) continue;
@@ -404,9 +582,15 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         const math = scanMathRanges(doc, opaque);
         // 编译上下文与缓存键必须来自**同一次**文档快照（扩展内算，见 prefix 选项的说明）
         const context = buildMathContext(opts.prefix(), doc);
+        // 块级切片（写作模式）：先算"哪些格子要被切片盖住"，再让公式/标记装饰避开它们
+        const covers = buildBlockCovers(state, opts, doc);
+        const covered = covers
+          .filter((c) => !c.revealed)
+          .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
         const all = [
-          ...buildMathDecorations(state, opts, math, context),
-          ...buildMarkupDecorations(state, { opaque, math }),
+          ...buildBlockCropDecorations(state, doc, covers, opts),
+          ...buildMathDecorations(state, opts, math, context, covered),
+          ...buildMarkupDecorations(state, { opaque, math }, covered),
         ];
         if (all.length === 0) return Decoration.none;
         // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）
@@ -436,8 +620,14 @@ export function livePreview(opts: LivePreviewOptions): Extension {
     context: string,
   ) => {
     const doc = state.doc.toString();
+    // 被块切片盖住的公式不用渲染（整块已经由切片呈现）：每个公式都是一次 IPC 往返，
+    // 一篇有几十个公式的文档能省掉几十次。展开源码时（选区进入）才需要。
+    const covered = buildBlockCovers(state, opts, doc)
+      .filter((c) => !c.revealed)
+      .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
     const requests: MathRequest[] = [];
     for (const range of scanMathRanges(doc)) {
+      if (insideCovered(range.from, range.to, covered)) continue;
       // 跨行公式：只有行间（display）会整行渲染成块级 widget，行内跨行保持源码不请求
       if (range.multiline && !range.display) continue;
       const near = visible.some(
@@ -467,6 +657,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
           if (visible.length === 0) visible = [{ from: 0, to: view.state.doc.length }];
           const doc = view.state.doc.toString();
           collectRequests(view.state, visible, buildMathContext(opts.prefix(), doc));
+          notifyBlocksNeeded(view.state, opts, visible, doc);
         }
 
         update(update: ViewUpdate) {
@@ -485,6 +676,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
             update.view.visibleRanges,
             buildMathContext(opts.prefix(), doc),
           );
+          notifyBlocksNeeded(update.state, opts, update.view.visibleRanges, doc);
         }
       },
   );
@@ -494,6 +686,28 @@ export function livePreview(opts: LivePreviewOptions): Extension {
 
 /** 所见即所得相关样式（公式 widget + 常用标记） */
 const mathWidgetTheme = EditorView.theme({
+  // 块切片（写作模式的"渲染表面"）：正文列满宽、高度由 SVG 的固有比例决定 ——
+  // 不写死高度，窗口宽度变化到下一次重编译之间也不会变形。line-height 归零避免
+  // 行盒在 SVG 下方多出一截（与 .cm-math-block 同一个理由）。
+  ".cm-block-crop": {
+      display: "block",
+      lineHeight: "0",
+      cursor: "text",
+  },
+  ".cm-block-crop:hover": {
+      backgroundColor: "rgba(128, 128, 128, 0.06)",
+  },
+  ".cm-block-crop svg": {
+      display: "block",
+      width: "100%",
+      height: "auto",
+  },
+  // 暗色：typst 产物是白底黑字（页面自带白底），整体反色后即"深色纸 + 浅色字"，
+  // 与既有公式 widget 的反色策略一致（文档自带颜色会被反掉，见调研文档第三节）
+  ".cm-block-crop-dark svg": {
+      filter: "invert(1)",
+  },
+
   ".cm-math-widget": {
       display: "inline-block",
       lineHeight: "0",

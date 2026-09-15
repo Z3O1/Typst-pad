@@ -12,6 +12,7 @@
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation, MathRender } from "./typst-engine";
+  import type { Block } from "./block-plan";
   import { squiggleRanges, offsetAt } from "./diagnostics-utils";
   import { livePreview, refreshLivePreview } from "./live-preview";
   import type { MathRequest } from "./live-preview";
@@ -45,6 +46,17 @@
     /** 渲染结果代次：变化时重整装饰（父组件收到新渲染结果后自增） */
     mathVersion?: number;
     /**
+     * 写作模式的**块级切片**（父组件每次 compile_blocks 后更新）：
+     * 非光标所在块显示成引擎自己画的那一块，光标所在块保持源码。
+     * null / 空 = 关闭（源码模式、后端不支持该命令时都走这条路，行为与加此功能前一致）。
+     * 见 docs/文档模式渲染保真-调研.md。
+     */
+    blocks?: Block[] | null;
+    /** 块切片代次：变化时重整块装饰（父组件收到新编译结果后自增） */
+    blocksVersion?: number;
+    /** 视口内出现"能渲染但还没有切片"的块：父组件去抖后按新窗口重编译 */
+    onBlocksNeeded?: () => void;
+    /**
      * 自动换行（源码模式 Alt+Z 切换，状态与持久化由父组件持有）。
      * 打开时给内容加 CodeMirror 的 `cm-lineWrapping`（`white-space: break-spaces` + 断词），
      * 长行折行显示、不再需要横向滚动。
@@ -65,6 +77,9 @@
     lookupMath,
     onMathRequest,
     mathVersion = 0,
+    blocks = null,
+    blocksVersion = 0,
+    onBlocksNeeded,
     wrap = false,
   }: Props = $props();
 
@@ -89,6 +104,9 @@
     lookup: (key: string) => lookupMath?.(key),
     onRequest: (requests: MathRequest[]) => onMathRequest?.(requests),
     dark: () => theme === "dark",
+    // 块级切片：只在写作模式交给渲染层，源码模式一律 null（要看到真正的源码）
+    blocks: () => (mode === "write" ? (blocks ?? null) : null),
+    onBlocksNeeded: () => onBlocksNeeded?.(),
   };
 
   /**
@@ -302,6 +320,7 @@
     if (!view) return;
     void mode;
     void mathVersion;
+    void blocksVersion; // 新的块切片到货 → 重整块装饰
     void prefixCode; // 前缀变化 → 编译上下文与缓存键变化，重新请求与渲染
     view.dispatch({ effects: refreshLivePreview.of(null) });
   });
@@ -320,6 +339,42 @@
       scrollIntoView: true,
     });
     view.focus();
+  }
+
+  /**
+   * 写作模式**正文列宽**（CSS px）：CodeMirror 内容列的实际宽度。
+   *
+   * 用于给写作模式的块级渲染定版心宽（pt = px × 3/4）—— 版心宽是**编译期输入**
+   * （Rust 侧注入 `#set page(width: …)`），所以列宽变了要重新编译（见 +page.svelte 的
+   * scheduleWritingReflow）。写作模式下左右各 48px 留白挂在 `.cm-scroller` 上，
+   * 因此 contentDOM 的宽度就是文字列宽度；源码模式另有用途，不在此处区分。
+   */
+  /**
+   * 当前视口覆盖的文档范围（CodeMirror 位置）：父组件用它算块级渲染的**窗口**
+   * （只渲视口附近的块，见 compile_blocks 的 wantFrom/wantTo）。
+   * 取不到（视图未建）时返回 null，调用方退化成"整篇都渲"（短文档无所谓）。
+   */
+  export function visibleRange(): { from: number; to: number } | null {
+    if (!view) return null;
+    try {
+      const ranges = view.visibleRanges;
+      if (ranges.length === 0) return null;
+      return {
+        from: ranges[0].from,
+        to: ranges[ranges.length - 1].to,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  export function contentWidthPx(): number {
+    if (!view) return 0;
+    try {
+      return view.contentDOM.clientWidth;
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -475,6 +530,10 @@
   .editor-host.write :global(.cm-scroller) {
     padding-left: 48px;
     padding-right: 48px;
+    /* 滚动条槽位常驻：写作模式的**版心宽是编译期输入**（Rust 侧按列宽注入 #set page），
+       如果滚动条出现/消失会让列宽来回变，就形成"重编译 → 内容高度变 → 滚动条变 → 再重编译"
+       的反馈环（预览区当年就是这么闪的，见 docs/WYSIWYG-调研.md 4.3）。 */
+    scrollbar-gutter: stable;
   }
   .editor-host.write :global(.cm-content) {
     /* 只留竖直方向：顶部呼吸感 + 底部留白（末行不贴底边） */

@@ -8,8 +8,8 @@ use tauri::{Emitter, Manager};
 mod packages;
 mod typst_world;
 
-// 阶段 0 探针：源块 ↔ 版面区域的几何映射（见 docs/文档模式渲染保真-调研.md）。
-// 目前只被测试调用，阶段 1 才接 Tauri 命令，故先允许"未使用"告警。
+// 源块 ↔ 版面区域的几何映射 + 写作模式的块级渲染（见 docs/文档模式渲染保真-调研.md）。
+// 阶段 0 的探针函数只有测试在用，故整体允许"未使用"告警。
 #[allow(dead_code)]
 mod block_geometry;
 
@@ -109,6 +109,51 @@ async fn compile_doc(
     })
     .await
     .unwrap_or_else(|_| typst_world::CompileOutput::internal_error("编译任务异常终止")))
+}
+
+/// 写作模式的块级编译（compile_blocks）：整篇编译一次，把每个源块在版面上的那一块切出来，
+/// 供编辑器把"非光标所在块"显示成**真实 typst 排版**（见 docs/文档模式渲染保真-调研.md）。
+///
+/// 与 compile_doc 的关系：同一条编译链路（同一把命令层互斥锁 + spawn_blocking），只是产物
+/// 从"每页 SVG"换成"每块 SVG + 几何"；诊断/警告结构与 compile_doc 完全一致，前端可以共用
+/// 状态栏、错误计数与波浪线逻辑。
+///
+/// * `docOffset` = 用户文档在 `src` 里的起始字节偏移（= 前缀代码的 UTF-8 字节长度）
+/// * `contentWidthPt` = 写作模式正文列宽（pt）：版心宽随编辑器列宽走
+/// * `wantFrom` / `wantTo` = 只给这个字节窗口内的块渲切片（**文档坐标的字节偏移**，与返回的
+///   块区间同一坐标系；null = 全渲）。
+///   逐块 SVG 会各自复制字形轮廓（实测约 58 字节/源字符），所以编辑器按视口请求窗口
+/// * Err 仅用于任务异常终止（正常编译失败仍走 Ok(ok:false)）
+#[tauri::command]
+async fn compile_blocks(
+    state: tauri::State<'_, CompileState>,
+    src: String,
+    doc_offset: usize,
+    document_path: Option<String>,
+    content_width_pt: f64,
+    want_from: Option<usize>,
+    want_to: Option<usize>,
+    font_families: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
+) -> Result<block_geometry::BlocksOutput, String> {
+    let lock = std::sync::Arc::clone(&state.lock);
+    let fonts_dir = state.fonts_dir.clone();
+    let fonts = typst_world::FontConfig::new(font_families, font_dirs);
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        block_geometry::compile_blocks(
+            src,
+            doc_offset,
+            document_path,
+            &fonts_dir,
+            &fonts,
+            content_width_pt,
+            want_from,
+            want_to,
+        )
+    })
+    .await
+    .map_err(|_| "块级编译任务异常终止".to_string())?)
 }
 
 /// 渲染单个公式为紧致 SVG（compile_math）：编辑器内联渲染（所见即所得）用。
@@ -477,6 +522,7 @@ pub fn run() {
             list_dir_typ,
             get_debug_flag,
             compile_doc,
+            compile_blocks,
             compile_math,
             export_pdf,
             list_font_families,

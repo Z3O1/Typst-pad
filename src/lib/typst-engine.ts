@@ -215,6 +215,128 @@ export async function compileToSvg(
   }
 }
 
+// ---------------------------------------------------------------------------
+// 写作模式的块级渲染（compile_blocks）：整篇编译一次 → 每个源块切一张 SVG
+// 契约见 src-tauri/src/block_geometry.rs 的 BlockCrop / BlocksOutput。
+// ---------------------------------------------------------------------------
+
+/** Rust 侧的单块产物：偏移是**文档坐标的字节偏移**（已减掉编译前缀，见 block-offsets.ts） */
+export interface BlockCrop {
+  start: number;
+  end: number;
+  kind: string;
+  /** 是否有渲染结果（`#let` / `#show` / 纯注释行没有） */
+  found: boolean;
+  /** 内容分布在几页（单张长页为 1） */
+  pages: number;
+  yPt: number;
+  widthPt: number;
+  heightPt: number;
+  bands: number;
+  /** 切片 SVG；空串 = 没有渲染结果 */
+  svg: string;
+}
+
+interface RawBlocksOutput {
+  ok: boolean;
+  blocks?: BlockCrop[];
+  pages?: number;
+  pageWidthPt?: number;
+  diagnostics?: Diagnostic[];
+  warnings?: Diagnostic[];
+}
+
+export interface BlocksOk {
+  ok: true;
+  /** 判别用：与 BlocksUnavailable / BlocksFail 组成可判别联合 */
+  unavailable: false;
+  blocks: BlockCrop[];
+  pageCount: number;
+  /** 实际用于排版的页宽（pt），= 正文列宽 / (1 - 2×页边距比例) */
+  pageWidthPt: number;
+  warnings?: Diagnostic[];
+}
+
+/** 后端没有这个命令（旧版本 / 浏览器开发桩）：调用方退回整页 SVG 预览路径 */
+export interface BlocksUnavailable {
+  ok: false;
+  unavailable: true;
+}
+
+export interface BlocksFail {
+  ok: false;
+  unavailable: false;
+  error: string;
+  errors: CompileErrorLocation[];
+}
+
+export type BlocksResult = BlocksOk | BlocksUnavailable | BlocksFail;
+
+/**
+ * 写作模式的块级编译：整篇编译一次，Rust 侧把每个源块在版面上的那一块（含与相邻块的
+ * 半个间距）切出来单独渲成 SVG —— 编辑器据此把"非光标所在块"显示成**真实 typst 排版**。
+ *
+ * `docOffsetBytes` = 编译前缀的 UTF-8 字节长度（用户文档在 `src` 里的起点），
+ * `contentWidthPt` = 写作模式正文列宽（pt）—— 版心宽随编辑器列宽走。
+ *
+ * 诊断/警告的结构与 `compileToSvg` 完全一致（同一套状态栏/波浪线逻辑）。
+ * 命令不存在（浏览器开发桩、旧后端）时返回 `unavailable`，由调用方退回整页预览。
+ */
+export async function compileBlocks(
+  source: string,
+  docOffsetBytes: number,
+  documentPath: string | null,
+  contentWidthPt: number,
+  fonts?: FontConfigArgs,
+  want?: { from: number; to: number } | null,
+): Promise<BlocksResult> {
+  let out: RawBlocksOutput | null;
+  try {
+    out = await invoke<RawBlocksOutput>("compile_blocks", {
+      src: source,
+      docOffset: docOffsetBytes,
+      documentPath,
+      contentWidthPt,
+      // 窗口 = 只给这一段（文档坐标字节偏移）内的块渲切片；逐块 SVG 会各自复制字形轮廓
+      // （实测约 58 字节/源字符），全渲在长文档下是每按键 10MB 级的开销。
+      // 窗口外的块由前端按"块文本相同"沿用上一轮切片（见 block-plan.carryOverCrops）。
+      wantFrom: want?.from ?? null,
+      wantTo: want?.to ?? null,
+      ...fontArgs(fonts),
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    // 桩 / 旧版本后端的"没有这个命令"是**预期**情形（浏览器开发模式、老安装包），
+    // 不是错误：交给调用方退回整页预览路径，不要显示成编译失败。
+    if (/not found|unknown command|compile_blocks/i.test(message)) {
+      return { ok: false, unavailable: true };
+    }
+    return { ok: false, unavailable: false, error: message, errors: [] };
+  }
+  if (!out || typeof out !== "object" || typeof out.ok !== "boolean" || !Array.isArray(out.blocks)) {
+    return { ok: false, unavailable: true }; // 形状不对 = 后端没实现（桩返回 null 等）
+  }
+  if (out.ok) {
+    return {
+      ok: true,
+      unavailable: false,
+      blocks: out.blocks,
+      pageCount: out.pages ?? 1,
+      pageWidthPt: out.pageWidthPt ?? contentWidthPt,
+      warnings: out.warnings,
+    };
+  }
+  const errors = errorLocations(out.diagnostics ?? []);
+  const first = (out.diagnostics ?? [])[0];
+  dbg.log("compile-diagnostics", "blocks raw", out.diagnostics);
+  return {
+    ok: false,
+    unavailable: false,
+    error: first ? formatDiagnostic(first) : "编译失败：未生成产物",
+    errors,
+  };
+}
+
 /**
  * 公式渲染结果（Rust 侧 compile_math 契约，serde camelCase）。
  * svg 为「贴边 + 透明背景」的紧凑 SVG；尺寸与基线单位是 pt，

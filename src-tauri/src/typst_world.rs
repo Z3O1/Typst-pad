@@ -1022,7 +1022,7 @@ pub fn compile_to_pdf_bytes(
 
 /// 把 typst 的 SourceDiagnostic 转为前端诊断（span → 1-based 行列）。
 /// 无法定位位置（detached span / 外部数据文件）的诊断跳过。
-fn collect_diagnostics(
+pub(crate) fn collect_diagnostics(
     world: &TypstWorld,
     diags: impl IntoIterator<Item = SourceDiagnostic>,
     main_line_offset: u32,

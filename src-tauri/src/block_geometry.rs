@@ -347,6 +347,243 @@ pub fn geometry_for_range(items: &[PlacedItem], range: Range<usize>) -> Option<B
 }
 
 // ---------------------------------------------------------------------------
+// 写作模式的块级渲染（阶段 1）：整篇编译一次 → 每个源块切一块 SVG 给编辑器内联显示
+// ---------------------------------------------------------------------------
+
+/// 页面默认页边距比例（70.87pt / 595.28pt，即 A4 默认页边距）。与 `typst_world::preview_page_setup`
+/// 同源：正文列宽 = 页宽 × (1 - 2×比例)，因此反推页宽 = 列宽 / (1 - 2×比例)。
+const PAGE_MARGIN_RATIO: f64 = 70.87 / 595.28;
+
+/// 一个源块的渲染产物（前端直接消费：serde camelCase）。
+///
+/// `start`/`end` 是**用户文档坐标的字节偏移**（不含编译前缀）—— Rust 侧已经减掉了
+/// `doc_offset`，前端只需把字节偏移换算成 CodeMirror 的 UTF-16 位置（见 block-offsets.ts）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockCrop {
+    pub start: usize,
+    pub end: usize,
+    pub kind: String,
+    /// 是否有渲染结果（`#let` / `#show` / 纯注释行没有 → 前端保持源码显示）
+    pub found: bool,
+    /// 内容分布在几页（单张长页正常为 1；>1 = 文档自己分页了，此时只切首页那部分）
+    pub pages: usize,
+    /// 裁剪带在页面上的纵向范围（pt），仅调试/核查用
+    pub y_pt: f64,
+    /// 裁剪带宽度（pt）= 正文列宽；高度（pt）含与相邻块的半个间距，
+    /// **所以各块按源码顺序摞起来高度总和 == 排版里的纵向总高度**
+    pub width_pt: f64,
+    pub height_pt: f64,
+    /// 占了几行（行带数），调试用
+    pub bands: usize,
+    /// 该块的 SVG（空串 = 没有渲染结果，前端保持源码显示）
+    pub svg: String,
+}
+
+/// `compile_blocks` 的产物。字段与 `CompileOutput` 保持同构（诊断/警告同一套结构），
+/// 前端因此在写作模式与源码模式之间可以共用状态栏、错误计数、波浪线逻辑。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlocksOutput {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<BlockCrop>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages: Option<usize>,
+    pub page_width_pt: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<crate::typst_world::Diagnostic>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::typst_world::Diagnostic>,
+}
+
+impl BlocksOutput {
+    fn fail(
+        diagnostics: Vec<crate::typst_world::Diagnostic>,
+        page_width_pt: f64,
+    ) -> Self {
+        Self { ok: false, blocks: Vec::new(), pages: None, page_width_pt, diagnostics, warnings: Vec::new() }
+    }
+}
+
+/// 写作模式的块级编译：**整篇编译一次**（与预览同一条链路），把每个源块在版面上的那一块
+/// 切出来单独渲成 SVG。
+///
+/// * `src` —— 编译源（可能含设置里的前缀代码，与 `compile_doc` 的约定一致）
+/// * `doc_offset` —— 用户文档在 `src` 里的起始**字节**偏移（= 前缀字符串的 UTF-8 字节长度）；
+///   返回的块区间都相对它，前端拿到就是 CodeMirror 可直接用的文档坐标
+/// * `content_width_pt` —— 写作模式正文列宽（pt）：版心宽随编辑器列宽走，正文在这个宽度下重排
+/// * `want_from` / `want_to` —— **只给这个字节窗口内的块渲切片**（**用户文档字节偏移**，
+///   与返回的块区间同一坐标系；None = 全渲）。
+///   实测（`dump_long_doc_blocks`）：逐块 SVG 会各自复制一份字形轮廓，约 **58 字节/源字符**
+///   —— 2 万字符的文档全渲一次要 11.7MB、debug 下 3.7s，**每按键一次**。所以编辑器只请求
+///   视口附近的那一段，窗口外的块照旧返回几何（`found`/`height_pt`），但 `svg` 为空，
+///   由前端用上一轮的结果按"块文本相同"沿用（见 block-plan 的 carryOverCrops）。
+///
+/// 失败与 `compile_doc` 同样返回结构化诊断（行号口径一致：注入的 `#set page` 行已减掉，
+/// 但**前缀行仍在**，与现有 `mapCompiledPosToDoc` 的假设一致）。
+pub fn compile_blocks(
+    src: String,
+    doc_offset: usize,
+    document_path: Option<String>,
+    fonts_dir: &Path,
+    font_config: &FontConfig,
+    content_width_pt: f64,
+    want_from: Option<usize>,
+    want_to: Option<usize>,
+) -> BlocksOutput {
+    let content_width_pt = if content_width_pt.is_finite() {
+        content_width_pt.clamp(120.0, 2000.0)
+    } else {
+        371.25 // 兜底 = 495px 正文列宽
+    };
+    // 页宽反推：正文列宽 = 页宽 ×(1 - 2×页边距比例)
+    let page_width_pt = content_width_pt / (1.0 - 2.0 * PAGE_MARGIN_RATIO);
+    let margin_pt = page_width_pt * PAGE_MARGIN_RATIO;
+    let injected = format!(
+        "#set page(width: {page_width_pt:.2}pt, height: auto, margin: {margin_pt:.2}pt)\n"
+    );
+    let compiled_src = format!("{injected}{src}");
+    // 编译源里的"用户文档起点"：注入行 + 前缀
+    let doc_start = injected.len() + doc_offset;
+
+    let world = TypstWorld::new(compiled_src, document_path, fonts_dir, font_config);
+    // `main_line_offset = 1`：注入的 `#set page(...)` 占了一行，主源诊断的行号要减回去
+    // （与 compile_with_page_width 同一口径；前缀行仍留在行号里，由前端 mapCompiledPosToDoc 处理）
+    let (document, raw_warnings) = match typst::compile::<PagedDocument>(&world) {
+        typst::diag::Warned { output: Ok(doc), warnings } => (doc, warnings),
+        typst::diag::Warned { output: Err(errors), .. } => {
+            let diags = crate::typst_world::collect_diagnostics(&world, errors, 1);
+            return BlocksOutput::fail(diags, page_width_pt);
+        }
+    };
+    let warnings = crate::typst_world::collect_diagnostics(&world, raw_warnings, 1);
+
+    // 块划分只看用户文档那一段（前缀不属于编辑器里的内容）
+    let Some(doc_text) = src.get(doc_offset..) else {
+        return BlocksOutput::fail(Vec::new(), page_width_pt);
+    };
+    let blocks = source_blocks(doc_text);
+    let (items, _stats) = collect_geometry(&world, &document);
+
+    // 1) 每个块的几何（编译源坐标 = 文档坐标 + doc_start）
+    struct Found {
+        idx: usize,
+        page: usize,
+        top: f64,
+        bottom: f64,
+        pages: usize,
+        bands: usize,
+        left: f64,
+    }
+    let mut geoms: Vec<Option<Found>> = Vec::with_capacity(blocks.len());
+    for (idx, block) in blocks.iter().enumerate() {
+        let injected_range = (block.range.start + doc_start)..(block.range.end + doc_start);
+        geoms.push(geometry_for_range(&items, injected_range).map(|g| Found {
+            idx,
+            page: g.page,
+            top: g.rect.min.y.to_pt(),
+            bottom: g.rect.max.y.to_pt(),
+            pages: g.pages,
+            bands: g.bands,
+            left: g.rect.min.x.to_pt(),
+        }));
+    }
+
+    // 2) 按 (页, y) 排序后，用相邻块的"中点"切带：相邻两块各自分到一半间距，
+    //    于是各块高度之和 = 排版里的纵向总高度，按顺序摞起来就还原版式。
+    let mut order: Vec<usize> = (0..geoms.len()).filter(|i| geoms[*i].is_some()).collect();
+    order.sort_by(|a, b| {
+        let (ga, gb) = (geoms[*a].as_ref().unwrap(), geoms[*b].as_ref().unwrap());
+        (ga.page, ga.top).partial_cmp(&(gb.page, gb.top)).unwrap()
+    });
+
+    let mut crops: Vec<Option<BlockCrop>> = Vec::with_capacity(blocks.len());
+    crops.resize_with(blocks.len(), || None);
+    for (pos, idx) in order.iter().enumerate() {
+        let g = geoms[*idx].as_ref().unwrap();
+        let prev = if pos > 0 { geoms[order[pos - 1]].as_ref() } else { None };
+        let next = if pos + 1 < order.len() { geoms[order[pos + 1]].as_ref() } else { None };
+        // 相邻块必须同页才能取中点（跨页之间没有"间距"可言）
+        let band_top = match prev.filter(|p| p.page == g.page) {
+            Some(p) => (p.bottom + g.top) / 2.0,
+            None => g.top,
+        };
+        let band_bottom = match next.filter(|n| n.page == g.page) {
+            Some(n) => (g.bottom + n.top) / 2.0,
+            None => g.bottom,
+        };
+        let band_top = band_top.max(0.0);
+        let height = band_bottom - band_top;
+        if height <= 0.5 {
+            continue;
+        }
+        // 横向切**正文列**（不是墨迹外接盒）：列表缩进、居中公式、段首缩进都在列内，
+        // 按墨迹切会把它们挤掉。
+        let rect = Rect::new(
+            Point::new(Abs::pt(margin_pt), Abs::pt(band_top)),
+            Point::new(Abs::pt(page_width_pt - margin_pt), Abs::pt(band_top + height)),
+        );
+        // 只渲"窗口内"的块：窗口外的块只回几何（前端沿用上一轮切片或先显示源码）
+        // 窗口与返回的块区间**同一坐标系**（用户文档字节偏移，不含注入行与前缀）
+        let in_window = match (want_from, want_to) {
+            (Some(from), Some(to)) => {
+                let s = blocks[*idx].range.start;
+                let e = blocks[*idx].range.end;
+                s < to && e >= from
+            }
+            _ => true,
+        };
+        let svg = if in_window {
+            match document.pages().get(g.page.saturating_sub(1)) {
+                Some(page) => render_crop(page, rect),
+                None => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        crops[*idx] = Some(BlockCrop {
+            start: blocks[*idx].range.start,
+            end: blocks[*idx].range.end,
+            kind: blocks[*idx].kind.to_string(),
+            found: true,
+            pages: g.pages,
+            y_pt: band_top,
+            width_pt: rect.size().x.to_pt(),
+            height_pt: height,
+            bands: g.bands,
+            svg,
+        });
+    }
+
+    // 3) 没有几何的块也返回（前端要拿它的区间做"源码透镜"的边界，不能凭空漏掉）
+    let mut out: Vec<BlockCrop> = Vec::with_capacity(blocks.len());
+    for (idx, block) in blocks.iter().enumerate() {
+        out.push(crops[idx].take().unwrap_or(BlockCrop {
+            start: block.range.start,
+            end: block.range.end,
+            kind: block.kind.to_string(),
+            found: false,
+            pages: 0,
+            y_pt: 0.0,
+            width_pt: content_width_pt,
+            height_pt: 0.0,
+            bands: 0,
+            svg: String::new(),
+        }));
+    }
+
+    BlocksOutput {
+        ok: true,
+        blocks: out,
+        pages: Some(document.pages().len()),
+        page_width_pt,
+        diagnostics: Vec::new(),
+        warnings,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 探针：一批真实文档跑一遍，把"能不能切"变成数字
 // ---------------------------------------------------------------------------
 
@@ -861,6 +1098,123 @@ mod tests {
             // 机器可读部分（便于后续比对/回归）
             println!("PROBE:{}", serde_json::to_string(&report).unwrap());
         }
+    }
+
+    /// 窗口化：窗口内的块有切片，窗口外的块只有几何（`found` 为 true、svg 为空）
+    #[test]
+    fn writing_mode_window_limits_crops() {
+        let src = "= 标题\n\n第一段。\n\n第二段。\n\n第三段。\n";
+        let out_all = compile_blocks(
+            src.to_string(), 0, None, &fonts_dir(), &FontConfig::default(), 371.25, None, None,
+        );
+        assert!(out_all.ok);
+        let all_svgs = out_all.blocks.iter().filter(|b| !b.svg.is_empty()).count();
+        assert!(all_svgs >= 3, "全渲时应有多个切片，实际 {all_svgs}");
+
+        // 窗口只覆盖文档最前面几个字节 → 只有第一个块出切片
+        let out_win = compile_blocks(
+            src.to_string(), 0, None, &fonts_dir(), &FontConfig::default(), 371.25, Some(0), Some(3),
+        );
+        assert!(out_win.ok);
+        let win_svgs = out_win.blocks.iter().filter(|b| !b.svg.is_empty()).count();
+        assert!(win_svgs < all_svgs, "窗口化应减少切片数量：{win_svgs} vs {all_svgs}");
+        assert!(win_svgs >= 1, "窗口内的块仍要出切片");
+        // 窗口外的块仍要回几何（前端要靠它判断"这块能渲染，只是还没渲"）
+        assert!(out_win.blocks.iter().filter(|b| b.found).count() >= 3);
+    }
+
+    /// 大文档开销探针：块级渲染每按键要付多少（IPC 字节数 + 渲染时间）。
+    /// 运行：`cargo test --manifest-path src-tauri/Cargo.toml dump_long_doc_blocks -- --ignored --nocapture`
+    #[test]
+    #[ignore = "按需运行：长文档下的块级渲染开销"]
+    fn dump_long_doc_blocks() {
+        for paragraphs in [20usize, 60, 120, 200] {
+            let mut src = String::from("= 长文档\n\n");
+            for i in 0..paragraphs {
+                src.push_str(&format!(
+                    "第 {i} 段正文，用来观察块级渲染在大文档下的开销。这一段里放一个行内公式 $a_{i} + b_{i} = c_{i}$，\n                     再补一句普通中文，让每个段落都有两三行。\n\n"
+                ));
+            }
+            let t = Instant::now();
+            let out = compile_blocks(src.clone(), 0, None, &fonts_dir(), &FontConfig::default(), 371.25, None, None);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            assert!(out.ok, "编译应成功: {:?}", out.diagnostics);
+            let rendered: Vec<&BlockCrop> = out.blocks.iter().filter(|b| !b.svg.is_empty()).collect();
+            let bytes: usize = rendered.iter().map(|b| b.svg.len()).sum();
+            println!(
+                "LONGDOC: 段落 {paragraphs} / 字符 {} / 块 {}（渲染 {}）/ 块切片合计 {:.1}KB / 编译+切片 {:.1}ms",
+                src.chars().count(),
+                out.blocks.len(),
+                rendered.len(),
+                bytes as f64 / 1024.0,
+                ms
+            );
+        }
+    }
+
+    /// 写作模式的块级渲染：区块要切得出来、宽度等于正文列宽、高度之和 ≈ 版心高度
+    #[test]
+    fn writing_mode_block_crops_are_sane() {
+        const COLUMN_PT: f64 = 371.25; // = 495px（写作模式常见正文列宽）
+        let src = "= 标题\n\n第一段正文，写得长一点以便观察断行与段落间距。\n\n- 列表项一\n- 列表项二\n\n$ integral_0^1 f(x) dif x $\n\n结尾段落。\n";
+        let out = compile_blocks(src.to_string(), 0, None, &fonts_dir(), &FontConfig::default(), COLUMN_PT, None, None);
+        assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
+        assert!(out.pages == Some(1), "page(height: auto) 应为单张长页");
+
+        let rendered: Vec<&BlockCrop> = out.blocks.iter().filter(|b| !b.svg.is_empty()).collect();
+        assert!(
+            rendered.len() >= 5,
+            "标题/段落/列表项/公式/结尾段都应渲染出切片，实际 {} 个（共 {} 块）",
+            rendered.len(),
+            out.blocks.len()
+        );
+        for b in &rendered {
+            assert!(b.svg.contains("<svg"), "切片应是 SVG：{}", &b.svg[..b.svg.len().min(60)]);
+            assert!(
+                (b.width_pt - COLUMN_PT).abs() < 0.5,
+                "切片宽度应等于正文列宽 {}，实际 {}",
+                COLUMN_PT,
+                b.width_pt
+            );
+            assert!(b.height_pt > 0.5, "切片高度应为正：{}", b.height_pt);
+            assert!(b.found && b.pages == 1);
+        }
+        // 块区间按源码顺序递增且不重叠（前端要靠它切"源码透镜"的边界）
+        for pair in out.blocks.windows(2) {
+            assert!(pair[0].end <= pair[1].start, "块区间应递增不重叠");
+        }
+        // 纵向总高度 = 首块顶到末块底（带间中点切分不丢高度）
+        let total: f64 = rendered.iter().map(|b| b.height_pt).sum();
+        let span = rendered.last().unwrap().y_pt + rendered.last().unwrap().height_pt
+            - rendered.first().unwrap().y_pt;
+        assert!(
+            (total - span).abs() < 1.0,
+            "各块高度之和 {total} 应等于首末块的纵向跨度 {span}"
+        );
+    }
+
+    /// 前缀代码（设置里的编译前缀）不进块区间：返回的偏移应是**用户文档坐标**
+    #[test]
+    fn writing_mode_blocks_ignore_prefix_offset() {
+        let prefix = "#set text(size: 12pt)\n";
+        let doc = "= 标题\n\n正文。\n";
+        let src = format!("{prefix}{doc}");
+        let out = compile_blocks(
+            src,
+            prefix.len(),
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            371.25,
+            None,
+            None,
+        );
+        assert!(out.ok);
+        // 第一个块（标题）应从文档的第 0 字节开始，而不是前缀之后
+        let first = out.blocks.first().expect("应有块");
+        assert_eq!(first.start, 0, "块偏移应是文档坐标（已减掉前缀）");
+        assert!(first.end <= doc.len(), "块区间不应超出文档长度");
+        assert!(!first.svg.is_empty(), "标题应渲染出切片");
     }
 
     /// 简单文档上跑一次几何映射：标题、段落、公式都应能定位到。
