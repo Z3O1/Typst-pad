@@ -8,6 +8,11 @@ use tauri::{Emitter, Manager};
 mod packages;
 mod typst_world;
 
+// 阶段 0 探针：源块 ↔ 版面区域的几何映射（见 docs/文档模式渲染保真-调研.md）。
+// 目前只被测试调用，阶段 1 才接 Tauri 命令，故先允许"未使用"告警。
+#[allow(dead_code)]
+mod block_geometry;
+
 /// 待打开的 .typ 文件队列：首次启动参数 + 跨实例转发 + macOS 打开事件，
 /// 前端就绪后一次性取走（避免事件早于前端监听而丢失）
 struct PendingFiles(Mutex<Vec<String>>);
