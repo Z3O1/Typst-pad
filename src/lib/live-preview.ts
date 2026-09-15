@@ -86,6 +86,11 @@ export interface LivePreviewOptions {
     to: number;
   }) => Promise<number | null>;
   /**
+   * **点切片里的链接**（阶段 3）：typst 的 `#link("…")[文字]` 在切片上是画出来的文字，
+   * 点击时把 URL 交给父组件（→ opener 插件用系统浏览器打开）。不传则链接只是不可点的热区。
+   */
+  onOpenLink?: (href: string) => void;
+  /**
    * 当前编译错误的区间（CodeMirror 位置）：**与诊断相交的块不许被切片盖住** ——
    * 波浪线画在源码上，被图片盖住的块里看不见（用户会看到"状态栏说有错，正文里找不到"）。
    * 入参是**正在算装饰的那个 state 的 doc**（不能取 `view.state`：StateField 计算时
@@ -235,60 +240,15 @@ class CodeBlockWidget extends WidgetType {
 }
 
 /**
- * 点在一张切片上：**光标落到点到的那个字符**（阶段 2 的"点击定位"）。
- *
- * 阶段 1 的做法是"落到块首"，用起来像"点哪儿都回到段首"；现在把点击点在切片里的相对位置
- * 换算成**页面坐标**（pt），交给父组件（→ Rust 侧 `block_hit_test`）在排版帧里找最近的字形，
- * 换回源码位置。任何一步失败（没有后端命令 / 块表过期 / 还没编译过）都退回块首 ——
- * **绝不因为定位失败而吞掉这次点击**。
- *
- * 点完之后做一次**滚动锚定**（`anchorPosAfterChange`）：被点的块会从切片变回源码，
- * 高度一变，原来点到的那个字就会跑掉；锚定把它钉回"鼠标刚才所在的屏幕高度"，
- * 于是"点哪里、哪里就亮起光标"这件事在视觉上成立。
- */
-async function handleCropMousedown(
-  view: EditorView,
-  event: MouseEvent,
-  rect: DOMRect,
-  cover: BlockCover,
-  opts: LivePreviewOptions,
-): Promise<void> {
-  const block = cover.block;
-  const targetY = event.clientY;
-  let target = block.from;
-  const point = cropPagePoint(rect, { x: event.clientX, y: event.clientY }, block);
-  if (point && opts.onCropClick) {
-    try {
-      const hit = await opts.onCropClick({
-        page: point.page,
-        xPt: point.xPt,
-        yPt: point.yPt,
-        from: block.from,
-        to: block.to,
-      });
-      if (hit !== null && Number.isFinite(hit)) target = hit;
-    } catch (e) {
-      console.error("[live-preview] 点击定位失败，落到块首：", e);
-    }
-  }
-  // 期间文档可能已经变了（点击定位是一次 IPC 往返）：目标位置越界就退回块首
-  const docLength = view.state.doc.length;
-  if (target < 0 || target > docLength) target = Math.min(block.from, docLength);
-  // 滚动目标与选区**同一个事务**：让"光标所在那一行"留在鼠标底下（行盒中心对齐，
-  // 见 scroll-anchor.ts 为什么不能直接改 scrollTop）
-  const anchor = anchorPosEffect(view, target, targetY, "center");
-  view.dispatch({ selection: EditorSelection.cursor(target), effects: anchor ?? undefined });
-  view.focus();
-}
-
-/**
  * 块切片 widget（阶段 1 的"渲染表面"）：整格源码被替换成**引擎自己画的那一块**。
  *
  * 尺寸不给死值：切片 SVG 的 viewBox/尺寸就是版心的尺寸，CSS 让 svg 宽度铺满正文列、
  * 高度按固有比例自动算（见 livePreviewTheme 的 .cm-block-crop svg）—— 这样窗口宽度
  * 变化到下一次重编译之间也不会变形错位。
  *
- * 点击 = 光标落到**点到的那个字符**（阶段 2 起按页面坐标做命中测试，见 handleCropMousedown）；
+ * 点击 = 光标落到**点到的那个字符**（阶段 2 起按页面坐标做命中测试），
+ * 拖选 = 从切片里拖出去选出一段（阶段 3）——两条都走 CodeMirror 的 `mouseSelectionStyle`
+ * 接管（见 `cropMouseSelection`：自己挂 mousedown 会与它抢同一次事件）。
  * 选区进入这一格 → 装饰撤掉、源码展开（与公式 widget 同款）。
  */
 class BlockCropWidget extends WidgetType {
@@ -296,7 +256,7 @@ class BlockCropWidget extends WidgetType {
     private readonly cover: BlockCover,
     private readonly raw: string,
     private readonly dark: boolean,
-    private readonly opts: LivePreviewOptions,
+    private readonly onOpenLink?: (href: string) => void,
   ) {
     super();
   }
@@ -311,7 +271,7 @@ class BlockCropWidget extends WidgetType {
     );
   }
 
-  toDOM(view: EditorView): HTMLElement {
+  toDOM(_view: EditorView): HTMLElement {
     try {
       const wrap = document.createElement("div");
       wrap.className = this.dark ? "cm-block-crop cm-block-crop-dark" : "cm-block-crop";
@@ -327,16 +287,51 @@ class BlockCropWidget extends WidgetType {
         svg.setAttribute("height", "auto");
         svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
       }
-      wrap.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        // 位置在**事件触发时**量：装饰重建后 DOM 会被替换，别在异步回来后取
-        const rect = wrap.getBoundingClientRect();
-        void handleCropMousedown(view, e, rect, this.cover, this.opts);
-      });
+      // **不挂 mousedown**：切片的点击与拖选统一由 CodeMirror 的 mouseSelectionStyle 接管
+      // （见 cropMouseSelection）。自己再挂一个会与它抢同一次事件。
+      this.addLinkHotspots(wrap);
       return wrap;
     } catch (e) {
       // 兜底：任何异常都退回**源码文本**（绝不把异常抛回渲染流程，见 fallbackTextDom 的说明）
       return fallbackTextDom(this.raw, e);
+    }
+  }
+
+  /**
+   * 切片内部的**链接热区**（阶段 3）：按"带内相对 pt"换算成百分比，铺一层透明可点的方块。
+   *
+   * 百分比而不是像素：切片 SVG 是 `width:100%; height:auto`，整块按列宽等比缩放，
+   * 所以带内相对坐标 → 百分比这一层换算与显示尺寸无关（界面缩放、窗口宽度都不用管）。
+   *
+   * 命中区**必须是真正的 DOM 元素**：SVG 里的链接是画出来的字形，点不到的。
+   * 热区上按下时 `stopPropagation`，免得被切片的"点击/拖选"接管（点链接是"打开"语义，
+   * 不是"把光标放到这里"）。
+   */
+  private addLinkHotspots(wrap: HTMLElement): void {
+    const block = this.cover.block;
+    const links = block.links ?? [];
+    if (links.length === 0 || block.widthPt <= 0 || block.heightPt <= 0) return;
+    for (const link of links) {
+      const a = document.createElement("a");
+      a.className = "cm-block-crop-link";
+      a.href = link.href; // 真 href：验收与"复制链接地址"这类浏览器行为都靠它
+      a.title = link.href;
+      a.draggable = false;
+      a.style.left = `${(link.xPt / block.widthPt) * 100}%`;
+      a.style.top = `${(link.yPt / block.heightPt) * 100}%`;
+      a.style.width = `${(link.widthPt / block.widthPt) * 100}%`;
+      a.style.height = `${(link.heightPt / block.heightPt) * 100}%`;
+      a.addEventListener("mousedown", (e) => e.stopPropagation());
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        try {
+          this.onOpenLink?.(link.href);
+        } catch (err) {
+          console.error("[live-preview] 打开链接失败：", err);
+        }
+      });
+      wrap.appendChild(a);
     }
   }
 
@@ -593,7 +588,7 @@ function buildBlockCropDecorations(
     if (to <= from) continue;
     out.push(
       Decoration.replace({
-        widget: new BlockCropWidget(cover, doc.slice(from, to), opts.dark(), opts),
+        widget: new BlockCropWidget(cover, doc.slice(from, to), opts.dark(), opts.onOpenLink),
         block: true,
       }).range(from, to),
     );
@@ -710,6 +705,242 @@ export function livePreview(opts: LivePreviewOptions): Extension {
       return { ...value, deco: value.deco.map(tr.changes) };
     },
     provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
+  });
+
+  /**
+   * **切片上的点击与拖选**（阶段 3）：由 CodeMirror 的 `mouseSelectionStyle` 接管鼠标选择。
+   *
+   * 为什么不铺"文字层"（按字形位置放绝对定位的 span、交给浏览器原生选择，pdf.js 那套）：
+   * 它要①把整块字符搬进 DOM（窗口内 8000 字符 ≈ 8000 个 span，而切片本身就是一张图），
+   * ②在 CodeMirror 的内容元素里造出**第二套选区**（复制走浏览器、剪切/改写走 CM，两套会打架）。
+   * 这里换成"**把指针位置翻译成源码位置、再由 CM 落选区**"：选区只有一套，Ctrl+C/X、方向键、
+   * 输入替换、Shift+方向键全都照旧；代价是**复制出来的是源码**（`= 标题` 而不是"标题"）——
+   * 与 Typora 一致（Typora 复制出来也是 markdown 源码）。仍然拿不到的：浏览器 Ctrl+F 查找、
+   * 拼写检查、无障碍，那三样确实要真正的文字层（见 docs/文档模式渲染保真-调研.md 3.4）。
+   *
+   * 位置解析分两种落点（都是"这一点的源码位置"）：
+   *  - 落在**切片**上 → 页面坐标（pt）→ Rust 侧命中测试（图片里没有字符位置）；
+   *  - 落在**源码行**上（拖过已展开的块、或本来就显示源码的块）→ 直接问 CodeMirror 的坐标映射。
+   * 命中是异步的（一次 IPC），所以 `get()` 同步返回"上一次已知"的范围，异步结果回来后再补一次
+   * dispatch —— 一次拖动里最多晚一帧，落点始终收敛到真实几何。
+   */
+  const DRAG_THRESHOLD_PX = 3;
+
+  /** 指针位置 → 源码位置（切片走命中测试、源码行走 CM 坐标映射） */
+  async function positionAtPointer(view: EditorView, x: number, y: number): Promise<number | null> {
+    let crop: HTMLElement | null = null;
+    try {
+      // **用 Element 而不是 HTMLElement**：指针多半落在切片内部那个 `<svg>` 上，而它是 SVGElement
+      // （`instanceof HTMLElement` 为 false）→ 之前会误判成"落在源码上"。实测踩过：拖选时锚点跑到
+      // 下一块的边界上（走 CM 的坐标映射，而它只能给出 widget 的 from/to）。
+      const el = document.elementFromPoint(x, y);
+      crop = (el?.closest?.(".cm-block-crop") as HTMLElement | null) ?? null;
+    } catch {
+      crop = null; // jsdom 等环境没有 elementFromPoint：按"落在源码上"处理
+    }
+    const covers = decoFieldCovers(view);
+    if (crop) {
+      const cover = covers.find((c) => c.block.from === Number(crop!.dataset.blockFrom));
+      const point = cover ? cropPagePoint(crop.getBoundingClientRect(), { x, y }, cover.block) : null;
+      if (cover && point && opts.onCropClick) {
+        try {
+          const hit = await opts.onCropClick({
+            page: point.page,
+            xPt: point.xPt,
+            yPt: point.yPt,
+            from: cover.block.from,
+            to: cover.block.to,
+          });
+          if (hit !== null && Number.isFinite(hit)) return hit;
+        } catch (e) {
+          console.error("[live-preview] 拖选定位失败，落回块首：", e);
+        }
+      }
+      return cover ? cover.block.from : null;
+    }
+    try {
+      return view.posAtCoords({ x, y });
+    } catch {
+      return null;
+    }
+  }
+
+  class CropSelection {
+    private anchor: number | null = null;
+    private head: number | null = null;
+    private moved = false;
+    private busy = false;
+    /** 松手那次解析可能撞上"上一次解析还没回来" —— 记下"要收尾"，等这一轮跑完照样收尾 */
+    private wantsFinal = false;
+    private sweep: HTMLElement | null = null;
+    private last: { x: number; y: number };
+    private readonly start: { x: number; y: number };
+
+    constructor(
+      private readonly view: EditorView,
+      private readonly cover: BlockCover,
+      event: MouseEvent,
+    ) {
+      this.start = { x: event.clientX, y: event.clientY };
+      this.last = { ...this.start };
+      /**
+       * 松手要自己听：CM 的 `MouseSelection.up()` 只在 `dragging == null` 时才重新问 style，
+       * 而且问的是**上一次 move 事件**（不是 mouseup）—— 靠 `get()` 是拿不到"松手了"这个信号的。
+       * 捕获阶段挂，早于 CM 的冒泡处理。
+       */
+      document.addEventListener("mouseup", this.onUp, true);
+    }
+
+    private readonly onUp = (event: MouseEvent): void => {
+      document.removeEventListener("mouseup", this.onUp, true);
+      /**
+       * **单击（没拖动过）时什么都不做**：按下的那次解析已经把光标放好了，而松手这一瞬间
+       * 版面已经变了（那一块展开了源码）—— 再按松手处的坐标解析一遍就会落到**另一个位置**
+       * （实测：点标题里的字，按下的解析是"位置 10"，松手时同一屏幕点已经对着别的块 → 位置 51）。
+       * 拖到过才需要收尾。
+       */
+      if (!this.moved) return;
+      this.last = { x: event.clientX, y: event.clientY };
+      void this.track(true);
+    };
+
+    /** 文档变了就别再自己接管（与 CM 的 MouseSelection.update 约定一致） */
+    update(update: ViewUpdate): boolean {
+      if (update.docChanged) {
+        document.removeEventListener("mouseup", this.onUp, true);
+        this.clearSweep();
+      }
+      return update.docChanged;
+    }
+
+    /**
+     * CM 在按下 / 每次拖动 / 松开时都会问"现在该选哪儿"。
+     *
+     * **拖动期间一律返回锚点光标**（常量）：一旦返回真正的选区，那块就会被展开成源码、
+     * 版式跟着变，而版式一变，指针底下的内容就换了 —— 实测拖到一半位置会**倒着走**
+     * （19 → 15），因为指针从"正文行"落到了刚露出来的空行上。所以拖动期间**不动布局**，
+     * 只用一个半透明的"扫过"色块给出反馈，松手时才把真选区交出去（那一下版式变一次是应有的）。
+     */
+    get(event: MouseEvent, extend: boolean): EditorSelection {
+      this.last = { x: event.clientX, y: event.clientY };
+      if (!this.moved && Math.hypot(event.clientX - this.start.x, event.clientY - this.start.y) > DRAG_THRESHOLD_PX) {
+        this.moved = true;
+      }
+      void this.track(event.type === "mouseup");
+      const current = this.view.state.selection.main;
+      const anchor =
+        extend && !current.empty ? current.anchor : this.anchor ?? this.cover.block.from;
+      // 拖动中：保持不动（等松手再落真选区，见 onUp）。这里也必须用 single —— cursor() 返回的
+      // 同样是 SelectionRange，交给 CM 的 MouseSelection 会读不到 .ranges
+      if (this.moved) return EditorSelection.single(anchor, anchor);
+      // 注意用 `single` 而不是 `range`：`EditorSelection.range()` 返回的是 **SelectionRange**
+      // （没有 ranges/main，CM 的 MouseSelection 会拿它当 EditorSelection 用 → 读 undefined 崩掉）
+      return extend && !current.empty
+        ? EditorSelection.create([current.extend(this.head ?? anchor)])
+        : EditorSelection.single(anchor, this.head ?? anchor);
+    }
+
+    /** 解析当前指针位置（同一时刻只跑一次；期间指针又动了就再跑一轮） */
+    private async track(final: boolean): Promise<void> {
+      if (final) this.wantsFinal = true;
+      if (this.busy) return;
+      this.busy = true;
+      try {
+        for (;;) {
+          const point = this.last;
+          const pos = await positionAtPointer(this.view, point.x, point.y);
+          if (pos !== null) {
+            const clamped = Math.max(0, Math.min(this.view.state.doc.length, pos));
+            if (this.anchor === null) this.anchor = clamped;
+            this.head = clamped;
+            if (final || this.wantsFinal || !this.moved) this.commit(point);
+            else this.paintSweep(point);
+          }
+          if (this.last === point) return;
+        }
+      } finally {
+        this.busy = false;
+        this.wantsFinal = false;
+      }
+    }
+
+    /** 松手（或还没拖动时的单击）：把选区真正落下去 —— 版面这一步会变（相关块展开成源码） */
+    private commit(point: { x: number; y: number }): void {
+      if (this.anchor === null || this.head === null) return;
+      this.clearSweep();
+      const selection = this.moved
+        ? EditorSelection.single(this.anchor, this.head)
+        : EditorSelection.single(this.head, this.head);
+      // 只点不动时把被点的字钉在指针那一带（与阶段 2 的单击行为完全一致）
+      const pin = this.moved ? null : anchorPosEffect(this.view, this.head, point.y, "center");
+      try {
+        this.view.dispatch({ selection, effects: pin ?? undefined });
+      } catch (e) {
+        console.error("[live-preview] 拖选落选区失败：", e);
+      }
+    }
+
+    /**
+     * 拖动中的反馈：一个半透明的"扫过"色块（固定定位在视口里，从按下的高度扫到指针高度）。
+     * 它只是视觉提示 —— 这段期间真正的选区还没落下（见 get 的说明）。
+     */
+    private paintSweep(point: { x: number; y: number }): void {
+      try {
+        if (!this.sweep) {
+          const el = document.createElement("div");
+          el.className = "cm-block-drag-sweep";
+          el.setAttribute("aria-hidden", "true");
+          el.style.position = "fixed";
+          el.style.pointerEvents = "none";
+          el.style.zIndex = "6";
+          el.style.background = "rgba(128, 128, 128, 0.28)";
+          document.body.appendChild(el);
+          this.sweep = el;
+        }
+        const box = this.view.contentDOM.getBoundingClientRect();
+        const top = Math.min(this.start.y, point.y);
+        const height = Math.max(2, Math.abs(point.y - this.start.y));
+        Object.assign(this.sweep.style, {
+          left: `${box.left}px`,
+          width: `${box.width}px`,
+          top: `${top}px`,
+          height: `${height}px`,
+        });
+      } catch {
+        // 反馈画不出来不影响拖选本身
+      }
+    }
+
+    private clearSweep(): void {
+      this.sweep?.remove();
+      this.sweep = null;
+    }
+  }
+
+  /** 从当前状态里取"格子表"（拖选过程中指针可能落到别的切片上，要按位置查它那一格） */
+  function decoFieldCovers(view: EditorView): BlockCover[] {
+    try {
+      return view.state.field(decoField)?.covers ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 把"按在切片上"的鼠标按下交给 `CropSelection`（见上面的长注释）。
+   * 返回 null = 不是切片上的按下（或找不到那一格）→ CodeMirror 用默认的鼠标选择。
+   */
+  const cropMouseSelection = EditorView.mouseSelectionStyle.of((view, event) => {
+    try {
+      // 同上：target 可能是切片里的 `<svg>`（SVGElement），别用 instanceof HTMLElement 判
+      const crop = (event.target as Element | null)?.closest?.(".cm-block-crop") as HTMLElement | null;
+      if (!crop) return null;
+      const cover = decoFieldCovers(view).find((c) => c.block.from === Number(crop.dataset.blockFrom));
+      return cover ? new CropSelection(view, cover, event) : null;
+    } catch (e) {
+      console.error("[live-preview] 切片鼠标选择接管失败，交回默认：", e);
+      return null;
+    }
   });
 
   /**
@@ -903,7 +1134,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
       },
   );
 
-  return [decoField, blockVerticalMoves, requester, mathWidgetTheme];
+  return [decoField, cropMouseSelection, blockVerticalMoves, requester, mathWidgetTheme];
 }
 
 /** 所见即所得相关样式（公式 widget + 常用标记） */
@@ -915,6 +1146,18 @@ const mathWidgetTheme = EditorView.theme({
       display: "block",
       lineHeight: "0",
       cursor: "text",
+      // 链接热区用百分比定位，需要它当定位参照
+      position: "relative",
+  },
+  // 切片内部的链接热区（透明，悬停时给一条下划线做提示）
+  ".cm-block-crop-link": {
+      position: "absolute",
+      cursor: "pointer",
+      borderRadius: "2px",
+  },
+  ".cm-block-crop-link:hover": {
+      backgroundColor: "rgba(128, 128, 128, 0.18)",
+      textDecoration: "underline",
   },
   ".cm-block-crop:hover": {
       backgroundColor: "rgba(128, 128, 128, 0.06)",

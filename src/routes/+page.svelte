@@ -336,6 +336,18 @@
   let lastBlocksWindow = $state("");
 
   /**
+   * **点切片里的链接**（阶段 3）：交给系统默认浏览器打开（opener 插件，与「关于 → 项目主页」
+   * 同一条链路）。URL 是 typst 文档里写的，所以只开 http/https/mailto（Rust 侧已过滤过一次）。
+   */
+  function handleOpenLink(href: string): void {
+    dbg.log("link", `打开切片里的链接：${href}`);
+    void openUrl(href).catch((e) => {
+      console.error("[link] 打开链接失败：", e);
+      statusText = truncateStatus(`打开链接失败：${e instanceof Error ? e.message : String(e)}`);
+    });
+  }
+
+  /**
    * 视口内出现了"能渲染但还没有切片"的块 → 去抖 150ms 后按**新的视口窗口**重编译一次。
    *
    * 窗口化渲染的正常中间态：滚动到没渲过的区域，那几块先是源码，这一轮回来后变成切片。
@@ -2324,6 +2336,7 @@
           blocksVersion={blocksVersion}
           onBlocksNeeded={handleBlocksNeeded}
           onCropClick={handleCropClick}
+          onOpenLink={handleOpenLink}
         />
       </div>
     </section>

@@ -156,6 +156,19 @@ for (const fx of withProbes) {
       if (blockIndex === activeIndex) continue; // 活动块此刻是源码，跳过（下一轮它已变回切片）
       const block = fx.blocks[blockIndex];
       if (!block.svg) continue;
+      // **链接热区上的探针点要跳过**：那里是"打开链接"的热区（阶段 3），点下去不会挪光标，
+      // 拿它去验"点击定位"只会误报。热区的坐标在夹具里（links，带内相对 pt）。
+      const inLink = (block.links ?? []).some(
+        (l) =>
+          probe.x >= l.xPt - 1 &&
+          probe.x <= l.xPt + l.widthPt + 1 &&
+          probe.y >= l.yPt - 1 &&
+          probe.y <= l.yPt + l.heightPt + 1,
+      );
+      if (inLink) {
+        totalSkipped++;
+        continue;
+      }
       const blockFrom = byteToPos(fx.doc, block.start);
       const pt = await probePoint(blockFrom, block, probe);
       if (!pt || !pt.visible) {

@@ -34,7 +34,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（35 个文件 / 623 项）
+npm test                 # 前端 + 脚本单测（35 个文件 / 625 项）
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（45 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
@@ -49,11 +49,11 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 15 项�
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
 
 # 写作模式「块级渲染」三套（需要 headless Chromium，见「环境备忘」；CDP_PORT 默认 9333）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，79 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，85 项）
 npm run fixtures:blocks                                                                   # 导出真实切片 + 点击探针
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs # 几何等价（64 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs # 几何等价 + 链接热区（75 项）
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击→精确字符（24 项 / 125 次点击）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs   # 场景截图（45 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs   # 场景截图（50 项，9 篇场景）
 ```
 
 **改动前的红线（都是踩过的，勿回退）**
@@ -158,10 +158,10 @@ node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成�
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
 npm run fixtures:blocks         # 导出真实块切片 + 几何 + 点击探针到 .browser-check/（块级渲染验收用）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，79 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/块内 Enter/各种输入）
-npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价（真实产物，64 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，85 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/块内 Enter/各种输入/拖选复制）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价 + 链接热区（真实产物，75 项）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击 → 精确字符（真实探针，24 项 / 125 次点击全中）
-npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，45 项）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，50 项 / 9 篇）
 ```
 
 ## 架构
@@ -238,7 +238,9 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 写作模式下，**非光标所在块显示成 typst 引擎自己画的那一块切片**，光标所在块展开成源码 ——
 即 Typora 形态，但排版来自真引擎（断词/字距/`#set`/宏/包全都在切片里）。调研与实测见
 `docs/文档模式渲染保真-调研.md`（含生态、许可证、API 逐条出处、阶段 0/1/2 的实测数据）。
-阶段 1 = 能看（切片 + 源码透镜），阶段 2 = 能用（点击精确字符、滚动锚定、翻页、出错不整篇退回）。
+阶段 1 = 能看（切片 + 源码透镜），阶段 2 = 能用（点击精确字符、滚动锚定、翻页、出错不整篇退回），
+阶段 3 = 好选好用（切片上拖选跨块 + Ctrl+C 复制、`#link` 可点）。**没有铺"每字形 span 的文字层"**——
+浏览器查找 / 拼写检查 / 无障碍仍拿不到，取舍见调研文档第十二节。
 
 - **链路**：`+page.svelte` 的 `runCompile` 在写作模式走 `compile_blocks`（Rust 侧
   `block_geometry::compile_blocks`：整篇编译一次 → 每个源块切一块 SVG），
@@ -273,6 +275,10 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
     新文档上 → `doc.lineAt(116)` 抛 `RangeError: Invalid position 116 in document of length 17`
     → 装饰整篇退化成源码，而且**在 ViewPlugin 里抛出会被 CM 记成 "CodeMirror plugin crashed"**
     （`collectRequests` 因此也整体包了 try/catch）。
+  - 阶段 3 的验收：`writing-blocks.mjs` **第 14 组**（拖选跨块 + Ctrl+C 复制 + 拖选后打字替换选区）、
+    `writing-blocks-visual.mjs` 的**链接热区**三条（位置与真实几何一致 ≤2%、点热区 → opener 收到 URL、
+    点热区不动光标）、`live-preview.test.ts` 的 jsdom 用例（拖选把选区落到源码区间、链接热区按百分比定位）、
+    `block_geometry.rs` 的 `block_crops_carry_link_hotspots`。
   - 验收（**别删**）：
     - `writing-blocks.mjs` **第 12 组**（`&blockslow=1` 用 350ms 假延迟模拟真机编译窗口）：插入新块后
       **正文一行都不许丢**、不许重复显示、控制台不许出现 RangeError / 插件崩了 / 装饰重建失败；
@@ -340,11 +346,41 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 - **诊断所在块不许被切片盖住**：波浪线画在源码上，被图片盖住的块里看不见。
   `block-plan.revealBlocksWithDiagnostics` 按**格子**区间判相交（格子含块前后的空行），
   在 `applyBlockSelection` **之后**跑（否则会被选区判定覆盖回去）。
+- **切片上的鼠标行为统一由 `mouseSelectionStyle` 接管（阶段 3，红线）**：点击 → 光标落到点到的
+  字符、拖选 → 跨块选区，都走 `live-preview.ts` 的 `CropSelection`（`EditorView.mouseSelectionStyle`
+  这个 facet：`view`/`event` 里不是切片就返回 null，交回 CodeMirror 默认行为）。
+  - **别在 widget 上自己挂 `mousedown`**：那会与 CM 的鼠标选择抢同一次事件（阶段 2 就是那么写的，
+    加了拖选之后必须合并成一处）。也别用 `instanceof HTMLElement` 判"指针在不在切片上"——
+    指针多半落在切片内部那个 `<svg>` 上，它是 **SVGElement**（实测：整条拖选的锚点因此跑到下一块的
+    边界上）。用 `Element.closest(".cm-block-crop")`。
+  - **拖动期间必须"冻结版式"**：拖动中一旦真的落选区，被选中的块会展开成源码、版式跟着变，
+    而版式一变，指针底下的内容就换了 —— 实测拖到一半位置会**倒着走**（19 → 15，因为指针从正文行
+    落到了刚露出来的空行上）。所以拖动期间只更新内部落点 + 画一个半透明"扫过"色块
+    （`document.body` 上的 `position: fixed` div），**松手那一次**才把真选区交出去。
+  - **单击不要听松手**：`MouseSelection.up()` 只在 `dragging == null` 时才重新问 style，
+    而且问的是**上一次 move 事件**，所以松手要自己听（捕获阶段的 document `mouseup`）。
+    但**单击（没拖动过）时松手什么都不做** —— 按下的那次解析已经把光标放好了，松手时版式已经变了，
+    再按松手坐标解析一遍会落到别处（实测：点标题里的字，按下解析=位置 10，松手重解析=位置 51）。
+  - **`EditorSelection.single()` ≠ `EditorSelection.range()`（踩过）**：给 CM 的
+    `MouseSelectionStyle.get()` 返回值必须是 **EditorSelection**（要有 `.ranges`/`.main`），
+    而 `EditorSelection.range()` / `.cursor()` 返回的是 **SelectionRange** —— 交了后者，
+    CM 内部读 `undefined.length` 直接抛（"Cannot read properties of undefined"），
+    拖选无声失效。`dispatch({selection})` 两种都能收，所以只有这里会踩。
+- **链接可点（阶段 3）**：typst 的 `#link("https://…")[文字]` 会画成 `FrameItem::Link(目标, 方框)` ——
+  它**不带源位置**但带目标与方框，Rust 侧（`collect_geometry_with_links` → `BlockCrop.links`）
+  把它收成"带内相对 pt"的热区（**夹到带内**：链接方框有时比墨迹包围盒略高，不夹会溢出切片一两像素），
+  前端在切片上铺一层透明 `<a>`（百分比定位，与 SVG 的等比缩放天然一致），点击 `stopPropagation`
+  后交给 opener 插件（`onOpenLink` → `+page.svelte` 的 `handleOpenLink`）。
+  只收 `http/https/mailto`（页内 `#link(<label>)` 要映射回源码位置，属后续工作）；没有链接时 `links` 为空。
+- **块粒度**：列表已经**每项一块**（`ListItem` / `EnumItem` 各自成块，嵌套列表留在父项那一块里）——
+  计划里的"列表项级细粒度"阶段 1 就已满足；**表格仍是整块**（按行切会把表格线切开、视觉上更碎，
+  而点击定位本来就精确到字符，所以是有意不做）。
 - **切片 DOM 上有 `data-block-from` / `data-block-kind`**：浏览器验收靠它把"夹具里的第几块"
   与"页面里的哪张切片"对上（按位置取，不依赖切片顺序）。别删（`writing-blocks-hit.mjs` 依赖它）。
-- **已知不足**：**脚注正文（页底装饰）在写作模式里不显示**（夹紧后它落在所有带之外；
-  要显示得单独切一块"页底装饰"，属阶段 3）；`#let`/`#show`/注释行这类不可渲染的块保持源码
-  （设计如此）；切片是图片，跨块选择/复制要等二期的文字层；**真机（tauri dev）手感与性能尚未验证**。
+- **已知不足**：**脚注正文（页底装饰）在写作模式里不显示**（夹紧后它落在所有带之外；要显示得
+  单独切一块"页底装饰"贴在文档末尾 —— 它没有源区间，得跳出"格子"模型，尚未做）；`#let`/`#show`/
+  注释行这类不可渲染的块保持源码（设计如此）；**表格是整块**（按行切会把表格线切开，有意不做）；
+  浏览器查找 / 拼写检查 / 无障碍拿不到（要真正的文字层）；**真机（tauri dev）手感与性能尚未验证**。
 
 ### 所见即所得（编辑器内联渲染）数据流
 

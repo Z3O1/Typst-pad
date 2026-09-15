@@ -145,6 +145,31 @@ export async function connect() {
       });
     },
 
+    /**
+     * 从 (x1,y1) 拖到 (x2,y2)（真实鼠标事件路径：mousePressed → 若干 mouseMoved → mouseReleased）。
+     * 中间那几步不能省：CodeMirror 的 MouseSelection 要看到"按着键移动了 10px 以上"才开始拖选。
+     */
+    async drag(x1, y1, x2, y2, { steps = 6 } = {}) {
+      const base = { button: "left", buttons: 1, clickCount: 1 };
+      await send("Input.dispatchMouseEvent", { type: "mousePressed", x: x1, y: y1, ...base });
+      for (let i = 1; i <= steps; i++) {
+        await send("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: x1 + ((x2 - x1) * i) / steps,
+          y: y1 + ((y2 - y1) * i) / steps,
+          ...base,
+        });
+      }
+      await send("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: x2,
+        y: y2,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+      });
+    },
+
     /** Ctrl+A 全选（用于整篇替换） */
     async selectAll() {
       const base = { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 };

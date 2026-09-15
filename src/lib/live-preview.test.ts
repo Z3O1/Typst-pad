@@ -290,6 +290,7 @@ describe("livePreview 块级切片", () => {
     widthPt: 371,
     heightPt: 20,
     svg: blockSvg("b"),
+    links: [],
     ...opts,
   });
 
@@ -321,6 +322,7 @@ describe("livePreview 块级切片", () => {
   }
 
   afterEach(() => {
+    vi.restoreAllMocks();
     view?.destroy();
     host?.remove();
   });
@@ -340,6 +342,17 @@ describe("livePreview 块级切片", () => {
   });
 
   const crops = () => host.querySelectorAll(".cm-block-crop");
+  /**
+   * 在切片上点一下（真实点击 = mousedown + mouseup；阶段 3 起由 CM 的 mouseSelectionStyle 接管）。
+   * jsdom 没有布局也没实现 `elementFromPoint`，所以要把它指到被点的那张切片上 —— 真实浏览器里
+   * 这一步由浏览器自己完成（落点命中测试靠它判断"指针在切片上还是源码行上"）。
+   */
+  const clickCrop = (el: HTMLElement, x = 40, y = 10) => {
+    // jsdom 根本没实现 elementFromPoint（不是"返回 null"），只能自己装一个
+    (document as unknown as Record<string, unknown>).elementFromPoint = () => el;
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: x, clientY: y }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: x, clientY: y }));
+  };
   const content = () => host.querySelector(".cm-content")?.textContent ?? "";
 
   it("非光标所在块被替换为切片，光标所在块保持源码", () => {
@@ -369,8 +382,7 @@ describe("livePreview 块级切片", () => {
   it("点击切片 → 光标落到该块源码起点，切片随即展开为源码", () => {
     const doc = "aaa\n\nbbb\n\nccc\n";
     mount(doc, [crop(0, 3), crop(5, 8), crop(10, 13)], 6);
-    const first = crops()[0] as HTMLElement;
-    first.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    clickCrop(crops()[0] as HTMLElement);
     expect(view.state.selection.main.head).toBe(0); // aaa 的起点
     expect(content()).toContain("aaa"); // 展开后源码可见
     expect(crops().length).toBe(2); // 换成 bbb 与 ccc 被替换
@@ -417,13 +429,16 @@ describe("livePreview 块级切片", () => {
     });
     const first = crops()[0] as HTMLElement;
     first.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 75, clientY: 25 }));
     await new Promise((r) => setTimeout(r, 0));
     // ① 页面坐标换算：x = 58 + 371.25 × 0.75、y = 100 + 20 × 0.5
-    expect(asked.length).toBe(1);
-    expect(asked[0].xPt).toBeCloseTo(58 + 371.25 * 0.75, 3);
-    expect(asked[0].yPt).toBeCloseTo(110, 3);
-    expect(asked[0].page).toBe(1);
-    expect(asked[0]).toMatchObject({ from: 0, to: 3 });
+    //（mousedown 与 mouseup 各会问一次命中测试，取最后一次看参数）
+    expect(asked.length).toBeGreaterThanOrEqual(1);
+    const last = asked[asked.length - 1];
+    expect(last.xPt).toBeCloseTo(58 + 371.25 * 0.75, 3);
+    expect(last.yPt).toBeCloseTo(110, 3);
+    expect(last.page).toBe(1);
+    expect(last).toMatchObject({ from: 0, to: 3 });
     // ② 光标落在回调给的位置（而不是块首 0）
     expect(view.state.selection.main.head).toBe(7);
     spy.mockRestore();
@@ -456,12 +471,112 @@ describe("livePreview 块级切片", () => {
         ],
       }),
     });
-    (crops()[0] as HTMLElement).dispatchEvent(
-      new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }),
-    );
+    const fallback = crops()[0] as HTMLElement;
+    fallback.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 75, clientY: 25 }));
     await new Promise((r) => setTimeout(r, 0));
     expect(view.state.selection.main.head).toBe(0);
     spy.mockRestore();
+  });
+
+  it("在切片上按下再拖到另一张切片 → 选出一段跨块的**源码**区间（阶段 3 拖选）", async () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    const geo = { page: 1, xPt: 58, yPt: 100, widthPt: 371.25, heightPt: 20 };
+    const rect = { left: 0, top: 0, width: 100, height: 50, right: 100, bottom: 50, x: 0, y: 0, toJSON: () => ({}) };
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(rect as DOMRect);
+    // 假命中测试：第一块给"块首"、第二块给"块尾"，便于断言选区两端
+    const asked: number[] = [];
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3, geo), crop(5, 8, geo), crop(10, 13, geo)],
+            onCropClick: async (req) => {
+              asked.push(req.from);
+              return req.from === 0 ? 0 : req.to; // 第一块 → 块首；另一块 → 块尾
+            },
+          }),
+        ],
+      }),
+    });
+    const list = Array.from(crops()) as HTMLElement[];
+    let under = list[0];
+    (document as unknown as Record<string, unknown>).elementFromPoint = () => under;
+    // ① 在**第一张切片**上按下（锚点）
+    list[0].dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 10, clientY: 10, buttons: 1 }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.state.selection.main.head).toBe(0); // 精确命中的锚点
+    // ② 拖到**第二张切片**上（buttons: 1 = 还在按着，CM 的 MouseSelection 靠它判断"在拖"）
+    under = list[1];
+    document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 90, clientY: 10, buttons: 1 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 90, clientY: 10 }));
+    await new Promise((r) => setTimeout(r, 0));
+    const sel = view.state.selection.main;
+    expect({ from: sel.from, to: sel.to }).toEqual({ from: 0, to: 13 });
+    // 选出来的是**源码**（与 Typora 一致：复制出去也是源码）
+    expect(view.state.sliceDoc(sel.from, sel.to)).toBe("aaa\n\nbbb\n\nccc");
+    // 被选区碰到的三块都展开成源码（切片让位，选区高亮才画得出来）
+    expect(host.querySelectorAll(".cm-block-crop").length).toBe(0);
+    expect(content()).toContain("aaa");
+    expect(content()).toContain("ccc");
+    expect(asked[0]).toBe(0); // 第一次命中问的是"按下去的那一块"
+    expect(asked[asked.length - 1]).toBe(10); // 最后问的是"拖到的那一块"（第三块那张切片）
+  });
+
+  it("切片里的链接渲染成可点热区（阶段 3）：按百分比定位、点击交给 onOpenLink 且不动光标", () => {
+    const doc = "aaa\n\nbbb\n";
+    const geo = { page: 1, xPt: 58, yPt: 100, widthPt: 371.25, heightPt: 20 };
+    const links = [
+      { xPt: 10, yPt: 5, widthPt: 20, heightPt: 8, href: "https://example.com/x" },
+      { xPt: 200, yPt: 10, widthPt: 40, heightPt: 8, href: "mailto:a@b.c" },
+    ];
+    const opened: string[] = [];
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3, { ...geo, links }), crop(5, 8, geo)],
+            onOpenLink: (href) => opened.push(href),
+          }),
+        ],
+      }),
+    });
+    const overlays = Array.from(host.querySelectorAll(".cm-block-crop-link")) as HTMLAnchorElement[];
+    expect(overlays.length).toBe(2);
+    expect(overlays.map((a) => a.getAttribute("href"))).toEqual([
+      "https://example.com/x",
+      "mailto:a@b.c",
+    ]);
+    // 按"带内相对 pt → 百分比"定位（与切片 SVG 的等比缩放一致）
+    expect(parseFloat(overlays[0].style.left)).toBeCloseTo((10 / 371.25) * 100, 2);
+    expect(parseFloat(overlays[0].style.top)).toBeCloseTo((5 / 20) * 100, 2);
+    expect(parseFloat(overlays[0].style.width)).toBeCloseTo((20 / 371.25) * 100, 2);
+    expect(parseFloat(overlays[0].style.height)).toBeCloseTo((8 / 20) * 100, 2);
+
+    const before = view.state.selection.main.head;
+    overlays[0].dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(opened).toEqual(["https://example.com/x"]); // 打开的是链接，不是"把光标挪过来"
+    expect(view.state.selection.main.head).toBe(before);
   });
 
   it("编译错误所在的块不被切片盖住（波浪线才看得见）", () => {

@@ -239,6 +239,20 @@ export interface BlockCrop {
   bands: number;
   /** 切片 SVG；空串 = 没有渲染结果 */
   svg: string;
+  /**
+   * 切片**内部**的链接热区（阶段 3"链接可点"）：坐标相对裁剪带左上角（pt，与 SVG 同坐标系）。
+   * 只有窗口内的块才有（与 svg 同步取舍）；没有链接时为空/缺省。
+   */
+  links?: CropLink[];
+}
+
+/** 切片上的一个链接热区（相对裁剪带左上角，pt） */
+export interface CropLink {
+  xPt: number;
+  yPt: number;
+  widthPt: number;
+  heightPt: number;
+  href: string;
 }
 
 interface RawBlocksOutput {

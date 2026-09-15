@@ -70,6 +70,8 @@
       from: number;
       to: number;
     }) => Promise<number | null>;
+    /** **切片里的链接被点**（阶段 3）：父组件交给 opener 插件打开（不移动光标、不吞点击） */
+    onOpenLink?: (href: string) => void;
     /**
      * 自动换行（源码模式 Alt+Z 切换，状态与持久化由父组件持有）。
      * 打开时给内容加 CodeMirror 的 `cm-lineWrapping`（`white-space: break-spaces` + 断词），
@@ -95,6 +97,7 @@
     blocksVersion = 0,
     onBlocksNeeded,
     onCropClick,
+    onOpenLink,
     wrap = false,
   }: Props = $props();
 
@@ -125,6 +128,7 @@
     // 点击定位（阶段 2）：父组件换算成字节偏移后问 Rust，编辑器只负责落光标
     onCropClick: (req: { page: number; xPt: number; yPt: number; from: number; to: number }) =>
       onCropClick?.(req) ?? Promise.resolve(null),
+    onOpenLink: (href: string) => onOpenLink?.(href),
     // 编译错误所在的块不许被切片盖住（波浪线画在源码上，见 live-preview 的说明）。
     // 用参数里的 doc：StateField 计算时 view 上的 state 还是旧的
     diagnosticRanges: (doc: Text) =>

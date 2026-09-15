@@ -661,5 +661,84 @@ check(
   JSON.stringify(consoleBad.slice(0, 1)),
 );
 
+
+console.log("14) 切片上拖选 + 复制（阶段 3）：从一张切片拖到另一张 → 选出一段跨块源码，Ctrl+C 能复制走");
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.click(400, 300);
+await c.selectAll();
+await c.type("第一段文字。\n\n第二段文字。\n\n第三段文字。\n");
+await new Promise((r) => setTimeout(r, 900));
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // 光标回文首（第一块成为活动块）
+await new Promise((r) => setTimeout(r, 400));
+
+/** 切片矩形（按块起点取）+ 当前光标/选区（走 CM 的 view） */
+const CROPS_INFO = `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => {
+  const r = el.getBoundingClientRect();
+  return { from: Number(el.dataset.blockFrom), left: r.left, top: r.top, w: r.width, h: r.height };
+})`;
+const SELECTION = `(() => {
+  const view = document.querySelector(".cm-content").cmTile.root.view;
+  const sel = view.state.selection.main;
+  return { from: sel.from, to: sel.to, text: view.state.sliceDoc(sel.from, sel.to), docLength: view.state.doc.length };
+})()`;
+
+// 复制事件（冒泡阶段）能拿到 CodeMirror 写进剪贴板的内容 —— 不依赖剪贴板权限
+await c.evaluate(`(() => {
+  window.__copied = null;
+  document.addEventListener("copy", (e) => {
+    try { window.__copied = e.clipboardData ? e.clipboardData.getData("text/plain") : null; } catch { window.__copied = "ERR"; }
+  });
+  return true;
+})()`);
+
+const dragCrops = await c.evaluate(CROPS_INFO);
+check("拖选前：非活动块都是切片", dragCrops.length >= 2, JSON.stringify(dragCrops));
+if (dragCrops.length >= 2) {
+  const first = dragCrops[0];
+  const last = dragCrops[dragCrops.length - 1];
+  const x1 = Math.round(first.left + first.w * 0.2);
+  const y1 = Math.round(first.top + first.h * 0.5);
+  const x2 = Math.round(last.left + last.w * 0.8);
+  const y2 = Math.round(last.top + last.h * 0.5);
+  await c.drag(x1, y1, x2, y2);
+  await new Promise((r) => setTimeout(r, 400));
+  const sel = await c.evaluate(SELECTION);
+  const firstEnd = first.from + 6; // 第一块正文大致长度（"第一段文字。"= 6 字符）——只用来说明"确实从第一块里起手"
+  check(
+    `拖出的选区从第一块跨到最后一块（选区 ${sel.from}..${sel.to}，块起点 ${first.from} / ${last.from}）`,
+    sel.from <= firstEnd && sel.to >= last.from && sel.to > sel.from,
+    JSON.stringify({ sel, first, last }),
+  );
+  check(
+    `选出来的是**源码**且跨了块（${JSON.stringify(sel.text.slice(0, 24))}…，含空行=${sel.text.includes("\\n\\n")}）`,
+    sel.text.includes("\n\n") && sel.text.length >= 10,
+    JSON.stringify(sel.text),
+  );
+  const cropsAfterDrag = await c.evaluate(CROPS);
+  check("被选区碰到的块展开成源码、剩下的仍是切片", cropsAfterDrag < dragCrops.length, `拖前 ${dragCrops.length} → 拖后 ${cropsAfterDrag}`);
+
+  // Ctrl+C：走 CM 的复制（选区是真的，复制出来的就是源码）
+  await c.key("c", { code: "KeyC", keyCode: 67, modifiers: 2 });
+  await new Promise((r) => setTimeout(r, 300));
+  const copied = await c.evaluate(`window.__copied`);
+  check(
+    "Ctrl+C 复制到的内容与选区一致（跨块源码）",
+    typeof copied === "string" && copied.length > 0 && copied === sel.text,
+    JSON.stringify({ copied: typeof copied === "string" ? copied.slice(0, 40) : copied, expect: sel.text.slice(0, 40) }),
+  );
+  await c.screenshot(SHOT("writing-blocks-drag-select"));
+
+  // 拖选之后接着打字：应当替换掉选区（选区是 CM 的真选区，不是 DOM 假高亮）
+  await c.type("替换");
+  await new Promise((r) => setTimeout(r, 700));
+  const afterType = await c.evaluate(SELECTION);
+  check(
+    "拖选之后直接打字 = 替换选区（说明这是 CM 的真选区）",
+    afterType.text === "",
+    JSON.stringify(afterType),
+  );
+}
+
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
 process.exit(process.exitCode ?? 0);

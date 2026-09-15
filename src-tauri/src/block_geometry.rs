@@ -42,6 +42,17 @@ pub struct SourceBlock {
     pub range: Range<usize>,
 }
 
+/// 版面上的一个**链接**（页面坐标，单位 pt）：typst 的 `#link("https://…")[文字]` 会画成
+/// `FrameItem::Link(目标, 尺寸)` —— 它**不带源位置**（`Span`），但带目标地址与方框，
+/// 于是可以对到"点这个方框就打开这个地址"（阶段 3 的"链接可点"）。
+#[derive(Debug, Clone)]
+pub struct PlacedLink {
+    pub page: usize,
+    pub rect: Rect,
+    /// 目标：只有外部 URL 会被收进来（页内 `#link(<label>)` 这类留给以后）
+    pub href: String,
+}
+
 /// 帧里一项的几何 + 它对应的源字节区间（页面坐标，单位 pt）
 #[derive(Debug, Clone)]
 pub struct PlacedItem {
@@ -195,16 +206,35 @@ fn kind_name(kind: SyntaxKind) -> &'static str {
 /// `world.range(span)` 把 `Span` 解成**编译那一份 `Source`** 上的字节区间 —— 必须用编译时的
 /// world，不能拿最新文本来解旧帧（`Span` 是编译期的节点编号，文本一改编号就漂）。
 pub fn collect_geometry(world: &dyn World, document: &PagedDocument) -> (Vec<PlacedItem>, FrameStats) {
+    collect_geometry_with_links(world, document).0
+}
+
+/// 同上，但顺带把**链接**也收出来（阶段 3 的"链接可点"要用；`collect_geometry` 只是不要它的壳）
+pub fn collect_geometry_with_links(
+    world: &dyn World,
+    document: &PagedDocument,
+) -> ((Vec<PlacedItem>, FrameStats), Vec<PlacedLink>) {
     let mut items = Vec::new();
+    let mut links = Vec::new();
     let mut stats = FrameStats::default();
     for (i, page) in document.pages().iter().enumerate() {
-        walk_frame(world, &page.frame, i + 1, Point::zero(), Transform::identity(), &mut items, &mut stats);
+        walk_frame(
+            world,
+            &page.frame,
+            i + 1,
+            Point::zero(),
+            Transform::identity(),
+            &mut items,
+            &mut links,
+            &mut stats,
+        );
     }
-    (items, stats)
+    ((items, stats), links)
 }
 
 /// 递归遍历帧。坐标映射与 typst-ide 的 `find_in_frame` 同构：
 /// 子帧里的点 `p` 在本层的位置 = `pos + p.transform(group.transform)`。
+#[allow(clippy::too_many_arguments)]
 fn walk_frame(
     world: &dyn World,
     frame: &Frame,
@@ -212,6 +242,7 @@ fn walk_frame(
     offset: Point,
     ts: Transform,
     out: &mut Vec<PlacedItem>,
+    links: &mut Vec<PlacedLink>,
     stats: &mut FrameStats,
 ) {
     for (pos, item) in frame.items() {
@@ -249,7 +280,7 @@ fn walk_frame(
                 if group.clip.is_some() {
                     stats.clipped_groups += 1;
                 }
-                walk_frame(world, &group.frame, page, origin, group.transform, out, stats);
+                walk_frame(world, &group.frame, page, origin, group.transform, out, links, stats);
             }
             FrameItem::Shape(shape, span) => {
                 stats.shapes += 1;
@@ -269,9 +300,34 @@ fn walk_frame(
                     out.push(PlacedItem { page, range, rect });
                 }
             }
-            // Link 没有源位置；Tag 有 Location 但没有 Span（元素级定位另走 introspector，阶段 1 再说）
-            FrameItem::Link(_, _) | FrameItem::Tag(_) => {}
+            FrameItem::Link(dest, size) => {
+                // 链接没有源位置，但有目标与方框：收下来给"切片上可点"用
+                if let Some(href) = link_href(dest) {
+                    links.push(PlacedLink {
+                        page,
+                        rect: Rect::from_pos_size(origin, *size),
+                        href,
+                    });
+                }
+            }
+            // Tag 有 Location 但没有 Span（元素级定位另走 introspector，阶段 1 再说）
+            FrameItem::Tag(_) => {}
         }
+    }
+}
+
+/// 链接目标 → 可点的 URL（页内跳转 / 位置型目标暂时不收：那要映射回源码位置，属后续工作）
+fn link_href(dest: &typst::model::Destination) -> Option<String> {
+    match dest {
+        typst::model::Destination::Url(url) => {
+            let url = url.as_str();
+            // 只收"能交给系统浏览器打开"的协议，避免把 `javascript:` 这类东西放进 DOM
+            let ok = url.starts_with("http://")
+                || url.starts_with("https://")
+                || url.starts_with("mailto:");
+            ok.then(|| url.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -410,8 +466,22 @@ pub struct BlockCrop {
     pub height_pt: f64,
     /// 占了几行（行带数），调试用
     pub bands: usize,
+    /// 该块 SVG **内部**的链接热区（相对裁剪带左上角，pt）：前端据此贴一层可点的透明方块。
+    /// 只有窗口内的块才有（与 svg 同步取舍），没有链接时为空数组。
+    pub links: Vec<CropLink>,
     /// 该块的 SVG（空串 = 没有渲染结果，前端保持源码显示）
     pub svg: String,
+}
+
+/// 切片上的一个链接热区（相对裁剪带左上角，pt —— 与 SVG 的坐标系一致）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CropLink {
+    pub x_pt: f64,
+    pub y_pt: f64,
+    pub width_pt: f64,
+    pub height_pt: f64,
+    pub href: String,
 }
 
 /// `compile_blocks` 的产物。字段与 `CompileOutput` 保持同构（诊断/警告同一套结构），
@@ -498,7 +568,7 @@ pub fn compile_blocks(
         return BlocksOutput::fail(Vec::new(), page_width_pt);
     };
     let blocks = source_blocks(doc_text);
-    let (items, _stats) = collect_geometry(&world, &document);
+    let ((items, _stats), placed_links) = collect_geometry_with_links(&world, &document);
 
     // 1) 每个块的几何（编译源坐标 = 文档坐标 + doc_start）
     struct Found {
@@ -599,6 +669,31 @@ pub fn compile_blocks(
         } else {
             String::new()
         };
+        // 链接热区：只取落在这一带里的（换算成"带内相对 pt"，与切片 SVG 的坐标系一致）。
+        // 与 svg 一样只给窗口内的块 —— 窗口外的块这一轮没有图，热区也就没有意义。
+        let links: Vec<CropLink> = if in_window && !svg.is_empty() {
+            placed_links
+                .iter()
+                .filter(|l| l.page == g.page && rects_intersect(l.rect, rect))
+                // 夹到带内：链接方框有时比"块的墨迹包围盒"略高一点（行高 vs 墨迹），
+                // 直接给前端会让热区溢出切片一两像素 —— 夹紧后前端按百分比铺出来必然在界内。
+                .filter_map(|l| {
+                    let x0 = (l.rect.min.x - rect.min.x).to_pt().clamp(0.0, rect.size().x.to_pt());
+                    let y0 = (l.rect.min.y - rect.min.y).to_pt().clamp(0.0, rect.size().y.to_pt());
+                    let x1 = (l.rect.max.x - rect.min.x).to_pt().clamp(0.0, rect.size().x.to_pt());
+                    let y1 = (l.rect.max.y - rect.min.y).to_pt().clamp(0.0, rect.size().y.to_pt());
+                    (x1 - x0 > 0.5 && y1 - y0 > 0.5).then(|| CropLink {
+                        x_pt: x0,
+                        y_pt: y0,
+                        width_pt: x1 - x0,
+                        height_pt: y1 - y0,
+                        href: l.href.clone(),
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         crops[*idx] = Some(BlockCrop {
             start: blocks[*idx].range.start,
             end: blocks[*idx].range.end,
@@ -611,6 +706,7 @@ pub fn compile_blocks(
             width_pt: rect.size().x.to_pt(),
             height_pt: height,
             bands: g.bands,
+            links,
             svg,
         });
     }
@@ -630,6 +726,7 @@ pub fn compile_blocks(
             width_pt: content_width_pt,
             height_pt: 0.0,
             bands: 0,
+            links: Vec::new(),
             svg: String::new(),
         }));
     }
@@ -1595,6 +1692,12 @@ mod tests {
             "#set text(size: 12pt)\n\n= 设置对照\n\n这一段用来和上一篇对照：两篇正文完全相同，只有文档开头那条设置语句不同。\n",
         ),
         (
+            // 带链接的段落**不能是最后一块**：最后一块是"活动块"（显示源码、没有切片），
+            // 那样浏览器验收就看不到链接热区了（夹具链路里踩过）
+            "链接",
+            "= 链接\n\n更多内容见 #link(\"https://typst.app/docs\")[官方文档]，也可以看 #link(\"https://example.com/a\")[这个例子]。\n\n收尾段落。\n",
+        ),
+        (
             "混排与 emoji",
             "= 混排\n\n中文 ASCII 🚀 混在一行里：émoji 与 a_0 = 0 都要能点对位置。\n\n第二段用纯中文写长一点，用来验证整段折行之后的纵向定位是不是仍然准确。\n",
         ),
@@ -1930,6 +2033,94 @@ mod tests {
         assert!(
             (total - span).abs() < 1.0,
             "各块高度之和 {total} 应等于首末块的纵向跨度 {span}"
+        );
+    }
+
+    /// **链接热区**（阶段 3"链接可点"）：`#link("url")[文字]` 画出来的方框要被收进那一块，
+    /// 坐标是"带内相对 pt"、href 原样；页内目标与非 http(s)/mailto 协议不收。
+    #[test]
+    fn block_crops_carry_link_hotspots() {
+        const COLUMN_PT: f64 = 371.25;
+        let doc = "看这里：\n\n更多内容见 #link(\"https://typst.app/docs\")[官方文档]，也可以点 #link(\"https://example.com/a\")[这个例子]。\n\n- 列表里的 #link(\"mailto:a@b.c\")[邮件] 也要能点。\n";
+        let out = compile_blocks(
+            doc.to_string(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
+        let with_links: Vec<&BlockCrop> = out.blocks.iter().filter(|b| !b.links.is_empty()).collect();
+        assert_eq!(with_links.len(), 2, "段落与列表各自带链接：{:?}", with_links.len());
+
+        let hrefs: Vec<&str> = out
+            .blocks
+            .iter()
+            .flat_map(|b| b.links.iter().map(|l| l.href.as_str()))
+            .collect();
+        assert_eq!(
+            hrefs,
+            vec!["https://typst.app/docs", "https://example.com/a", "mailto:a@b.c"],
+            "三个链接都要在，且按出现顺序"
+        );
+
+        for block in &with_links {
+            assert!(block.height_pt > 0.5 && !block.svg.is_empty());
+            for link in &block.links {
+                // 热区必须落在这一块的带内（换算成"带内相对 pt"没算错），且尺寸为正
+                assert!(
+                    link.width_pt > 1.0 && link.height_pt > 1.0,
+                    "热区尺寸应为正：{:?}",
+                    link
+                );
+                assert!(
+                    link.x_pt >= -0.5 && link.x_pt + link.width_pt <= block.width_pt + 0.5,
+                    "热区横向应在带内：{:?}（带宽 {}）",
+                    link,
+                    block.width_pt
+                );
+                assert!(
+                    link.y_pt >= -0.5 && link.y_pt + link.height_pt <= block.height_pt + 0.5,
+                    "热区纵向应在带内：{:?}（带高 {}）",
+                    link,
+                    block.height_pt
+                );
+            }
+        }
+
+        // 没有链接的文档 → 一个热区也没有（不能凭空造）
+        let plain = compile_blocks(
+            "= 标题\n\n普通一段。\n".to_string(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(plain.ok);
+        assert!(plain.blocks.iter().all(|b| b.links.is_empty()), "没有链接就不该有热区");
+
+        // 页内目标（`#link(<label>)`）不当作外部 URL：热区为空（映射回源码位置属后续工作）
+        let internal = compile_blocks(
+            "= 标题 <sec>\n\n见 #link(<sec>)[第一节]。\n".to_string(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(internal.ok, "编译应成功：{:?}", internal.diagnostics);
+        assert!(
+            internal.blocks.iter().all(|b| b.links.is_empty()),
+            "页内跳转暂时不收：{:?}",
+            internal.blocks.iter().map(|b| &b.links).collect::<Vec<_>>()
         );
     }
 

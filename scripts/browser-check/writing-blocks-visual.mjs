@@ -148,6 +148,81 @@ for (const fx of fixtures) {
     JSON.stringify(linesText.slice(0, 80)),
   );
 
+  // ⑥ 链接热区（阶段 3"链接可点"）：真实产物里 `#link("…")[…]` 的方框要变成可点的热区，
+  //    位置按"带内相对 pt → 百分比"对得上（拿夹具里的 links 逐条比），点下去交给 opener 插件。
+  const fixtureLinks = fx.blocks.flatMap((b, i) => (b.links ?? []).map((l) => ({ i, ...l })));
+  if (fixtureLinks.length > 0) {
+    const overlays = await c.evaluate(`(() => {
+      const out = [];
+      for (const el of document.querySelectorAll(".cm-block-crop")) {
+        const from = Number(el.dataset.blockFrom);
+        const r = el.getBoundingClientRect();
+        for (const a of el.querySelectorAll(".cm-block-crop-link")) {
+          const ar = a.getBoundingClientRect();
+          out.push({
+            from,
+            href: a.getAttribute("href"),
+            left: (ar.left - r.left) / r.width,
+            top: (ar.top - r.top) / r.height,
+            w: ar.width / r.width,
+            h: ar.height / r.height,
+          });
+        }
+      }
+      return out;
+    })()`);
+    const byteToPos = (doc, bytes) =>
+      new TextDecoder().decode(new TextEncoder().encode(doc).slice(0, bytes)).length;
+    let worst = 0;
+    let matched = 0;
+    for (const link of fixtureLinks) {
+      const block = fx.blocks[link.i];
+      if (!block.svg) continue; // 窗口外 / 活动块：这一轮没有切片
+      const pos = byteToPos(fx.doc, block.start);
+      const hit = overlays.find((o) => o.from === pos && o.href === link.href);
+      if (!hit) continue;
+      matched++;
+      worst = Math.max(
+        worst,
+        Math.abs(hit.left - link.xPt / block.widthPt),
+        Math.abs(hit.top - link.yPt / block.heightPt),
+        Math.abs(hit.w - link.widthPt / block.widthPt),
+        Math.abs(hit.h - link.heightPt / block.heightPt),
+      );
+    }
+    check(
+      `${fx.name}：${fixtureLinks.length} 个链接都渲染成热区、位置与真实几何一致（最大偏差 ${(worst * 100).toFixed(2)}%）`,
+      matched === fixtureLinks.filter((l) => fx.blocks[l.i].svg).length && worst <= 0.02,
+      JSON.stringify({ matched, overlays: overlays.length, worst }),
+    );
+
+    // 点一下热区：URL 交给 opener 插件，且**不动光标**（点链接是"打开"语义）
+    const target = await c.evaluate(`(() => {
+      const a = document.querySelector(".cm-block-crop-link");
+      if (!a) return null;
+      const r = a.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), href: a.getAttribute("href") };
+    })()`);
+    if (target) {
+      const headBefore = await c.evaluate(
+        `document.querySelector(".cm-content").cmTile.root.view.state.selection.main.head`,
+      );
+      await c.click(target.x, target.y);
+      await new Promise((r) => setTimeout(r, 400));
+      const opened = await c.evaluate(`window.__browserDevOpenUrls ?? []`);
+      const headAfter = await c.evaluate(
+        `document.querySelector(".cm-content").cmTile.root.view.state.selection.main.head`,
+      );
+      check(
+        `${fx.name}：点热区 → opener 收到该 URL（${target.href}）`,
+        Array.isArray(opened) && opened.includes(target.href),
+        JSON.stringify({ opened }),
+      );
+      check(`${fx.name}：点热区不会挪动光标`, headAfter === headBefore, JSON.stringify({ headBefore, headAfter }));
+      await c.evaluate(`window.__browserDevOpenUrls = []`);
+    }
+  }
+
   await c.screenshot(SHOT(`writing-blocks-visual-${fx.name}`));
 }
 

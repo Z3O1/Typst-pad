@@ -6,7 +6,7 @@
 // 本模块只做决策，不碰 CodeMirror：把"块表 + 当前选区 + 文档长度"算成
 // "哪些区间要被 widget 覆盖"，落成装饰由 live-preview.ts 负责。
 import type { Text } from "@codemirror/state";
-import type { BlockCrop } from "./typst-engine";
+import type { BlockCrop, CropLink } from "./typst-engine";
 import { byteOffsetsToPositions } from "./block-offsets";
 
 /** 版本快照用：同一次编译产出的文档文本（用来判断块表是否已过期） */
@@ -34,6 +34,8 @@ export interface Block {
   page: number;
   xPt: number;
   yPt: number;
+  /** 切片内部的可点链接热区（相对裁剪带左上角，pt）；空数组 = 这一块没有链接 */
+  links: CropLink[];
 }
 
 /**
@@ -47,7 +49,18 @@ export function toBlockTable(
   doc: string,
   raw: Pick<
     BlockCrop,
-    "start" | "end" | "kind" | "found" | "svg" | "widthPt" | "heightPt" | "pages" | "page" | "xPt" | "yPt"
+    | "start"
+    | "end"
+    | "kind"
+    | "found"
+    | "svg"
+    | "widthPt"
+    | "heightPt"
+    | "pages"
+    | "page"
+    | "xPt"
+    | "yPt"
+    | "links"
   >[],
 ): BlockTable {
   const offsets: number[] = [];
@@ -74,6 +87,9 @@ export function toBlockTable(
       page: typeof b.page === "number" && b.page > 0 ? b.page : 1,
       xPt: typeof b.xPt === "number" ? b.xPt : 0,
       yPt: typeof b.yPt === "number" ? b.yPt : 0,
+      links: Array.isArray(b.links)
+        ? b.links.filter((l) => l && typeof l.href === "string" && l.href !== "")
+        : [],
     });
   }
   return { doc, blocks };
