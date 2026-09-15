@@ -11,6 +11,7 @@ import {
   carryOverCrops,
   planBlockCovers,
   toBlockTable,
+  verticalBlockTarget,
 } from "./block-plan";
 import type { BlockCover } from "./block-plan";
 import type { BlockCrop } from "./typst-engine";
@@ -207,5 +208,40 @@ describe("carryOverCrops（窗口化：窗口外的块沿用上一轮切片）",
     const out = carryOverCrops(null, next, doc);
     expect(out.carried).toBe(0);
     expect(out.missing).toBe(1);
+  });
+});
+
+describe("verticalBlockTarget（跨块竖直移动：修「按上跳回开头」）", () => {
+  const covers = () => {
+    const doc = "aaa\n\nbbb\n\nccc\n"; // 格子：[0,4) [4,9) [9,14)
+    const table = toBlockTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]);
+    return planBlockCovers(table.blocks, Text.of(doc.split("\n")));
+  };
+
+  it("块内移动不接管（交回 CodeMirror 的逐行行为）", () => {
+    const c = covers();
+    // 光标在第 2 格内，默认结果也落在第 2 格 → null
+    expect(verticalBlockTarget(c, 6, 5, -1)).toBeNull();
+  });
+
+  it("向上跨格 → 落到上一格源码的末尾（不是文档开头）", () => {
+    const c = covers();
+    // 光标在第 2 格开头（位置 4），默认结果会跑到第 1 格 → 接管，落到第 1 格末尾
+    expect(verticalBlockTarget(c, 4, 0, -1)).toBe(3); // covers[0].coverTo - 1
+  });
+
+  it("向下跨格 → 落到下一格源码的开头", () => {
+    const c = covers();
+    expect(verticalBlockTarget(c, 8, 14, 1)).toBe(9); // covers[2].coverFrom
+  });
+
+  it("已经在第一/最后一格 → 不接管（保持默认：不动）", () => {
+    const c = covers();
+    expect(verticalBlockTarget(c, 1, 0, -1)).toBeNull(); // 第一格再往上
+    expect(verticalBlockTarget(c, 12, 14, 1)).toBeNull(); // 最后一格再往下
+  });
+
+  it("没有格子（源码模式）→ 永不接管", () => {
+    expect(verticalBlockTarget([], 3, 0, -1)).toBeNull();
   });
 });

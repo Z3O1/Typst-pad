@@ -211,6 +211,40 @@ export function applyBlockSelection(
 }
 
 /**
+ * **跨块竖直移动的落点**（ArrowUp / ArrowDown / PageUp / PageDown 用）。
+ *
+ * 为什么需要自己算：CodeMirror 的竖直移动（`moveVertically`）是从光标往上/下逐像素扫，
+ * 找到**文本行**才停 —— 而它的扫描会**跳过所有非文本块**（widget，见 `posAtCoords`：
+ * `if (block.type != BlockType.Text) { yOffset = block.top - halfLine; continue }`）。
+ * 写作模式的切片全是 widget，于是"往上"时它会一路跳过所有切片、扫到内容顶部，
+ * 然后返回**位置 0** —— 用户看到的就是「在 `== 6` 前面按上，跳回文档开头」（实测复现）。
+ *
+ * 规则：默认结果**仍落在当前格内**（块内多行移动）时不接管，交回 CodeMirror；
+ * 一旦会跨格，就把光标放到相邻格的边界上 —— 向上 = 上一格源码的末尾（`coverTo - 1`），
+ * 向下 = 下一格源码的开头（`coverFrom`）。这样"上一块/下一块"像 Typora 一样一块一块走。
+ *
+ * 返回 null = 不接管（调用方把按键交回默认行为）。
+ */
+export function verticalBlockTarget(
+  covers: readonly BlockCover[],
+  pos: number,
+  defaultTarget: number,
+  dir: -1 | 1,
+): number | null {
+  if (covers.length === 0) return null;
+  const idx = covers.findIndex((c) => pos >= c.coverFrom && pos < c.coverTo);
+  if (idx < 0) return null;
+  const cur = covers[idx];
+  // 默认结果仍在当前格内 → 块内移动，交回默认
+  if (defaultTarget >= cur.coverFrom && defaultTarget < cur.coverTo) return null;
+  const next = dir > 0 ? idx + 1 : idx - 1;
+  if (next < 0 || next >= covers.length) return null;
+  return dir > 0
+    ? covers[next].coverFrom
+    : Math.max(0, covers[next].coverTo - 1);
+}
+
+/**
  * 块表是否仍然对应当前文档（供调试与"落后多少"的日志使用）。
  *
  * **注意**：块表过期时我们仍然沿用旧表（不做位置映射）。理由：编辑只发生在已展开的那一格

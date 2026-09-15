@@ -7,9 +7,9 @@
 //
 // 装饰（Decoration）机制与既有的诊断波浪线同源（见 Editor.svelte 的 diagnosticsCompartment），
 // 只是装饰类型由 `mark` 换成 `replace({ widget })`。
-import { Decoration, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
+import { Decoration, EditorView, ViewPlugin, WidgetType, keymap } from "@codemirror/view";
 import type { DecorationSet, ViewUpdate } from "@codemirror/view";
-import { StateEffect, StateField } from "@codemirror/state";
+import { EditorSelection, Prec, StateEffect, StateField } from "@codemirror/state";
 import type { EditorState, Extension, Range, Text } from "@codemirror/state";
 import { mathCacheKey, scanMathRanges, selectionTouchesRange } from "./math-ranges";
 import type { MathRange } from "./math-ranges";
@@ -18,7 +18,7 @@ import type { MarkupKind } from "./markup-ranges";
 import { scanNonMarkupRegions } from "./typst-lex";
 import type { Region } from "./typst-lex";
 import { buildMathContext } from "./math-context";
-import { applyBlockSelection, planBlockCovers } from "./block-plan";
+import { applyBlockSelection, planBlockCovers, verticalBlockTarget } from "./block-plan";
 import type { Block, BlockCover } from "./block-plan";
 import { MATH_SIZE_PT } from "./typst-engine";
 import type { MathRender } from "./typst-engine";
@@ -573,9 +573,9 @@ export function livePreview(opts: LivePreviewOptions): Extension {
    * 任何装饰计算出的意外都必须退化成"不挂装饰"（源码照常显示、编辑照常可用），
    * 并把原因写进控制台，绝不冒泡到 CodeMirror 的事务里。
    */
-  const collect = (state: EditorState): DecorationSet => {
+  const collect = (state: EditorState): { deco: DecorationSet; covers: BlockCover[] } => {
     try {
-        if (!opts.enabled()) return Decoration.none;
+        if (!opts.enabled()) return { deco: Decoration.none, covers: [] };
         // 一次重建里 lexer 只跑一遍：区域扫描结果同时喂给公式与标记两条扫描
         // （此前两条路径各自再扫一遍，40k 字符文档实测每次按键 ~14ms，合并后约 1/3）
         const doc = state.doc.toString();
@@ -593,26 +593,68 @@ export function livePreview(opts: LivePreviewOptions): Extension {
           ...buildMathDecorations(state, opts, math, context, covered),
           ...buildMarkupDecorations(state, { opaque, math }, covered),
         ];
-        if (all.length === 0) return Decoration.none;
-        // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）
-        return Decoration.set(all, true);
+        return {
+          // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）
+          deco: all.length === 0 ? Decoration.none : Decoration.set(all, true),
+          // 格子表交给"跨块竖直移动"用（见 blockVerticalMoves）：它要按格子找相邻块
+          covers,
+        };
     } catch (e) {
       console.error("[live-preview] 装饰重建失败，已退化为源码显示：", e);
-      return Decoration.none;
+      return { deco: Decoration.none, covers: [] };
     }
   };
 
-  const decoField = StateField.define<DecorationSet>({
+  const decoField = StateField.define<{ deco: DecorationSet; covers: BlockCover[] }>({
     create: (state) => collect(state),
-    update(deco, tr) {
+    update(value, tr) {
       const refreshed = tr.effects.some((e) => e.is(refreshLivePreview));
       if (tr.docChanged || tr.selection || refreshed) {
         return collect(tr.state);
       }
-      return deco.map(tr.changes);
+      return { ...value, deco: value.deco.map(tr.changes) };
     },
-    provide: (f) => EditorView.decorations.from(f),
+    provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
   });
+
+  /**
+   * **跨块竖直移动**（修「在最后一块前面按上，跳回文档开头」）：
+   * CodeMirror 的竖直移动会跳过所有 widget 去找文本行（见 `posAtCoords`），而写作模式的
+   * 切片全是 widget —— 一路跳过就扫到内容顶部、返回位置 0。这里只在"默认结果会跨格"时接管，
+   * 把光标放到相邻格的边界上；块内移动一律交回默认行为（逐行、保留目标列）。
+   * 判定是纯函数 `verticalBlockTarget`（可单测），这里只做 CM 的接线。
+   */
+  const blockVerticalMoves = Prec.high(
+    keymap.of([
+      { key: "ArrowUp", run: (view) => crossBlock(view, -1) },
+      { key: "ArrowDown", run: (view) => crossBlock(view, 1) },
+      // PageUp/PageDown 走的是同一条 `moveVertically`，会有同样的"跳过 widget 跳到底"问题
+      { key: "PageUp", run: (view) => crossBlock(view, -1) },
+      { key: "PageDown", run: (view) => crossBlock(view, 1) },
+    ]),
+  );
+
+  function crossBlock(view: EditorView, dir: -1 | 1): boolean {
+    try {
+      const covers = view.state.field(decoField).covers;
+      if (covers.length === 0) return false;
+      const sel = view.state.selection;
+      // 多光标 / 非空选区：不接管（选区扩展有自己的语义）
+      if (sel.ranges.length !== 1 || !sel.main.empty) return false;
+      const fallback = view.moveVertically(sel.main, dir > 0);
+      const target = verticalBlockTarget(covers, sel.main.head, fallback.head, dir);
+      if (target === null) return false;
+      view.dispatch({
+        selection: EditorSelection.cursor(target),
+        scrollIntoView: true,
+      });
+      return true;
+    } catch (e) {
+      // 兜底：任何意外都交回默认行为（绝不吞按键、也不抛进事务）
+      console.error("[live-preview] 跨块竖直移动失败，交回默认：", e);
+      return false;
+    }
+  }
 
   /** 收集「视口附近 + 尚未拿到结果」的公式渲染请求（父组件另有去重，重复调用无副作用） */
   const collectRequests = (
@@ -682,7 +724,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
       },
   );
 
-  return [decoField, requester, mathWidgetTheme];
+  return [decoField, blockVerticalMoves, requester, mathWidgetTheme];
 }
 
 /** 所见即所得相关样式（公式 widget + 常用标记） */

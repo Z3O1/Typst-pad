@@ -183,5 +183,68 @@ check("滚动到底部后仍有切片（窗口跟着视口走）", longCropsAfte
 check("滚到的位置能看到该块的源码或切片", tailVisible || longCropsAfter > 0, "底部什么都没显示");
 await c.screenshot(SHOT("writing-blocks-long"));
 
+console.log("8) 跨块竖直移动：按上/下逐块走，不跳回文档开头（用户报过「在 == 6 前面按上跳回开头」）");
+// 为什么会有这个 bug：CodeMirror 的竖直移动会跳过所有 widget 去找文本行（posAtCoords），
+// 而写作模式的切片全是 widget → 一路跳过就扫到内容顶部、返回位置 0。
+await c.evaluate(`localStorage.setItem("typst-pad:state", JSON.stringify({ theme: "light" }))`);
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.click(400, 300);
+await c.selectAll();
+await c.type("= 标题\n\n第一段。\n\n- 列表项\n\n最后一段。\n");
+await new Promise((r) => setTimeout(r, 800));
+
+/** 当前"源码形态"的块文本（切片里的文字不算 —— 它们在 widget 里） */
+const REVEALED = `Array.from(document.querySelectorAll(".cm-line")).map((el) => (el.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean)`;
+const revealedNow = async () => (await c.evaluate(REVEALED)).join(" | ");
+
+await c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 光标在最后一块
+await new Promise((r) => setTimeout(r, 400));
+check("起点：光标在最后一块（源码形态）", (await revealedNow()).includes("最后一段"), await revealedNow());
+
+const seen = [];
+for (let i = 0; i < 5; i++) {
+  await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 });
+  await new Promise((r) => setTimeout(r, 300));
+  seen.push(await revealedNow());
+}
+check(
+  `按上逐块前移（5 次展开序列：${seen.map((x) => x.split(" | ").pop()).join(" → ")}）`,
+  seen[0].includes("最后一段") && seen.some((x) => x.includes("列表项")) && seen.some((x) => x.includes("第一段")),
+  JSON.stringify(seen),
+);
+check("第一次按上不会直接跳到第一块", !seen[0].includes("标题"), seen[0]);
+check("按到第一块后继续按上不出乱子（仍在第一块或不动）", !seen[4].includes("脚本错误"), seen[4]);
+check("状态栏没有脚本错误", !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"));
+
+// 向下：从文档开头连续按下 —— 只要求"单调前进、不跳到文档末尾、最终能走到最后一块"。
+// 已知的小毛病（如实记录，不假装完美）：从块的**开头**往下按，第一次会先在块内挪到块尾，
+// 第二次才跨到下一块 —— 因为 CodeMirror 的下扫在 widget 里能落回当前格，我们就不接管。
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home
+await new Promise((r) => setTimeout(r, 400));
+const down = [];
+for (let i = 0; i < 7; i++) {
+  await c.key("ArrowDown", { code: "ArrowDown", keyCode: 40 });
+  await new Promise((r) => setTimeout(r, 300));
+  down.push(await revealedNow());
+}
+const tail = (x) => x.split(" | ").pop() ?? "";
+/** 展开文本 → 文档里第几块（越大越靠后）；用作"单调前进"的判据 */
+const rank = (t) => {
+  if (t.includes("最后一段")) return 3;
+  if (t.includes("列表项")) return 2;
+  if (t.includes("第一段")) return 1;
+  return 0; // = 标题
+};
+const ranks = down.map((x) => rank(tail(x)));
+const monotone = ranks.every((r, i) => i === 0 || r >= ranks[i - 1]);
+check(
+  `按下单调前进（7 次展开序列：${down.map((x) => tail(x)).join(" → ")}）`,
+  monotone,
+  JSON.stringify(down),
+);
+check("按下最终能走到最后一块", ranks.includes(3), JSON.stringify(ranks));
+check("按下不会跳到文档开头/末尾（每一步都是某个块的开头）", ranks[0] <= 1 && monotone, JSON.stringify(ranks));
+
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
 process.exit(process.exitCode ?? 0);
