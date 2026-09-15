@@ -70,9 +70,8 @@ const BLOCK_KINDS: &[SyntaxKind] = &[
     SyntaxKind::TermItem,
 ];
 
-/// 这些节点**只有独占整行时**才自成一块：行内 `$x$`、行内 `` `code` `` 必须留在段落里
-/// （否则一个段落会被切成三段，块级 widget 会把段落截断 —— 实测踩到过）。
-const LINE_ONLY_KINDS: &[SyntaxKind] = &[SyntaxKind::Raw, SyntaxKind::Equation, SyntaxKind::Code];
+/// 这些节点**只有独占整行时**才自成一块（`#let` / `#show` / `#table(...)` 这类代码表达式）。
+const LINE_ONLY_KINDS: &[SyntaxKind] = &[SyntaxKind::Code];
 
 /// 按**语法树顶层节点**切分源块。
 ///
@@ -123,7 +122,15 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
             continue;
         }
 
+        // 公式与 raw 的自成块判据**跟 typst 的语义走，不能看"是否独占整行"**（实测被真实文档咬过）：
+        //   * 公式：`$x$`（定界符内侧无空白）是**行内**的 —— 哪怕它独占整行，也仍属于同一个段落，
+        //     于是几个连续的 `$x$` 会被 typst 连排成一行；按"独占整行"切成多块会让这些块的带
+        //     互相重叠（实测：5 个公式的帧项全在同一个 y 带里交错，DOM 顺序与页面顺序对不上，
+        //     看起来就是"公式挤成一团"）。只有 `$ x $`（内侧有空白）才是行间公式，才打断段落。
+        //   * raw：`` `code` `` 是行内的，只有 ```` ``` ```` 围栏才是块。
         let own_block = BLOCK_KINDS.contains(&kind)
+            || (kind == SyntaxKind::Equation && is_display_equation(src, &range))
+            || (kind == SyntaxKind::Raw && is_fenced_raw(src, &range))
             || (LINE_ONLY_KINDS.contains(&kind) && is_alone_on_line(src, range.start, range.end));
 
         if own_block {
@@ -139,6 +146,27 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
     }
     close_para(&mut para, &mut out);
     out
+}
+
+/// 行间公式判据（与 typst 一致、也与前端 math-ranges 的判定一致）：
+/// **定界符内侧两侧都有空白** 的 `$ x $` 才是行间/块级公式；`$x$` 是行内公式。
+fn is_display_equation(src: &str, range: &Range<usize>) -> bool {
+    let text = &src[range.clone()];
+    let mut chars = text.chars();
+    if chars.next() != Some('$') {
+        return false;
+    }
+    let inner: String = text.chars().rev().skip(1).collect::<String>().chars().rev().collect();
+    let inner = inner.trim_start_matches('$');
+    match (inner.chars().next(), inner.chars().last()) {
+        (Some(first), Some(last)) => first.is_whitespace() && last.is_whitespace() && inner.trim().len() > 0,
+        _ => false,
+    }
+}
+
+/// 块级 raw 判据：必须是以 ```` ``` ```` 开头的围栏（`` `x` `` 是行内 raw）。
+fn is_fenced_raw(src: &str, range: &Range<usize>) -> bool {
+    src[range.clone()].trim_start().starts_with("```")
 }
 
 /// 该字节区间是否"独占整行"（前一行的残余与本行的后续都只有空白）
@@ -1311,6 +1339,50 @@ mod tests {
         ),
     ];
 
+    /// **分块判据必须跟 typst 语义走**（真实文档咬过一次：`$x$` 是行内公式，哪怕独占整行也
+    /// 不打断段落 —— 按"独占整行"把它当块，会让连续几个 `$x$` 的带互相重叠，看起来"公式挤成一团"）。
+    #[test]
+    fn block_partition_matches_typst_semantics() {
+        let blocks = |src: &str| {
+            source_blocks(src)
+                .into_iter()
+                .map(|b| (b.kind, src[b.range].to_string()))
+                .collect::<Vec<_>>()
+        };
+
+        // ① `$x$`（内侧无空白）= 行内公式：独占整行也留在段落里 → 连排的三个公式是**一块**
+        let inline = "设 $a=1$\n$b=2$\n$c=3$\n";
+        let got = blocks(inline);
+        assert_eq!(got.len(), 1, "行内公式不该把段落切开：{got:?}");
+        assert_eq!(got[0].0, "Paragraph");
+
+        // ② `$ x $`（内侧有空白）= 行间公式：自成一块（独占整行）
+        let display = "前文。\n\n$ a + b = c $\n\n后文。\n";
+        let got = blocks(display);
+        assert!(
+            got.iter().any(|(k, t)| *k == "Equation" && t.contains("a + b")),
+            "行间公式应自成一块：{got:?}"
+        );
+        assert_eq!(got.iter().filter(|(k, _)| *k == "Paragraph").count(), 2, "前后各有段落");
+
+        // ③ 行内 raw（单反引号）不是块；围栏 raw 是块
+        let raw = "正文里有 `code` 一段。\n\n```rust\nfn main() {}\n```\n\n后文。\n";
+        let got = blocks(raw);
+        assert_eq!(got.iter().filter(|(k, _)| *k == "Raw").count(), 1, "只有围栏算块：{got:?}");
+        assert!(
+            got.iter().any(|(k, t)| *k == "Raw" && t.starts_with("```")),
+            "块级 raw 应该是那段围栏：{got:?}"
+        );
+
+        // ④ 行间公式写在行中间也自成一块（typst 会打断段落）
+        let mid = "前文 $ a + b $ 后文。\n";
+        let got = blocks(mid);
+        assert!(
+            got.iter().any(|(k, _)| *k == "Equation"),
+            "行中间的行间公式也应自成一块：{got:?}"
+        );
+    }
+
     /// **切片几何不变量**（真实引擎产物，常驻测试）：
     ///  ① 每块宽度 = 正文列宽（横向切的是列不是墨迹）；
     ///  ② 各块高度之和 = 首块顶到底块底的纵向跨度（相邻块按中点分间距 ⇒ 摞起来不丢高度）；
@@ -1368,6 +1440,91 @@ mod tests {
             for pair in out.blocks.windows(2) {
                 assert!(pair[0].end <= pair[1].start, "[{name}] 块区间应递增不重叠");
             }
+        }
+    }
+
+    /// **真实文档体检**：读 `.browser-check/real-scene.typ`（用户给的真实文档）→ 编译 → 打印诊断与块表，
+    /// 并输出一条 `BLOCKFIXTURE`（给浏览器验收渲染截图用）。
+    /// 用法：先把文档存到该路径，再
+    /// `cargo test --manifest-path src-tauri/Cargo.toml dump_real_doc_fixture -- --ignored --nocapture`
+    #[test]
+    #[ignore = "按需运行：真实文档的块级渲染体检"]
+    fn dump_real_doc_fixture() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.browser-check/real-scene.typ");
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            println!("REALDOC: 读不到 {}（先把文档存到那里）", path.display());
+            return;
+        };
+        const COLUMN_PT: f64 = 371.25;
+        let out = compile_blocks(
+            src.clone(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        println!(
+            "REALDOC: ok={} 页数={:?} 块={} 诊断={} 源字符={}",
+            out.ok,
+            out.pages,
+            out.blocks.len(),
+            out.diagnostics.len(),
+            src.chars().count()
+        );
+        for d in &out.diagnostics {
+            println!("REALDOC-DIAG: [{}] 行{} 列{} {}", d.severity, d.line, d.column, d.message);
+        }
+        for b in &out.blocks {
+            println!(
+                "REALDOC-BLOCK: {:<10} [{:>4},{:>4}) y={:>6.1} h={:>6.1} found={:<5} svg={}KB",
+                b.kind,
+                b.start,
+                b.end,
+                b.y_pt,
+                b.height_pt,
+                b.found,
+                b.svg.len() / 1024
+            );
+        }
+        // 把 == 5 那一段（y 480..540）的帧项按 y 排出来：判断"公式挤在一起"是 typst 自己的
+        // 排版，还是块切片的锅（切片只能读帧、不可能挪动内容 —— 这条输出就是证据）
+        {
+            let injected = "#set page(width: 487.30pt, height: auto, margin: 58.02pt)\n";
+            let world = TypstWorld::new(
+                format!("{injected}{src}"),
+                None,
+                &fonts_dir(),
+                &FontConfig::default(),
+            );
+            if let typst::diag::Warned { output: Ok(doc), .. } = typst::compile::<PagedDocument>(&world) {
+                let (items, _) = collect_geometry(&world, &doc);
+                let doc_start = injected.len();
+                let mut in_region: Vec<(f64, usize, usize)> = items
+                    .iter()
+                    .filter(|i| i.rect.min.y.to_pt() > 480.0 && i.rect.min.y.to_pt() < 540.0)
+                    .map(|i| (i.rect.min.y.to_pt(), i.range.start.saturating_sub(doc_start), i.range.end.saturating_sub(doc_start)))
+                    .collect();
+                in_region.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                println!("REALDOC-REGION: y 480..540 的帧项 {} 个（y, 文档区间）", in_region.len());
+                for (y, a, b) in in_region.iter().take(40) {
+                    println!("  y={y:>6.1} 文档 [{a},{b})");
+                }
+            }
+        }
+        if out.ok {
+            println!(
+                "BLOCKFIXTURE:{}",
+                serde_json::json!({
+                    "name": "真实文档（数学作业）",
+                    "doc": src,
+                    "contentWidthPt": COLUMN_PT,
+                    "pageWidthPt": out.page_width_pt,
+                    "blocks": out.blocks,
+                })
+            );
         }
     }
 
