@@ -11,11 +11,12 @@ import {
   applyBlockSelection,
   carryOverCrops,
   changedSpan,
+  crossesCollapsedCover,
   planBlockCovers,
   remapBlocksThroughEdit,
   revealBlocksWithDiagnostics,
+  sourceVerticalTarget,
   toBlockTable,
-  verticalBlockTarget,
 } from "./block-plan";
 import type { Block, BlockCover } from "./block-plan";
 import type { BlockCrop } from "./typst-engine";
@@ -277,59 +278,75 @@ describe("carryOverCrops（窗口化：窗口外的块沿用上一轮切片）",
   });
 });
 
-describe("verticalBlockTarget（跨块竖直移动：修「按上跳回开头」）", () => {
-  const covers = () => {
-    const doc = "aaa\n\nbbb\n\nccc\n"; // 格子：[0,4) [4,9) [9,14)
-    const table = toBlockTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]);
-    return planBlockCovers(table.blocks, Text.of(doc.split("\n")));
+describe("竖直移动的判定（写作模式照代码模式走：逐源码行、空行也停、列保留）", () => {
+  /** 行：1 `aaa`(0-3) 2 空(4) 3 `bbb`(5-8) 4 空(9) 5 `ccc`(10-13) 6 空(14) */
+  const DOC = "aaa\n\nbbb\n\nccc\n";
+  /** 格子（空行归上一块）：[0,5) [5,10) [10,14)；光标在 cursor 处 → 那一格展开源码 */
+  const coversWith = (cursor: number) => {
+    const table = toBlockTable(DOC, [crop(0, 3), crop(5, 8), crop(10, 13)]);
+    const c = planBlockCovers(table.blocks, Text.of(DOC.split("\n")));
+    applyBlockSelection(c, [{ from: cursor, to: cursor, head: cursor }], DOC.length);
+    return c;
   };
 
-  it("块内移动不接管（交回 CodeMirror 的逐行行为）", () => {
-    const c = covers();
-    // 光标在第 2 格内，默认结果也落在第 2 格 → null
-    expect(verticalBlockTarget(c, 6, 5, -1)).toBeNull();
+  describe("crossesCollapsedCover（这一走要不要接管）", () => {
+    it("块内移动（默认结果在同一格）→ 不接管，交回 CodeMirror 的逐行行为", () => {
+      expect(crossesCollapsedCover(coversWith(6), 6, 5)).toBe(false);
+    });
+
+    it("默认落到段落之间那条空行 → 不接管（代码模式也在这里停一拍）", () => {
+      // 光标在第一块（位置 1）里，默认从 3 落到空行 4 —— 空行属**第一块自己的格子**（[0,5)）
+      expect(crossesCollapsedCover(coversWith(1), 3, 4)).toBe(false);
+      // 站在那条空行上再往上：落到 3 也还在第一格里
+      expect(crossesCollapsedCover(coversWith(4), 4, 3)).toBe(false);
+    });
+
+    it("站在空行上往下：默认会跳过整个 bbb 那一块 → 接管", () => {
+      expect(crossesCollapsedCover(coversWith(4), 4, 5)).toBe(false); // 正好停在下一块开头：不算跨
+      expect(crossesCollapsedCover(coversWith(4), 4, 9)).toBe(true); // 跳过整块 bbb
+    });
+
+    it("向上跨过未展开的切片 → 接管（「在最后一块按上跳回文档开头」那条）", () => {
+      expect(crossesCollapsedCover(coversWith(10), 10, 0)).toBe(true);
+    });
+
+    it("原地不动 / 没有格子（源码模式）→ 永不接管", () => {
+      expect(crossesCollapsedCover(coversWith(6), 6, 6)).toBe(false);
+      expect(crossesCollapsedCover([], 6, 5)).toBe(false);
+    });
   });
 
-  it("向上跨格 → 落到上一块正文的末尾（不是文档开头）", () => {
-    const c = covers();
-    // 光标在第 2 块的第一行行首（位置 5 = 第 2 格起点），默认结果会跑到第 1 格 → 接管
-    expect(verticalBlockTarget(c, 5, 0, -1)).toBe(3); // covers[0].block.to
-  });
+  describe("sourceVerticalTarget（逐源码行走的落点）", () => {
+    const doc = Text.of(DOC.split("\n"));
 
-  it("向下跨格 → 落到下一块**正文**的开头（不是格子里那条空行）", () => {
-    const c = covers();
-    // 格子 [5,10) 里的正文是 bbb[5,8)：往下应当落到 10（第三块正文开头），而不是 coverTo
-    expect(verticalBlockTarget(c, 8, 14, 1)).toBe(10);
-  });
+    it("↓ 走一行：段落之间那条空行也停（不是直接进下一段）", () => {
+      expect(sourceVerticalTarget(doc, 1, 1, 1, 1)).toBe(4); // aaa 第 1 列 → 空行（列夹到 0）
+    });
 
-  it("从块尾按 ↓ → 一次就进下一段正文（不再先停在段落之间的空行上）", () => {
-    const c = covers();
-    // 位置 3 = 第一块正文的末尾；CodeMirror 的默认结果会是那条空行（位置 4），
-    // 它在这一格的范围里但**不在这一块正文里** → 接管，直接落到 bbb 的开头
-    expect(verticalBlockTarget(c, 3, 4, 1)).toBe(5);
-    // 光标已经在空行（位置 4，属于**上一格**）上时，默认结果 5 就是下一段正文的开头
-    // → 接管结果与默认一致 → 返回 null（不接管，省一次滚动锚定）
-    expect(verticalBlockTarget(c, 4, 5, 1)).toBeNull();
-  });
+    it("站在空行上再 ↓ → 下一块正文的开头", () => {
+      expect(sourceVerticalTarget(doc, 4, 1, 1, 0)).toBe(5);
+    });
 
-  it("多行块内逐行移动仍然不接管（块内正文没走完）", () => {
-    const doc = "aaa\nline2\nline3\n\nbbb\n";
-    const table = toBlockTable(doc, [crop(0, 15), crop(17, 20)]);
-    const c = planBlockCovers(table.blocks, Text.of(doc.split("\n")));
-    // 光标在第一行，默认结果落到第二行（仍在第一块正文里）→ 不接管
-    expect(verticalBlockTarget(c, 0, 4, 1)).toBeNull();
-    // 从块尾往下 → 落到下一块正文开头；这里接管结果与默认结果一致 → 返回 null（不接管）
-    expect(verticalBlockTarget(c, 15, 17, 1)).toBeNull();
-  });
+    it("↑ 走一行：第二块行首的上面是那条空行，不是上一块的行尾", () => {
+      expect(sourceVerticalTarget(doc, 5, -1, 1, 0)).toBe(4);
+    });
 
-  it("已经在第一/最后一格 → 不接管（保持默认：不动）", () => {
-    const c = covers();
-    expect(verticalBlockTarget(c, 1, 0, -1)).toBeNull(); // 第一格再往上
-    expect(verticalBlockTarget(c, 12, 14, 1)).toBeNull(); // 最后一格再往下
-  });
+    it("列保留，但按目标行长度夹住", () => {
+      const two = Text.of(["aaaaa", "bbbbb", ""]);
+      expect(sourceVerticalTarget(two, 3, 1, 1, 3)).toBe(9); // 第 4 列 → 下一行第 4 列
+      expect(sourceVerticalTarget(two, 9, -1, 1, 3)).toBe(3); // 来回对称
+      expect(sourceVerticalTarget(doc, 12, 1, 1, 2)).toBe(14); // 目标行是空行 → 夹到 0 列
+      expect(sourceVerticalTarget(doc, 4, -1, 1, 2)).toBe(2); // 目标行 `aaa` 只有 3 列
+    });
 
-  it("没有格子（源码模式）→ 永不接管", () => {
-    expect(verticalBlockTarget([], 3, 0, -1)).toBeNull();
+    it("走一屏的行数（翻页用同一套语义）", () => {
+      expect(sourceVerticalTarget(doc, 0, 1, 3, 0)).toBe(9); // 第 1 行 → 第 4 行
+    });
+
+    it("到第一/最后一行 → null（交回默认，那里有「落到行首/行尾」的兜底）", () => {
+      expect(sourceVerticalTarget(doc, 1, -1, 1, 0)).toBeNull();
+      expect(sourceVerticalTarget(doc, 14, 1, 1, 0)).toBeNull();
+    });
   });
 });
 

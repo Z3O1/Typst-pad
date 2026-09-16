@@ -319,46 +319,58 @@ export function applyBlockSelection(
 }
 
 /**
- * **跨块竖直移动的落点**（ArrowUp / ArrowDown / PageUp / PageDown 用）。
+ * **这条竖直走法会不会跨过未展开的切片**（写作模式的 ↑/↓ 判定用，纯函数）。
  *
- * 为什么需要自己算：CodeMirror 的竖直移动（`moveVertically`）是从光标往上/下逐像素扫，
+ * 为什么需要它：CodeMirror 的竖直移动（`moveVertically`）是从光标往上/下逐像素扫，
  * 找到**文本行**才停 —— 而它的扫描会**跳过所有非文本块**（widget，见 `posAtCoords`：
- * `if (block.type != BlockType.Text) { yOffset = block.top - halfLine; continue }`）。
- * 写作模式的切片全是 widget，于是"往上"时它会一路跳过所有切片、扫到内容顶部，
- * 然后返回**位置 0** —— 用户看到的就是「在 `== 6` 前面按上，跳回文档开头」（实测复现）。
+ * `if (block.type != BlockType.Text) { yOffset = block.bottom + halfLine; continue }`）。
+ * 写作模式的切片全是 widget，于是默认结果可能是"跨过一整块"（从段落末行直接落到下一段），
+ * "往上"时甚至一路跳过所有切片扫到内容顶部、返回**位置 0** —— 用户报过
+ * 「在 `== 6` 前面按上，跳回文档开头」（实测复现）。
  *
- * 规则（阶段 2 起按"视觉上的下一块"判定，不再按格子）：
- *  - 默认结果**仍在当前块的正文里**（多行块内逐行移动）→ 不接管，交回 CodeMirror；
- *  - 一旦会走到块外（含格子那一圈"块前后的空行"）→ 接管，落到相邻块**正文**的边界上：
- *    向下 = 下一块的 `block.from`（下一段正文的开头，而不是格子里那条空行）、
- *    向上 = 上一块的末字符。
+ * 于是写作模式的竖直移动只看这一条：
+ *  - **没跨过切片** → 默认结果就是代码模式的行为（逐可见行、保留目标列、空行也停），交回默认；
+ *  - **跨过了** → 默认把切片当空气跳过去了，改由 `sourceVerticalTarget` 按**源码行**走。
  *
- * 为什么要看 `block` 而不是 `cover`：格子为了吃掉块前的空行会往前扩一圈，于是"往下走一格"
- * 会先落在两个段落之间那条空行上（第一次按 ↓ 停在空行、第二次才进下一段，"一次一段"的手感
- * 断成两拍）。块与块之间的空行在排版里本来只是段落间距，视觉上不该停一拍。
- *
- * 返回 null = 不接管（调用方把按键交回默认行为）。
+ * 区间按**开区间**判（两端不算）：光标自己所在的格子必然是展开的（`applyBlockSelection`
+ * 保证"光标所在格 reveal"），"落在切片边界上"不算跨越。
  */
-export function verticalBlockTarget(
+export function crossesCollapsedCover(
   covers: readonly BlockCover[],
-  pos: number,
-  defaultTarget: number,
+  from: number,
+  to: number,
+): boolean {
+  if (covers.length === 0 || from === to) return false;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  return covers.some((c) => !c.revealed && c.coverFrom < hi && c.coverTo > lo);
+}
+
+/**
+ * **按源码行走一步（或一屏的行数）** —— 写作模式 ↑/↓ 的落点（纯函数）。
+ *
+ * 用户 2026-09-16 的要求：「光标移动和代码模式的光标移动一样」。所以这里的语义就照代码模式抄：
+ *  - 一次走**一行源码**（`lines = 1`；翻页传一屏的行数），空行照样停一拍；
+ *  - **保留列**（`chars`，按目标行的长度夹住）；
+ *  - 到第一行 / 最后一行返回 null —— 调用方把按键交回默认行为（`cursorByLine` 在走不动时
+ *    会落到行首/行尾，这个兜底也得留着）。
+ *
+ * 目标行此刻多半还盖在切片里（这正是"默认会跨过切片"的原因），切片里量不到字符的像素位置
+ * （图片里没有文本），所以列只能用**字符列**估一个初值；块展开之后再由调用方按真实几何校正
+ * （见 live-preview 的 `measureColumn`）。
+ */
+export function sourceVerticalTarget(
+  doc: Text,
+  head: number,
   dir: -1 | 1,
+  lines: number,
+  chars: number,
 ): number | null {
-  if (covers.length === 0) return null;
-  const idx = covers.findIndex((c) => pos >= c.coverFrom && pos < c.coverTo);
-  if (idx < 0) return null;
-  const cur = covers[idx];
-  // 默认结果仍落在**本块正文**内 → 块内移动，交回默认（多行块逐行走）
-  if (defaultTarget >= cur.block.from && defaultTarget < cur.block.to) return null;
-  const next = dir > 0 ? idx + 1 : idx - 1;
-  if (next < 0 || next >= covers.length) return null;
-  const target =
-    dir > 0
-      ? covers[next].block.from // 下一段正文的开头（跳过块前那条空行）
-      : Math.max(0, covers[next].block.to); // 上一段正文的末尾（**用块而不是格子**：格子现在含块尾空行）
-  // 接管的结果与 CodeMirror 默认结果一致时不必接管（省掉一次多余的滚动锚定）
-  return target === defaultTarget ? null : target;
+  const line = doc.lineAt(head);
+  const number = line.number + dir * Math.max(1, Math.round(lines));
+  if (number < 1 || number > doc.lines) return null;
+  const target = doc.line(number);
+  return target.from + Math.max(0, Math.min(Math.round(chars), target.length));
 }
 
 /**

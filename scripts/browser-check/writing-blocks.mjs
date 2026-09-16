@@ -187,9 +187,14 @@ check("滚动到底部后仍有切片（窗口跟着视口走）", longCropsAfte
 check("滚到的位置能看到该块的源码或切片", tailVisible || longCropsAfter > 0, "底部什么都没显示");
 await c.screenshot(SHOT("writing-blocks-long"));
 
-console.log("8) 跨块竖直移动：按上/下逐块走，不跳回文档开头（用户报过「在 == 6 前面按上跳回开头」）");
-// 为什么会有这个 bug：CodeMirror 的竖直移动会跳过所有 widget 去找文本行（posAtCoords），
-// 而写作模式的切片全是 widget → 一路跳过就扫到内容顶部、返回位置 0。
+console.log("8) 竖直移动 = 代码模式：逐源码行走、空行也停、列保留、Shift 扩选（用户：「光标移动和代码模式的光标移动一样」）");
+// 历史：这一组以前锁的是"一次跨一整块"（从段落末行直接进下一段、向上落到上一块末字符），
+// 理由写在 block-plan.verticalBlockTarget 里。用户 2026-09-16 明确要求「和代码模式一样」→
+// 现在改成：默认走法**没跨过切片**就完全交回 CodeMirror（逐可见行、空行也停、列保留），
+// 跨过了才按**源码行**走一行（落点在切片里 → 那一块展开）。判定见 block-plan 的
+// crossesCollapsedCover + sourceVerticalTarget。
+// "按上不许跳回文档开头"这条仍然锁在这里：CodeMirror 的竖直移动会跳过所有 widget，
+// 一路扫到内容顶部返回**位置 0**（用户报过「在 == 6 前面按上跳回开头」）。
 await c.evaluate(`localStorage.setItem("typst-pad:state", JSON.stringify({ theme: "light" }))`);
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
@@ -201,59 +206,148 @@ await new Promise((r) => setTimeout(r, 800));
 /** 当前"源码形态"的块文本（切片里的文字不算 —— 它们在 widget 里） */
 const REVEALED = `Array.from(document.querySelectorAll(".cm-line")).map((el) => (el.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean)`;
 const revealedNow = async () => (await c.evaluate(REVEALED)).join(" | ");
-
-await c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 光标在最后一块
-await new Promise((r) => setTimeout(r, 400));
-check("起点：光标在最后一块（源码形态）", (await revealedNow()).includes("最后一段"), await revealedNow());
-
-const seen = [];
-for (let i = 0; i < 5; i++) {
+/**
+ * 光标所在的**源码行**（第几行、第几列、行文本）+ 光标的屏幕 x + 当前展开的块文本。
+ * 逐行移动的验收全靠它：空行上没有文本，"光标在哪一行"只能这样读。
+ */
+const CARET = `(() => {
+  const el = document.querySelector(".cm-content");
+  const view = el && el.cmTile && el.cmTile.root && el.cmTile.root.view;
+  if (!view) return null;
+  const sel = view.state.selection.main;
+  const line = view.state.doc.lineAt(sel.head);
+  const coords = view.coordsAtPos(sel.head, sel.assoc);
+  return {
+    head: sel.head,
+    anchor: sel.anchor,
+    empty: sel.empty,
+    line: line.number,
+    col: sel.head - line.from,
+    lineText: line.text,
+    docLines: view.state.doc.lines,
+    docLength: view.state.doc.length,
+    x: coords ? coords.left : null,
+    revealed: Array.from(document.querySelectorAll(".cm-line"))
+      .map((e) => (e.textContent || "").replace(/\\s+/g, " ").trim())
+      .filter(Boolean)
+      .join(" | "),
+  };
+})()`;
+const caret = () => c.evaluate(CARET);
+const arrowDown = async () => {
+  await c.key("ArrowDown", { code: "ArrowDown", keyCode: 40 });
+  await new Promise((r) => setTimeout(r, 250));
+  return caret();
+};
+const arrowUp = async () => {
   await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 });
-  await new Promise((r) => setTimeout(r, 300));
-  seen.push(await revealedNow());
-}
+  await new Promise((r) => setTimeout(r, 250));
+  return caret();
+};
+
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home → 文档开头（第一块）
+await new Promise((r) => setTimeout(r, 400));
+const start = await caret();
 check(
-  `按上逐块前移（5 次展开序列：${seen.map((x) => x.split(" | ").pop()).join(" → ")}）`,
-  seen[0].includes("最后一段") && seen.some((x) => x.includes("列表项")) && seen.some((x) => x.includes("第一段")),
-  JSON.stringify(seen),
+  `起点：光标在第 1 行第 1 列（标题块展开源码）`,
+  start.line === 1 && start.col === 0 && start.revealed.includes("标题"),
+  JSON.stringify(start),
 );
-check("第一次按上不会直接跳到第一块", !seen[0].includes("标题"), seen[0]);
-check("按到第一块后继续按上不出乱子（仍在第一块或不动）", !seen[4].includes("脚本错误"), seen[4]);
+
+// ① ↓ 逐行走：段落之间那条空行也要停一拍（代码模式如此）
+const d1 = await arrowDown();
+check(
+  `↓ 一次 → 第 2 行（段落之间那条空行，不是直接进下一段）`,
+  d1.line === 2 && d1.lineText === "" && d1.revealed.includes("标题"),
+  JSON.stringify(d1),
+);
+const d2 = await arrowDown();
+check(
+  `↓ 再一次 → 第 3 行第 1 列（下一块正文开头，那一块因此展开）`,
+  d2.line === 3 && d2.col === 0 && d2.lineText.startsWith("第一段") && d2.revealed.includes("第一段"),
+  JSON.stringify(d2),
+);
+check(
+  `跨到下一块之后，上一块照旧变回切片（标题不在源码形态里）`,
+  !d2.revealed.includes("标题"),
+  d2.revealed,
+);
+// ② ↑ 逐行走：第二块行首的上面是那条空行（不是上一块的行尾、更不是文档开头）
+const u1 = await arrowUp();
+check(
+  `↑ 一次 → 回到第 2 行（空行；不是上一块的末字符、不是文档开头）`,
+  u1.line === 2 && u1.head !== 0,
+  JSON.stringify(u1),
+);
+const u2 = await arrowUp();
+// 落点允许是第 1~3 列：写作模式把标题的 `= ` 标记**藏起来**了（位置 0~2 都在被藏的那一段里），
+// 所以"行首可见文本处"就是位置 2 —— 与"点在标题行最左边"落到的位置一致。
+check(
+  `↑ 再一次 → 第 1 行（列 ${u2.col} 落在标题行首，写作模式藏了 \`= \` 标记）`,
+  u2.line === 1 && u2.col <= 2,
+  JSON.stringify(u2),
+);
+check(`连续 ↑ 到底也没有跳回/跳过（停在位置 ${u2.head}）`, u2.head <= 2, JSON.stringify(u2));
+
+// ③ 列保留：从段落行尾往下走两行，光标仍落在**同一水平位置**上（代码模式的目标列语义）
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+await arrowDown(); // → 空行
+await arrowDown(); // → 第一段
+await c.key("End", { code: "End", keyCode: 35 }); // 行尾
+await new Promise((r) => setTimeout(r, 250));
+const colStart = await caret();
+const colStep1 = await arrowDown(); // → 空行（夹到第 1 列）
+const colStep2 = await arrowDown(); // → 列表项那一行
+check(
+  `列保留：从「第一段。」行尾（列 ${colStart.col}）往下两行后仍在同一水平位置（x ${colStart.x?.toFixed(0) ?? "?"} → ${colStep2.x?.toFixed(0) ?? "?"}）`,
+  colStep1.lineText === "" && colStep2.lineText.startsWith("- 列表项") &&
+    colStart.x !== null && colStep2.x !== null && Math.abs(colStep2.x - colStart.x) <= 16,
+  JSON.stringify({ colStart, colStep1: colStep1.head, colStep2 }),
+);
+
+// ④ 从文档末尾连续 ↑：**一次一行**地往回走，绝不跳回文档开头（原来那条用户报的 bug）
+await c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 文档末尾
+await new Promise((r) => setTimeout(r, 400));
+const fromEnd = await caret();
+check("起点：光标在文档末尾（最后一块展开源码）", fromEnd.revealed.includes("最后一段"), JSON.stringify(fromEnd));
+const ups = [fromEnd];
+for (let i = 0; i < 5; i++) ups.push(await arrowUp());
+const backwards = ups.slice(1).every((s, i) => s.line === ups[i].line - 1);
+check(
+  `连续 ↑ 每次只退一行（行号 ${ups.map((s) => s.line).join(" → ")}）`,
+  backwards,
+  JSON.stringify(ups.map((s) => ({ line: s.line, col: s.col, head: s.head }))),
+);
+check(
+  `第一次按上不会直接跳回文档开头（位置 ${ups[1].head}）`,
+  ups[1].head !== 0,
+  JSON.stringify(ups[1]),
+);
+check("按到第 1 行后不再动（位置 0）", ups[ups.length - 1].line > 1 || ups[ups.length - 1].head === 0, JSON.stringify(ups[ups.length - 1]));
 check("状态栏没有脚本错误", !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"));
 
-// 向下：从文档开头连续按下 —— 只要求"单调前进、不跳到文档末尾、最终能走到最后一块"。
-// 阶段 2 起"下一次按 ↓ 就进下一段正文"（跨越段落之间那条空行，见 block-plan.verticalBlockTarget）：
-// 所以从第一段往下按一下就该看到第二段，而不是先停在空行上。
-await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home
-await new Promise((r) => setTimeout(r, 400));
-const down = [];
-for (let i = 0; i < 7; i++) {
-  await c.key("ArrowDown", { code: "ArrowDown", keyCode: 40 });
-  await new Promise((r) => setTimeout(r, 300));
-  down.push(await revealedNow());
-}
-const tail = (x) => x.split(" | ").pop() ?? "";
-/** 展开文本 → 文档里第几块（越大越靠后）；用作"单调前进"的判据 */
-const rank = (t) => {
-  if (t.includes("最后一段")) return 3;
-  if (t.includes("列表项")) return 2;
-  if (t.includes("第一段")) return 1;
-  return 0; // = 标题
-};
-const ranks = down.map((x) => rank(tail(x)));
-const monotone = ranks.every((r, i) => i === 0 || r >= ranks[i - 1]);
+// ⑤ Shift+↓：扩选也走同一套语义（过去没接管 → CodeMirror 默认会跳过整块切片）
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+const shiftStart = await caret();
+await c.key("ArrowDown", { code: "ArrowDown", keyCode: 40, modifiers: 8 }); // Shift+↓
+await new Promise((r) => setTimeout(r, 250));
+const shift1 = await caret();
+await c.key("ArrowDown", { code: "ArrowDown", keyCode: 40, modifiers: 8 });
+await new Promise((r) => setTimeout(r, 250));
+const shift2 = await caret();
 check(
-  `按下单调前进（7 次展开序列：${down.map((x) => tail(x)).join(" → ")}）`,
-  monotone,
-  JSON.stringify(down),
+  `Shift+↓ 逐行扩选（行号 ${shiftStart.line} → ${shift1.line} → ${shift2.line}，anchor 不动）`,
+  !shift2.empty &&
+    shift2.anchor === shiftStart.head &&
+    shift1.line === shiftStart.line + 1 &&
+    shift2.line === shiftStart.line + 2 &&
+    shift2.head < shift2.docLength,
+  JSON.stringify({ shiftStart, shift1, shift2 }),
 );
-check("按下最终能走到最后一块", ranks.includes(3), JSON.stringify(ranks));
-check("按下不会跳到文档开头/末尾（每一步都是某个块的开头）", ranks[0] <= 1 && monotone, JSON.stringify(ranks));
-check(
-  "按 ↓ 一次就进下一段（跨越段落之间的空行，段段之间不再停一拍）",
-  rank(tail(down[0])) >= 1,
-  JSON.stringify(down.slice(0, 2)),
-);
+await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 }); // 收起选区（非空选区按 ↑ = 收到一端）
+await new Promise((r) => setTimeout(r, 250));
 
 
 // ---------------------------------------------------------------------------
@@ -387,6 +481,42 @@ await c.key("PageUp", { code: "PageUp", keyCode: 33, modifiers: 8 }); // Shift+P
 await new Promise((r) => setTimeout(r, 400));
 const shiftUp = await c.evaluate(VIEW);
 check("Shift+PageUp 仍然是选区扩展（anchor 不动、head 往回走）", shiftUp.anchor > shiftUp.head, JSON.stringify({ anchor: shiftUp.anchor, head: shiftUp.head }));
+
+// 两端：到头之后**不许绕过所有切片跳到另一头**（默认翻页在写作模式里就是这个毛病）
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home → 文档开头
+await new Promise((r) => setTimeout(r, 400));
+await c.key("PageUp", { code: "PageUp", keyCode: 33 });
+await new Promise((r) => setTimeout(r, 400));
+const topPage = await c.evaluate(VIEW);
+check(
+  `在文档开头按 PageUp 不会跳到文档末尾（位置 ${topPage.head} / ${topPage.docLength}）`,
+  topPage.head < topPage.docLength * 0.1,
+  JSON.stringify(topPage),
+);
+await c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 文档末尾
+await new Promise((r) => setTimeout(r, 400));
+await c.key("PageDown", { code: "PageDown", keyCode: 34 });
+await new Promise((r) => setTimeout(r, 400));
+const botPage = await c.evaluate(VIEW);
+check(
+  `在文档末尾按 PageDown 不会绕回文档开头（位置 ${botPage.head} / ${botPage.docLength}）`,
+  botPage.head > botPage.docLength * 0.9,
+  JSON.stringify(botPage),
+);
+// "已经滚到底、光标还在上面"时也必须真的走一屏 —— 修前这里会把位移夹成 0、交回默认翻页（= 跳到文档末尾）
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 400));
+await c.evaluate(`document.querySelector(".cm-scroller").scrollTop = 1e9`);
+await new Promise((r) => setTimeout(r, 400));
+const stuck0 = await c.evaluate(VIEW);
+await c.key("PageDown", { code: "PageDown", keyCode: 34 });
+await new Promise((r) => setTimeout(r, 500));
+const stuck1 = await c.evaluate(VIEW);
+check(
+  `滚到底再按 PageDown 仍然往前走一屏（位置 ${stuck0.head} → ${stuck1.head}，全文 ${stuck1.docLength}）`,
+  stuck1.head > stuck0.head && stuck1.head < stuck1.docLength * 0.5,
+  JSON.stringify({ before: stuck0.head, after: stuck1.head, docLength: stuck1.docLength }),
+);
 
 console.log("11) 编译失败：保留没被改到的切片 + 错误所在块看得到（阶段 2）");
 await c.goto(URL_BLOCKS);

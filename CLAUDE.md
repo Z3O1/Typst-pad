@@ -49,7 +49,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 15 项�
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
 
 # 写作模式「块级渲染」三套（需要 headless Chromium，见「环境备忘」；CDP_PORT 默认 9333）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，95 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，109 项）
 npm run fixtures:blocks                                                                   # 导出真实切片 + 点击探针
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs # 几何等价 + 链接热区（75 项）
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击→精确字符（24 项 / 125 次点击）
@@ -158,7 +158,7 @@ node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成�
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
 npm run fixtures:blocks         # 导出真实块切片 + 几何 + 点击探针到 .browser-check/（块级渲染验收用）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，95 项：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/块内 Enter/各种输入/拖选复制/整块选中）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，109 项：切片/展开/窗口化/竖直移动（代码模式语义）/点击锚定/翻页/编译失败/块内 Enter/各种输入/拖选复制/整块选中）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价 + 链接热区（真实产物，75 项）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击 → 精确字符（真实探针，24 项 / 125 次点击全中）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，50 项 / 9 篇）
@@ -199,7 +199,7 @@ src/lib/updater.ts          # 自动更新包装层：check → 可判别结果�
 src/lib/update-utils.ts     # 自动更新纯逻辑：启动检查延迟 / 进度换算 / 字节格式化 / 错误文案（可单测；**没有检查节流**，见「自动更新数据流」）
 src/lib/update-notes.ts     # 更新说明的 Markdown 渲染（受控子集 → 安全 HTML，先整体转义再生成标签；可单测）
 src/lib/block-offsets.ts    # 字节偏移 ↔ CodeMirror 位置（UTF-16）换算：CJK 一个字 3 字节 / emoji 4 字节，直接当位置用会整篇错位（可单测）
-src/lib/block-plan.ts       # 写作模式块级渲染的**规划**纯逻辑：块表 → "哪些格子被切片覆盖 / 哪一块展开源码 / 窗口外沿用上一轮切片 / 跨块竖直移动落点 / 编译失败保留哪些切片 / 诊断块展开"（可单测）
+src/lib/block-plan.ts       # 写作模式块级渲染的**规划**纯逻辑：块表 → "哪些格子被切片覆盖 / 哪一块展开源码 / 窗口外沿用上一轮切片 / 竖直移动的接管判定（crossesCollapsedCover）与逐源码行落点（sourceVerticalTarget）/ 编译失败保留哪些切片 / 诊断块展开"（可单测）
 src/lib/block-hit.ts        # 点击定位的坐标纯逻辑：切片内的点 → 页面坐标（pt，只依赖 DOM 实测矩形）+ 命中结果钳回块内（可单测）
 src/lib/scroll-anchor.ts    # 滚动锚定：把"光标该落在屏幕哪个高度"变成 CodeMirror 自己的 scrollIntoView 目标（**别自己写 scrollTop**，见「写作模式的块级渲染」）（可单测）
 src/lib/debug.ts            # 调试日志通道 dbg（dev 默认开；--debug / ?debug=1 / localStorage 可开）
@@ -321,10 +321,8 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   widget 自己身上、画到正文列最右边，且 `domAtPos` 退化成 `.cm-content`；实测同一场景两种算法：
   `coordsAtPos(head).left` = **1087（列右缘）→ 304（行首）**、`domAtPos` = `.cm-content` →
   `.cm-line`。下游三处必须一起跟着改：`remapBlocksThroughEdit` 的"空行上打字"落点改成
-  **末尾在改动点之前的最后一块**（原来是"之后的下一块"）、`verticalBlockTarget` 向上取
-  `covers[next].block.to`（不是 `coverTo - 1`，格子现在含块尾空行）、以及"接管结果与默认一致时
-  返回 null"（省一次多余的滚动锚定）。验收：`writing-blocks.mjs` **第 16 组**（删除修复时实测会红：
-  `x=1087`）。
+  **末尾在改动点之前的最后一块**（原来是"之后的下一块"）、以及"接管结果与默认一致时返回 null"
+  （省一次多余的滚动锚定）。验收：`writing-blocks.mjs` **第 16 组**（删除修复时实测会红：`x=1087`）。
 - **分块判据必须跟 typst 语义走，不能看"是否独占整行"（红线，被真实文档咬过）**：
   `$x$`（定界符内侧无空白）是**行内**公式 —— 哪怕独占整行也**不**打断段落，几个连续的 `$x$`
   会被 typst 连排成一行；只有 `$ x $`（内侧有空白）才是行间公式、才打断段落。
@@ -337,18 +335,28 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   丢弃 → 回退成源码/旧代码块 widget，而它的内容又被那张超长切片又画了一遍（**代码块和表格各
   出现两次 + 76px 空隙**，截图与夹具都留过证）。现在 `compile_blocks` 的第 2b 步把每块的
   bottom 夹到下一个块的 top，带高退化时留最小带而**不是丢块**（丢块会让前端当成"不可渲染"）。
-- **竖直移动必须自己接管（红线，用户报过「在最后一块按上跳回文档开头」）**：CodeMirror 的
-  `moveVertically` 是逐像素扫到**文本行**才停，而 `posAtCoords` 对 widget（非文本块）**直接跳过**
-  —— 写作模式的切片全是 widget，于是"往上"会一路跳过所有切片、扫到内容顶部返回**位置 0**。
-  修法：写作模式下用 `Prec.high` 接管 ArrowUp/ArrowDown：默认结果仍落在**本块正文**内就交回默认
-  （块内逐行、保留目标列），一旦会走到块外就把光标放到相邻块**正文**的边界（向上 = 上一块末字符，
-  向下 = 下一块的 `block.from`）。**参照是"块"不是"格子"**：格子为了吃掉块前空行会往前扩一圈，
-  按格子判会让 ↓ 先停在段落之间那条空行上（段段之间多一拍）。判定是纯函数
-  `block-plan.verticalBlockTarget`，浏览器验收第 8 组锁住（**别删**）。
+- **竖直移动 = 代码模式的语义（红线，2026-09-16 用户：「我希望光标移动和代码模式的光标移动一样」）**：
+  CodeMirror 的 `moveVertically` 是逐像素扫到**文本行**才停，而 `posAtCoords` 对 widget（非文本块）
+  **直接跳过** —— 写作模式的切片全是 widget，于是"往上"会一路跳过所有切片、扫到内容顶部返回
+  **位置 0**（用户报过「在 `== 6` 前面按上跳回开头」）。现在的规则只有两条（判定是纯函数：
+  `block-plan.crossesCollapsedCover` + `sourceVerticalTarget`）：
+  ① 默认走法**没跨过未展开的切片** → 一律**交回 CodeMirror 默认**（逐可见行、保留目标列、空行也停）；
+  ② 跨过了（默认把切片当空气跳过去了）→ 按**源码行**走一行：空行照样停一拍、列保留，
+  落点在切片里就把那一块展开（"光标进入即展开"）。列先用字符列估、紧接着用真实几何校正
+  （`live-preview.measureColumn`：目标那块在同一次事务里已经展开成源码，所以量得到）。
+  **Shift+↑/↓ 也一并接管**（以前没管 → 走到 CM 的 `selectLineDown`，同样跳过所有切片）。
+  **别退回"一次跨一整块"**（0.7.x 的 `verticalBlockTarget`）：它跳过段落之间那条空行、也丢掉目标列，
+  从第二段行首按 ↑ 会落到第一段的**行尾**，与代码模式不一致。验收：`writing-blocks.mjs` **第 8 组**
+  （14 项：逐行走 / 空行停一拍 / 列保留（光标 x 差 ≤16px）/ 连续 ↑ 每次只退一行且不跳回开头 /
+  Shift+↓ 逐行扩选）——**别删**。
 - **翻页（PageUp/PageDown，含 Shift 扩选）自己实现**（`live-preview.ts` 的 `pageMove`）：
-  CM 默认翻页 = `moveVertically(视口高)`，同样会跳过所有 widget → 直接跳文档首/尾。做法：把光标
-  当前的屏幕高度平移一屏作为查询点取位置，再**用滚动目标把光标钉回原来的屏幕高度**（内容走一屏、
-  光标不动）。没有块级渲染（源码模式）时交回默认。
+  CM 默认翻页 = `moveVertically(一屏高)`，同样会跳过所有 widget → 直接跳文档首/尾。做法与 CM 的
+  `cursorByPage` 同源：位移取 CM 的 `clientHeight - 5`（**别用 0.85 视口高那种经验值**），
+  把光标当前的屏幕高度平移一屏作为查询点取位置，再**用滚动目标把光标钉回原来的屏幕高度**
+  （内容走一屏、光标不动）。位移**不按"还剩多少滚动余量"夹**（夹成 0 会把按键交回默认，又回到
+  "一下跳到文档末尾"）；到头时由 `posAtCoords` 夹到文档首尾。没有块级渲染（源码模式）时交回默认。
+  验收：`writing-blocks.mjs` 第 10 组（含"文档开头按 PageUp 不跳末尾 / 末尾按 PageDown 不绕回开头 /
+  滚到底再按 PageDown 仍走一屏"三条）。
 - **打字期间不编译（红线，用户报「输入手感很差」）**：写作模式下**每一次按键**都会走一遍
   `scheduleCompile` → 整篇编译 + 窗口内每块渲一张切片（debug 构建几十~几百毫秒），而三个编译命令
   （`compile_doc` / `compile_blocks` / `compile_math`）**共用一把互斥锁** —— 实测在公式里打 12 个字符
