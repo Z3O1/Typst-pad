@@ -32,7 +32,7 @@
   import { loadState, saveState } from "$lib/persistence";
   import { decideAppKey, topModal } from "$lib/app-keys";
   import type { AppModal } from "$lib/app-keys";
-  import { isEffectiveDirty, ensureTrailingNewline } from "$lib/doc-utils";
+  import { isEffectiveDirty, ensureTrailingNewline, needsBlankOverwriteConfirm } from "$lib/doc-utils";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
   import ContextMenu from "$lib/ContextMenu.svelte";
@@ -264,6 +264,12 @@
   let zoomBaseline100 = 0;
   /** 正在设一次缩放并测量（期间不接受 resize 事件改基准——那是缩放自己引起的） */
   let zoomStepInFlight = false;
+  /**
+   * 本会话里**页面收到过多少次带 Ctrl 的滚轮事件**（只用于诊断，不参与任何判定）。
+   * 写进「界面缩放未生效」的文案里：0 次 ⇒ 事件压根没到页面（被引擎/系统吃掉了），
+   * 有次数 ⇒ 事件到了、是 `setZoom` 没生效。两种成因的修法完全不同，见 zoom.ts 的文案注解。
+   */
+  let zoomWheelEvents = 0;
   /**
    * 缩放沉降窗口的截止时间戳（见 zoom.ts 的注解）：从"我们让引擎改档"起算，到复核结束为止。
    * 这期间收到的 `resize` **不许**重校 100% 基准 —— 引擎改档本身就会引发一次 resize，
@@ -753,6 +759,7 @@
       widths: { baseline: zoomBaseline100, current: currentWidth },
       dpr: window.devicePixelRatio,
       dprFactor: dprEngineZoomNow(),
+      wheelEvents: zoomWheelEvents,
     });
   }
 
@@ -778,6 +785,17 @@
   }
 
   /**
+   * `Ctrl+Shift+=` / `Ctrl+Shift+-`：±1 格（用户 2026-09-16 要求）。
+   *
+   * 与滚轮走**同一条** setUiZoom → applyUiZoom → 复核链路，所以状态栏文案、存档、引擎复核
+   * 三处行为完全一致；差别只在于**没有滚轮手势**——WebView2 那条"手势结束时把 ZoomFactor 抹回去"
+   * 的路径（#1022）碰不到这里，这也是它被用户当"缩放失败的备用手段"的原因（见 app-keys.zoomKeySteps）。
+   */
+  function zoomBySteps(steps: 1 | -1) {
+    setUiZoom(steps > 0 ? zoomIn(uiZoom) : zoomOut(uiZoom));
+  }
+
+  /**
    * Ctrl+滚轮：放大/缩小整个界面（编辑区 + 预览 + 菜单 + 状态栏）。
    *
    * 命中时**必须 preventDefault**：否则这次滚动会继续滚动编辑器/预览区，WebView2 还可能顺手
@@ -793,6 +811,11 @@
   function handleZoomWheel(e: WheelEvent) {
     if (!e.ctrlKey) return;
     e.preventDefault();
+    // 计数只用于**诊断**（写进"未生效"文案，见 zoomRejectedNotice）：用户从 0.7.5 起反复反馈
+    // 「缩放调整失败」，而"页面压根没收到 Ctrl+滚轮"与"收到了但引擎没动"是完全不同的两个成因
+    // —— 前者说明事件在到达页面之前就被吃掉了（例如引擎自己那套缩放控件开着），
+    // 后者才是 setZoom 没生效。累计计数（不重置）就是为了让这条一眼可辨。
+    zoomWheelEvents += 1;
     setUiZoom(nextZoom(uiZoom, e.deltaY, e.deltaX, e.deltaMode));
   }
 
@@ -846,13 +869,14 @@
     schedulePersist();
   }
 
-  /** 有未保存修改时请求确认（打开/拖放/关联打开/重新读取前） */
+  /** 有未保存修改时请求确认（打开/拖放/关联打开/重新读取/新建前） */
   async function confirmDiscard(
     message = "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？",
+    title = "未保存的修改",
   ): Promise<boolean> {
     if (isTauri()) {
       return await confirm(message, {
-        title: "未保存的修改",
+        title,
         kind: "warning",
       });
     }
@@ -898,6 +922,16 @@
   }
 
   async function handleSave(): Promise<string | null> {
+    // 空文档写进**已有文件**会把它清空 —— 唯一的"能把磁盘文件变空"的路径，
+    // 所以多问一句（判定在 doc-utils.needsBlankOverwriteConfirm，可单测）。
+    // filePath 为 null 时不问：那是另存为，覆盖不到任何东西。
+    if (needsBlankOverwriteConfirm(filePath, doc)) {
+      const ok = await confirmDiscard(
+        `「${fileTitle}」的内容是空的（只有空白字符），保存会把磁盘上的文件也清空。仍要保存吗？`,
+        "保存空文档",
+      );
+      if (!ok) return null;
+    }
     try {
       const saved = await saveTypFile(filePath, doc);
       if (!saved) return null;
@@ -1019,8 +1053,22 @@
     sel.addRange(range);
   }
 
-  /** 新建：清空文档并清除持久化的上次内容 */
-  function handleNew() {
+  /**
+   * 新建：清空文档并清除持久化的上次内容。
+   *
+   * **有未保存内容时先确认**（2026-09-16 补）：这是全应用唯一"不问就丢内容"的路 ——
+   * 它把编辑器清空、`filePath` 置空，还顺手 `clearState()` 清掉会话存档，连"启动恢复上次内容"
+   * 那条后路一起断了；而「打开…」「Ctrl+R」都早有确认（`confirmDiscard`）。用户问过
+   * 「编辑器会清空文件吗」之后把这道确认补齐。
+   * （磁盘文件不受影响：`filePath` 被置空，紧接着按 Ctrl+S 走的是"另存为"，覆盖不到原文件。）
+   */
+  async function handleNew() {
+    if (isEffectiveDirty(dirty, doc)) {
+      const ok = await confirmDiscard(
+        "当前文档有未保存的修改，新建将丢弃这些修改。仍要新建吗？",
+      );
+      if (!ok) return;
+    }
     doc = "";
     editorDoc = "";
     filePath = null;
@@ -1100,12 +1148,15 @@
           },
           {
             label: "放大",
-            // 这里的 shortcut 不是真快捷键（MenuBar 的匹配器只支持「Ctrl+单键」，不会命中），
-            // 而是把操作姿势当灰字提示显示出来：Ctrl+滚轮 没法写进快捷键匹配
-            shortcut: "Ctrl+滚轮",
+            // 灰字提示：Ctrl+滚轮 是手势（写不进快捷键匹配），Ctrl+Shift+= 是这一对键盘键里的"加"
+            shortcut: "Ctrl+滚轮 / Ctrl+Shift+=",
             action: () => setUiZoom(zoomIn(uiZoom)),
           },
-          { label: "缩小", action: () => setUiZoom(zoomOut(uiZoom)) },
+          {
+            label: "缩小",
+            shortcut: "Ctrl+Shift+-",
+            action: () => setUiZoom(zoomOut(uiZoom)),
+          },
           {
             label: "重置缩放",
             checked: uiZoom === ZOOM_DEFAULT,
@@ -1754,6 +1805,12 @@
       case "format":
         e.preventDefault();
         runFormat(action.command);
+        return;
+      case "zoom":
+        // Ctrl+Shift+= / Ctrl+Shift+-：±1 格（用户要求）。走和滚轮同一条 setUiZoom → applyUiZoom → 复核。
+        // 必须 preventDefault：否则引擎自己那套缩放会一并插手（与我们的系数打架）。
+        e.preventDefault();
+        zoomBySteps(action.steps);
         return;
       case "reload-file":
         e.preventDefault(); // 仅在有文件时拦（没文件时 decideAppKey 已经返回 null，放行给浏览器刷新）

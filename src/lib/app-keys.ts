@@ -32,6 +32,7 @@ export type AppKeyAction =
   | { type: "reload-file" } // Ctrl+R：重新读取当前文件
   | { type: "new-window" } // Ctrl+Shift+N：新建窗口
   | { type: "close-window" } // Ctrl+W：关闭当前窗口
+  | { type: "zoom"; steps: 1 | -1 } // Ctrl+Shift+= / Ctrl+Shift+-：界面缩放 ±1 格
   | { type: "dismiss-modal"; modal: AppModal }; // Esc：关掉最上层的弹窗
 
 /**
@@ -54,6 +55,32 @@ export function topModal(open: Partial<Record<AppModal, boolean>>): AppModal | n
 }
 
 /**
+ * Ctrl+Shift+加 / Ctrl+Shift+减：界面缩放 ±1 格（用户 2026-09-16 要求
+ * 「加入 Ctrl + Shift + -/+ 调整一格的快捷键」）。
+ *
+ * **为什么要在滚轮之外再做一条键盘通道**（不是重复劳动）：Ctrl+滚轮那条路要穿过 WebView2 自己的
+ * 手势处理（见 CLAUDE.md「界面缩放」那节的 WebView2Feedback #1022 —— 引擎可能在手势进行中/结束时
+ * 把宿主设的 `ZoomFactor` 抹回手势开始时的值），而键盘不经过任何手势。所以它一身两用：
+ * ① 用户反复反馈「缩放调整还是会失败」时，这是一条**能用的替代操作**；
+ * ② 它同时是**判据** —— 键盘也推不动布局宽度 ⇒ 问题在 `setZoom` 本身；键盘能推、滚轮不能
+ *    ⇒ 问题在那条手势路径上（"未生效"文案里新加的「滚轮 N 次」就是为这个准备的）。
+ *
+ * 匹配放宽到「字符」与「物理键」两套：带 Shift 时 `key` 随键盘布局变（`=` → `+`、`-` → `_`），
+ * 而 `code` 恒为 `Equal` / `Minus`（小键盘另给 `NumpadAdd` / `NumpadSubtract`）。
+ *
+ * **必须带 Shift**：不带 Shift 的 `Ctrl+=` / `Ctrl+-` 是浏览器/引擎自己的缩放手势，不抢
+ * （用户要的就是带 Shift 的这一对）；带 Alt 的组合也不认（那在部分输入法/布局里另有含义）。
+ */
+export function zoomKeySteps(e: WrapKeyEvent): 1 | -1 | null {
+  if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return null;
+  if (e.key === "+" || e.key === "=" || e.code === "Equal" || e.code === "NumpadAdd") return 1;
+  if (e.key === "-" || e.key === "_" || e.code === "Minus" || e.code === "NumpadSubtract") {
+    return -1;
+  }
+  return null;
+}
+
+/**
  * 按键 → 动作。返回 null = 本页不处理（交回编辑器 / 浏览器 / 系统）。
  *
  * 判定顺序（改动前先读完这一段的理由）：
@@ -61,8 +88,10 @@ export function topModal(open: Partial<Record<AppModal, boolean>>): AppModal | n
  * 2. **Alt+Z**：自动换行开关。它没有 Ctrl/Meta，必须排在任何 `mod` 门之前（见 word-wrap）。
  * 3. **Ctrl/Cmd 门**：没有 Ctrl/Meta 一律不处理。
  * 4. **Ctrl+Shift+N**：新建窗口。**必须在格式表之前**——格式表那一支对 Shift 组合会 return。
- * 5. **Ctrl+Shift+<键>**：格式命令；表里没有的组合不处理（不抢系统的 Shift 手势）。
- * 6. **Ctrl+R / Ctrl+W**：重读文件 / 关窗。
+ * 5. **Ctrl+Shift+= / -**：界面缩放 ±1 格。同样排在格式表之前（格式表是"查表"，`=`/`-` 不在表里，
+ *    顺序上其实不冲突，但缩放属于"全局视图操作"，放在格式表之前更不容易被后续改动吃掉）。
+ * 6. **Ctrl+Shift+<键>**：格式命令；表里没有的组合不处理（不抢系统的 Shift 手势）。
+ * 7. **Ctrl+R / Ctrl+W**：重读文件 / 关窗。
  *
  * 注：Alt 修饰不参与判定（`Ctrl+Alt+R` 之类的怪组合按旧行为同样会触发），改动这里等于改行为，别顺手。
  */
@@ -77,6 +106,8 @@ export function decideAppKey(e: WrapKeyEvent, state: AppKeyState): AppKeyAction 
   if (e.shiftKey) {
     // **新建窗口必须排在格式表之前**（见文件头注释：曾经因为顺序反了而彻底失效）
     if (key === "n") return { type: "new-window" };
+    const steps = zoomKeySteps(e);
+    if (steps !== null) return { type: "zoom", steps };
     const command = SHIFT_FORMAT_COMMANDS[key];
     return command ? { type: "format", command } : null;
   }

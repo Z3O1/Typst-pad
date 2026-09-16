@@ -414,7 +414,16 @@ async function handleCommand(
     }
     case "write_file": {
       const path = typeof a.path === "string" ? a.path : FAKE_PATH;
-      fakeFiles.set(path, typeof a.content === "string" ? a.content : "");
+      const content = typeof a.content === "string" ? a.content : "";
+      fakeFiles.set(path, content);
+      // 每次写盘都留一条记录（含空内容）：验收据此断言"该写的写了 / 不该写的没写"。
+      // 用户 2026-09-16 问「编辑器会清空文件吗」—— 验收第 38 组靠它证明整个编辑过程里一次写盘都没有。
+      const w = window as unknown as Record<string, unknown>;
+      const writes = Array.isArray(w.__browserDevWrites)
+        ? (w.__browserDevWrites as Array<{ path: string; content: string }>)
+        : [];
+      writes.push({ path, content });
+      w.__browserDevWrites = writes;
       notify(command);
       return null;
     }

@@ -2262,6 +2262,13 @@ check(
 );
 
 // 反向：Ctrl+N（无 Shift）仍然是菜单「新建」——两套手势互不干扰
+//
+// ⚠️ 2026-09-16 起「新建」在有未保存内容时会**先确认**（见第 38 组那道防护），
+// 而这里只验"手势路由对不对"，所以先把内容清空：空文档没有可丢的东西，不弹确认，
+// 按下去必然直接新建。守卫本身的行为在第 38 组验。
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 300));
 await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 }); // 只按 Ctrl
 await new Promise((r) => setTimeout(r, 600));
 const afterCtrlN = await c.evaluate(`({
@@ -2506,6 +2513,210 @@ await c.key("Escape", { code: "Escape", keyCode: 27 });
 await new Promise((r) => setTimeout(r, 400));
 const afterEscAbout = await c.evaluate(aboutProbe);
 check("Esc 关掉关于弹窗", !afterEscAbout.open, JSON.stringify(afterEscAbout));
+
+// 第 38 组：**「编辑器会不会自己清空文件」的两道防护**
+// （用户 2026-09-16 问「编辑器会清空文件吗？？」）
+//
+// 审计结论：全工程只有 `saveTypFile` 一个 `.typ` 写入口，它只挂在显式保存上（菜单/右键「保存」、
+// Ctrl+S、关窗弹窗的「保存并关闭」），**没有自动保存、没有定时写盘**（页面里那几个 setTimeout
+// 分别管预览重排、缩放复核、公式队列、更新检查与会话存档的 300ms 防抖——最后那个写的是
+// localStorage，不是文件）。所以"应用自己把文件清空"这条路是堵住的，这一组把它钉死。
+//
+// 真正会丢内容/写空的只有两条，各补一道确认（本轮新加）：
+// ① 「新建」——它清空编辑器 + 置空 filePath + 清掉会话存档，此前**一句都不问**；
+// ② 「空文档 + 已有文件 + 按保存」——唯一能把磁盘文件写成空的组合。
+// ② 在本组只能断言"不写盘"（浏览器开发模式没有 filePath：`plugin:dialog|open` 对文件对话框
+// 返回 null，拿不到路径），它的判定函数 `needsBlankOverwriteConfirm` 由单测覆盖。
+console.log("38) 「编辑器会清空文件吗」——新建要先确认 + 全程不自动写盘");
+
+const writesProbe = `(window.__browserDevWrites || []).map((w) => ({
+  path: w.path, bytes: w.content.length,
+}))`;
+const statusProbe = `document.querySelector(".statusbar").innerText`;
+
+// ① 空文档上按 Ctrl+N：没有可丢的内容 → 不确认，直接新建（守卫不能把正常新建也拦死）
+//
+// 判据用**存档里的 dirty 翻转 + 内容为空**，不读状态栏、也不读 `innerText`：
+//  · 状态栏会被紧接着的一次编译从「已新建」顶成「就绪」（实测 500ms 后已经是「就绪」）；
+//  · `.cm-content` 的 innerText 对空文档返回的是 `"\n"`（1 个字符），不是 `""`（实测踩到，写检查时踩过一次）；
+//  · 存档会先被 `clearState()` 清掉（实测 +120ms 时还是 null），约 300ms 后又被一次设置持久化
+//    写回"空会话"（content 空 + dirty false），所以"存档为 null"这种瞬时状态不能当判据。
+// dirty 从 true 变 false 只有 handleNew（本组里没有保存/打开）能做到：确认一发就会被桩取消、
+// dirty 会留在 true，所以它正好能区分"弹了但被取消"和"没弹、直接新建"。
+await c.click(400, 300);
+await c.type("先随便写点，再删光，制造「空文档」这种状态\n");
+await new Promise((r) => setTimeout(r, 500));
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 700)); // 等存档防抖落地
+await c.evaluate(`(() => { window.__browserDevWrites = []; })()`);
+const archiveProbe = `(() => {
+  const raw = localStorage.getItem("typst-pad:state");
+  const s = raw ? JSON.parse(raw) : null;
+  return {
+    content: s ? s.content : null,
+    dirty: s ? s.dirty : null,
+    writes: (window.__browserDevWrites || []).length,
+  };
+})()`;
+const beforeBlankNew = await c.evaluate(archiveProbe);
+await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 900));
+const newOnBlank = await c.evaluate(archiveProbe);
+check(
+  "空文档上 Ctrl+N：没有可丢的内容 → 不弹确认，直接新建（dirty 被新建翻成 false）",
+  beforeBlankNew.content === "" &&
+    beforeBlankNew.dirty === true &&
+    newOnBlank.content === "" &&
+    newOnBlank.dirty === false &&
+    newOnBlank.writes === 0,
+  JSON.stringify({ before: beforeBlankNew, after: newOnBlank }),
+);
+
+// ② 输入内容（等过持久化防抖）→ 一次写盘都不该发生：应用从不自己写 .typ
+await c.click(400, 300);
+await c.type("= 不会被自动写走的内容\n这里是正文。\n");
+await new Promise((r) => setTimeout(r, 1200));
+const typedState = await c.evaluate(`({
+  chars: (document.querySelector(".cm-content").innerText || "").length,
+  writes: ${writesProbe},
+  saved: ${savedContent},
+})`);
+check(
+  "编辑内容后（含超过 300ms 持久化防抖）没有任何写盘动作：应用不会自己写文件",
+  typedState.chars > 0 && typedState.writes.length === 0,
+  JSON.stringify(typedState),
+);
+check(
+  "会话存档照常更新（存档走 localStorage，与文件无关）——内容是刚敲的那段",
+  String(typedState.saved).includes("不会被自动写走的内容"),
+  JSON.stringify(String(typedState.saved).slice(0, 60)),
+);
+
+// ③ 有未保存内容时 Ctrl+N：先确认。浏览器验收里的 confirm 桩固定返回 false（= 用户点「取消」），
+//    所以这里验的是"取消分支"：内容与存档都必须原样留着。
+const beforeNew = await c.evaluate(`({ content: ${savedContent}, chars: (document.querySelector(".cm-content").innerText || "").length })`);
+await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 600));
+const afterNewAttempt = await c.evaluate(`({
+  status: ${statusProbe},
+  content: ${savedContent},
+  chars: (document.querySelector(".cm-content").innerText || "").length,
+  writes: ${writesProbe},
+})`);
+check(
+  "有未保存内容时 Ctrl+N 先确认：取消（桩 confirm=false）→ 编辑器内容一字未丢",
+  afterNewAttempt.chars === beforeNew.chars && afterNewAttempt.chars > 0,
+  JSON.stringify({ before: beforeNew.chars, after: afterNewAttempt.chars }),
+);
+check(
+  "取消后没有真的新建：状态栏不是「已新建」、会话存档里的内容也还在（clearState 没执行）",
+  !afterNewAttempt.status.includes("已新建") &&
+    afterNewAttempt.content === beforeNew.content &&
+    afterNewAttempt.content.length > 0,
+  JSON.stringify({
+    status: afterNewAttempt.status,
+    saved: String(afterNewAttempt.content).slice(0, 40),
+  }),
+);
+
+// ④ 常见操作（切模式 / 缩放 / 等编译）之后仍然一次写盘都没有——把"应用从不自己写文件"钉得更死
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 }); // Ctrl+/ 切模式
+await new Promise((r) => setTimeout(r, 500));
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 800));
+await c.wheel(400, 300, -120, { modifiers: 2 }); // Ctrl+滚轮缩放
+await new Promise((r) => setTimeout(r, 900));
+const afterOps = await c.evaluate(`({ writes: ${writesProbe} })`);
+check(
+  "切模式 + 缩放之后依然没有任何写盘动作（写盘只可能来自显式保存）",
+  afterOps.writes.length === 0,
+  JSON.stringify(afterOps),
+);
+
+// 第 39 组：**`Ctrl+Shift+=` / `Ctrl+Shift+-` 调整界面缩放**（用户 2026-09-16 要求
+// 「加入 Ctrl + Shift + -/+ 调整一格的快捷键」）
+//
+// 存在的理由不只是"多一种操作"（见 app-keys.zoomKeySteps 的注解）：Ctrl+滚轮那条路要穿过
+// WebView2 的手势处理（#1022：引擎可能把手势里设的 ZoomFactor 抹回手势开始时的值），键盘不经过
+// 手势 —— 它既是可用的替代操作，也是判据：键盘也推不动 ⇒ 问题在 setZoom 本身；键盘能推、
+// 滚轮不能 ⇒ 问题在手势路径。所以这一组同时锁住"键位正确"与"确实改了状态/存档/引擎入参"。
+//
+// 断言全部**相对当前档位**写（本组跑在最后，前面的组可能把缩放留在非 100% 的位置）。
+console.log("39) Ctrl+Shift+= / Ctrl+Shift+- 调整界面缩放（用户要求）");
+
+const zoomPct = (z) => Math.round((z ?? 0) * 100);
+const z0 = await c.evaluate(zoomProbe);
+await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 }); // Ctrl+Shift+=
+await new Promise((r) => setTimeout(r, 400));
+const z1 = await c.evaluate(zoomProbe);
+check(
+  "Ctrl+Shift+= → 放大一格（引擎入参 +10%，状态栏与存档同步）",
+  Math.abs((z1.requested ?? 0) - ((z0.requested ?? 0) + 0.1)) < 0.001 &&
+    z1.status.includes(`缩放 ${zoomPct(z1.requested)}%`) &&
+    Math.abs((z1.saved ?? 0) - (z1.requested ?? 0)) < 0.001,
+  JSON.stringify({ before: z0.requested, after: z1.requested, status: z1.status, saved: z1.saved }),
+);
+check(
+  "状态栏出现常驻缩放徽标（与 Ctrl+滚轮那条路完全同一套反馈）",
+  z1.tags.some((t) => t.includes(`${zoomPct(z1.requested)}%`)),
+  JSON.stringify(z1.tags),
+);
+
+await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
+await new Promise((r) => setTimeout(r, 400));
+const z2 = await c.evaluate(zoomProbe);
+check(
+  "再按一次 → 再涨一格（一格 = 10%，不是一步跳到上限）",
+  Math.abs((z2.requested ?? 0) - ((z0.requested ?? 0) + 0.2)) < 0.001,
+  JSON.stringify({ before: z0.requested, after: z2.requested }),
+);
+
+await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 }); // Ctrl+Shift+-
+await new Promise((r) => setTimeout(r, 400));
+const z3 = await c.evaluate(zoomProbe);
+check(
+  "Ctrl+Shift+- → 缩小一格（回到刚才那一档）",
+  Math.abs((z3.requested ?? 0) - ((z0.requested ?? 0) + 0.1)) < 0.001,
+  JSON.stringify({ after: z3.requested }),
+);
+
+// 反向：不带 Shift 的 Ctrl+= 不归我们管（那是引擎/系统自己的缩放手势，别抢）
+const callsBeforePlain = z3.zoomCalls;
+await c.key("=", { code: "Equal", keyCode: 187, modifiers: 2 }); // 只按 Ctrl
+await new Promise((r) => setTimeout(r, 400));
+const z4 = await c.evaluate(zoomProbe);
+check(
+  "不带 Shift 的 Ctrl+= 不被我们接管（缩放没动、也没再让引擎改档）",
+  Math.abs((z4.requested ?? 0) - (z3.requested ?? 0)) < 0.001 && z4.zoomCalls === callsBeforePlain,
+  JSON.stringify({ requested: z4.requested, zoomCalls: z4.zoomCalls, before: callsBeforePlain }),
+);
+
+// 连按到下限：收敛在 50% 并提示"到边界了"（与滚轮同一条收敛逻辑）
+for (let i = 0; i < 14; i++) {
+  await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
+  await new Promise((r) => setTimeout(r, 120));
+}
+await new Promise((r) => setTimeout(r, 400));
+const zBottom = await c.evaluate(zoomProbe);
+check(
+  "连按 14 次 Ctrl+Shift+- → 收敛在 50% 并提示「到边界了」（不越界、不会冲成负数）",
+  Math.abs((zBottom.requested ?? 0) - 0.5) < 0.001 && zBottom.status.includes("到边界了"),
+  JSON.stringify({ requested: zBottom.requested, status: zBottom.status }),
+);
+
+// 收尾：走菜单「重置缩放」回到 100%（顺带验菜单入口没坏）
+await openMenu("视图");
+await c.waitFor(`document.body.innerText.includes("重置缩放")`, { timeout: 5000 });
+await clickMenuItem("重置缩放");
+await new Promise((r) => setTimeout(r, 500));
+const zReset = await c.evaluate(zoomProbe);
+check(
+  "菜单「视图 → 重置缩放」回到 100%，徽标消失（缩放的三条入口共用同一套状态）",
+  Math.abs((zReset.requested ?? 0) - 1) < 0.001 &&
+    !zReset.tags.some((t) => t.includes("缩放")),
+  JSON.stringify({ requested: zReset.requested, tags: zReset.tags }),
+);
 
 // 收尾：清回空文档并回写作模式
 await c.selectAll();

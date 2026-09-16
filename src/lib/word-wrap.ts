@@ -8,6 +8,12 @@ export interface WrapKeyEvent {
   metaKey: boolean;
   altKey: boolean;
   shiftKey: boolean;
+  /**
+   * 物理键（`KeyboardEvent.code`，可选）。有些手势按物理键判断更稳：
+   * 带 Shift 时 `key` 会随键盘布局变化（`=` 会变成 `+`、`-` 会变成 `_`），
+   * 而 `code` 始终是 `Equal` / `Minus`（见 app-keys 的缩放快捷键）。
+   */
+  code?: string;
 }
 
 /**

@@ -248,6 +248,35 @@ describe("zoomRejectedNotice（状态栏文案）", () => {
     expect(s).toContain("限制在 210%");
     expect(s).not.toContain("dpr");
   });
+
+  it("滚轮事件次数为 0 → 明说「本会话没收到 Ctrl+滚轮」（事件没到页面，另一个成因）", () => {
+    const s = zoomRejectedNotice(1.5, 1, {
+      measurements: 4,
+      widths: { baseline: 1379, current: 1379 },
+      wheelEvents: 0,
+    });
+    expect(s).toContain("本会话没收到 Ctrl+滚轮");
+    // 只用键盘/菜单时本来就没有滚轮事件，别让这句话把人误导向"事件被吃掉"
+    expect(s).toContain("只用过键盘/菜单时属正常");
+  });
+
+  it("滚轮事件有次数 → 写出次数（事件到了，是 setZoom 没生效）", () => {
+    const s = zoomRejectedNotice(1.5, 1, {
+      measurements: 4,
+      widths: { baseline: 1379, current: 1379 },
+      wheelEvents: 7,
+    });
+    expect(s).toContain("收到 Ctrl+滚轮 7 次");
+  });
+
+  it("没给滚轮次数（旧调用方）→ 那段不写，文案其余部分不变", () => {
+    const s = zoomRejectedNotice(1.5, 1, {
+      measurements: 4,
+      widths: { baseline: 1379, current: 1379 },
+    });
+    expect(s).not.toContain("滚轮");
+    expect(s).toContain("量了 4 次");
+  });
 });
 
 describe("shouldRebaselineZoom（这次 resize 要不要重校 100% 基准）", () => {

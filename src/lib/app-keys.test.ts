@@ -5,16 +5,19 @@ import { describe, it, expect } from "vitest";
 import { SHIFT_FORMAT_COMMANDS, decideAppKey, topModal } from "./app-keys";
 import type { AppKeyState } from "./app-keys";
 
-/** 构造按键事件：只写关心字段，修饰键默认全 false */
+/** 构造按键事件：只写关心字段，修饰键默认全 false；`code` 用于物理键判定（可选） */
 const key = (
   k: string,
-  mods: Partial<Record<"ctrlKey" | "metaKey" | "altKey" | "shiftKey", boolean>> = {},
+  mods: Partial<Record<"ctrlKey" | "metaKey" | "altKey" | "shiftKey", boolean>> & {
+    code?: string;
+  } = {},
 ) => ({
   key: k,
   ctrlKey: false,
   metaKey: false,
   altKey: false,
   shiftKey: false,
+  code: undefined,
   ...mods,
 });
 
@@ -53,6 +56,70 @@ describe("decideAppKey：新建窗口", () => {
   it("表里没有的 Shift 组合不处理（不抢系统手势）", () => {
     expect(decideAppKey(key("p", { ctrlKey: true, shiftKey: true }), state())).toBeNull();
     expect(decideAppKey(key("w", { ctrlKey: true, shiftKey: true }), state())).toBeNull();
+  });
+});
+
+describe("decideAppKey：Ctrl+Shift+= / - 调整界面缩放（用户要求）", () => {
+  it("Ctrl+Shift+= → 放大一格", () => {
+    expect(decideAppKey(key("=", { ctrlKey: true, shiftKey: true }), state())).toEqual({
+      type: "zoom",
+      steps: 1,
+    });
+  });
+
+  it("Ctrl+Shift++ （真的按出加号，布局不同 key 也不同）同样放大", () => {
+    expect(decideAppKey(key("+", { ctrlKey: true, shiftKey: true }), state())).toEqual({
+      type: "zoom",
+      steps: 1,
+    });
+  });
+
+  it("Ctrl+Shift+- → 缩小一格（含 Shift 把 - 打成 _ 的布局）", () => {
+    expect(decideAppKey(key("-", { ctrlKey: true, shiftKey: true }), state())).toEqual({
+      type: "zoom",
+      steps: -1,
+    });
+    expect(decideAppKey(key("_", { ctrlKey: true, shiftKey: true }), state())).toEqual({
+      type: "zoom",
+      steps: -1,
+    });
+  });
+
+  it("按物理键也能命中（键盘布局把字符改掉时靠 code 兜住）", () => {
+    expect(decideAppKey(key("?", { ctrlKey: true, shiftKey: true, code: "Equal" }), state())).toEqual({
+      type: "zoom",
+      steps: 1,
+    });
+    expect(decideAppKey(key("_", { ctrlKey: true, shiftKey: true, code: "NumpadSubtract" }), state())).toEqual({
+      type: "zoom",
+      steps: -1,
+    });
+  });
+
+  it("Cmd（macOS）同样命中", () => {
+    expect(decideAppKey(key("=", { metaKey: true, shiftKey: true }), state())).toEqual({
+      type: "zoom",
+      steps: 1,
+    });
+  });
+
+  it("不带 Shift 的 Ctrl+= / Ctrl+- 不抢（那是引擎/系统自己的缩放手势）", () => {
+    expect(decideAppKey(key("=", { ctrlKey: true }), state())).toBeNull();
+    expect(decideAppKey(key("-", { ctrlKey: true }), state())).toBeNull();
+  });
+
+  it("带 Alt 的组合不认（部分输入法/布局另有含义）", () => {
+    expect(decideAppKey(key("=", { ctrlKey: true, shiftKey: true, altKey: true }), state())).toBeNull();
+  });
+
+  it("缩放这一对不影响既有的 Shift 手势：Ctrl+Shift+N 仍是新建窗口、Ctrl+Shift+M 仍是公式块", () => {
+    expect(decideAppKey(key("n", { ctrlKey: true, shiftKey: true }), state())).toEqual({
+      type: "new-window",
+    });
+    expect(decideAppKey(key("m", { ctrlKey: true, shiftKey: true }), state())).toEqual({
+      type: "format",
+      command: "math-block",
+    });
   });
 });
 

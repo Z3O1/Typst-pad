@@ -1,7 +1,7 @@
-// doc-utils 空文档/实际未保存修改判断/前缀规范化纯函数单元测试
+// doc-utils：空文档判断 / 实际未保存修改判断 / 空文档覆盖前确认 / 前缀规范化纯函数单元测试
 // （关闭确认弹窗的前置判断逻辑 + 编译前缀补尾随换行）
 import { describe, it, expect } from "vitest";
-import { isBlankDoc, isEffectiveDirty, ensureTrailingNewline } from "./doc-utils";
+import { isBlankDoc, isEffectiveDirty, needsBlankOverwriteConfirm, ensureTrailingNewline } from "./doc-utils";
 
 describe("isBlankDoc", () => {
   it("空字符串：视为空文档", () => {
@@ -52,6 +52,28 @@ describe("isEffectiveDirty", () => {
     expect(isEffectiveDirty(false, "")).toBe(false);
     expect(isEffectiveDirty(false, "   ")).toBe(false);
     expect(isEffectiveDirty(false, "Hello")).toBe(false);
+  });
+});
+
+describe("needsBlankOverwriteConfirm（空文档覆盖已有文件 → 保存前二次确认）", () => {
+  it("有文件路径 + 空内容：需要确认（唯一能把磁盘文件清空的组合）", () => {
+    expect(needsBlankOverwriteConfirm("/tmp/报告.typ", "")).toBe(true);
+  });
+
+  it("有文件路径 + 仅空白内容：同样需要确认（空格/制表符/换行/全角空格）", () => {
+    expect(needsBlankOverwriteConfirm("/tmp/报告.typ", "   ")).toBe(true);
+    expect(needsBlankOverwriteConfirm("/tmp/报告.typ", "\n\t ")).toBe(true);
+    expect(needsBlankOverwriteConfirm("/tmp/报告.typ", "　")).toBe(true);
+  });
+
+  it("有文件路径 + 有内容：正常保存，不打扰", () => {
+    expect(needsBlankOverwriteConfirm("/tmp/报告.typ", "= 标题")).toBe(false);
+    expect(needsBlankOverwriteConfirm("/tmp/报告.typ", "  \nA")).toBe(false);
+  });
+
+  it("无文件路径（另存为）：不需要确认——还没选到目标，覆盖不到任何文件", () => {
+    expect(needsBlankOverwriteConfirm(null, "")).toBe(false);
+    expect(needsBlankOverwriteConfirm(null, "= 标题")).toBe(false);
   });
 });
 
