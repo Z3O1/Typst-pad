@@ -127,6 +127,8 @@ export function zoomApplied(target: number, observed: number | null, tolerance =
   return Math.abs(observed - target) <= tolerance;
 }
 
+
+
 // ---------------------------------------------------------------------------
 // 复核的等待节奏（2026-09-14 用户第四次反馈「缩放会无效」+ 状态栏「引擎把 150% 限制在 100%」）
 //
@@ -190,11 +192,20 @@ export interface ZoomRejectDetail {
    * 宽度判据说 1.00、它说 1.50 → 是我们自己量歪了；两条都说 1.00 → 引擎真没动。
    */
   dprFactor?: number | null;
+  /**
+   * 本会话页面收到过多少次「带 Ctrl 的滚轮事件」（2026-09-16 加，纯诊断）。
+   * **0 次 = 事件压根没到页面**（在到达页面之前就被吃掉了：引擎自己那套缩放控件开着、
+   * 鼠标驱动或系统手势先接走）——那种情况怎么改 `setZoom` 都没用；**有次数 = 事件到了，
+   * 是 `setZoom` 没生效**。用户反复反馈「缩放调整失败」而我看不到他的机器，这一条让一张截图
+   * 就能分清这两类成因。交叉验证靠键盘通道（`Ctrl+Shift+=/-`，不经过任何手势）：
+   * 键盘能推、滚轮不能 ⇒ 问题在手势路径；两者都不能 ⇒ 问题在 setZoom 本身。
+   */
+  wheelEvents?: number;
 }
 
-export function zoomRejectedNotice(
+export function zoomUnobservedNotice(
   target: number,
-  observed: number,
+  observed: number | null,
   detail0: ZoomRejectDetail,
 ): string {
   const detail = [`量了 ${detail0.measurements} 次`];
@@ -209,7 +220,21 @@ export function zoomRejectedNotice(
   if (typeof dprFactor === "number" && Number.isFinite(dprFactor) && dprFactor > 0) {
     detail.push(`dpr 判据给 ${zoomLabel(dprFactor)}`);
   }
-  return `界面缩放未生效：引擎把 ${zoomLabel(target)} 限制在 ${zoomLabel(observed)}（${detail.join("；")}）`;
+  const wheelEvents = detail0.wheelEvents;
+  if (typeof wheelEvents === "number" && Number.isFinite(wheelEvents) && wheelEvents >= 0) {
+    // 0 次要明说"没收到"：那是另一个成因（事件被引擎吃掉），跟 setZoom 没生效不是一回事。
+    // 补一句"若只用过键盘/菜单则正常"——键盘通道（Ctrl+Shift+=/-）本来就不产生滚轮事件，
+    // 少了这句会把"用户按快捷键"读成"滚轮事件被吃掉"（一次真实的误判就在这句上）。
+    detail.push(
+      wheelEvents === 0
+        ? "本会话没收到 Ctrl+滚轮（只用过键盘/菜单时属正常）"
+        : `收到 Ctrl+滚轮 ${wheelEvents} 次`,
+    );
+  }
+  // 措辞是"没观察到"而不是"引擎限制了"：我们没法区分"引擎没接受"与"我们这两条判据读不出来"
+  // （用户那台机器就是后者），而且**这条提示不再改变任何状态**（用户要求缩放只由他改）。
+  const saw = observed === null || !Number.isFinite(observed) ? "读不到" : zoomLabel(observed);
+  return `已按你的操作设到 ${zoomLabel(target)}（引擎侧没观察到变化：量到 ${saw}；${detail.join("；")}）`;
 }
 
 // ---------------------------------------------------------------------------

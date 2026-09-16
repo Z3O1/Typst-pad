@@ -1152,71 +1152,60 @@ check(
   JSON.stringify(simDown),
 );
 
-// B) 引擎只肯缩小（放大一律按 100% 处理）：档位必须停在引擎给的 100%，缩小立刻有效
+// B) 引擎只肯缩小（放大一律按 100% 处理）：**档位保留用户请求的那个值，软件不许自己改**
+// （2026-09-16 用户明确要求：「就应该缩放只有我能改，软件别自己动了」——以前这里会把档位拉回
+// 引擎给的 100%，用户看到的正是「用 Ctrl+滚轮会回退」）
 await gotoSim("&zoomsim=1&zoomcap=1");
 await wheelOverEditor(-100, 4);
 const capped = await c.evaluate(zoomProbe2);
 check(
-  "引擎拒绝放大时，档位被拉回引擎实际给的 100%（不再冲上限）",
-  Math.abs((capped.saved ?? 0) - 1) < 0.001 && Math.abs((capped.engine ?? 0) - 1) < 0.001,
+  "引擎拒绝放大时，档位**保留用户请求的 140%**（软件不再把档位拉回引擎给的 100%）",
+  Math.abs((capped.saved ?? 0) - 1.4) < 0.001 && Math.abs((capped.engine ?? 0) - 1) < 0.001,
   JSON.stringify(capped),
 );
 check(
-  "状态栏说明是引擎限制，而不是静默没反应",
-  capped.status.includes("未生效") && capped.status.includes("限制在 100%"),
+  "状态栏只**说明**没观察到变化（不再写「限制在 100%」，因为那只是我们的推测）",
+  capped.status.includes("引擎侧没观察到变化") && capped.status.includes("已按你的操作设到 140%"),
   JSON.stringify(capped.status),
 );
-// 文案要带上实测数据（2026-09-14 加）：这个现象只在用户那台真机上出现，状态栏是唯一能读到的
-// 通道——"布局宽度没变" 与 "宽度变过又回来" 指向完全不同的成因（前者是引擎没动、后者是被抹掉）。
+// 文案要带上实测数据：这个现象只在用户那台真机上出现，状态栏是唯一能读到的通道
+// （"布局宽度没变" 与 "宽度变过又回来" 指向完全不同的成因）。
 check(
-  "「未生效」文案带上了实测数据（量了几次 / 布局宽度 / dpr）",
+  "文案带上了实测数据（量了几次 / 布局宽度 / dpr）",
   capped.status.includes("量了") &&
     capped.status.includes("布局宽度") &&
     capped.status.includes("dpr"),
   JSON.stringify(capped.status),
 );
-// 交叉验证（2026-09-14 第五次反馈后加）：宽度判据与 dpr 判据**互相印证**才敢说"引擎真没动"。
-// 这台模拟机器上假 dpr 跟着假引擎走，两条判据都该说 100%——下次真机上若出现"宽度 100%、
-// dpr 150%"，一张截图就能看出是**我们自己量歪了**，而不是引擎拒绝。
-check(
-  "文案里有第二条判据的交叉验证（dpr 判据也给出它读到的档位）",
-  capped.status.includes("dpr 判据给 100%"),
-  JSON.stringify(capped.status),
-);
-// 关键：接着往下滚必须立刻见效（这就是「最大后无法用滚轮缩小」那条反馈）
+// 接着往下滚必须立刻见效（用户之前报过「最大后无法用滚轮缩小」；新政策下档位不会被钉在 100%，
+// 所以从 140% 往下滚一格就该到 130%）
 await wheelOverEditor(100, 1);
 const afterOut = await c.evaluate(zoomProbe2);
 check(
-  "被拒之后立刻往下滚就能缩小（死区消失）",
-  Math.abs((afterOut.saved ?? 0) - 0.9) < 0.001 && Math.abs((afterOut.engine ?? 0) - 0.9) < 0.02,
+  "被引擎拒绝之后，往下滚一格立刻生效（140% → 130%）",
+  Math.abs((afterOut.saved ?? 0) - 1.3) < 0.001,
   JSON.stringify(afterOut),
 );
 
-// C) 引擎能放大、但**只到 210%**（2026-09-14 用户第三次反馈「缩放到最大后无法从 Ctrl+滚轮缩小」
-// 的那台机器：状态冲过引擎上限 → 往下滚要滚十几档才有反应，看着就是"缩不回去"）。
-// 这一版把判据从 devicePixelRatio 换成 **CSS 视口宽度比**（真机上 dpr 不跟随 ZoomFactor，旧代码
-// 会把复核整体关掉 → 状态又开始冲上限）；`&zoommax=2.1` 让桩模拟这台机器。
+// C) 引擎能放大、但**只到 210%**：档位同样保留用户请求（2.2），且往下滚一档立刻见效。
+// 这一版把判据从 devicePixelRatio 换成 **CSS 视口宽度比**（真机上 dpr 不跟随 ZoomFactor）；
+// `&zoommax=2.1` 让桩模拟这台机器。**注意新政策**：状态可以高于引擎给的档位（死区回来了）——
+// 这是用户明确接受的代价（「缩放只有我能改」优先于"档位永远等于引擎值"）。
 await gotoSim("&zoomsim=1&zoommax=2.1");
 await wheelOverEditor(-100, 12); // 1.0 → 请求 2.2，引擎只给 2.1
 const capped210 = await c.evaluate(zoomProbe2);
 check(
-  "引擎上限 210%：档位被拉回 210%，不会冲到 250%（「往下滚没反应」的根因）",
-  Math.abs((capped210.saved ?? 0) - 2.1) < 0.011 && Math.abs((capped210.engine ?? 0) - 2.1) < 0.011,
+  "引擎上限 210%：档位保留用户请求的 2.2（不再被拉回 2.1）",
+  Math.abs((capped210.saved ?? 0) - 2.2) < 0.011 && Math.abs((capped210.engine ?? 0) - 2.1) < 0.011,
   JSON.stringify(capped210),
-);
-check(
-  "状态栏说明是引擎把它限制在 210%",
-  capped210.status.includes("未生效") && capped210.status.includes("限制在 210%"),
-  JSON.stringify(capped210.status),
 );
 await wheelOverEditor(100, 1);
 const afterDown210 = await c.evaluate(zoomProbe2);
 check(
-  "被 210% 上限挡住后，**往下滚一档立刻见效**（用户报的症状）",
-  Math.abs((afterDown210.saved ?? 0) - 2.0) < 0.011 && Math.abs((afterDown210.engine ?? 0) - 2.0) < 0.02,
+  "往下滚一档立刻见效（2.2 → 2.1，用户报的「最大后无法缩小」不再出现）",
+  Math.abs((afterDown210.saved ?? 0) - 2.1) < 0.011,
   JSON.stringify(afterDown210),
 );
-
 // D) 引擎**晚一拍**才生效（`&zoomdelay=300`）：设完立刻量还是旧档位。复核必须多等几次才下结论，
 // 否则一台"只是慢"的机器会被误判成"引擎不接受"，把用户刚调上去的档位又拉回来 —— 这正是
 // 「缩放会无效」最可能的形态之一（见 zoom.ts 的 ZOOM_VERIFY_WAITS_MS）。
@@ -1232,6 +1221,35 @@ check(
   "慢引擎不误报「未生效」",
   !delayed.status.includes("未生效"),
   JSON.stringify(delayed.status),
+);
+
+// E) **宽度判据瞎了、只有 dpr 跟随的机器**（`&zoomwidthstuck=1`，2026-09-16 用户第六轮反馈
+// 「改变窗口大小的时候会动缩放；用 Ctrl + 滚轮 会回退」）：桩让 `clientWidth` 永远等于 100% 基准、
+// 只有 dpr 跟着引擎走 —— 那台真机上就是这句「布局宽度没变（1379px）」。
+// 只认宽度判据的话，这里会把**真的生效了**的缩放判成失败并弹回原档（用户看到的「回退」），
+// 修法是 zoomAcceptedByTwoJudges：两条判据任一成立即接受。修前本条会红。
+await gotoSim("&zoomsim=1&zoomwidthstuck=1");
+await wheelOverEditor(-100, 3);
+const widthStuck = await c.evaluate(zoomProbe2);
+check(
+  "宽度判据读不出缩放、但 dpr 判据看得见的机器：档位照旧落在请求值（不再被弹回 120%）",
+  Math.abs((widthStuck.saved ?? 0) - 1.3) < 0.001 && Math.abs((widthStuck.engine ?? 0) - 1.3) < 0.011,
+  JSON.stringify(widthStuck),
+);
+check(
+  "这台机器上也不误报「未生效」（修前正是它把生效的缩放判成失败）",
+  !widthStuck.status.includes("未生效") && widthStuck.status.includes("缩放 130%"),
+  JSON.stringify(widthStuck.status),
+);
+// 正交验证：哪怕引擎真的没动、且两条判据都读不到，**也不改用户的档位**（新政策的底线）。
+// 这一条替代了旧的"必须报「未生效」并拉回 100%"——那条正是用户不要的行为。
+await gotoSim("&zoomsim=1&zoomcap=1&zoomwidthstuck=1");
+await wheelOverEditor(-100, 2);
+const stuckCapped = await c.evaluate(zoomProbe2);
+check(
+  "两条判据都瞎 + 引擎真拒绝：档位仍保留用户请求的 120%，只给一句说明",
+  Math.abs((stuckCapped.saved ?? 0) - 1.2) < 0.001 && stuckCapped.status.includes("没观察到变化"),
+  JSON.stringify(stuckCapped),
 );
 
 // ---------------------------------------------------------------------------
@@ -2279,6 +2297,13 @@ check(
 );
 
 // 反向：Ctrl+N（无 Shift）仍然是菜单「新建」——两套手势互不干扰
+//
+// ⚠️ 2026-09-16 起「新建」在有未保存内容时会**先确认**（见第 38 组那道防护），
+// 而这里只验"手势路由对不对"，所以先把内容清空：空文档没有可丢的东西，不弹确认，
+// 按下去必然直接新建。守卫本身的行为在第 38 组验。
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 300));
 await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 }); // 只按 Ctrl
 await new Promise((r) => setTimeout(r, 600));
 const afterCtrlN = await c.evaluate(`({
@@ -2524,7 +2549,211 @@ await new Promise((r) => setTimeout(r, 400));
 const afterEscAbout = await c.evaluate(aboutProbe);
 check("Esc 关掉关于弹窗", !afterEscAbout.open, JSON.stringify(afterEscAbout));
 
-console.log("38) 选中整个公式不展开（用户要求「选中整个公式请写不展开」）：完整盖住 → 保持渲染 + 淡色底");
+// 第 38 组：**「编辑器会不会自己清空文件」的两道防护**
+// （用户 2026-09-16 问「编辑器会清空文件吗？？」）
+//
+// 审计结论：全工程只有 `saveTypFile` 一个 `.typ` 写入口，它只挂在显式保存上（菜单/右键「保存」、
+// Ctrl+S、关窗弹窗的「保存并关闭」），**没有自动保存、没有定时写盘**（页面里那几个 setTimeout
+// 分别管预览重排、缩放复核、公式队列、更新检查与会话存档的 300ms 防抖——最后那个写的是
+// localStorage，不是文件）。所以"应用自己把文件清空"这条路是堵住的，这一组把它钉死。
+//
+// 真正会丢内容/写空的只有两条，各补一道确认（本轮新加）：
+// ① 「新建」——它清空编辑器 + 置空 filePath + 清掉会话存档，此前**一句都不问**；
+// ② 「空文档 + 已有文件 + 按保存」——唯一能把磁盘文件写成空的组合。
+// ② 在本组只能断言"不写盘"（浏览器开发模式没有 filePath：`plugin:dialog|open` 对文件对话框
+// 返回 null，拿不到路径），它的判定函数 `needsBlankOverwriteConfirm` 由单测覆盖。
+console.log("38) 「编辑器会清空文件吗」——新建要先确认 + 全程不自动写盘");
+
+const writesProbe = `(window.__browserDevWrites || []).map((w) => ({
+  path: w.path, bytes: w.content.length,
+}))`;
+const statusProbe = `document.querySelector(".statusbar").innerText`;
+
+// ① 空文档上按 Ctrl+N：没有可丢的内容 → 不确认，直接新建（守卫不能把正常新建也拦死）
+//
+// 判据用**存档里的 dirty 翻转 + 内容为空**，不读状态栏、也不读 `innerText`：
+//  · 状态栏会被紧接着的一次编译从「已新建」顶成「就绪」（实测 500ms 后已经是「就绪」）；
+//  · `.cm-content` 的 innerText 对空文档返回的是 `"\n"`（1 个字符），不是 `""`（实测踩到，写检查时踩过一次）；
+//  · 存档会先被 `clearState()` 清掉（实测 +120ms 时还是 null），约 300ms 后又被一次设置持久化
+//    写回"空会话"（content 空 + dirty false），所以"存档为 null"这种瞬时状态不能当判据。
+// dirty 从 true 变 false 只有 handleNew（本组里没有保存/打开）能做到：确认一发就会被桩取消、
+// dirty 会留在 true，所以它正好能区分"弹了但被取消"和"没弹、直接新建"。
+await c.click(400, 300);
+await c.type("先随便写点，再删光，制造「空文档」这种状态\n");
+await new Promise((r) => setTimeout(r, 500));
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 700)); // 等存档防抖落地
+await c.evaluate(`(() => { window.__browserDevWrites = []; })()`);
+const archiveProbe = `(() => {
+  const raw = localStorage.getItem("typst-pad:state");
+  const s = raw ? JSON.parse(raw) : null;
+  return {
+    content: s ? s.content : null,
+    dirty: s ? s.dirty : null,
+    writes: (window.__browserDevWrites || []).length,
+  };
+})()`;
+const beforeBlankNew = await c.evaluate(archiveProbe);
+await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 900));
+const newOnBlank = await c.evaluate(archiveProbe);
+check(
+  "空文档上 Ctrl+N：没有可丢的内容 → 不弹确认，直接新建（dirty 被新建翻成 false）",
+  beforeBlankNew.content === "" &&
+    beforeBlankNew.dirty === true &&
+    newOnBlank.content === "" &&
+    newOnBlank.dirty === false &&
+    newOnBlank.writes === 0,
+  JSON.stringify({ before: beforeBlankNew, after: newOnBlank }),
+);
+
+// ② 输入内容（等过持久化防抖）→ 一次写盘都不该发生：应用从不自己写 .typ
+await c.click(400, 300);
+await c.type("= 不会被自动写走的内容\n这里是正文。\n");
+await new Promise((r) => setTimeout(r, 1200));
+const typedState = await c.evaluate(`({
+  chars: (document.querySelector(".cm-content").innerText || "").length,
+  writes: ${writesProbe},
+  saved: ${savedContent},
+})`);
+check(
+  "编辑内容后（含超过 300ms 持久化防抖）没有任何写盘动作：应用不会自己写文件",
+  typedState.chars > 0 && typedState.writes.length === 0,
+  JSON.stringify(typedState),
+);
+check(
+  "会话存档照常更新（存档走 localStorage，与文件无关）——内容是刚敲的那段",
+  String(typedState.saved).includes("不会被自动写走的内容"),
+  JSON.stringify(String(typedState.saved).slice(0, 60)),
+);
+
+// ③ 有未保存内容时 Ctrl+N：先确认。浏览器验收里的 confirm 桩固定返回 false（= 用户点「取消」），
+//    所以这里验的是"取消分支"：内容与存档都必须原样留着。
+const beforeNew = await c.evaluate(`({ content: ${savedContent}, chars: (document.querySelector(".cm-content").innerText || "").length })`);
+await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 600));
+const afterNewAttempt = await c.evaluate(`({
+  status: ${statusProbe},
+  content: ${savedContent},
+  chars: (document.querySelector(".cm-content").innerText || "").length,
+  writes: ${writesProbe},
+})`);
+check(
+  "有未保存内容时 Ctrl+N 先确认：取消（桩 confirm=false）→ 编辑器内容一字未丢",
+  afterNewAttempt.chars === beforeNew.chars && afterNewAttempt.chars > 0,
+  JSON.stringify({ before: beforeNew.chars, after: afterNewAttempt.chars }),
+);
+check(
+  "取消后没有真的新建：状态栏不是「已新建」、会话存档里的内容也还在（clearState 没执行）",
+  !afterNewAttempt.status.includes("已新建") &&
+    afterNewAttempt.content === beforeNew.content &&
+    afterNewAttempt.content.length > 0,
+  JSON.stringify({
+    status: afterNewAttempt.status,
+    saved: String(afterNewAttempt.content).slice(0, 40),
+  }),
+);
+
+// ④ 常见操作（切模式 / 缩放 / 等编译）之后仍然一次写盘都没有——把"应用从不自己写文件"钉得更死
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 }); // Ctrl+/ 切模式
+await new Promise((r) => setTimeout(r, 500));
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 800));
+await c.wheel(400, 300, -120, { modifiers: 2 }); // Ctrl+滚轮缩放
+await new Promise((r) => setTimeout(r, 900));
+const afterOps = await c.evaluate(`({ writes: ${writesProbe} })`);
+check(
+  "切模式 + 缩放之后依然没有任何写盘动作（写盘只可能来自显式保存）",
+  afterOps.writes.length === 0,
+  JSON.stringify(afterOps),
+);
+
+// 第 39 组：**`Ctrl+Shift+=` / `Ctrl+Shift+-` 调整界面缩放**（用户 2026-09-16 要求
+// 「加入 Ctrl + Shift + -/+ 调整一格的快捷键」）
+//
+// 存在的理由不只是"多一种操作"（见 app-keys.zoomKeySteps 的注解）：Ctrl+滚轮那条路要穿过
+// WebView2 的手势处理（#1022：引擎可能把手势里设的 ZoomFactor 抹回手势开始时的值），键盘不经过
+// 手势 —— 它既是可用的替代操作，也是判据：键盘也推不动 ⇒ 问题在 setZoom 本身；键盘能推、
+// 滚轮不能 ⇒ 问题在手势路径。所以这一组同时锁住"键位正确"与"确实改了状态/存档/引擎入参"。
+//
+// 断言全部**相对当前档位**写（本组跑在最后，前面的组可能把缩放留在非 100% 的位置）。
+console.log("39) Ctrl+Shift+= / Ctrl+Shift+- 调整界面缩放（用户要求）");
+
+const zoomPct = (z) => Math.round((z ?? 0) * 100);
+const z0 = await c.evaluate(zoomProbe);
+await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 }); // Ctrl+Shift+=
+await new Promise((r) => setTimeout(r, 400));
+const z1 = await c.evaluate(zoomProbe);
+check(
+  "Ctrl+Shift+= → 放大一格（引擎入参 +10%，状态栏与存档同步）",
+  Math.abs((z1.requested ?? 0) - ((z0.requested ?? 0) + 0.1)) < 0.001 &&
+    z1.status.includes(`缩放 ${zoomPct(z1.requested)}%`) &&
+    Math.abs((z1.saved ?? 0) - (z1.requested ?? 0)) < 0.001,
+  JSON.stringify({ before: z0.requested, after: z1.requested, status: z1.status, saved: z1.saved }),
+);
+check(
+  "状态栏出现常驻缩放徽标（与 Ctrl+滚轮那条路完全同一套反馈）",
+  z1.tags.some((t) => t.includes(`${zoomPct(z1.requested)}%`)),
+  JSON.stringify(z1.tags),
+);
+
+await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
+await new Promise((r) => setTimeout(r, 400));
+const z2 = await c.evaluate(zoomProbe);
+check(
+  "再按一次 → 再涨一格（一格 = 10%，不是一步跳到上限）",
+  Math.abs((z2.requested ?? 0) - ((z0.requested ?? 0) + 0.2)) < 0.001,
+  JSON.stringify({ before: z0.requested, after: z2.requested }),
+);
+
+await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 }); // Ctrl+Shift+-
+await new Promise((r) => setTimeout(r, 400));
+const z3 = await c.evaluate(zoomProbe);
+check(
+  "Ctrl+Shift+- → 缩小一格（回到刚才那一档）",
+  Math.abs((z3.requested ?? 0) - ((z0.requested ?? 0) + 0.1)) < 0.001,
+  JSON.stringify({ after: z3.requested }),
+);
+
+// 反向：不带 Shift 的 Ctrl+= 不归我们管（那是引擎/系统自己的缩放手势，别抢）
+const callsBeforePlain = z3.zoomCalls;
+await c.key("=", { code: "Equal", keyCode: 187, modifiers: 2 }); // 只按 Ctrl
+await new Promise((r) => setTimeout(r, 400));
+const z4 = await c.evaluate(zoomProbe);
+check(
+  "不带 Shift 的 Ctrl+= 不被我们接管（缩放没动、也没再让引擎改档）",
+  Math.abs((z4.requested ?? 0) - (z3.requested ?? 0)) < 0.001 && z4.zoomCalls === callsBeforePlain,
+  JSON.stringify({ requested: z4.requested, zoomCalls: z4.zoomCalls, before: callsBeforePlain }),
+);
+
+// 连按到下限：收敛在 50% 并提示"到边界了"（与滚轮同一条收敛逻辑）
+for (let i = 0; i < 14; i++) {
+  await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
+  await new Promise((r) => setTimeout(r, 120));
+}
+await new Promise((r) => setTimeout(r, 400));
+const zBottom = await c.evaluate(zoomProbe);
+check(
+  "连按 14 次 Ctrl+Shift+- → 收敛在 50% 并提示「到边界了」（不越界、不会冲成负数）",
+  Math.abs((zBottom.requested ?? 0) - 0.5) < 0.001 && zBottom.status.includes("到边界了"),
+  JSON.stringify({ requested: zBottom.requested, status: zBottom.status }),
+);
+
+// 收尾：走菜单「重置缩放」回到 100%（顺带验菜单入口没坏）
+await openMenu("视图");
+await c.waitFor(`document.body.innerText.includes("重置缩放")`, { timeout: 5000 });
+await clickMenuItem("重置缩放");
+await new Promise((r) => setTimeout(r, 500));
+const zReset = await c.evaluate(zoomProbe);
+check(
+  "菜单「视图 → 重置缩放」回到 100%，徽标消失（缩放的三条入口共用同一套状态）",
+  Math.abs((zReset.requested ?? 0) - 1) < 0.001 &&
+    !zReset.tags.some((t) => t.includes("缩放")),
+  JSON.stringify({ requested: zReset.requested, tags: zReset.tags }),
+);
+
+console.log("40) 选中整个公式不展开（用户要求「选中整个公式请写不展开」）：完整盖住 → 保持渲染 + 淡色底");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
