@@ -127,6 +127,52 @@ export function zoomApplied(target: number, observed: number | null, tolerance =
   return Math.abs(observed - target) <= tolerance;
 }
 
+/**
+ * **双重判据：宽度判据与 dpr 判据，任一成立即接受**（2026-09-16，用户第六轮反馈
+ * 「改变窗口大小的时候会动缩放；用 Ctrl+滚轮会回退」+「缩放调整还是会失败」）。
+ *
+ * 背景：复核靠"引擎到底动没动"来决定是否把状态拉回去（见 zoom.ts 顶部的判据注解）。
+ * 而**两条判据都可能单独失灵**：
+ * - 宽度判据（CSS 视口宽度 ÷ 100% 基准）在真机上可能读不出变化 —— 用户之前截图里那句
+ *   「布局宽度没变（1379px）」就是它；
+ * - dpr 判据（`devicePixelRatio ÷ 100% 时的 dpr`）在有显示器缩放/多屏的机器上可能不跟随
+ *   ZoomFactor（0.7.8 换成宽度判据就是因为这个）。
+ * 只认一条的最大风险不是"误判成接受"，而是**把真的生效了的缩放判成失败并弹回原档** ——
+ * 用户看到的就是「缩放会回退」，而且怎么调都调不上去。所以两条一起看：
+ *
+ * 规则（保守优先：只有"宽度判据说它压根没动"时，才让 dpr 判据救人）：
+ * 1. 宽度判据 ≈ 请求值 → **接受**（正常路径；页面缩放的定义本身）；
+ * 2. 宽度判据说"动过，但给的是**别的**档位"（≠ 改档前的档位）→ **不接受、也不推翻**：
+ *    引擎确实响应了，只是给的档位不同（引擎上限），这时 dpr 判据救不了，照旧按引擎给的档位
+ *    收敛（见 zoomProbeVerdict 的 `capped`）；
+ * 3. 宽度判据说"和改档前一模一样"（＝压根没动），而 dpr 判据 ≈ 请求值 → **接受**
+ *    （这台机器上只有 dpr 看得见缩放，宽度是瞎的）；
+ * 4. 两条都说"没动" → 不接受（引擎真没动，缩放死区保护照旧生效）。
+ *
+ * 返回 `by` 说明是哪条判据定的案：写进调试日志，真机上再出问题能一眼看出是哪台机器的形状。
+ */
+export function zoomAcceptedByTwoJudges(
+  target: number,
+  widthZoom: number | null,
+  dprZoom: number | null,
+  previous: number,
+  tolerance = 0.02,
+): { accepted: boolean; by: "width" | "dpr" | null } {
+  if (zoomApplied(target, widthZoom, tolerance)) return { accepted: true, by: "width" };
+  // 宽度判据读到了**别的**档位（既不是请求值、也不是改档前那一档）→ 引擎在响应，只是给的档位不同。
+  // 这种情况不能拿 dpr 判据去推翻宽度判据：宽度才是页面缩放的定义。
+  if (
+    widthZoom !== null &&
+    Number.isFinite(widthZoom) &&
+    !zoomApplied(previous, widthZoom, tolerance)
+  ) {
+    return { accepted: false, by: null };
+  }
+  // 宽度说"没动"（或压根读不到）→ 让 dpr 判据兜这一次
+  if (zoomApplied(target, dprZoom, tolerance)) return { accepted: true, by: "dpr" };
+  return { accepted: false, by: null };
+}
+
 // ---------------------------------------------------------------------------
 // 复核的等待节奏（2026-09-14 用户第四次反馈「缩放会无效」+ 状态栏「引擎把 150% 限制在 100%」）
 //

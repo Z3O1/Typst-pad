@@ -1217,6 +1217,35 @@ check(
   JSON.stringify(delayed.status),
 );
 
+// E) **宽度判据瞎了、只有 dpr 跟随的机器**（`&zoomwidthstuck=1`，2026-09-16 用户第六轮反馈
+// 「改变窗口大小的时候会动缩放；用 Ctrl + 滚轮 会回退」）：桩让 `clientWidth` 永远等于 100% 基准、
+// 只有 dpr 跟着引擎走 —— 那台真机上就是这句「布局宽度没变（1379px）」。
+// 只认宽度判据的话，这里会把**真的生效了**的缩放判成失败并弹回原档（用户看到的「回退」），
+// 修法是 zoomAcceptedByTwoJudges：两条判据任一成立即接受。修前本条会红。
+await gotoSim("&zoomsim=1&zoomwidthstuck=1");
+await wheelOverEditor(-100, 3);
+const widthStuck = await c.evaluate(zoomProbe2);
+check(
+  "宽度判据读不出缩放、但 dpr 判据看得见的机器：档位照旧落在请求值（不再被弹回 120%）",
+  Math.abs((widthStuck.saved ?? 0) - 1.3) < 0.001 && Math.abs((widthStuck.engine ?? 0) - 1.3) < 0.011,
+  JSON.stringify(widthStuck),
+);
+check(
+  "这台机器上也不误报「未生效」（修前正是它把生效的缩放判成失败）",
+  !widthStuck.status.includes("未生效") && widthStuck.status.includes("缩放 130%"),
+  JSON.stringify(widthStuck.status),
+);
+// 正交验证：同一台机器上**引擎真不动**时必须仍然被判死（`&zoomcap=1` + `&zoomwidthstuck=1`），
+// 否则"双重判据"就成了把死区保护放跑的漏洞。
+await gotoSim("&zoomsim=1&zoomcap=1&zoomwidthstuck=1");
+await wheelOverEditor(-100, 2);
+const stuckCapped = await c.evaluate(zoomProbe2);
+check(
+  "宽度瞎 + 引擎拒绝放大：仍然报「未生效」并把档位拉回 100%（死区保护没有被双重判据放跑）",
+  stuckCapped.status.includes("未生效") && Math.abs((stuckCapped.saved ?? 0) - 1) < 0.001,
+  JSON.stringify(stuckCapped),
+);
+
 // ---------------------------------------------------------------------------
 // 第 28 组：缩放到很大时状态栏不能"长高"（用户截图里的样子）
 // 背景（2026-09-14）：用户把界面放大到 190%（等价于 CSS 视口只剩 ~660px）后，状态栏里那条很长的

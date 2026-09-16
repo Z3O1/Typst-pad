@@ -93,6 +93,7 @@
     shouldRebaselineZoom,
     zoomApplied,
     zoomIn,
+    zoomAcceptedByTwoJudges,
     zoomLabel,
     zoomOut,
     zoomProbeVerdict,
@@ -704,6 +705,8 @@
     if (zoomCalibration === null) return; // 还没校准过（正常路径一定先经过 applyUiZoom）
     const mySeq = ++zoomVerifySeq;
     let observed: number | null = null;
+    /** 同一次读数的 dpr 判据（第二条独立信号）：两条任一成立即接受，见 zoomAcceptedByTwoJudges */
+    let observedDpr: number | null = null;
     let measurements = 0;
     zoomStepInFlight = true;
     markZoomSettling();
@@ -714,6 +717,7 @@
         if (mySeq !== zoomVerifySeq) return; // 用户又调档了：这次复核作废（别把新档位拉回去）
         measurements += 1;
         observed = await measureEngineZoom();
+        observedDpr = dprEngineZoomNow();
         const verdict = zoomProbeVerdict(target, observed, appliedZoom);
         if (verdict === "accepted" || verdict === "capped") break; // 有结论了，不必再等
       }
@@ -724,6 +728,7 @@
         await getCurrentWebview().setZoom(target);
         measurements += 1;
         observed = await measureEngineZoom();
+        observedDpr = dprEngineZoomNow();
       }
     } catch (e) {
       dbg.log("zoom", "复核时 setZoom 失败", e);
@@ -737,12 +742,22 @@
     }
     if (mySeq !== zoomVerifySeq) return;
     const currentWidth = document.documentElement.clientWidth;
-    if (observed === null || !Number.isFinite(observed)) return; // 量不到：不判定、不改状态
-    if (zoomApplied(target, observed)) {
+    // **两条判据任一成立即接受**（2026-09-16）：只认宽度的话，那台"CSS 视口宽度不跟随 ZoomFactor"
+    // 的机器上会把**真的生效了**的缩放判成失败并弹回原档（用户第六轮反馈的「缩放会回退」）。
+    const judge = zoomAcceptedByTwoJudges(target, observed, observedDpr, appliedZoom);
+    if (judge.accepted) {
+      if (judge.by === "dpr") {
+        dbg.log(
+          "zoom",
+          `宽度判据看不出变化（${observed === null ? "读不到" : observed.toFixed(3)}），` +
+            `但 dpr 判据给 ${zoomLabel(observedDpr)} —— 按"引擎接受了"处理（这台机器的 CSS 视口宽度不跟随 ZoomFactor）`,
+        );
+      }
       appliedZoom = clampZoom(target);
       rebaselineZoom(); // 测量刚做完，此刻"宽度 × 档位"就是 100% 基准
       return; // 引擎接受了，正常路径
     }
+    if (observed === null || !Number.isFinite(observed)) return; // 量不到：不判定、不改状态
     const snapped = clampZoom(observed);
     appliedZoom = snapped;
     rebaselineZoom();
