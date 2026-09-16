@@ -1076,5 +1076,80 @@ check(
 );
 await c.screenshot(SHOT("writing-blocks-enter-split-caret"));
 
+// ---------------------------------------------------------------------------
+// 17) 写作模式装上打包字体：源码透镜与引擎切片**同一套字**（字号/行高/字体三条腿齐）
+// ---------------------------------------------------------------------------
+// 为什么值得单独验：字体那份字体本来就随应用分发（Rust 侧 resources/fonts），前端通过
+// `bundled_font` 命令取字节（raw IPC → ArrayBuffer）再用 FontFace 注册；**装不上时一切照旧**
+// （退回系统衬线栈），所以"代码看着对、其实没生效"完全可能发生 —— 这一组验的就是真生效。
+console.log("17) 写作模式装上打包字体：源码透镜与引擎切片同一套字");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 900));
+
+const FONT_PROBE = `(() => {
+  const width = (family, text) => {
+    const s = document.createElement("span");
+    s.style.cssText = "position:absolute;left:-9999px;top:0;white-space:pre;font-size:16px;font-family:" + family;
+    s.textContent = text;
+    document.body.appendChild(s);
+    const w = s.getBoundingClientRect().width;
+    s.remove();
+    return w;
+  };
+  const content = document.querySelector(".cm-content");
+  const cjk = "第一段正文";
+  const latin = "Hamburgefonstiv";
+  return {
+    loadedLatin: document.fonts.check('16px "Libertinus Serif"'),
+    loadedCjk: document.fonts.check('16px "Noto Serif CJK SC"'),
+    family: content ? getComputedStyle(content).fontFamily : "",
+    cjkInstalled: width('"Noto Serif CJK SC"', cjk),
+    cjkFallback: width('"No Such Family Xyz"', cjk),
+    latinInstalled: width('"Libertinus Serif"', latin),
+    latinFallback: width('"No Such Family Xyz"', latin),
+  };
+})()`;
+const fonts = await c.evaluate(FONT_PROBE);
+check(
+  "两份打包字体都真的装上了（document.fonts.check）",
+  fonts.loadedLatin === true && fonts.loadedCjk === true,
+  JSON.stringify(fonts),
+);
+check(
+  `写作模式正文字体栈用上了它们（${String(fonts.family).slice(0, 64)}…）`,
+  fonts.family.includes("Libertinus Serif") &&
+    fonts.family.indexOf("Libertinus Serif") < fonts.family.indexOf("Noto Serif CJK SC"),
+  fonts.family,
+);
+check(
+  `拉丁走的是 Libertinus Serif（${fonts.latinInstalled.toFixed(1)}px，兜底族 ${fonts.latinFallback.toFixed(1)}px —— 两者不同才说明真用上了）`,
+  Math.abs(fonts.latinInstalled - fonts.latinFallback) > 0.5,
+  JSON.stringify(fonts),
+);
+check(
+  `中文走的是思源宋体（5 个汉字 ${fonts.cjkInstalled.toFixed(1)}px ≈ 16px×5）`,
+  Math.abs(fonts.cjkInstalled - 80) <= 16,
+  JSON.stringify(fonts),
+);
+// 字节这一层也钉一下：dev server 提供的就是仓库里那份字体（真机走 Rust 的 raw IPC 读同一个文件，
+// 名字↔文件的对齐由 scripts/editor-fonts.test.mjs 静态保证）
+const fontBytes = await c.evaluate(`(async () => {
+  const res = await fetch("/__bundled-fonts/NotoSerifCJKsc-Regular.otf");
+  const buf = new Uint8Array(await res.arrayBuffer());
+  return { status: res.status, size: buf.length, magic: String.fromCharCode(buf[0], buf[1], buf[2], buf[3]) };
+})()`);
+check(
+  `字体的确是那份真文件（HTTP ${fontBytes.status} / ${fontBytes.size} 字节 / 魔数 ${fontBytes.magic}）`,
+  fontBytes.status === 200 && fontBytes.size > 100000 && /OTTO|true|ttcf/.test(fontBytes.magic),
+  JSON.stringify(fontBytes),
+);
+check(
+  "状态栏没有脚本错误（装字体这条路径不许弄坏编辑区）",
+  !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"),
+);
+await c.screenshot(SHOT("writing-blocks-fonts"));
+
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
 process.exit(process.exitCode ?? 0);

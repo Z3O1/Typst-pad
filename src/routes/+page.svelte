@@ -46,6 +46,8 @@
   import { decideAppKey, topModal } from "$lib/app-keys";
   import type { AppModal } from "$lib/app-keys";
   import { isEffectiveDirty, ensureTrailingNewline, needsBlankOverwriteConfirm } from "$lib/doc-utils";
+  import { failureStatus } from "$lib/failure-text";
+  import { installEditorFonts, loadBundledFont } from "$lib/editor-font";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
   import ContextMenu from "$lib/ContextMenu.svelte";
@@ -1064,7 +1066,8 @@
       statusText = "已打开";
       return true;
     } catch (e) {
-      statusText = "打开失败";
+      // 带上 Rust 侧的原因（`仅支持 .typ 文件` / `目录无效` …）：光写「打开失败」用户不知道能改什么
+      statusText = failureStatus("打开失败", e);
       return false;
     }
   }
@@ -1095,7 +1098,7 @@
       schedulePersist();
       return saved;
     } catch (e) {
-      statusText = "保存失败";
+      statusText = failureStatus("保存失败", e);
       return null;
     }
   }
@@ -1121,8 +1124,8 @@
       scheduleCompile();
       schedulePersist();
       statusText = "已重新读取";
-    } catch {
-      statusText = "重新读取失败";
+    } catch (e) {
+      statusText = failureStatus("重新读取失败", e);
     }
   }
 
@@ -1378,12 +1381,12 @@
       } else if (result.cancelled) {
         statusText = "已取消导出";
       } else {
-        statusText = "导出失败";
+        statusText = failureStatus("导出失败", result.error);
         previewStatus = "error";
         previewError = result.error;
       }
     } catch (e) {
-      statusText = "导出失败";
+      statusText = failureStatus("导出失败", e);
       previewStatus = "error";
       previewError = e instanceof Error ? e.message : String(e);
     }
@@ -2214,6 +2217,17 @@
     void defaultFontFamilies().then((v) => {
       if (v.length > 0) defaultFonts = v;
     });
+    /**
+     * **写作模式的源码透镜装上打包字体**（Libertinus Serif + 思源宋体子集，见 editor-font.ts）：
+     * 字号（--write-doc-px）与行高早就跟着文档走了，字体是最后一条腿 —— 装上之后源码形态与
+     * 引擎切片才是同一套排版（字宽、断行都对得上）。字体本来就随应用分发，这一步不增加体积；
+     * 装不上（老后端没这个命令 / 文件缺失）就什么都不做，字体栈自己退回系统族。
+     */
+    void installEditorFonts({ load: loadBundledFont })
+      .then((families) => {
+        if (families.length > 0) dbg.log("font", `写作模式已装上打包字体：${families.join(" / ")}`);
+      })
+      .catch((e) => dbg.log("font", "打包字体没装上（保持系统字体栈）：", e));
 
     const firstCompile = runCompile();
     if (isSecondaryWindow) {

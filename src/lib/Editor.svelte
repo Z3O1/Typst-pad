@@ -21,6 +21,7 @@
   import type { WriteCommand } from "./write-commands";
   import { mark } from "./startup-timing";
   import { anchorPosEffect } from "./scroll-anchor";
+  import { WRITE_FONT_STACK } from "./editor-font";
   import { dbg } from "./debug";
 
   interface Props {
@@ -517,11 +518,14 @@
 </script>
 
 <!-- style:--write-doc-px = 文档正文字号（pt → px，1pt = 4/3px）：写作模式的正文与行高按它渲染，
-     与引擎切片完全一致，光标进出块时字号不跳（见样式里 .editor-host.write 的说明） -->
+     与引擎切片完全一致，光标进出块时字号不跳（见样式里 .editor-host.write 的说明）。
+     style:--write-font-stack = 写作模式的字体栈（与 typst 默认族顺序一致）：字号/行高/字体
+     三条腿齐了，源码形态与切片形态才是同一套排版（见 editor-font.ts） -->
 <div
   class="editor-host"
   class:write={mode === "write"}
   style:--write-doc-px={`${(docTextPt * 4) / 3}px`}
+  style:--write-font-stack={WRITE_FONT_STACK}
   bind:this={host}
 ></div>
 
@@ -557,7 +561,16 @@
    * 字体与预览/PDF 输出一致（思源宋体），所见即所得才对得上。
    */
   .editor-host.write :global(.cm-content) {
-    font-family: "Noto Serif CJK SC", "Songti SC", "Source Han Serif SC", Georgia, serif;
+    /* 字体栈由 editor-font.ts 的 WRITE_FONT_STACK 提供（拉丁 Libertinus → 中文思源宋体 → 系统宋体）；
+       打包字体装上之前/装不上时，那两族名自然落空、退回后面的系统族，行为与从前一致。 */
+    font-family: var(
+      --write-font-stack,
+      "Noto Serif CJK SC",
+      "Songti SC",
+      "Source Han Serif SC",
+      Georgia,
+      serif
+    );
   }
 
   /* 写作模式下编辑器底色/文字跟随主题变量（暗色时与纸张底色一致，不漏白底） */

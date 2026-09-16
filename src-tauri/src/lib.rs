@@ -274,6 +274,18 @@ fn default_font_families() -> Vec<String> {
         .collect()
 }
 
+/// 打包字体的原始字节（**写作模式的源码透镜要装上同一套字**，见 `typst_world::EDITOR_FONT_FILES`）。
+///
+/// 为什么不让前端直接读资源目录：没有 fs 插件；而且这份字体本来就随应用分发（`fonts/` 是
+/// `bundle.resources` 的一项），从 Rust 读出来交给 webview **不增加安装包体积**。
+/// 参数只认白名单里的文件名（防路径穿越）；返回 `tauri::ipc::Response` = raw IPC，
+/// 前端拿到的是 ArrayBuffer，不必把 1.3MB 的字体摊成 JSON 数组（那样慢一个数量级）。
+#[tauri::command]
+fn bundled_font(app: tauri::AppHandle, name: String) -> Result<tauri::ipc::Response, String> {
+    let dir = typst_world::resolve_fonts_dir(&app);
+    typst_world::read_editor_font(&dir, &name).map(tauri::ipc::Response::new)
+}
+
 /// 列出可用字体族（设置里「中文字体」下拉的数据源）：打包字体 + 系统字体 + 额外目录。
 /// 选项来自真实注册的字体，因此用户选不出不存在的族名——写错族名的后果是 typst 只发
 /// warning 然后**静默回退到楷体**，正是"改了字体没用"的根源。
@@ -547,7 +559,8 @@ pub fn run() {
             compile_math,
             export_pdf,
             list_font_families,
-            default_font_families
+            default_font_families,
+            bundled_font
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

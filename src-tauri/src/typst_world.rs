@@ -319,6 +319,35 @@ pub const DEFAULT_FONT_FAMILIES: &[&str] = &[
     "Microsoft YaHei",
 ];
 
+/// **写作模式的源码透镜要用的打包字体**（前端 `@font-face` 的名单；`src/lib/editor-font.ts`
+/// 是它的镜像，`scripts/editor-fonts.test.mjs` 静态对齐两边）。
+///
+/// 为什么前端要拿到这几份：写作模式是"非光标块显示引擎切片 + 光标所在块展开成源码"。字号
+/// （`textPt`）与行高（`par.leading`）早就跟着文档走了，**字体是最后一条腿** —— 切片是 typst 用
+/// 这几个打包字体排出来的，而 webview 里的源码此前只能用系统字体栈（Windows 上落到宋体 + Times），
+/// 同一段文字在两种形态里字宽与断行都不一样，光标进出块时看起来像"换了一套字"（用户报过
+/// 「不要光标在哪里哪里就变大了」，那是字号；这条是同一个毛病的字体版）。
+///
+/// 这几份字体本来就随应用分发（`tauri.conf.json` 的 `bundle.resources` 把 `fonts/` 交给运行时），
+/// 所以这里**不增加安装包体积**，只是把字节交给 webview（前端没有 fs 插件，读不到资源目录）。
+pub const EDITOR_FONT_FILES: &[&str] = &[
+    "LibertinusSerif-Regular.otf",
+    "LibertinusSerif-Bold.otf",
+    "NotoSerifCJKsc-Regular.otf",
+];
+
+/// 读一份打包字体的原始字节（给前端 `@font-face` 用）。
+///
+/// **只认白名单里的文件名**：这个命令的参数来自前端，绝不能让它变成"读任意文件"的口子
+/// （不在 `EDITOR_FONT_FILES` 里的一律拒绝，`..` 之类自然也进不来）。
+pub fn read_editor_font(fonts_dir: &Path, name: &str) -> Result<Vec<u8>, String> {
+    if !EDITOR_FONT_FILES.contains(&name) {
+        return Err(format!("不认识的字体：{name}"));
+    }
+    let path = fonts_dir.join(name);
+    std::fs::read(&path).map_err(|e| format!("读取字体失败（{}）：{e}", path.display()))
+}
+
 /// 字体配置（前端设置传入）。
 #[derive(Clone, Debug)]
 pub struct FontConfig {
@@ -1175,6 +1204,30 @@ mod tests {
     /// CWD 是 src-tauri，用 CARGO_MANIFEST_DIR 定位更稳）
     fn fonts_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts")
+    }
+
+    /// 写作模式的源码透镜要用的打包字体：白名单里的文件**必须真在仓库里**（改名/换字体时这条会红，
+    /// 否则前端只会静默退回系统字体，谁也不知道），且白名单外的名字一律拒绝。
+    #[test]
+    fn editor_font_files_exist_and_are_whitelisted() {
+        let dir = fonts_dir();
+        for name in EDITOR_FONT_FILES {
+            let path = dir.join(name);
+            assert!(path.is_file(), "缺打包字体：{}", path.display());
+            let bytes = read_editor_font(&dir, name).unwrap_or_else(|e| panic!("{name} 读不到：{e}"));
+            assert!(
+                bytes.len() > 100_000,
+                "{name} 只有 {} 字节，不像一份真字体",
+                bytes.len()
+            );
+        }
+        // 白名单之外（含路径穿越、系统文件）一律拒绝
+        for bad in ["../Cargo.toml", "Cargo.toml", "", "/etc/passwd"] {
+            assert!(
+                read_editor_font(&dir, bad).is_err(),
+                "白名单外的名字必须拒绝：{bad:?}"
+            );
+        }
     }
 
     /// 公式渲染（compile_math）：行内公式成功，SVG 贴边且透明，

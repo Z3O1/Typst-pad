@@ -802,6 +802,20 @@ async function handleCommand(
     case "default_font_families":
       notify(command);
       return [...FAKE_FONT_FAMILIES_DEFAULT];
+    /**
+     * **打包字体**（写作模式的源码透镜要装上同一套字，见 editor-font.ts）。
+     * 真机走 Rust 的 raw IPC 读 `resources/fonts/`；浏览器开发模式没有那一步，就从 dev server
+     * 取**同一份文件**（`/__bundled-fonts/...`，见 vite.config.js 的 bundledFontsDev 插件：
+     * vite 的允许清单里没有 src-tauri，所以那里开了一个只读的小口子）。
+     * 这样验收能真断言"字体装上了、写作模式真的用上了它"，而不是只看代码路径对不对。
+     */
+    case "bundled_font": {
+      notify(command);
+      const name = typeof a.name === "string" ? a.name : "";
+      const res = await fetch(`/__bundled-fonts/${encodeURIComponent(name)}`);
+      if (!res.ok) throw new Error(`取字体失败：${name}（HTTP ${res.status}）`);
+      return await res.arrayBuffer();
+    }
     case "take_pending_files":
       return [];
     case "get_debug_flag":

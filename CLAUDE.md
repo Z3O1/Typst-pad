@@ -35,8 +35,8 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（35 个文件 / 656 项）
-cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（45 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
+npm test                 # 前端 + 脚本单测（38 个文件 / 677 项）
+cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（48 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 本地打包需要更新签名私钥（配置里已有 pubkey → 缺私钥打包会直接失败）：
@@ -50,11 +50,11 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 15 项�
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
 
 # 写作模式「块级渲染」三套（需要 headless Chromium，见「环境备忘」；CDP_PORT 默认 9333）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，109 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，115 项）
 npm run fixtures:blocks                                                                   # 导出真实切片 + 点击探针
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs # 几何等价 + 链接热区（75 项）
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击→精确字符（24 项 / 125 次点击）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs   # 场景截图（50 项，9 篇场景）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs   # 场景截图（64 项，9 篇场景）
 ```
 
 **改动前的红线（都是踩过的，勿回退）**
@@ -76,10 +76,10 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-sc
 
 **已知未决 / 可做**（都不是 bug，是留给接手人的选择）
 
-- `scripts/` 里 5 个 wasm 时代的死脚本（`debug-math*.mjs`、`debug-svg.mjs`、`debug-fontinfo.mjs`、`verify-sanitize.mjs`）依赖已移除的 `@myriaddreamin/typst.ts`，跑不起来也没人引用 —— 可以删。
+- ~~`scripts/` 里 6 个 wasm 时代的死脚本~~（`debug-math{,2,3}.mjs` / `debug-svg.mjs` / `debug-fontinfo.mjs` / `verify-sanitize.mjs`）：**2026-09-16 已删**（依赖已移除的 `@myriaddreamin/typst.ts`，跑不起来也无人引用）。
 - 浏览器开发模式（`?browserdev=1`）的编译是**假实现**（内存里的假文件系统 + 假 SVG）。想在浏览器里看真实排版走 `fixtures:math` 夹具链路；**真保存 / 导出 PDF / 系统对话框必须桌面版**。
-- 编辑器界面字体走系统字体栈（无 `@font-face`），所以写作模式正文与 PDF 用的思源宋体**并不完全一致**（打包字体只喂给 typst 编译）。要一致就加 `@font-face`。
-- `保存失败` / `打开失败` 的状态栏提示没带上 Rust 侧的具体原因（如 `仅支持 .typ 文件`、`目录无效`），可补。
+- ~~编辑器界面字体走系统字体栈~~：**2026-09-16 写作模式的正文已经装上打包字体**（`editor-font.ts` + Rust `bundled_font`，见下方「源码透镜」那条红线）—— 源码形态与切片现在是同一套字。**源代码模式**仍是等宽系统栈（那本来就该是代码字体，不必对齐）。
+- ~~`保存失败` / `打开失败` 没带 Rust 侧原因~~：**2026-09-16 已补**（`failure-text.ts` 的 `failureStatus`，把「仅支持 .typ 文件」「目录无效」这类原因接在冒号后面；打开/保存/重新读取/导出四处都接了，8 条单测）。
 - 设置弹窗的「启动时恢复上次内容」默认开（用户当时的选择）；若不想让新用户被上次内容打扰，可改默认或加提示。
 - 没有 git tag 之外的发布脚本；发版本流程见「CI / 发布约定」末尾。
 - **自动更新只覆盖 Windows**：CI 只构建 Windows 安装包，`latest.json` 里也只有 `windows-x86_64`。要上 macOS/Linux 得先补构建 job，并给 `+page.svelte` 的安装成功分支接 `tauri-plugin-process` 的 `relaunch()`（Windows 上 NSIS 装完会自己把应用拉起来，无需 relaunch，所以现在没引这个插件）。
@@ -160,10 +160,10 @@ npm run fixtures:math           # 导出真实公式产物到 .browser-check/（
 npm run fixtures:blocks         # 导出真实块切片 + 几何 + 点击探针到 .browser-check/（块级渲染验收用）
 node scripts/verify-release.mjs 0.8.0   # 发版后的匿名验收（清单可达性 + 版本号 + 安装包 + minisign 验签）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，109 项：切片/展开/窗口化/竖直移动（代码模式语义）/点击锚定/翻页/编译失败/块内 Enter/各种输入/拖选复制/整块选中）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，115 项：切片/展开/窗口化/竖直移动（代码模式语义）/点击锚定/翻页/编译失败/块内 Enter/各种输入/拖选复制/整块选中/打包字体）
 npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价 + 链接热区（真实产物，75 项）
-npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击 → 精确字符（真实探针，24 项 / 125 次点击全中）
-npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，50 项 / 9 篇）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击 → 精确字符（真实探针，27 项 / 136 次点击全中）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，64 项 / 9 篇）
 ```
 
 ## 架构
@@ -200,6 +200,8 @@ src/lib/menu-keys.ts        # 菜单栏按键决策纯函数（Alt / accessKey /
 src/lib/updater.ts          # 自动更新包装层：check → 可判别结果、下载进度事件流、句柄释放（只包 Tauri）
 src/lib/update-utils.ts     # 自动更新纯逻辑：启动检查延迟 / 进度换算 / 字节格式化 / 错误文案（可单测；**没有检查节流**，见「自动更新数据流」）
 src/lib/update-notes.ts     # 更新说明的 Markdown 渲染（受控子集 → 安全 HTML，先整体转义再生成标签；可单测）
+src/lib/editor-font.ts      # 写作模式的**打包字体**：与 typst 用同一套字（Rust `bundled_font` 取字节 → FontFace 注册），字体栈 `WRITE_FONT_STACK` 与 typst 默认族同序（可单测）
+src/lib/failure-text.ts     # 失败文案：from invoke 抛出的东西里抠一句原因，「保存失败：仅支持 .typ 文件」（可单测）
 src/lib/block-offsets.ts    # 字节偏移 ↔ CodeMirror 位置（UTF-16）换算：CJK 一个字 3 字节 / emoji 4 字节，直接当位置用会整篇错位（可单测）
 src/lib/block-plan.ts       # 写作模式块级渲染的**规划**纯逻辑：块表 → "哪些格子被切片覆盖 / 哪一块展开源码 / 窗口外沿用上一轮切片 / 竖直移动的接管判定（crossesCollapsedCover）与逐源码行落点（sourceVerticalTarget）/ 编译失败保留哪些切片 / 诊断块展开"（可单测）
 src/lib/block-hit.ts        # 点击定位的坐标纯逻辑：切片内的点 → 页面坐标（pt，只依赖 DOM 实测矩形）+ 命中结果钳回块内（可单测）
@@ -216,14 +218,15 @@ src-tauri/fonts/            # 打包字体（见"字体"：**不放 static/**）
 ```
 
 配置与辅助目录：
-- `vite.config.js`：SvelteKit + wasm 插件 + **dev 白屏修复三件套**（见"原生编译后端"末尾，勿动）；Tauri 开发用 `TAURI_DEV_HOST`。
+- `vite.config.js`：SvelteKit + wasm 插件 + **dev 白屏修复三件套**（见"原生编译后端"末尾，勿动）+ `bundledFontsDev`（**只作用于 dev**：把 `src-tauri/fonts/` 借 `/__bundled-fonts/*` 暴露给浏览器验收用，真机走 Rust 的 `bundled_font`；白名单挡路径穿越）；Tauri 开发用 `TAURI_DEV_HOST`。
 - `vitest.config.ts`：jsdom + `include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"]` + `server.fs.allow: [".."]`（scripts 那条是发布脚本的测试：脚本是普通 JS + node 内置模块，不参与 svelte-check，见"测试"）。
 - `svelte.config.js`：`@sveltejs/adapter-static`（SPA，`fallback: index.html`）。
 - `src-tauri/app-icon.svg`：**应用图标的源文件**（矢量、1024×1024，「叠纸 + T」造型：深墨蓝底 + 三张错落纸页 + 墨色 T + 三条正文线 + 品牌青光标本）。改图标只改它，然后 `npm run tauri icon src-tauri/app-icon.svg` 重新生成 `src-tauri/icons/` 全套（`.ico`/`.icns`/各尺寸 PNG/Store 那一串），网站 favicon（`static/favicon.png`，256px）同源导出。**两个坑**：① `tauri icon` 会顺带产出 `android/`、`ios/` 两个目录，本项目只做桌面端，**生成后删掉**；② 图标是**打包时嵌进 exe** 的，装了的用户要重装（或等下一个版本）才看得到，任务栏可能还留着旧缩略图缓存。生成用的 SVG 里有 `feDropShadow`，tauri 内置的 resvg 渲染正常（已核对 `.ico` 里 16/24/32/48/64/256 六档）。
 - `.github/workflows/`：`ci.yml`（test + build-bundles）、`release.yml`（tag 发草稿 Release），约定见"CI / 发布约定"。
 - `scripts/`：`check-fonts.mjs`（字体魔数校验）、`download-fonts.mjs`（重新下载字体）、`browser-check/`（CDP 验收）、`install-vs-buildtools.bat`/`verify-app.bat`（Windows 辅助）。
   `scripts/capabilities.test.mjs`：**Tauri capability 静态体检**（前端用到的插件命令 → 必须在 `src-tauri/capabilities/default.json` 里有对应权限；ACL 拒绝只在真机运行时才出现，浏览器验收碰不到，见「多窗口与页面级按键路由」）。
-  **历史遗留（wasm 时代，依赖已移除的 `@myriaddreamin/typst.ts`，跑不起来、也无人引用）**：`debug-math*.mjs`、`debug-svg.mjs`、`debug-fontinfo.mjs`、`verify-sanitize.mjs`。
+  `scripts/editor-fonts.test.mjs`：**写作模式打包字体的静态体检**（Rust `EDITOR_FONT_FILES` ↔ 前端 `EDITOR_FONT_FACES` ↔ `WRITE_FONT_STACK` 的族名顺序 ↔ `src-tauri/fonts/` 里真有这些文件 ↔ `bundle.resources` 会分发它们）。
+  **历史遗留（wasm 时代）那 6 个脚本已于 2026-09-16 删除**（`debug-math{,2,3}.mjs` / `debug-svg.mjs` / `debug-fontinfo.mjs` / `verify-sanitize.mjs`）。
 - `docs/`：`WYSIWYG-调研.md`（所见即所得的方案调研）；`CHANGELOG.md` 按 Keep a Changelog 维护；`.browser-check/` 为验收产物（已 gitignore）。
 
 ### 编译数据流（核心链路）
@@ -297,7 +300,7 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
       （打字 / 回车 1~3 次 / `$` / 围栏 / 粘贴 / Tab / 退格 / Delete / 删整行 / 选区替换 /
       全选换短文档换长文档 / 撤销）→ 四条不变量（旧表不抛异常、改动落在已展开的格子里、
       格子边界落在行首、未展开的格子必须把那一块正文完整盖住且格子首尾相接铺满全文）。
-- **源码透镜的字号/行距必须跟随文档（红线，用户：「不要光标在哪里哪里就变大了」）**：
+- **源码透镜的字号/行距/字体都必须跟随文档（红线，用户：「不要光标在哪里哪里就变大了」）**：
   非光标块是引擎切片、光标所在块是源码，两者字号不一致时**光标一进某一块，那一块的字就变大**
   （旧值：编辑区固定 16px / 行高 1.9，而切片是 typst 默认 11pt = 14.6667px / 行高 1.65 →
   字大 9%、行盒高 26%）。现在：Rust 侧 `block_geometry::document_text_pt` 按**字符数取众数**
@@ -308,6 +311,16 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   22/19/45px 降到 **0 / +3 / +8px**（中文长段落 / 标题层级 / 代码与表格）。**别把字号写死回去**：
   写死就退回"点哪哪变大"。验收：`writing-mode-scenes.mjs` 的「光标进出块时页面不许变高」四条
   （两条高度差 ≤12px + 默认文档 14.6667px + `#set text(size: 12pt)` 的文档 16px）**别删**。
+  **字体是最后补上的一条腿**（2026-09-16）：切片是 typst 用**打包字体**（Libertinus Serif +
+  思源宋体子集）排的，而 webview 里的源码此前只能用系统字体栈 → 同一段文字在两种形态里字宽、
+  断行都不一样，光标进出块时像"换了一套字"。现在启动时把这三份打包字体装上
+  （Rust `bundled_font` 读 `resources/fonts/`，raw IPC → `FontFace`；**字体本来就随应用分发，
+  不增加安装包体积**），写作模式的字体栈（`--write-font-stack`）与 typst 的默认族**同序**：
+  `Libertinus Serif → Noto Serif CJK SC → 系统宋体兜底`。装不上（老后端 / 文件缺失）就什么都不做，
+  自动退回系统族。验收：`writing-blocks.mjs` **第 17 组**（`document.fonts.check` 两份都装上 /
+  字体栈真的用上 / 拉丁与中文的实测字宽真来自它们 / 取到的是那份真文件 / 没有脚本错误）+
+  `editor-font.test.ts`（7 条）+ `scripts/editor-fonts.test.mjs`（**静态对齐** Rust 白名单 ↔
+  前端名单 ↔ `src-tauri/fonts` 里的文件 ↔ `bundle.resources`，改一边忘另一边时会红）。
 - **文档切换（打开/新建/重读）必须 `resetBlocks()`**：旧块区间套在新文档上会**盖住正文**
   （比公式缓存过期的危害大得多），见 `resetBlocks` 的注释。
 - **版心宽是编译期输入**：`page(width: 列宽/(1-2×页边距比例), height: auto)`，所以窗口尺寸 /
@@ -636,7 +649,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 ### 字体
 
-**两条管线**：① **typst 渲染**（预览/公式/PDF）用 Rust `FontBook`，产物 SVG 是字形轮廓；② **编辑器界面文字**用纯 CSS 字体栈（无 `@font-face`，即系统字体）——所以界面的中文与预览/PDF 的思源宋体**不保证一致**（想一致得把打包字体经 Tauri asset 协议喂给 webview，未做）。
+**两条管线**：① **typst 渲染**（预览/公式/PDF）用 Rust `FontBook`，产物 SVG 是字形轮廓；② **编辑器界面文字**用 CSS 字体栈 —— **写作模式**（`--write-font-stack`）现在把打包字体也装进了 webview（Rust `bundled_font` → FontFace，见 `editor-font.ts`），与 typst 用同一套字；**源代码模式**仍是等宽系统栈。
 
 - **打包字体**：`src-tauri/fonts/`（7 个：思源宋体 / NewCMMath×3 / LibertinusSerif×2 / DejaVuSansMono）。**不放 `static/`**（会被拷进前端产物，安装包白胖 5.7MB）。新增字体同步 `download-fonts.mjs`、Rust 单测 `fonts_all_registered`、README 清单。
 - **字体集 = 打包目录 + 系统目录 + 用户额外目录**（`FontConfig.dirs`，设置 → 额外字体目录，对齐 typst CLI 的 `--font-path`）。缓存**按目录列表做 key**（`Mutex<HashMap<..>>`）——增删目录必须重新加载，别退回 `OnceLock` 单值缓存。
@@ -713,6 +726,15 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 - 前端 vitest + jsdom，`include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"]`（第二条是发布脚本的测试：脚本是普通 JS + node 内置模块，进了 TS program 就得给每个参数写 JSDoc 或装 `@types/node`——仓库刻意没装，见 `vite.config.js` 里的 `@ts-expect-error`，所以让它们留在类型检查之外）；vite 的 `server.fs.allow: [".."]` 覆盖仓库上级目录（junction 场景下 node_modules 解析被拒的教训，见 #33，配置仍保留）。现有覆盖：`typst-engine`（invoke 契约映射 + 诊断转换纯函数，invoke/dialog 以 vi.mock 断言入参与消费）、`diagnostics-utils`、`error-list`、`context-menu-utils`、`doc-utils`、`editor-keymap`、`menu-keys`、`popover-utils`（#46 Popover 视口溢出的回归守卫）、`persistence`、`svg-paginate`、`pdf-export`、`preview-scale`、`write-commands`、`zoom`（滚轮档距/方向/上下限收敛/浮点圆整/横向位移退回）、`update-utils`（进度换算 / 字节格式化 / 错误文案翻译 / 启动检查延迟；**检查节流那条已删除**，见「自动更新数据流」）、`update-notes`（更新说明的 Markdown 渲染：转义/XSS、标题/嵌套列表/粗体/行内代码、不闭合成对符号时保持原文、链接不做成 `<a>`），脚本侧 `scripts/generate-latest-json.test.mjs`（平台键映射、semver 校验、NSIS 优先挑选、清单结构、CHANGELOG 提取、CLI 端到端）。
   **已删除的低价值测试（勿凭"补覆盖"再加回来）**：`file-ops.test.ts`（只测 `.typ` 后缀匹配这种一眼可见的判断，真路径安全在 Rust `validate_typ_path`，留着会造成"文件安全已测"的错觉）、`debug.test.ts`（调试日志通道，坏掉无用户可见后果）、`context-menu-utils.test.ts` 的 `computeMenuPosition` 收边 5 项（3 行 clamp，失败肉眼可见；更复杂的限宽分支由 popover-utils 覆盖）。
+- **Rust 单测里有一条"全局缓存"的坑（2026-09-16 修）**：`block_geometry` 的命中几何是**进程级全局**
+  （`HIT_CACHE` 只留"最近一次 `compile_blocks`"的字形几何）。生产路径没事（前端只对刚编译过的同一篇
+  文档命中，前面还有"块表必须与当前文档一致"的闸门），但 **cargo test 是并行跑的** —— 两个用例同时
+  编译不同文档时后者会覆盖前者，命中断言就读到了别人的排版。症状：`hit_test_on_real_layout_maps_edges_to_block_bounds`
+  **单独跑绿、跑全集红**（期望 `Some(0)` 拿到 `Some(2)`，正好差一个前缀的长度）。现在凡是写/读这块
+  缓存的用例都先拿一把测试锁（`HIT_CACHE_TEST_LOCK`）串行；`pick_hit` 那种纯函数用例不受影响。
+- **本机跑 `npm run fixtures:blocks` 要让 cargo 在 PATH 上**：脚本里是裸 `cargo`，而本机 cargo 在
+  `~/.cargo/bin`（默认不在 PATH）—— 不补就会静默产出空的 `.browser-check/block-fixtures.json`（`[]`），
+  后面三套真实产物验收全变成"没有夹具"。补法：`PATH="$HOME/.cargo/bin:$PATH" npm run fixtures:blocks`。
 - Rust 单测（`typst_world.rs`/`packages.rs` 内 `cargo test`，用 `CARGO_MANIFEST_DIR` 定位 `src-tauri/fonts`）：中文+数学文档端到端编译（每页含 `<svg>`，PDF 字节非空）、字体注册（7 个文件 + 族名断言）、语法错误诊断（1-based 行列 + endLine）、相对 include（成功 / 缺失文件诊断带 path / 未保存文档提示）、JSON 序列化契约（camelCase 键名 `endLine`/`endColumn`）、@local/@preview 包（缓存命中不下载 / miss 下载与 URL 格式 / 404 与网络失败诊断区分 / 数据目录优先 / 路径穿越与损坏归档防御 / 端到端导入编译，均用临时目录注入环境变量，不触真实用户目录与网络）。
 - 所见即所得链路测试：`typst-lex.test.ts`（区域扫描：注释/raw/字符串/代码/`[...]` 内容块）、`markup-ranges.test.ts`（标记拆解，含"代码与公式里的 `*` `_` 不算标记"、有序列表编号、围栏代码块）、`typst-scan-fuzz.test.ts`（**鲁棒性网**：120 份固定种子随机文档 + 15 组病态输入，断言不抛异常、区间有序不越界不重叠、区域无缝覆盖全文）、`math-context.test.ts`（`#let` 提取的保守规则）、`live-preview.test.ts`（jsdom 里真挂 EditorView，断言 widget 替换 / 块级 vs 行内 / 光标进出展开 / 失败回退 / 开关关闭 / 样式类）。**坑**：jsdom 下挂视图时光标默认在 offset 0，会落在构造内部而触发"展开"，测隐藏效果必须把光标放到构造之外。
 - 前端测试不接触真实编译——依赖引擎的逻辑保持"核心逻辑独立可测"（纯函数 + mock invoke）。

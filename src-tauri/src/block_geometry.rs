@@ -1275,6 +1275,20 @@ pub type CropSize = Size;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **命中几何是进程级全局的**（`HIT_CACHE` 只保留"最近一次 `compile_blocks`"的字形几何）。
+    /// 生产路径没问题：前端只对刚编译过的同一篇文档做命中测试，前面还有"块表必须与当前文档一致"
+    /// 的闸门。但**测试是并行跑的** —— 两个用例同时编译不同文档时，后者的几何会覆盖前者，
+    /// 命中断言就读到了别人的排版。实测：`hit_test_on_real_layout_maps_edges_to_block_bounds`
+    /// 单独跑绿、跑全集红（期望 `Some(0)` 拿到 `Some(2)`，正好差一个前缀的长度）。
+    /// 所以凡是**写**缓存（调 `compile_blocks`）或**读**缓存（调 `hit_test`）的用例都先拿这把锁，
+    /// 让它们串行；`pick_hit` 那种纯函数用例不受影响（自造 items）。
+    static HIT_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 拿测试锁（用 `into_inner` 兜住中毒：某个用例 panic 了也要放别人过去）
+    fn hit_cache_guard() -> std::sync::MutexGuard<'static, ()> {
+        HIT_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
     use std::path::PathBuf;
 
     fn fonts_dir() -> PathBuf {
@@ -1337,6 +1351,7 @@ mod tests {
     /// **真实引擎几何 + 真实字节偏移**：单行块的左缘 → 块首，右缘 → 块尾（含 CJK 3 字节）。
     #[test]
     fn hit_test_on_real_layout_maps_edges_to_block_bounds() {
+        let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
         const COLUMN_PT: f64 = 371.25;
         // 一行的短段落（不折行）+ 一个会折成好几行的长段落
         let doc = "甲乙丙丁戊己庚辛\n\n这是一段很长的中文正文，它会在版心宽度里折成好几行，用来验证纵向的命中判定：点的位置越往下，落在源码里的字符就应该越靠后，而横向的点则决定光标落在字的哪一侧。收尾。\n";
@@ -1550,6 +1565,7 @@ mod tests {
     /// 窗口化：窗口内的块有切片，窗口外的块只有几何（`found` 为 true、svg 为空）
     #[test]
     fn writing_mode_window_limits_crops() {
+        let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
         let src = "= 标题\n\n第一段。\n\n第二段。\n\n第三段。\n";
         let out_all = compile_blocks(
             src.to_string(), 0, None, &fonts_dir(), &FontConfig::default(), 371.25, None, None,
@@ -1576,6 +1592,7 @@ mod tests {
     /// 耗时只在下面 `dump_long_doc_blocks` 里按需打印。
     #[test]
     fn windowing_keeps_payload_bounded() {
+        let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
         let mut src = String::from("= 长文档\n\n");
         for i in 0..160 {
             src.push_str(&format!(
@@ -1750,6 +1767,7 @@ mod tests {
     /// 标题（更大）与代码块（等宽、字号可能不同）都不能把基准带跑。
     #[test]
     fn document_text_size_follows_the_document() {
+        let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
         let cases: [(&str, f64); 3] = [
             ("正文一段。再来一句，字符数要够多。\n\n= 标题\n\n又一段正文。\n", 11.0),
             (
@@ -1830,6 +1848,7 @@ mod tests {
     ///  ④ 块区间按源码顺序递增不重叠（前端靠它切"源码透镜"的边界）。
     #[test]
     fn block_crop_geometry_invariants() {
+        let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
         const COLUMN_PT: f64 = 371.25;
         for (name, src) in GEOMETRY_DOCS {
             let out = compile_blocks(
@@ -2074,6 +2093,7 @@ mod tests {
     /// 写作模式的块级渲染：区块要切得出来、宽度等于正文列宽、高度之和 ≈ 版心高度
     #[test]
     fn writing_mode_block_crops_are_sane() {
+        let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
         const COLUMN_PT: f64 = 371.25; // = 495px（写作模式常见正文列宽）
         let src = "= 标题\n\n第一段正文，写得长一点以便观察断行与段落间距。\n\n- 列表项一\n- 列表项二\n\n$ integral_0^1 f(x) dif x $\n\n结尾段落。\n";
         let out = compile_blocks(src.to_string(), 0, None, &fonts_dir(), &FontConfig::default(), COLUMN_PT, None, None);
@@ -2116,6 +2136,7 @@ mod tests {
     /// 坐标是"带内相对 pt"、href 原样；页内目标与非 http(s)/mailto 协议不收。
     #[test]
     fn block_crops_carry_link_hotspots() {
+        let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
         const COLUMN_PT: f64 = 371.25;
         let doc = "看这里：\n\n更多内容见 #link(\"https://typst.app/docs\")[官方文档]，也可以点 #link(\"https://example.com/a\")[这个例子]。\n\n- 列表里的 #link(\"mailto:a@b.c\")[邮件] 也要能点。\n";
         let out = compile_blocks(
@@ -2203,6 +2224,7 @@ mod tests {
     /// 前缀代码（设置里的编译前缀）不进块区间：返回的偏移应是**用户文档坐标**
     #[test]
     fn writing_mode_blocks_ignore_prefix_offset() {
+        let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
         let prefix = "#set text(size: 12pt)\n";
         let doc = "= 标题\n\n正文。\n";
         let src = format!("{prefix}{doc}");
