@@ -93,11 +93,10 @@
     shouldRebaselineZoom,
     zoomApplied,
     zoomIn,
-    zoomAcceptedByTwoJudges,
     zoomLabel,
     zoomOut,
     zoomProbeVerdict,
-    zoomRejectedNotice,
+    zoomUnobservedNotice,
   } from "$lib/zoom";
   // isWrapToggleKey 的判定已挪进 app-keys.decideAppKey（那里统一管按键路由，含它的顺序要求）
   import { WRAP_SOURCE_ONLY_NOTICE, wrapNotice } from "$lib/word-wrap";
@@ -575,6 +574,8 @@
     markZoomSettling();
     try {
       await getCurrentWebview().setZoom(target);
+      // `appliedZoom` = **我们请求的档位**（不再由复核改写）：它只用于诊断读数与基准换算
+      appliedZoom = target;
       dbg.log("zoom", `set ${zoomLabel(target)}`);
     } catch (e) {
       dbg.log("zoom", "setZoom failed", e);
@@ -602,7 +603,7 @@
         .setZoom(target)
         .then(() => {
           dbg.log("zoom", `confirm ${zoomLabel(target)}`);
-          void verifyZoomApplied(target);
+          void observeZoomEffect(target);
         })
         // 这次是兜底重试，失败只记日志（首次调用已经把失败报过了）
         .catch((e) => dbg.log("zoom", "confirm failed", e));
@@ -683,100 +684,69 @@
   }
 
   /**
-   * 复核 webview 到底有没有接受这个系数，**没接受就把界面状态拉回引擎给的档位**。
+   * 改档之后**只观察、不改状态**（用户 2026-09-16 明确要求：「就应该缩放只有我能改，软件别自己动了」）。
    *
-   * 为什么必须拉回来（2026-09-14 四次实机反馈串起来看）：真机上引擎没接受"放大"，而 uiZoom 照旧
-   * 一路涨到上限 250%，于是从 250% 往下滚要滚十几档才有反应——用户先看到「放大根本没用，缩小有用」，
-   * 接着是「最大后无法用滚轮缩小」，第三次仍是「缩放到最大后无法从 Ctrl+滚轮缩小」，第四次直接
-   * 截图「引擎把 150% 限制在 100%」。让状态永远等于引擎实际接受的档位，滚轮就再也不会掉进这种
-   * 死区：放大被拒时档位原地不动（界面与状态都保持一致，并在状态栏说明原因），缩小立刻有效。
-   *
-   * **判据是 CSS 布局宽度不是 devicePixelRatio**（0.7.8 之后换的）：dpr 依赖显示器缩放、真机上
-   * 可能不跟随宿主设的 ZoomFactor，那时旧代码会把复核整体关掉（fail-open）→ 状态又开始一路涨。
-   * 布局宽度比是页面缩放的定义本身，精确且与显示器无关。详见 zoom.ts 的 zoomFromWidths。
-   *
-   * **复核要"多量几次"**（见 zoom.ts 的 ZOOM_VERIFY_WAITS_MS 那段注解）：设一次立刻量只覆盖
-   * "立即生效"的引擎；实测有的机器上引擎会晚一拍才把档位落到布局上，或者在手势结束时把宿主设的值
-   * 抹掉（#1022）。所以设一次之后按 0/250/700ms 连量三次，还不对就把这一档再设一遍再量一次——
-   * 只有"重设"能救回被丢掉的值。引擎明确给了别的档位（上限）时不再等（见 zoomProbeVerdict）。
+   * 历史（为什么以前会自己动）：从 0.7.4 起这里叫 `verifyZoomApplied` —— 设完档量一次，量到的档位与
+   * 请求值不一致就把 `uiZoom` **拉回引擎给的档位**，为的是防"引擎只肯到 100%、而状态一路涨到 250%，
+   * 于是往下滚要滚十几档才有反应"那个死区。代价是：**判断本身可能出错**，而一旦判错，用户要的缩放
+   * 就被我们自己弹回原档 —— 用户第六轮反馈的「用 Ctrl+滚轮会回退」正是它（他那台机器上两条判据都
+   * 读不出缩放变化，于是每一次缩放都被判成"引擎没动"并拉回）。用户已经明确取舍：**宁可没有死区
+   * 保护，也不要软件自己改缩放**。所以现在：
+   *   - 只在我们**执行用户操作**时调用 `setZoom`（见 applyUiZoom）；
+   *   - 这里量到的读数只用于**诊断**（调试日志 + 状态栏里一句"没观察到变化"的说明），
+   *     **绝不写 `uiZoom`、绝不改变引擎档位**；
+   *   - 因此"引擎上限"这类机器上状态可能高于引擎实际给的档位（死区回来了）——这是用户接受的代价，
+   *     真要再收，也应该由用户自己按 Ctrl+Shift+-，而不是我们偷偷改。
    */
-  async function verifyZoomApplied(target: number) {
+  async function observeZoomEffect(target: number) {
     if (zoomIsFaked()) return;
     if (zoomCalibration === null) return; // 还没校准过（正常路径一定先经过 applyUiZoom）
     const mySeq = ++zoomVerifySeq;
     let observed: number | null = null;
-    /** 同一次读数的 dpr 判据（第二条独立信号）：两条任一成立即接受，见 zoomAcceptedByTwoJudges */
     let observedDpr: number | null = null;
     let measurements = 0;
     zoomStepInFlight = true;
     markZoomSettling();
     try {
-      await getCurrentWebview().setZoom(target); // 顺带把这一档再设一遍（兜底重试）
       for (const wait of ZOOM_VERIFY_WAITS_MS) {
         if (wait > 0) await sleep(wait);
-        if (mySeq !== zoomVerifySeq) return; // 用户又调档了：这次复核作废（别把新档位拉回去）
+        if (mySeq !== zoomVerifySeq) return; // 用户又调档了：这次观察作废
         measurements += 1;
         observed = await measureEngineZoom();
         observedDpr = dprEngineZoomNow();
-        const verdict = zoomProbeVerdict(target, observed, appliedZoom);
-        if (verdict === "accepted" || verdict === "capped") break; // 有结论了，不必再等
-      }
-      if (observed !== null && !zoomApplied(target, observed)) {
-        // 一路量下来都是"没动过"：值很可能是被引擎丢掉了，重设一遍才是解法（立刻重设没用）
-        await sleep(ZOOM_VERIFY_RESET_DELAY_MS);
-        if (mySeq !== zoomVerifySeq) return;
-        await getCurrentWebview().setZoom(target);
-        measurements += 1;
-        observed = await measureEngineZoom();
-        observedDpr = dprEngineZoomNow();
+        if (zoomApplied(target, observed) || zoomApplied(target, observedDpr)) break;
       }
     } catch (e) {
-      dbg.log("zoom", "复核时 setZoom 失败", e);
+      dbg.log("zoom", "观察缩放结果时出错", e);
       return;
     } finally {
-      // 只有"最新那次复核"才有资格解除测量标记（期间可能有更新的复核接手）
       if (mySeq === zoomVerifySeq) {
         zoomStepInFlight = false;
-        zoomSettlingUntil = 0; // 复核收尾：之后引擎再触发 resize 就是用户拖窗口，照常重校基准
+        zoomSettlingUntil = 0; // 观察收尾：之后引擎再触发 resize 就是用户拖窗口
       }
     }
     if (mySeq !== zoomVerifySeq) return;
     const currentWidth = document.documentElement.clientWidth;
-    // **两条判据任一成立即接受**（2026-09-16）：只认宽度的话，那台"CSS 视口宽度不跟随 ZoomFactor"
-    // 的机器上会把**真的生效了**的缩放判成失败并弹回原档（用户第六轮反馈的「缩放会回退」）。
-    const judge = zoomAcceptedByTwoJudges(target, observed, observedDpr, appliedZoom);
-    if (judge.accepted) {
-      if (judge.by === "dpr") {
-        dbg.log(
-          "zoom",
-          `宽度判据看不出变化（${observed === null ? "读不到" : observed.toFixed(3)}），` +
-            `但 dpr 判据给 ${zoomLabel(observedDpr)} —— 按"引擎接受了"处理（这台机器的 CSS 视口宽度不跟随 ZoomFactor）`,
-        );
-      }
-      appliedZoom = clampZoom(target);
-      rebaselineZoom(); // 测量刚做完，此刻"宽度 × 档位"就是 100% 基准
-      return; // 引擎接受了，正常路径
+    if (zoomApplied(target, observed) || zoomApplied(target, observedDpr)) {
+      dbg.log("zoom", `观察：引擎侧与请求一致（${zoomLabel(target)}）`);
+      return;
     }
-    if (observed === null || !Number.isFinite(observed)) return; // 量不到：不判定、不改状态
-    const snapped = clampZoom(observed);
-    appliedZoom = snapped;
-    rebaselineZoom();
-    if (snapped === clampZoom(uiZoom)) return; // 状态已经在引擎给的档位上了
+    // **没有观察到变化**：可能是引擎没接受，也可能是我们这两条判据读不出来（那台机器就是这样）。
+    // 无论哪种，都只写一句说明，档位保持用户操作后的值。
     dbg.log(
       "zoom",
-      `引擎未接受 ${zoomLabel(target)}（实测 ${observed.toFixed(3)}，量了 ${measurements} 次；` +
-        `布局宽度 ${Math.round(zoomBaseline100)}→${Math.round(currentWidth)}，dpr ${window.devicePixelRatio}）`,
+      `观察：没看到引擎侧变化（请求 ${zoomLabel(target)}，实测 ${observed === null ? "读不到" : observed.toFixed(3)}，` +
+        `量了 ${measurements} 次；布局宽度 ${Math.round(zoomBaseline100)}→${Math.round(currentWidth)}）`,
     );
-    uiZoom = snapped; // 触发 $effect → 再把引擎对齐到这个档位（已经是了，等价空操作）
-    schedulePersist();
-    statusText = zoomRejectedNotice(target, observed, {
+    statusText = zoomUnobservedNotice(target, observed, {
       measurements,
       widths: { baseline: zoomBaseline100, current: currentWidth },
       dpr: window.devicePixelRatio,
-      dprFactor: dprEngineZoomNow(),
+      dprFactor: observedDpr,
       wheelEvents: zoomWheelEvents,
     });
   }
+
 
   /** 改缩放并反馈（滚轮 / 菜单共用）；值没变时提示"已到边界"，不重复写存档 */
   function setUiZoom(next: number) {

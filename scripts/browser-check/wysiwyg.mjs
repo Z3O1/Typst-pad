@@ -1135,71 +1135,60 @@ check(
   JSON.stringify(simDown),
 );
 
-// B) 引擎只肯缩小（放大一律按 100% 处理）：档位必须停在引擎给的 100%，缩小立刻有效
+// B) 引擎只肯缩小（放大一律按 100% 处理）：**档位保留用户请求的那个值，软件不许自己改**
+// （2026-09-16 用户明确要求：「就应该缩放只有我能改，软件别自己动了」——以前这里会把档位拉回
+// 引擎给的 100%，用户看到的正是「用 Ctrl+滚轮会回退」）
 await gotoSim("&zoomsim=1&zoomcap=1");
 await wheelOverEditor(-100, 4);
 const capped = await c.evaluate(zoomProbe2);
 check(
-  "引擎拒绝放大时，档位被拉回引擎实际给的 100%（不再冲上限）",
-  Math.abs((capped.saved ?? 0) - 1) < 0.001 && Math.abs((capped.engine ?? 0) - 1) < 0.001,
+  "引擎拒绝放大时，档位**保留用户请求的 140%**（软件不再把档位拉回引擎给的 100%）",
+  Math.abs((capped.saved ?? 0) - 1.4) < 0.001 && Math.abs((capped.engine ?? 0) - 1) < 0.001,
   JSON.stringify(capped),
 );
 check(
-  "状态栏说明是引擎限制，而不是静默没反应",
-  capped.status.includes("未生效") && capped.status.includes("限制在 100%"),
+  "状态栏只**说明**没观察到变化（不再写「限制在 100%」，因为那只是我们的推测）",
+  capped.status.includes("引擎侧没观察到变化") && capped.status.includes("已按你的操作设到 140%"),
   JSON.stringify(capped.status),
 );
-// 文案要带上实测数据（2026-09-14 加）：这个现象只在用户那台真机上出现，状态栏是唯一能读到的
-// 通道——"布局宽度没变" 与 "宽度变过又回来" 指向完全不同的成因（前者是引擎没动、后者是被抹掉）。
+// 文案要带上实测数据：这个现象只在用户那台真机上出现，状态栏是唯一能读到的通道
+// （"布局宽度没变" 与 "宽度变过又回来" 指向完全不同的成因）。
 check(
-  "「未生效」文案带上了实测数据（量了几次 / 布局宽度 / dpr）",
+  "文案带上了实测数据（量了几次 / 布局宽度 / dpr）",
   capped.status.includes("量了") &&
     capped.status.includes("布局宽度") &&
     capped.status.includes("dpr"),
   JSON.stringify(capped.status),
 );
-// 交叉验证（2026-09-14 第五次反馈后加）：宽度判据与 dpr 判据**互相印证**才敢说"引擎真没动"。
-// 这台模拟机器上假 dpr 跟着假引擎走，两条判据都该说 100%——下次真机上若出现"宽度 100%、
-// dpr 150%"，一张截图就能看出是**我们自己量歪了**，而不是引擎拒绝。
-check(
-  "文案里有第二条判据的交叉验证（dpr 判据也给出它读到的档位）",
-  capped.status.includes("dpr 判据给 100%"),
-  JSON.stringify(capped.status),
-);
-// 关键：接着往下滚必须立刻见效（这就是「最大后无法用滚轮缩小」那条反馈）
+// 接着往下滚必须立刻见效（用户之前报过「最大后无法用滚轮缩小」；新政策下档位不会被钉在 100%，
+// 所以从 140% 往下滚一格就该到 130%）
 await wheelOverEditor(100, 1);
 const afterOut = await c.evaluate(zoomProbe2);
 check(
-  "被拒之后立刻往下滚就能缩小（死区消失）",
-  Math.abs((afterOut.saved ?? 0) - 0.9) < 0.001 && Math.abs((afterOut.engine ?? 0) - 0.9) < 0.02,
+  "被引擎拒绝之后，往下滚一格立刻生效（140% → 130%）",
+  Math.abs((afterOut.saved ?? 0) - 1.3) < 0.001,
   JSON.stringify(afterOut),
 );
 
-// C) 引擎能放大、但**只到 210%**（2026-09-14 用户第三次反馈「缩放到最大后无法从 Ctrl+滚轮缩小」
-// 的那台机器：状态冲过引擎上限 → 往下滚要滚十几档才有反应，看着就是"缩不回去"）。
-// 这一版把判据从 devicePixelRatio 换成 **CSS 视口宽度比**（真机上 dpr 不跟随 ZoomFactor，旧代码
-// 会把复核整体关掉 → 状态又开始冲上限）；`&zoommax=2.1` 让桩模拟这台机器。
+// C) 引擎能放大、但**只到 210%**：档位同样保留用户请求（2.2），且往下滚一档立刻见效。
+// 这一版把判据从 devicePixelRatio 换成 **CSS 视口宽度比**（真机上 dpr 不跟随 ZoomFactor）；
+// `&zoommax=2.1` 让桩模拟这台机器。**注意新政策**：状态可以高于引擎给的档位（死区回来了）——
+// 这是用户明确接受的代价（「缩放只有我能改」优先于"档位永远等于引擎值"）。
 await gotoSim("&zoomsim=1&zoommax=2.1");
 await wheelOverEditor(-100, 12); // 1.0 → 请求 2.2，引擎只给 2.1
 const capped210 = await c.evaluate(zoomProbe2);
 check(
-  "引擎上限 210%：档位被拉回 210%，不会冲到 250%（「往下滚没反应」的根因）",
-  Math.abs((capped210.saved ?? 0) - 2.1) < 0.011 && Math.abs((capped210.engine ?? 0) - 2.1) < 0.011,
+  "引擎上限 210%：档位保留用户请求的 2.2（不再被拉回 2.1）",
+  Math.abs((capped210.saved ?? 0) - 2.2) < 0.011 && Math.abs((capped210.engine ?? 0) - 2.1) < 0.011,
   JSON.stringify(capped210),
-);
-check(
-  "状态栏说明是引擎把它限制在 210%",
-  capped210.status.includes("未生效") && capped210.status.includes("限制在 210%"),
-  JSON.stringify(capped210.status),
 );
 await wheelOverEditor(100, 1);
 const afterDown210 = await c.evaluate(zoomProbe2);
 check(
-  "被 210% 上限挡住后，**往下滚一档立刻见效**（用户报的症状）",
-  Math.abs((afterDown210.saved ?? 0) - 2.0) < 0.011 && Math.abs((afterDown210.engine ?? 0) - 2.0) < 0.02,
+  "往下滚一档立刻见效（2.2 → 2.1，用户报的「最大后无法缩小」不再出现）",
+  Math.abs((afterDown210.saved ?? 0) - 2.1) < 0.011,
   JSON.stringify(afterDown210),
 );
-
 // D) 引擎**晚一拍**才生效（`&zoomdelay=300`）：设完立刻量还是旧档位。复核必须多等几次才下结论，
 // 否则一台"只是慢"的机器会被误判成"引擎不接受"，把用户刚调上去的档位又拉回来 —— 这正是
 // 「缩放会无效」最可能的形态之一（见 zoom.ts 的 ZOOM_VERIFY_WAITS_MS）。
@@ -1235,14 +1224,14 @@ check(
   !widthStuck.status.includes("未生效") && widthStuck.status.includes("缩放 130%"),
   JSON.stringify(widthStuck.status),
 );
-// 正交验证：同一台机器上**引擎真不动**时必须仍然被判死（`&zoomcap=1` + `&zoomwidthstuck=1`），
-// 否则"双重判据"就成了把死区保护放跑的漏洞。
+// 正交验证：哪怕引擎真的没动、且两条判据都读不到，**也不改用户的档位**（新政策的底线）。
+// 这一条替代了旧的"必须报「未生效」并拉回 100%"——那条正是用户不要的行为。
 await gotoSim("&zoomsim=1&zoomcap=1&zoomwidthstuck=1");
 await wheelOverEditor(-100, 2);
 const stuckCapped = await c.evaluate(zoomProbe2);
 check(
-  "宽度瞎 + 引擎拒绝放大：仍然报「未生效」并把档位拉回 100%（死区保护没有被双重判据放跑）",
-  stuckCapped.status.includes("未生效") && Math.abs((stuckCapped.saved ?? 0) - 1) < 0.001,
+  "两条判据都瞎 + 引擎真拒绝：档位仍保留用户请求的 120%，只给一句说明",
+  Math.abs((stuckCapped.saved ?? 0) - 1.2) < 0.001 && stuckCapped.status.includes("没观察到变化"),
   JSON.stringify(stuckCapped),
 );
 

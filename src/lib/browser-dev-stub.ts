@@ -48,11 +48,19 @@ const ZOOM_SIM_BASE_DPR = 1.25;
  * - `&zoomdelay=300`：引擎**晚一拍**才把档位落到布局上（模拟"设完立刻量还是旧档位"的机器，
  *   复核的多等几次就是为它准备的，见 zoom.ts 的 ZOOM_VERIFY_WAITS_MS）。
  */
-function zoomSimMode(): { sim: boolean; cap: number | null; delay: number; widthStuck: boolean } {
-  if (typeof window === "undefined") return { sim: false, cap: null, delay: 0, widthStuck: false };
+function zoomSimMode(): {
+  sim: boolean;
+  cap: number | null;
+  delay: number;
+  widthStuck: boolean;
+  blind: boolean;
+} {
+  if (typeof window === "undefined") {
+    return { sim: false, cap: null, delay: 0, widthStuck: false, blind: false };
+  }
   const params = new URLSearchParams(window.location.search);
   const sim = params.has("zoomsim");
-  if (!sim) return { sim: false, cap: null, delay: 0, widthStuck: false };
+  if (!sim) return { sim: false, cap: null, delay: 0, widthStuck: false, blind: false };
   const delayParam = Number(params.get("zoomdelay"));
   const delay = Number.isFinite(delayParam) && delayParam > 0 ? delayParam : 0;
   // `&zoomwidthstuck=1`：**dpr 跟着引擎缩放走，但 CSS 视口宽度不动**（2026-09-16 加的机器）。
@@ -60,9 +68,19 @@ function zoomSimMode(): { sim: boolean; cap: number | null; delay: number; width
   // 「布局宽度没变（1379px）」说明宽度判据在这台机器上读不出缩放，而界面其实是变了的 ——
   // 只认宽度判据就会把**真的生效了**的缩放判成失败并弹回原档（见 zoom.ts 的 zoomAcceptedByTwoJudges）。
   const widthStuck = params.has("zoomwidthstuck");
-  if (params.has("zoomcap")) return { sim: true, cap: 1, delay, widthStuck };
+  // `&zoomblind=1`：**两条判据都是瞎的**（宽度不动、dpr 也不动），但引擎其实照常缩放。
+  // 这是用户那台机器的形状：截图里「布局宽度没变（1379px）」与「dpr 1.50」两条都没动，
+  // 而界面其实是变了的（他说「会回退」＝先变过又被打回来）。页面侧靠"判据能力探针"识别这种机器。
+  const blind = params.has("zoomblind");
+  if (params.has("zoomcap")) return { sim: true, cap: 1, delay, widthStuck: widthStuck || blind, blind };
   const max = Number(params.get("zoommax"));
-  return { sim: true, cap: Number.isFinite(max) && max > 0 ? max : null, delay, widthStuck };
+  return {
+    sim: true,
+    cap: Number.isFinite(max) && max > 0 ? max : null,
+    delay,
+    widthStuck: widthStuck || blind,
+    blind,
+  };
 }
 
 /**
@@ -80,6 +98,7 @@ function installFakeDevicePixelRatio(
   delayMs = 0,
   onApplied?: (zoom: number) => void,
   widthStuck = false,
+  blind = false,
 ): (zoom: number) => void {
   let applied = initialZoom;
   let baseWidth: number | null = null;
@@ -98,16 +117,22 @@ function installFakeDevicePixelRatio(
   };
   Object.defineProperty(window, "devicePixelRatio", {
     configurable: true,
-    get: () => ZOOM_SIM_BASE_DPR * applied,
+    // blind：dpr 也不跟随缩放（真机上 dpr 只反映显示器缩放，与 WebView2 的 ZoomFactor 无关）
+    get: () => ZOOM_SIM_BASE_DPR * (blind ? 1 : applied),
   });
   Object.defineProperty(document.documentElement, "clientWidth", {
     configurable: true,
     get: () => {
+      // CSS 视口宽度 = 真实视口 ÷ 引擎缩放。用 `window.innerWidth`（没被我们改过）当"真实视口"，
+      // 这样**用户拖窗口**时这个假宽度也会跟着变（重要的保真度：只按第一次读到的固定基准算的话，
+      // 验收永远模拟不出"用户一边缩放一边拖窗口"这条路径，而那正是"状态栏百分比自己变"的现场）。
+      const realWidth = window.innerWidth;
       if (baseWidth === null) baseWidth = document.documentElement.getBoundingClientRect().width;
+      if (!(realWidth > 0)) return baseWidth;
       // widthStuck（&zoomwidthstuck=1）：宽度**永远等于 100% 基准**，模拟"宽度判据在这台机器上
       // 读不出缩放"（真机上那句「布局宽度没变（1379px）」）；dpr 照旧跟着引擎走。
-      if (widthStuck) return baseWidth;
-      return baseWidth > 0 ? baseWidth / applied : baseWidth;
+      if (widthStuck) return realWidth;
+      return realWidth / applied;
     },
   });
   onApplied?.(applied);
@@ -580,6 +605,7 @@ export function installBrowserDevStub(): void {
         engineWindow.__browserDevEngineZoom = zoom;
       },
       simMode.widthStuck,
+      simMode.blind,
     );
     zoomSimState = (zoom: number) => applySimulatedZoom(zoom);
   }
