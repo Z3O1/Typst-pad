@@ -695,7 +695,7 @@ describe("livePreview 块级切片", () => {
             lookup: () => undefined,
             onRequest: () => {},
             dark: () => false,
-            blocks: () => [crop(0, 3), block, crop(26, 29)],
+            blocks: () => [crop(0, 3), block, crop(31, 34)],
           }),
         ],
       }),

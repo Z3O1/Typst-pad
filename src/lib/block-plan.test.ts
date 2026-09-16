@@ -78,11 +78,18 @@ describe("planBlockCovers", () => {
     const covers = planBlockCovers(table.blocks, text);
     expect(covers).toHaveLength(3);
     expect(covers[0].coverFrom).toBe(0);
-    expect(covers[0].coverTo).toBe(4); // 盖到"块尾那行 + 紧随的空行"的整行边界
-    expect(covers[1].coverFrom).toBe(4); // 上一格的终点 = 这一格的起点（首尾相接）
-    expect(covers[1].coverTo).toBe(9);
-    expect(covers[2].coverFrom).toBe(9);
+    // 每格盖到**下一块的第一行行首** ⇒ 块与块之间的空行归**上一块**（实测：空行若归下一块，
+    // 在行尾按 Enter 后光标正好落在"空行行首 = 上一块切片结尾"，CM 会把光标画到正文列最右边）
+    expect(covers[0].coverTo).toBe(5); // 下一块（bbb）的第一行行首
+    expect(covers[1].coverFrom).toBe(5); // 上一格的终点 = 这一格的起点（首尾相接）
+    expect(covers[1].coverTo).toBe(10); // 再下一块（ccc）的第一行行首
+    expect(covers[2].coverFrom).toBe(10);
     expect(covers[2].coverTo).toBe(doc.length); // 末格延伸到文档末尾
+    // 每块正文都要被自己的格子完整盖住（空行多出来没关系）
+    for (let i = 0; i < covers.length; i++) {
+      expect(covers[i].coverFrom).toBeLessThanOrEqual(covers[i].block.from);
+      expect(covers[i].coverTo).toBeGreaterThanOrEqual(covers[i].block.to);
+    }
     // 每个边界都必须是行首（CM 的块级替换要求整行对齐，否则原文会与 widget 并存）
     const lineStarts = new Set<number>([0]);
     for (let n = 1; n <= text.lines; n++) lineStarts.add(text.line(n).from);
@@ -108,11 +115,10 @@ describe("planBlockCovers", () => {
 });
 
 describe("applyBlockSelection", () => {
-  /** 三块文档：每格 = 块自身（位置见断言） */
+  /** 三块文档：格子见 planBlockCovers（空行归上一块）→ [0,5) [5,10) [10,14) */
   function three(): { covers: BlockCover[]; doc: string } {
     const doc = "aaa\n\nbbb\n\nccc\n";
     const table = asciiTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]);
-    // 整行对齐后的格子：[0,4) [4,9) [9,14)
     return { covers: planBlockCovers(table.blocks, Text.of(doc.split("\n"))), doc };
   }
 
@@ -122,15 +128,18 @@ describe("applyBlockSelection", () => {
     expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
   });
 
-  it("光标在块之间的空行里 → 展开**下面**那一块（空行归属后一格）", () => {
+  it("光标在块之间的空行里 → 展开**上面**那一块（空行归属上一格）", () => {
+    // 实测背景（用户报「用 Enter 拆分块的时候，光标会有问题」）：在行尾按 Enter 后光标正好落在
+    // 新空行的行首，而那里同时是**上一块切片的结尾** —— CM 会把光标定位到 widget 自己身上，
+    // 画到正文列最右边。空行归上一块之后，光标落在上一格**内部** → 那一格展开源码 → 光标正常。
     const { covers, doc } = three();
-    applyBlockSelection(covers, [{ from: 4, to: 4 }], doc.length); // 第 4 位 = 第二格行首
-    expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
+    applyBlockSelection(covers, [{ from: 4, to: 4 }], doc.length); // 第 4 位 = 第一格里的空行
+    expect(covers.map((c) => c.revealed)).toEqual([true, false, false]);
   });
 
   it("光标正好落在格子边界 → 只展开后面那一格（否则点段落开头会把上一段也展开）", () => {
     const { covers, doc } = three();
-    applyBlockSelection(covers, [{ from: 9, to: 9 }], doc.length);
+    applyBlockSelection(covers, [{ from: 10, to: 10 }], doc.length); // 第 10 位 = 第三块第一行行首（两格共享的边界）
     expect(covers.map((c) => c.revealed)).toEqual([false, false, true]);
   });
 
@@ -281,24 +290,25 @@ describe("verticalBlockTarget（跨块竖直移动：修「按上跳回开头」
     expect(verticalBlockTarget(c, 6, 5, -1)).toBeNull();
   });
 
-  it("向上跨格 → 落到上一格源码的末尾（不是文档开头）", () => {
+  it("向上跨格 → 落到上一块正文的末尾（不是文档开头）", () => {
     const c = covers();
-    // 光标在第 2 格开头（位置 4），默认结果会跑到第 1 格 → 接管，落到第 1 格末尾
-    expect(verticalBlockTarget(c, 4, 0, -1)).toBe(3); // covers[0].coverTo - 1
+    // 光标在第 2 块的第一行行首（位置 5 = 第 2 格起点），默认结果会跑到第 1 格 → 接管
+    expect(verticalBlockTarget(c, 5, 0, -1)).toBe(3); // covers[0].block.to
   });
 
   it("向下跨格 → 落到下一块**正文**的开头（不是格子里那条空行）", () => {
     const c = covers();
-    // 格子 [4,9) 里的正文是 bbb[5,8)：往下应当落到 10（第三块正文开头），而不是 coverFrom
+    // 格子 [5,10) 里的正文是 bbb[5,8)：往下应当落到 10（第三块正文开头），而不是 coverTo
     expect(verticalBlockTarget(c, 8, 14, 1)).toBe(10);
   });
 
   it("从块尾按 ↓ → 一次就进下一段正文（不再先停在段落之间的空行上）", () => {
     const c = covers();
     // 位置 3 = 第一块正文的末尾；CodeMirror 的默认结果会是那条空行（位置 4），
-    // 它在第二格的范围里但**不在第二块正文里** → 接管，直接落到 bbb 的开头
+    // 它在这一格的范围里但**不在这一块正文里** → 接管，直接落到 bbb 的开头
     expect(verticalBlockTarget(c, 3, 4, 1)).toBe(5);
-    // 光标已经在空行（位置 4）上时，默认结果 5 就是下一段正文的开头 → 不必接管
+    // 光标已经在空行（位置 4，属于**上一格**）上时，默认结果 5 就是下一段正文的开头
+    // → 接管结果与默认一致 → 返回 null（不接管，省一次滚动锚定）
     expect(verticalBlockTarget(c, 4, 5, 1)).toBeNull();
   });
 
@@ -308,8 +318,8 @@ describe("verticalBlockTarget（跨块竖直移动：修「按上跳回开头」
     const c = planBlockCovers(table.blocks, Text.of(doc.split("\n")));
     // 光标在第一行，默认结果落到第二行（仍在第一块正文里）→ 不接管
     expect(verticalBlockTarget(c, 0, 4, 1)).toBeNull();
-    // 从块尾往下 → 落到下一块正文开头
-    expect(verticalBlockTarget(c, 15, 17, 1)).toBe(17);
+    // 从块尾往下 → 落到下一块正文开头；这里接管结果与默认结果一致 → 返回 null（不接管）
+    expect(verticalBlockTarget(c, 15, 17, 1)).toBeNull();
   });
 
   it("已经在第一/最后一格 → 不接管（保持默认：不动）", () => {
@@ -351,27 +361,28 @@ describe("changedSpan / remapBlocksThroughEdit（编译失败时保留没被改�
     expect(span.delta).toBe(1);
   });
 
-  it("在块之间插入整块：新文本所在的下一块退回源码，其余原样/平移", () => {
+  it("在块之间插入整块：新文本所在的**上面那一块**退回源码，其余原样/平移", () => {
     const before = "aaa\n\nbbb\n\nccc\n";
     const after = "aaa\n\nXX\n\nbbb\n\nccc\n"; // 在第二块之前插入一整块
     const out = remapBlocksThroughEdit(table(before), before, after);
     expect(out.blocks.length).toBe(3); // 铺满全文的约束：块数不变
-    // 第一块没被碰到：区间不变、切片照用
-    expect(out.blocks[0]).toMatchObject({ from: 0, to: 3, svg: "<svg/>" });
-    // 第二块：新文本落在**它的格子**里（块与块之间的空行归后一格）→ 它退回源码
-    expect(out.blocks[1]).toMatchObject({ from: 5 + 4, found: false, svg: "" });
+    // 新文本落在第一块后面的那些空行上 —— 这些空行属于**第一块**的格子（见 planBlockCovers）→ 第一块退回源码
+    expect(out.blocks[0]).toMatchObject({ from: 0, to: 3, found: false, svg: "" });
+    // 第二块整体平移，切片照用
+    expect(out.blocks[1]).toMatchObject({ from: 5 + 4, found: true, svg: "<svg/>" });
     expect(out.blocks[2].from).toBe(10 + 4);
     expect(out.blocks[2].svg).toBe("<svg/>");
     expect(out.kept).toBe(2);
   });
 
-  it("在段落之间那条空行上打字：后一块退回源码（新字不会被它的旧切片盖住）", () => {
+  it("在段落之间那条空行上打字：空行所属的那一块退回源码（新字不会被它的旧切片盖住）", () => {
     const before = "aaa\n\nbbb\n";
     const after = "aaa\nX\nbbb\n"; // 在空行上打一个字（不改变块结构）
     const out = remapBlocksThroughEdit(table(before), before, after);
     const middle = out.blocks.find((b) => b.found === false);
     expect(middle, "至少要有一块退回源码").toBeTruthy();
     expect(middle!.svg).toBe("");
+    expect(out.blocks[0].found).toBe(false); // 空行归上一块 → 放开的是上面那一块
   });
 
   it("在文末追加：最后一块退回源码（末格的 coverTo 是文末，新字会被它盖住）", () => {
@@ -446,10 +457,10 @@ describe("revealBlocksWithDiagnostics（错误位置不许被切片盖住）", (
 
   it("诊断落在块与块之间的空行上 → 也是被盖住的范围，照样展开（宁可多展开）", () => {
     const covers = setup();
-    // 位置 4 是空行 = 第二格的 coverFrom（格子也盖住它）
+    // 位置 4 是空行 = **第一格**的范围（空行归上一块，见 planBlockCovers）
     const revealed = revealBlocksWithDiagnostics(covers, [{ from: 4, to: 5 }]);
     expect(revealed).toBe(1);
-    expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
+    expect(covers.map((c) => c.revealed)).toEqual([true, false, false]);
   });
 
   it("已经展开 / 不可渲染的格子不重复计数", () => {

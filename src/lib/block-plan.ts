@@ -186,10 +186,19 @@ export interface BlockCover {
  * `writing-blibcks` 抓到：切片在、正文也还在）。仓库里既有的数学块 widget 同样是整行
  * 范围（`first.from .. last.to`，见 live-preview.blockRangeFor）。
  *
- * 格子吃掉的是**块尾的空行**（块与块之间的空行归上一块），于是：
+ * 格子吃掉的是**块尾的空行**（块与块之间的空行归**上一块**），于是：
  *  - 格子铺满全文、首尾相接 ⇒ 永远恰好有一块是源码形态，光标不会无处可去；
  *  - 排版里的段落间距已经算进切片高度（相邻块各分到一半间距），空行若再单独占一行
  *    就会叠出多余空白，摞起来就不等于原版式。
+ *
+ * **空行归"上一块"而不是"后一块"，是实测定下来的**（用户报「用 Enter 拆分块的时候，光标会有问题」）：
+ * 在行尾按 Enter 之后，光标正好落在**新空行的行首**，而那个位置同时是**上一块切片（块级 widget）
+ * 的结尾**。CM 对"块 widget 结尾那个位置"的定位会落到 widget 自身（`coordsAtPos` 返回 widget 的
+ * 右下角），于是光标被画到正文列的最右边（截图里就是"光标飘到右边缘"）；若恰好那一行是空行、
+ * CM 又没给它建 DOM，还会进一步退化成 `domAtPos` 返回 `.cm-content`。
+ * 让空行归上一块之后，光标落在**上一块的格子内部**（不是边界）→ 那一块照常展开源码 →
+ * 位置有真实 DOM → 光标画在行首。实测：改前 `coordsAtPos(1135).left = 1087`（列宽右缘），
+ * 改后 = 304（行首）。
  *
  * 不可渲染的块分两种，**行为完全不同，别弄混**：
  *  - **引擎说这块没有输出**（`noOutput`：`#set` / `#show` / `#let` / 纯注释行）→ 格子照建、
@@ -210,17 +219,14 @@ export function planBlockCovers(blocks: readonly Block[] | null, doc: Text): Blo
   const usable = blocks.filter((b) => b.from >= 0 && b.from < b.to && b.to <= doc.length);
   if (usable.length === 0) return [];
   const covers: BlockCover[] = [];
-  /** 块的最后一行行号（`to` 落在行首时取上一行） */
-  const lastLine = (b: Block) => doc.lineAt(b.to - 1).number;
-  /** 块之后那一行的起点 = 这一格该盖到哪儿（到文档末尾就是末尾） */
-  const afterLastLine = (b: Block) => {
-    const n = lastLine(b) + 1;
-    return n > doc.lines ? doc.length : doc.line(n).from;
-  };
+  /** 块的第一行行首（格子边界必须落在行首，见上） */
+  const firstLineStart = (b: Block) => doc.lineAt(b.from).from;
   for (let i = 0; i < usable.length; i++) {
     const block = usable[i];
-    const coverFrom = i > 0 ? afterLastLine(usable[i - 1]) : 0;
-    const coverTo = i + 1 < usable.length ? afterLastLine(block) : doc.length;
+    // 这一格从"自己的第一行行首"开始，到"下一块的第一行行首"结束（末格到文档末尾）——
+    // 中间的空行因此落在**上一块**的格子里（理由见上面的实测说明）
+    const coverFrom = i > 0 ? firstLineStart(block) : 0;
+    const coverTo = i + 1 < usable.length ? firstLineStart(usable[i + 1]) : doc.length;
     covers.push({
       block,
       coverFrom,
@@ -347,9 +353,12 @@ export function verticalBlockTarget(
   if (defaultTarget >= cur.block.from && defaultTarget < cur.block.to) return null;
   const next = dir > 0 ? idx + 1 : idx - 1;
   if (next < 0 || next >= covers.length) return null;
-  return dir > 0
-    ? covers[next].block.from // 下一段正文的开头（跳过块前那条空行）
-    : Math.max(0, covers[next].coverTo - 1); // 上一段的最后一个字符
+  const target =
+    dir > 0
+      ? covers[next].block.from // 下一段正文的开头（跳过块前那条空行）
+      : Math.max(0, covers[next].block.to); // 上一段正文的末尾（**用块而不是格子**：格子现在含块尾空行）
+  // 接管的结果与 CodeMirror 默认结果一致时不必接管（省掉一次多余的滚动锚定）
+  return target === defaultTarget ? null : target;
 }
 
 /**
@@ -410,13 +419,20 @@ export function remapBlocksThroughEdit(
   const byLine = blocks.filter(touchesLine);
   /**
    * 改动既不在任何块的正文里、也不在任何块的行上（段落之间的空行上打字、文末追加）——
-   * 那它一定落在**某个块的格子**里（空行归后一格、文末归末格），把那一块放出来。
+   * 那它一定落在**某个块的格子**里，把那一块放出来。格子归属见 `planBlockCovers`：
+   * 空行归**上一块**（所以这里找"末尾在改动点之前/之处的最后一块"，而不是"之后的下一块"），
+   * 文末归末格；文档最开头（任何块之前）归第一格。
+   * 实测背景：用户报「用 Enter 拆分块的时候，光标会有问题」—— 空行归上一块之后，
+   * 在空行上打字/按 Enter 就必须放开上一块，否则新打的字会被它的旧切片盖住。
    */
-  const gapTarget =
-    byLine.length > 0 || blocks.some((b) => b.from < span.to && b.to > span.from)
-      ? null
-      : (blocks.find((b) => b.from + (b.from >= span.to ? span.delta : 0) >= span.to) ??
-        blocks[blocks.length - 1]);
+  let gapTarget: Block | null = null;
+  if (byLine.length === 0 && !blocks.some((b) => b.from < span.to && b.to > span.from)) {
+    for (const b of blocks) {
+      if (b.to <= span.from) gapTarget = b;
+      else break;
+    }
+    if (gapTarget === null) gapTarget = blocks[0];
+  }
   const fallback = gapTarget;
   const out: Block[] = [];
   let kept = 0;

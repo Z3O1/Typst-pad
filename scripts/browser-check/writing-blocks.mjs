@@ -865,5 +865,64 @@ if (rawRect) {
   await c.screenshot(SHOT("writing-blocks-codeblock-inside"));
 }
 
+console.log("16) 在行尾按 Enter 拆分块 → 光标落在新行行首（用户报「用 enter 拆分块的时候，光标会有问题」）");
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.click(400, 300);
+await c.selectAll();
+await c.type("开头一段文字。\n\n第二段文字。\n\n第三段文字。\n");
+await new Promise((r) => setTimeout(r, 900));
+
+/** 光标画在哪儿：CM 的实测坐标 + 该位置在 DOM 里落在哪个元素上 */
+const CARET_GEO = `(() => {
+  const v = document.querySelector(".cm-content").cmTile.root.view;
+  const head = v.state.selection.main.head;
+  const co = v.coordsAtPos(head);
+  const host = document.querySelector(".cm-content").getBoundingClientRect();
+  let domAt = "?";
+  try {
+    const p = v.domAtPos(head);
+    const el = p.node.nodeType === 3 ? p.node.parentElement : p.node;
+    domAt = el ? el.className || el.tagName : "null";
+  } catch (e) { domAt = "ERR"; }
+  return { head, line: JSON.stringify(v.state.doc.lineAt(head).text),
+           x: co ? Math.round(co.left) : null, left: Math.round(host.left), right: Math.round(host.right),
+           domAt, crops: document.querySelectorAll(".cm-block-crop").length };
+})()`;
+
+// 光标放到第二段行尾（那一段是切片），再按 Enter —— 新空行会落在"上一块切片的结尾"那个位置上
+await c.evaluate(`(() => {
+  const v = document.querySelector(".cm-content").cmTile.root.view;
+  const d = v.state.doc.toString();
+  const i = d.indexOf("第二段文字。");
+  v.dispatch({ selection: { anchor: i + "第二段文字。".length } });
+  return true;
+})()`);
+await new Promise((r) => setTimeout(r, 400));
+const beforeEnter = await c.evaluate(CARET_GEO);
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+await new Promise((r) => setTimeout(r, 1200));
+const afterEnter = await c.evaluate(CARET_GEO);
+check(
+  `按 Enter 前后文档结构正常（${afterEnter.crops} 张切片、光标在第 ${afterEnter.head} 位）`,
+  afterEnter.crops >= 1 && afterEnter.head === beforeEnter.head + 1,
+  JSON.stringify({ beforeEnter, afterEnter }),
+);
+check(
+  // 行首的实测 x 会比正文列左缘大几像素（光标自身宽度/取整），对照过正常行的行首也是 +6px；
+  // 关键是**不能**落在右半边 —— 修好之前这里是 x=正文列右缘（光标被画到最右边）
+  `光标落在新行的**行首**（x=${afterEnter.x}，正文列 ${afterEnter.left}~${afterEnter.right}）`,
+  afterEnter.x !== null &&
+    Math.abs(afterEnter.x - afterEnter.left) <= 12 &&
+    afterEnter.x < (afterEnter.left + afterEnter.right) / 2,
+  JSON.stringify(afterEnter),
+);
+check(
+  "光标那个位置有真实 DOM（不是飘在 widget / 容器上）",
+  /cm-line/.test(afterEnter.domAt),
+  JSON.stringify(afterEnter.domAt),
+);
+await c.screenshot(SHOT("writing-blocks-enter-split-caret"));
+
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
 process.exit(process.exitCode ?? 0);
