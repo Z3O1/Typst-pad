@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { savePdfDialog } from "./file-ops";
 import { pdfFileName } from "./pdf-export";
 import { dbg } from "./debug";
+import { TYPST_DEFAULT_TEXT_PT } from "./preview-scale";
 
 // ---------------------------------------------------------------------------
 // 接口契约（Rust 侧实现，见 T1 任务契约）：
@@ -260,6 +261,8 @@ interface RawBlocksOutput {
   blocks?: BlockCrop[];
   pages?: number;
   pageWidthPt?: number;
+  /** 文档正文实际字号（pt）：源码透镜的字号基准，见 block_geometry::document_text_pt */
+  textPt?: number;
   diagnostics?: Diagnostic[];
   warnings?: Diagnostic[];
 }
@@ -272,6 +275,12 @@ export interface BlocksOk {
   pageCount: number;
   /** 实际用于排版的页宽（pt），= 正文列宽 / (1 - 2×页边距比例) */
   pageWidthPt: number;
+  /**
+   * **文档正文实际字号**（pt，Rust 侧按字符数投票取众数）——写作模式"源码透镜"的字号基准：
+   * 编辑器正文按它渲染，光标进出块时字号/行高才不会跳（用户：「不要光标在哪里哪里就变大了」）。
+   * 后端没给（旧版本 / 浏览器桩）时回落到 typst 默认 11pt。
+   */
+  textPt: number;
   warnings?: Diagnostic[];
 }
 
@@ -341,6 +350,7 @@ export async function compileBlocks(
       blocks: out.blocks,
       pageCount: out.pages ?? 1,
       pageWidthPt: out.pageWidthPt ?? contentWidthPt,
+      textPt: typeof out.textPt === "number" && out.textPt > 0 ? out.textPt : TYPST_DEFAULT_TEXT_PT,
       warnings: out.warnings,
     };
   }

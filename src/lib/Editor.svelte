@@ -54,6 +54,12 @@
      * 见 docs/文档模式渲染保真-调研.md。
      */
     blocks?: Block[] | null;
+    /**
+     * **文档正文实际字号**（pt，来自 Rust 侧 compile_blocks 的 `textPt`）：写作模式的源码透镜
+     * 按它渲染（`--write-doc-px = textPt × 4/3`），于是光标进出块时字号、行高都不跳
+     * （用户：「不要光标在哪里哪里就变大了」）。缺省用 typst 默认 11pt。
+     */
+    docTextPt?: number;
     /** 块切片代次：变化时重整块装饰（父组件收到新编译结果后自增） */
     blocksVersion?: number;
     /** 视口内出现"能渲染但还没有切片"的块：父组件去抖后按新窗口重编译 */
@@ -95,6 +101,7 @@
     mathVersion = 0,
     blocks = null,
     blocksVersion = 0,
+    docTextPt = 11,
     onBlocksNeeded,
     onCropClick,
     onOpenLink,
@@ -509,7 +516,14 @@
   });
 </script>
 
-<div class="editor-host" class:write={mode === "write"} bind:this={host}></div>
+<!-- style:--write-doc-px = 文档正文字号（pt → px，1pt = 4/3px）：写作模式的正文与行高按它渲染，
+     与引擎切片完全一致，光标进出块时字号不跳（见样式里 .editor-host.write 的说明） -->
+<div
+  class="editor-host"
+  class:write={mode === "write"}
+  style:--write-doc-px={`${(docTextPt * 4) / 3}px`}
+  bind:this={host}
+></div>
 
 <style>
   .editor-host {
@@ -522,8 +536,19 @@
   }
 
   /* ---------- 写作模式（仿 Typora）：衬线正文 + 无行号 + 宽行距 ---------- */
+  /*
+   * 写作模式的正文字号 = **文档实际字号**（Rust 侧 compile_blocks 的 `textPt`，前端换算成 px
+   * 挂在 `--write-doc-px` 上），行高 = typst 的 leading（`par.leading` 默认 0.65em → 1.65）。
+   *
+   * 为什么必须这样：写作模式是"非光标块显示引擎切片 + 光标所在块展开成源码"，两者字号不一致时
+   * 光标一进某一块，那一块的字和行高就会**变大**（用户：「不要光标在哪里哪里就变大了」）。
+   * 实测旧行为：编辑区固定 16px、行高 1.9，而切片是 typst 默认 11pt（14.67px）、行高 1.65
+   * → 光标一进去，字大 9%、行盒高 26%。现在字体与行高都跟着文档走：
+   * 默认文档 14.67px / 1.65，`#set text(size: 12pt)` 的文档 16px / 1.65。
+   * 兜底 14.6667px = typst 默认 11pt（旧后端没给 textPt 时，与切片仍然对得上）。
+   */
   .editor-host.write :global(.cm-editor) {
-    font-size: 16px;
+    font-size: var(--write-doc-px, 14.6667px);
   }
 
   /*
@@ -573,38 +598,44 @@
   .editor-host.write :global(.cm-content) {
     /* 只留竖直方向：顶部呼吸感 + 底部留白（末行不贴底边） */
     padding: 40px 0 160px;
-    line-height: 1.9;
+    /* typst 的 `par.leading` 默认 0.65em ⇒ 行高 1.65em（与切片里的行距一致，见上） */
+    line-height: 1.65;
     caret-color: var(--typora-caret, currentColor);
   }
 
   /* 标题：字号梯度**必须跟 typst 一致**（`typst-library/src/model/heading.rs` 的 ShowSet：
-     level 1 = 1.4em、level 2 = 1.2em、level 3 及以下 = 1.0em，只加粗、不再变大）。
-     以前这里是仿 Typora 的 1.8 / 1.5 / 1.25 / 1.08em —— 块级渲染落地后就露馅了：光标进标题块时
-     那一块展开成源码，标题**比切片里大 36%~40%**（用户报「在标题所在块，标题就会变的很大」）。
-     改完之后各级与切片的差只剩正文本身那 9%（编辑区 16px vs typst 默认 11pt = 14.67px），
-     不再有"标题特别大"的跳变。
-     line-height 保持原值：实测量出来正好接近 typst 的标题行盒（1.65em × 标题字号）——
-     h1 1.45×22.4 = 32.5px vs 33.9px、h2 1.5×19.2 = 28.8px vs 29.0px、h3 1.55×16 = 24.8px vs 24.2px。 */
-  .editor-host.write :global(.cm-line:has(.cm-markup-heading)) {
-    padding-top: 0.6em;
-    padding-bottom: 0.2em;
-  }
+     level 1 = 1.4em、level 2 = 1.2em、level 3 及以下 = 1.0em，只加粗、不再变大），
+     行高用 typst 的 leading（1.65em，见上）—— 这样光标进标题块时，那一行的高度与切片对得上。
+     以前这里是仿 Typora 的 1.8 / 1.5 / 1.25 / 1.08em：块级渲染落地后就成了 bug，
+     光标一进标题块那一行就比切片大 36%~40%（用户报「在标题所在块，标题就会变的很大」）。
+     上下留白也用 typst 的块间距（heading.rs 的 above / below，单位是**正文字号**的 em，
+     而 padding 正好挂在字号 = 正文的行上，所以直接写数值即可）：
+     level 1 → above 1.8em / below 0.75em；level 2 及以下 → above 1.44em / below 0.75em。 */
+  /*
+   * 标题行**不加上下 padding**（实测取舍，别再加回去）：切片是"按 y 序把页面切成的带"，
+   * 标题周围的空白**已经分散在相邻块的带里**（带在相邻墨迹的中点处切），所以源码形态不需要
+   * 再补一份 —— 补了反而跳：
+   *   padding 0        → 光标进标题块，页面高度 +3px
+   *   0.6em / 0.2em    → +19px（旧值）
+   *   typst 的 1.8em / 0.75em → +40px
+   * 三种都实测过（`.browser-check/probe-pagejump.mjs` 那套量法，600px 视口 + 真实夹具）。
+   */
 
   .editor-host.write :global(.cm-markup-heading-1) {
     font-size: 1.4em;
-    line-height: 1.45;
+    line-height: 1.65;
     font-weight: 700;
   }
 
   .editor-host.write :global(.cm-markup-heading-2) {
     font-size: 1.2em;
-    line-height: 1.5;
+    line-height: 1.65;
     font-weight: 700;
   }
 
   .editor-host.write :global(.cm-markup-heading-3) {
     font-size: 1em;
-    line-height: 1.55;
+    line-height: 1.65;
     font-weight: 600;
   }
 
@@ -612,6 +643,7 @@
   .editor-host.write :global(.cm-markup-heading-5),
   .editor-host.write :global(.cm-markup-heading-6) {
     font-size: 1em;
+    line-height: 1.65;
     font-weight: 600;
   }
 

@@ -157,16 +157,85 @@ if (!headings) {
       Math.abs(h2.sourcePx / h3.sourcePx - 1.2) < 0.02,
       JSON.stringify({ h2: h2.sourcePx, h3: h3.sourcePx }),
     );
-    // ② 与切片里的绝对字号也不许差太多（剩下的差只应来自"编辑区正文 16px vs typst 默认 11pt"）
+    // ② 与切片里的绝对字号**必须一致**：源码透镜的字号基准已经改成"文档实际字号"
+    //（Rust 侧 textPt → --write-doc-px），所以这里应当是 1.000 —— 差一点点都会让用户看到
+    // "光标一进那块字就变大"（用户：「不要光标在哪里哪里就变大了」）
     for (const [name, m] of [["h1", h1], ["h2", h2], ["h3", h3]]) {
       const ratio = m.sourcePx / m.typstPx;
       check(
-        `${name} 与切片字号之比 ${ratio.toFixed(3)}（1.0~1.15，别再有"标题特别大"）`,
-        ratio >= 0.98 && ratio <= 1.15,
+        `${name} 与切片字号之比 ${ratio.toFixed(3)}（1.0 ± 0.02，与引擎排版一致）`,
+        ratio >= 0.98 && ratio <= 1.02,
         JSON.stringify(m),
       );
     }
   }
+}
+
+// 光标进出块时**页面不许变高**（用户：「不要光标在哪里哪里就变大了」）。
+// 量法：`.cmContent` 的实际内容高度（`view.contentHeight`）在"光标在文末"与"光标进最大的那一块"两态之差。
+// **视口要临时调窄**：夹具是按 contentWidthPt=371.25pt 渲的，1400px 视口下切片被放大 2.1 倍，
+// 那样比出来的高度差全是缩放假象；600px 视口下列宽 ≈ 489px → 显示比例 1.32 ≈ 真实应用的 1.333。
+console.log("\n=== 光标进出块时页面不许变高（源码透镜跟随文档字号与行距）");
+{
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: 600,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  const CONTENT_HEIGHT = `(() => {
+    const v = document.querySelector(".cm-content").cmTile.root.view;
+    return Math.round(v.contentHeight);
+  })()`;
+  for (const name of ["中文长段落", "标题层级"]) {
+    const fx = fixtures.find((f) => f.name === name);
+    await loadScene(fx.doc);
+    await c.evaluate(`(() => {
+      const v = document.querySelector(".cm-content").cmTile.root.view;
+      v.dispatch({ selection: { anchor: v.state.doc.length } });
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 400));
+    const atEnd = await c.evaluate(CONTENT_HEIGHT);
+    const biggest = fx.blocks.filter((b) => b.svg).sort((a, b) => b.heightPt - a.heightPt)[0];
+    const needle = fx.doc.slice(biggest.start, biggest.end).split("\n")[0].slice(0, 8);
+    await c.evaluate(`(() => {
+      const v = document.querySelector(".cm-content").cmTile.root.view;
+      const d = v.state.doc.toString();
+      v.dispatch({ selection: { anchor: d.indexOf(${JSON.stringify(needle)}) + 2 } });
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 500));
+    const inside = await c.evaluate(CONTENT_HEIGHT);
+    check(
+      `${name}：光标进块后页面高度只差 ${inside - atEnd}px（≤12px）`,
+      Math.abs(inside - atEnd) <= 12,
+      JSON.stringify({ atEnd, inside, blockPt: biggest.heightPt }),
+    );
+  }
+  // 字号/行距确实跟着文档走：默认 11pt → 14.6667px / 1.65
+  await loadScene(fixtures.find((f) => f.name === "中文长段落").doc);
+  const metrics = await c.evaluate(`(() => {
+    const cs = getComputedStyle(document.querySelector(".cm-content"));
+    return { font: cs.fontSize, line: cs.lineHeight, docPx: getComputedStyle(document.querySelector(".editor-host")).getPropertyValue("--write-doc-px") };
+  })()`);
+  check(
+    `源码透镜字号 = 文档字号（${metrics.font}，--write-doc-px=${metrics.docPx.trim()}）`,
+    Math.abs(parseFloat(metrics.font) - 14.6667) < 0.05 && metrics.docPx.trim().startsWith("14.66"),
+    JSON.stringify(metrics),
+  );
+  // `#set text(size: 12pt)` 的文档 → 透镜字号必须跟着变成 16px（16px = 12pt）
+  await loadScene(fixtures.find((f) => f.name === "文档级设置（12pt）").doc);
+  const twelve = await c.evaluate(`(() => {
+    const cs = getComputedStyle(document.querySelector(".cm-content"));
+    return { font: cs.fontSize, line: cs.lineHeight };
+  })()`);
+  check(
+    `文档写 #set text(size: 12pt) → 透镜字号 16px（${twelve.font} / ${twelve.line}）`,
+    Math.abs(parseFloat(twelve.font) - 16) < 0.05 && twelve.line === "26.4px",
+    JSON.stringify(twelve),
+  );
+  await c.send("Emulation.clearDeviceMetricsOverride");
 }
 
 // 「完全隐藏，和 PDF 一样什么都看不到」（用户 2026-09-16 选定）：

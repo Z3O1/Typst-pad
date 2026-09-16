@@ -62,7 +62,7 @@ pub struct PlacedItem {
 }
 
 /// 帧遍历的统计（用来判断"映射漏了多少"而不是只看最终覆盖率）
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct FrameStats {
     pub text_items: usize,
     pub glyphs_total: usize,
@@ -72,6 +72,10 @@ pub struct FrameStats {
     pub clipped_groups: usize,
     pub shapes: usize,
     pub images: usize,
+    /// 字号直方图：字号（pt ×100，取整当键）→ 该字号下的**字符数**。
+    /// 用来回答"这篇文档的正文实际多大"（`document_text_pt`）—— 源码透镜要按它渲染，
+    /// 否则光标一进某一块，那一块的字就比切片大一圈（用户：「不要光标在哪里哪里就变大了」）。
+    pub size_weights: std::collections::BTreeMap<u32, usize>,
 }
 
 /// 这些语法树顶层节点各自**独占一个流式块**（typst 的排版也是以它们分块的）
@@ -255,6 +259,9 @@ fn walk_frame(
             FrameItem::Text(text) => {
                 stats.text_items += 1;
                 stats.glyphs_total += text.glyphs.len();
+                // 按字符数给字号投票（正文量最大，标题/代码只是少数）
+                let key = (text.size.to_pt() * 100.0).round().max(0.0) as u32;
+                *stats.size_weights.entry(key).or_insert(0) += text.text.chars().count().max(1);
                 let mut x = Abs::zero();
                 for glyph in &text.glyphs {
                     let advance = glyph.x_advance.at(text.size);
@@ -439,6 +446,26 @@ pub fn geometry_for_range(items: &[PlacedItem], range: Range<usize>) -> Option<B
 /// 同源：正文列宽 = 页宽 × (1 - 2×比例)，因此反推页宽 = 列宽 / (1 - 2×比例)。
 const PAGE_MARGIN_RATIO: f64 = 70.87 / 595.28;
 
+/// typst 的默认正文字号（pt）：文档没有 `#set text(size:)` 时源码透镜就用它
+/// （11pt = 14.67px，与切片里的正文完全一致）。
+pub const DEFAULT_TEXT_PT: f64 = 11.0;
+
+/// 文档的**正文实际字号**（pt）：帧里所有文本按**字符数**投票，取票数最高的那个字号。
+///
+/// 为什么这么算：写作模式里"光标所在块展开成源码、其余块显示引擎切片"，而源码是编辑器 CSS
+/// 画的 —— 如果它的字号与切片不一致，光标一进某一块，那一块的字和行高就会**变大**
+/// （用户原话：「不要光标在哪里哪里就变大了」）。正文在字符数上占绝对多数（标题/代码块只是少数），
+/// 所以众数就是正文字号：默认文档 11pt、`#set text(size: 12pt)` 的文档 12pt（都有单测）。
+/// 没有文本（空文档 / 只有图形）时回落到 typst 默认的 11pt。
+pub fn document_text_pt(stats: &FrameStats) -> f64 {
+    stats
+        .size_weights
+        .iter()
+        .max_by_key(|(_, weight)| **weight)
+        .map(|(key, _)| *key as f64 / 100.0)
+        .unwrap_or(DEFAULT_TEXT_PT)
+}
+
 /// 一个源块的渲染产物（前端直接消费：serde camelCase）。
 ///
 /// `start`/`end` 是**用户文档坐标的字节偏移**（不含编译前缀）—— Rust 侧已经减掉了
@@ -495,6 +522,9 @@ pub struct BlocksOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pages: Option<usize>,
     pub page_width_pt: f64,
+    /// **文档的正文实际字号**（pt）—— 前端拿它当写作模式"源码透镜"的字号基准，
+    /// 这样光标进出块时字号不跳（见 `document_text_pt`）。
+    pub text_pt: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<crate::typst_world::Diagnostic>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -506,7 +536,15 @@ impl BlocksOutput {
         diagnostics: Vec<crate::typst_world::Diagnostic>,
         page_width_pt: f64,
     ) -> Self {
-        Self { ok: false, blocks: Vec::new(), pages: None, page_width_pt, diagnostics, warnings: Vec::new() }
+        Self {
+            ok: false,
+            blocks: Vec::new(),
+            pages: None,
+            page_width_pt,
+            text_pt: DEFAULT_TEXT_PT,
+            diagnostics,
+            warnings: Vec::new(),
+        }
     }
 }
 
@@ -568,7 +606,7 @@ pub fn compile_blocks(
         return BlocksOutput::fail(Vec::new(), page_width_pt);
     };
     let blocks = source_blocks(doc_text);
-    let ((items, _stats), placed_links) = collect_geometry_with_links(&world, &document);
+    let ((items, stats), placed_links) = collect_geometry_with_links(&world, &document);
 
     // 1) 每个块的几何（编译源坐标 = 文档坐标 + doc_start）
     struct Found {
@@ -731,6 +769,9 @@ pub fn compile_blocks(
         }));
     }
 
+    // 文档正文实际字号：**必须在 `store_hit_geometry` 之前算**（stats 与 items 一起被消费掉）
+    let text_pt = document_text_pt(&stats);
+
     // 字形几何进缓存，供"点击 → 精确字符"的命中测试用（见 HIT_CACHE）。
     // 放在最后：前面的几何计算都借用了 items，这里把所有权交出去，不再多一份拷贝。
     store_hit_geometry(items, doc_start);
@@ -740,6 +781,7 @@ pub fn compile_blocks(
         blocks: out,
         pages: Some(document.pages().len()),
         page_width_pt,
+        text_pt,
         diagnostics: Vec::new(),
         warnings,
     }
@@ -1702,6 +1744,40 @@ mod tests {
             "= 混排\n\n中文 ASCII 🚀 混在一行里：émoji 与 a_0 = 0 都要能点对位置。\n\n第二段用纯中文写长一点，用来验证整段折行之后的纵向定位是不是仍然准确。\n",
         ),
     ];
+
+    /// **源码透镜的字号基准 = 文档正文实际字号**（用户：「不要光标在哪里哪里就变大了」）：
+    /// 取帧里各字号的**字符数众数** —— 默认文档应当是 11pt，`#set text(size: 12pt)` 的文档 12pt，
+    /// 标题（更大）与代码块（等宽、字号可能不同）都不能把基准带跑。
+    #[test]
+    fn document_text_size_follows_the_document() {
+        let cases: [(&str, f64); 3] = [
+            ("正文一段。再来一句，字符数要够多。\n\n= 标题\n\n又一段正文。\n", 11.0),
+            (
+                "#set text(size: 12pt)\n\n正文一段。再来一句，字符数要够多。\n\n= 标题\n\n又一段正文。\n",
+                12.0,
+            ),
+            // 只有图形、没有文本（空文档）：回落到 typst 默认 11pt
+            ("", 11.0),
+        ];
+        for (src, want) in cases {
+            let out = compile_blocks(
+                src.to_string(),
+                0,
+                None,
+                &fonts_dir(),
+                &FontConfig::default(),
+                371.25,
+                None,
+                None,
+            );
+            assert!(out.ok, "编译应当成功：{src:?}");
+            assert!(
+                (out.text_pt - want).abs() < 0.01,
+                "文档正文实际字号应当是 {want}pt，实际 {}（src={src:?}）",
+                out.text_pt
+            );
+        }
+    }
 
     /// **分块判据必须跟 typst 语义走**（真实文档咬过一次：`$x$` 是行内公式，哪怕独占整行也
     /// 不打断段落 —— 按"独占整行"把它当块，会让连续几个 `$x$` 的带互相重叠，看起来"公式挤成一团"）。

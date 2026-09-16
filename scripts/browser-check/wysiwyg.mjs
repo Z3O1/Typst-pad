@@ -497,7 +497,16 @@ const paper = await c.evaluate(`(() => {
 check("写作模式下编辑器带 write 类", paper.hostHasWriteClass, JSON.stringify(paper));
 check("无行号槽（Typora 没有行号）", paper.gutterDisplay === "none", paper.gutterDisplay);
 check("正文是衬线字体（与预览/PDF 输出一致）", /serif|Songti|Noto Serif/i.test(paper.fontFamily), paper.fontFamily);
-check("字号/行距是写作排版（16px / ≥1.8）", parseFloat(paper.fontSize) >= 16 && parseFloat(paper.lineHeight) >= 1.8, JSON.stringify([paper.fontSize, paper.lineHeight]));
+check(
+  // 写作模式的正文必须**跟文档实际字号走**（Rust 侧 textPt → --write-doc-px），行高用 typst 的
+  // leading（0.65em → 1.65）：光标进出块时那一块的字号/行距才不会变（用户：「不要光标在哪里
+  // 哪里就变大了」）。浏览器桩的文档没有 #set text(size:)，所以 = 11pt × 4/3 = 14.6667px。
+  `正文跟随文档字号（11pt → ${paper.fontSize}）且行距 = typst leading（${paper.lineHeight}）`,
+  // getComputedStyle 的 line-height 给的是**算好的 px**（24.2 = 1.65 × 14.6667），别拿 1.65 比
+  Math.abs(parseFloat(paper.fontSize) - 14.6667) < 0.05 &&
+    Math.abs(parseFloat(paper.lineHeight) - 14.6667 * 1.65) < 0.2,
+  JSON.stringify([paper.fontSize, paper.lineHeight]),
+);
 check("整页纸张限宽居中", paper.paperMaxWidth !== "none", paper.paperMaxWidth);
 check("状态栏有模式标识且不显示行列", paper.status.includes("写作") && !paper.status.includes("行 "), paper.status);
 await c.screenshot(SHOT("wysiwyg-18-write-ui"));
@@ -522,9 +531,10 @@ const headingSize = await c.evaluate(`(() => {
   return el ? parseFloat(getComputedStyle(el).fontSize) : null;
 })()`);
 check(
-  // 1.4em × 16px = 22.4px（typst 的一级标题）；**不是**"随便放大"就行 —— 梯度必须与切片一致
-  "标题在写作模式下按 typst 梯度放大（1.4em = 22.4px）",
-  headingSize !== null && Math.abs(headingSize - 22.4) < 0.5,
+  // 1.4em × 14.6667px = 20.53px（typst 的一级标题，文档默认 11pt）；
+  // **不是**"随便放大"就行 —— 梯度与基准都必须与切片一致
+  "标题在写作模式下按 typst 梯度放大（1.4em = 20.53px）",
+  headingSize !== null && Math.abs(headingSize - 20.53) < 0.5,
   String(headingSize),
 );
 await c.screenshot(SHOT("wysiwyg-19-write-format"));

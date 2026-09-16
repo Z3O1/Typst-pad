@@ -300,6 +300,18 @@ function realMath(body: string, display: boolean, sizePt: number): RealMathFixtu
  * 假公式渲染：结构模仿 typst 的 compile_math 产物（贴边 viewBox + 透明底 + 文本），
  * 尺寸/基线给合理量级，用于在浏览器里验证「公式内联渲染」的布局与对齐（非真实排版）。
  */
+/**
+ * 桩的「文档正文实际字号」（pt）：真实现是 Rust 侧按字符数投票取众数
+ * （`block_geometry::document_text_pt`）。桩只要认得 `#set text(size: Npt)` 就够了 ——
+ * 有了它，浏览器验收才能覆盖"源码透镜跟随文档字号"（默认 11pt → 14.67px、
+ * `#set text(size: 12pt)` → 16px，见 writing-mode-scenes.mjs 的检查）。
+ */
+function fakeDocumentTextPt(doc: string): number {
+  const m = /#set\s+text\(\s*size:\s*([0-9.]+)pt/.exec(doc);
+  const pt = m ? Number(m[1]) : NaN;
+  return Number.isFinite(pt) && pt > 0 ? pt : 11;
+}
+
 function fakeMath(body: string, display: boolean) {
   const widthPt = Math.max(4, body.length * 5.2);
   const heightPt = display ? 16 : 7.2;
@@ -673,7 +685,13 @@ async function handleCommand(
           notify(command);
           // 记下来：假命中测试要按这份产物回答（见 fixtureHit）
           lastFake = { doc, blocks: hit.blocks as FakeBlockRecord[] };
-          return { ok: true, blocks: hit.blocks, pages: 1, pageWidthPt: hit.pageWidthPt };
+          return {
+            ok: true,
+            blocks: hit.blocks,
+            pages: 1,
+            pageWidthPt: hit.pageWidthPt,
+            textPt: fakeDocumentTextPt(doc),
+          };
         }
       }
       const out = fakeBlocks(doc);
@@ -687,7 +705,7 @@ async function handleCommand(
         }
       }
       notify(command);
-      return out;
+      return { ...out, textPt: fakeDocumentTextPt(doc) };
     }
     case "compile_math": {
       notify(command);

@@ -206,7 +206,7 @@ src/lib/debug.ts            # 调试日志通道 dbg（dev 默认开；--debug /
 src/lib/browser-dev-stub.ts # 浏览器开发桩：假 __TAURI_INTERNALS__ + 假编译，供 ?browserdev=1 用（仅开发）
 src/routes/+layout.ts       # SPA 模式（ssr = false），配合 adapter-static 的 index.html fallback
 src-tauri/src/lib.rs        # Rust 壳：read/write/write_binary/list_dir_typ/take_pending_files/compile_doc/compile_blocks/block_hit_test/compile_math/export_pdf 命令 + opener/dialog 插件
-src-tauri/src/block_geometry.rs # **写作模式的块级渲染**：源块划分（语法树顶层）+ 帧遍历（字形 Span → 源字节区间）+ 按 y 序中点切带 + 切一块渲成 SVG + **点击命中测试**（pick_hit / HIT_CACHE）（见「写作模式的块级渲染」那节）
+src-tauri/src/block_geometry.rs # **写作模式的块级渲染**：源块划分（语法树顶层）+ 帧遍历（字形 Span → 源字节区间）+ 按 y 序中点切带 + 切一块渲成 SVG + **点击命中测试**（pick_hit / HIT_CACHE）+ 文档正文字号（document_text_pt → textPt，源码透镜按它渲染）（见「写作模式的块级渲染」那节）
 src-tauri/src/packages.rs   # 包系统：@local 本地包读取 / @preview 自动下载缓存（目录规范与 CLI 一致 + 安全解压）
 src-tauri/src/typst_world.rs # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 包解析接线 / 诊断转换（SVG/PDF）
 src-tauri/src/main.rs       # 桌面入口（调用 lib.rs 的 run）
@@ -292,6 +292,17 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
       （打字 / 回车 1~3 次 / `$` / 围栏 / 粘贴 / Tab / 退格 / Delete / 删整行 / 选区替换 /
       全选换短文档换长文档 / 撤销）→ 四条不变量（旧表不抛异常、改动落在已展开的格子里、
       格子边界落在行首、未展开的格子必须把那一块正文完整盖住且格子首尾相接铺满全文）。
+- **源码透镜的字号/行距必须跟随文档（红线，用户：「不要光标在哪里哪里就变大了」）**：
+  非光标块是引擎切片、光标所在块是源码，两者字号不一致时**光标一进某一块，那一块的字就变大**
+  （旧值：编辑区固定 16px / 行高 1.9，而切片是 typst 默认 11pt = 14.6667px / 行高 1.65 →
+  字大 9%、行盒高 26%）。现在：Rust 侧 `block_geometry::document_text_pt` 按**字符数取众数**
+  算出文档正文实际字号，随 `compile_blocks` 的 `textPt` 返回；前端挂成 `--write-doc-px`
+  （`pt × 4/3`）给 `.editor-host`，写作模式 `.cm-editor` 的字号取它、`.cm-content` 行高取
+  typst 的 `par.leading`（0.65em → **1.65**）。缺省 14.6667px（旧后端 / 桩也对得上）。
+  实测（600px 视口 + 真实夹具，比例 1.32 ≈ 真机 1.333）：光标进出块的**页面高度差**从
+  22/19/45px 降到 **0 / +3 / +8px**（中文长段落 / 标题层级 / 代码与表格）。**别把字号写死回去**：
+  写死就退回"点哪哪变大"。验收：`writing-mode-scenes.mjs` 的「光标进出块时页面不许变高」四条
+  （两条高度差 ≤12px + 默认文档 14.6667px + `#set text(size: 12pt)` 的文档 16px）**别删**。
 - **文档切换（打开/新建/重读）必须 `resetBlocks()`**：旧块区间套在新文档上会**盖住正文**
   （比公式缓存过期的危害大得多），见 `resetBlocks` 的注释。
 - **版心宽是编译期输入**：`page(width: 列宽/(1-2×页边距比例), height: auto)`，所以窗口尺寸 /
@@ -448,7 +459,7 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 - **字号**：`MATH_TEXT_PT = 10.5`（Rust）/ 编辑器正文 14px = 10.5pt，故 SVG 的 pt 与编辑器 CSS 的 pt **1:1**，前端直接写 `width/height: Npt` + `vertical-align: -(height-baseline)pt`。改字号要两侧同步。
 - **暗色主题**：typst 产物是黑字透明底，暗色下看不见 → widget 带 `cm-math-dark` 类整体 `filter: invert(1)`。**不要用 `&dark` 选择器**：`EditorView.theme` 不支持该前缀（实测抛 `RangeError: Unsupported selector: &dark`，SvelteKit 会整页渲染成 500 错误页，表现为"应用没渲染"）。
 - **展开规则**：`selectionTouchesRange`（光标落在区间内含两端即展开，非空选区相交即展开）。标记类构造的展开范围必须是**标记 + 正文的并集**——标题/列表只有前导标记，只取标记范围会导致光标落在正文里时 `= ` 不露出（实测踩过）。
-- **标题字号梯度必须跟 typst 一致：1.4 / 1.2 / 1.0em（红线，用户报「在标题所在块，标题就会变的很大」）**。typst 的 heading（`heading.rs` 的 ShowSet）是 level 1 = 1.4em、level 2 = 1.2em、level 3 及以下 = 1.0em（**只加粗，不再变大**）。以前这里仿 Typora 写的是 1.8 / 1.5 / 1.25 / 1.08em（`Editor.svelte` 写作模式那几条 + `live-preview.ts` 主题里同名的那几条），块级渲染落地后就变成 bug：光标一进标题块，那一块展开成源码、由我们的 CSS 画，**标题比切片大 36%~40%**（详见调研文档第十三节之 4 的对照表）。`line-height` 保持 1.45 / 1.5 / 1.55 —— 换成新字号后它们正好接近 typst 的标题行盒（1.65em × 标题字号）。**剩下的 +9% 是"编辑区正文 16px vs typst 默认 11pt = 14.67px"，与块类型无关，别再去动标题梯度去凑它。** 验收：`writing-mode-scenes.mjs` 的「标题字号梯度对齐 typst」（h1/h3 = 1.4、h2/h3 = 1.2、与切片字号之比 ≤ 1.15）**别删**。
+- **标题字号梯度必须跟 typst 一致：1.4 / 1.2 / 1.0em、行高 1.65（红线，用户报「在标题所在块，标题就会变的很大」）**。typst 的 heading（`heading.rs` 的 ShowSet）是 level 1 = 1.4em、level 2 = 1.2em、level 3 及以下 = 1.0em（**只加粗，不再变大**），并且用和正文同一个 leading（0.65em ⇒ 行高 1.65）。以前这里仿 Typora 写的是 1.8 / 1.5 / 1.25 / 1.08em（`Editor.svelte` 写作模式那几条 + `live-preview.ts` 主题里同名的那几条）+ 行高 1.45/1.5/1.55，块级渲染落地后就变成 bug：光标一进标题块，那一块展开成源码、由我们的 CSS 画，**标题比切片大 36%~40%**（详见调研文档第十三节之 4 的对照表）。**标题行的上下 padding 一律不加**（三种取值实测：0 → 光标进块页面只差 +3px、旧的 0.6em/0.2em → +19px、typst 的 1.8em/0.75em → +40px）：标题周围的空白已经分散在**相邻块的切片带**里（带在相邻墨迹的中点处切），源码形态再补一份就翻倍。验收：`writing-mode-scenes.mjs` 的「标题字号梯度对齐 typst」（h1/h3 = 1.4、h2/h3 = 1.2、与切片字号之比 1.0 ± 0.02）**别删**。
 - **选中整个公式不展开（用户要求「选中整个公式请写不展开」）**：与块级同一套规则（`math-ranges.mathRevealDecision` + `selectionCoversRange`）——选区**完整盖住**公式 → 保持渲染 + 淡色底 `.cm-math-selected`；只盖住一部分、或光标在公式里 → 照旧展开。**别把它套到跨行行间公式上**（`inlinePresentation: false`）：那种公式只能整行 `block: true` 替换，widget 是 `contenteditable=false` 的顶层 `div`，被选区完整盖住后打字**会把字符插到下一行**（实测 `$ x^2 $\n后文` → `$ x^2 $\nz后文`，文档本身没变）。所以**单行**行间公式已改成"装饰只盖公式本身 + widget 落在行内 + 行级居中"（`MathBlockWidget` 的 `inline` 形态 → `span.cm-math-block-inline` + `Decoration.line({class: "cm-math-line"})`），落在 `.cm-line` 里就没有这个问题（实测打字正确替换选区）。**别把单行行间公式改回整行 block 替换**（理由同上，实测数据在调研文档第十三节之 3）。**判据是"装饰实际盖住的区间"**（`decorated = block ?? 公式区间`），不是只看公式本身：单行行间公式连行首行尾空白一起盖（`  $ x $  ` 才居中），若只按公式范围判"完整盖住"，就会出现"选区盖住公式、widget 只被盖住一部分"——DOM 里 widget 是原子节点，浏览器只能在边缘插入，**实测字符被插到行尾**（`  $ x^2 $  ` 选中 `$ x^2 $` 打字 → `  $ x^2 $  z`），所以那种情况照旧展开。`buildMathDecorations` 与 `collectRequestsInner` 两处的判据必须用同一个 `decorated`。
 - **输入 `$` 自动配对**（用户要求「加入功能：自动补全 $$」，2026-09-14）：敲一个 `$` 就把定界符补成一对、光标落在中间，判定全在 `auto-pair.ts`（纯函数可单测），落事务在 `Editor.svelte` 的 `EditorView.inputHandler`（只在"空选区 + 输入内容恰好是 `$`"时介入，不碰粘贴 / IME / 选中替换；任何抛错都 `return false` 退回默认输入，绝不吞按键）。
   - **独占一行 → 补 `$  $`（行间公式脚手架）**：typst 的行间公式是**定界符内侧两侧留白**的 `$ x $`，所以脚手架是"两个空格 + 光标在中间"——敲一个字直接得到 `$ x $`，光标移开后由块级 widget 居中渲染（验收里断言桩收到 `display: true`）。行内（同行还有别的字）→ 补 `$$`，敲字得到 `$x$`。

@@ -72,6 +72,7 @@
   import { dbg, setCliDebug } from "$lib/debug";
   import { clampPopoverRect } from "$lib/popover-utils";
   import {
+    TYPST_DEFAULT_TEXT_PT,
     isReflowApplied,
     previewCanvasWidth,
     previewPageWidthPt,
@@ -327,6 +328,12 @@
    * 0 = 还没量到（编辑器未挂载）→ 编译时用默认值兜底，量到之后 scheduleWritingReflow 会重编一次。
    */
   let writingWidthPt = $state(0);
+  /**
+   * **文档正文实际字号**（pt，Rust 侧按字符数投票取众数）—— 写作模式"源码透镜"的字号基准：
+   * 编辑器正文按它渲染（`Editor.svelte` 的 `--write-doc-px`），于是光标进出块时**字号不跳**
+   * （用户：「不要光标在哪里哪里就变大了」）。后端没给（旧版本/桩/源码模式）时用 typst 默认 11pt。
+   */
+  let writingTextPt = $state(TYPST_DEFAULT_TEXT_PT);
   let writingReflowTimer: ReturnType<typeof setTimeout> | undefined;
   /** 量不到列宽时的兜底版心宽（495px = 371.25pt，写作模式常见列宽） */
   const DEFAULT_WRITING_WIDTH_PT = 371.25;
@@ -1755,6 +1762,10 @@
       writingBlocksDoc = doc;
       writingBlocksExact = true;
       blocksVersion++;
+      // 文档正文实际字号（源码透镜的字号基准，见 writingTextPt 的说明）
+      if (result.textPt > 0 && Math.abs(result.textPt - writingTextPt) > 0.01) {
+        writingTextPt = result.textPt;
+      }
       if (carried.carried > 0 || carried.missing > 0) {
         dbg.log(
           "compile",
@@ -2363,6 +2374,7 @@
           mathVersion={mathVersion}
           blocks={writingBlocks}
           blocksVersion={blocksVersion}
+          docTextPt={writingTextPt}
           onBlocksNeeded={handleBlocksNeeded}
           onCropClick={handleCropClick}
           onOpenLink={handleOpenLink}

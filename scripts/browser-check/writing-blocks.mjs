@@ -844,14 +844,36 @@ if (paras.first && paras.last) {
 // 场景 B：**在代码块里**整块拖选（光标必然在里面）→ 必须展开（否则打不了字），但**围栏藏起来**
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 400));
+// 先在切片里点一下把这一块展开，再对着**展开后的真实源码**拖整块。
+// 为什么不在切片上直接拖：mousedown 会把光标放进这一块 → 它立刻展开、版式随之变化，而此时拖动要
+// 经过好几步 mouseMoved，指针底下的内容已经换过了。夹具是按 371.25pt 渲的、在 1400px 视口下被放大约
+// 2.1 倍，所以"切片比展开后的源码还高"，指针最后必然落到下面那一段上（实测头部落到文档末尾）。
+// 真实应用里比例是 1.333，代码块切片与源码行数相同、高度接近，拖起来不会有这个错位 ——
+// "缩放后的几何是否一致"由 writing-mode-scenes.mjs 的「光标进出块时页面不许变高」在 600px 视口下量。
+const blockPoint = await c.evaluate(`(() => {
+  const el = document.querySelector('.cm-block-crop[data-block-kind="Raw"]');
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+})()`);
 const rawRect = await rectOf("Raw");
-if (rawRect) {
-  await c.drag(
-    Math.round(rawRect.left + 2),
-    Math.round(rawRect.top + 3),
-    Math.round(rawRect.left + rawRect.w - 2),
-    Math.round(rawRect.top + rawRect.h - 3),
-  );
+if (rawRect && blockPoint) {
+  await c.click(blockPoint.x, blockPoint.y); // 点进代码块 → 它展开成源码
+  await new Promise((r) => setTimeout(r, 500));
+  // 展开后按**真实源码行**算起止点：第一行（```rust）的左缘 → 最后一行（```）的右缘
+  const srcRect = await c.evaluate(`(() => {
+    const lines = Array.from(document.querySelectorAll(".cm-line"));
+    const first = lines.find((l) => l.textContent.includes("\`\`\`rust"));
+    const last = lines.filter((l) => l.textContent.trim().startsWith("\`\`\`")).pop();
+    if (!first || !last) return null;
+    const a = first.getBoundingClientRect();
+    const b = last.getBoundingClientRect();
+    return { x1: Math.round(a.left + 2), y1: Math.round(a.top + a.height / 2),
+             x2: Math.round(b.left + b.width - 2), y2: Math.round(b.top + b.height / 2) };
+  })()`);
+  check("点进代码块后能看到它的源码行（拖选要在真实源码上做）", !!srcRect, JSON.stringify(srcRect));
+  if (!srcRect) throw new Error("代码块源码行没找到");
+  await c.drag(srcRect.x1, srcRect.y1, srcRect.x2, srcRect.y2);
   await new Promise((r) => setTimeout(r, 500));
   const b = await c.evaluate(SNAPSHOT);
   check("在代码块里拖整块：它展开成源码（光标在里面，不展开就打不了字）", b.codeInSource === true, JSON.stringify(b));
