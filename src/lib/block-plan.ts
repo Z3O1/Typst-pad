@@ -24,6 +24,18 @@ export interface Block {
   kind: string;
   /** 是否有渲染结果（`#let` / `#show` / 纯注释行没有） */
   found: boolean;
+  /**
+   * **引擎对这块什么都没有画**（`#set` / `#show` / `#let` / 纯注释行这类"规则"）。
+   *
+   * 与 `found: false` 的区别很重要：`found: false` 还有另一种来源 —— 编辑之后块表"过期"了、
+   * 编译失败后沿用旧表时被标成不可渲染（见 remapBlocksThroughEdit），那种情况**必须**显示源码，
+   * 绝不能隐藏（否则用户刚敲的字会凭空消失）。所以这个标记**只在"刚拿到的一次成功编译、
+   * 引擎确实没给这一块任何东西"时才为 true**，其它路径一律为 false（或缺省）。
+   *
+   * 用法：写作模式下这种块**整格隐藏**（与 PDF 一致 —— 真排版里它就是什么都不输出），
+   * 光标/选区进去时才展开成源码（用户 2026-09-16 选定）。
+   */
+  noOutput: boolean;
   /** 切片 SVG；空串 = 没有渲染结果 */
   svg: string;
   widthPt: number;
@@ -80,6 +92,8 @@ export function toBlockTable(
       to,
       kind: b.kind,
       found: b.found === true,
+      // 引擎"什么都没画"：只认这一次编译的结论（见 Block.noOutput 的说明）
+      noOutput: b.found !== true,
       svg: typeof b.svg === "string" ? b.svg : "",
       widthPt: b.widthPt,
       heightPt: b.heightPt,
@@ -146,7 +160,13 @@ export interface BlockCover {
   coverTo: number;
   /** 该块是否可渲染（有 SVG 且高度为正） */
   renderable: boolean;
-  /** 是否展开源码（光标/选区落在它这一格，或它根本没法渲染） */
+  /**
+   * 这一块在真排版里**没有输出**（引擎什么都没画，`#set`/`#show`/`#let`/纯注释行）→
+   * 写作模式下**整格隐藏**（与 PDF 一致），只有光标/选区进去时才展开成源码。
+   * 见 Block.noOutput 的说明。
+   */
+  noOutput: boolean;
+  /** 是否展开源码（光标/选区落在它这一格，或它属于"过期/编译失败"那种不可渲染） */
   revealed: boolean;
   /**
    * 选区是否**完整盖住**了这一块（`sel.from ≤ block.from && sel.to ≥ block.to`）。
@@ -171,7 +191,10 @@ export interface BlockCover {
  *  - 排版里的段落间距已经算进切片高度（相邻块各分到一半间距），空行若再单独占一行
  *    就会叠出多余空白，摞起来就不等于原版式。
  *
- * 不可渲染的块（`#let` / `#show` / 注释行）保持可见、永不被 widget 覆盖。
+ * 不可渲染的块分两种，**行为完全不同，别弄混**：
+ *  - **引擎说这块没有输出**（`noOutput`：`#set` / `#show` / `#let` / 纯注释行）→ 格子照建、
+ *    但"未展开"时**整格隐藏**（与 PDF 一致；光标进去才展开源码）；
+ *  - **块表过期 / 编译失败**（`found:false` 但不是 `noOutput`）→ 永远显示源码（绝不隐藏）。
  */
 export function planBlockCovers(blocks: readonly Block[] | null, doc: Text): BlockCover[] {
   if (!blocks || blocks.length === 0) return [];
@@ -203,6 +226,8 @@ export function planBlockCovers(blocks: readonly Block[] | null, doc: Text): Blo
       coverFrom,
       coverTo,
       renderable: block.found && block.svg !== "" && block.heightPt > 0.5,
+      // 只有"确实是引擎说的没输出"才隐藏（过期块表的 noOutput 已在 remap 里清掉）
+      noOutput: block.noOutput === true,
       revealed: false, // 由 applyBlockSelection 填入
       selected: false, // 同上
     });
@@ -257,9 +282,12 @@ export function applyBlockSelection(
       const head = sel.head ?? sel.to;
       return head >= cover.coverFrom && (head < cover.coverTo || cover.coverTo === docLength);
     });
-    // 整块被选中 → 不展开（保持切片 + 淡色底）；只盖住一部分、或光标在里面 → 展开源码
+    // 整块被选中 → 不展开（保持切片 + 淡色底）；只盖住一部分、或光标在里面 → 展开源码。
+    // **没输出的块（noOutput）按"有切片"对待**：不碰它时它整格隐藏（与 PDF 一致），
+    // 光标/选区碰到才展开源码；而"块表过期 / 编译失败"那种（!renderable 且 !noOutput）
+    // 照旧永远展开 —— 绝不能把用户刚打的字藏起来。
     const hit =
-      !cover.renderable ||
+      (!cover.renderable && !cover.noOutput) ||
       holdsHead ||
       (selections.some((sel) => touches(cover, sel)) && !selected);
     if (selected !== cover.selected || hit !== cover.revealed) changed = true;
@@ -398,7 +426,9 @@ export function remapBlocksThroughEdit(
       ? b.from === fallback.from && b.to === fallback.to
       : byLine.some((x) => x.from === b.from && x.to === b.to) ||
         (b.from < span.to && b.to > span.from);
-  const revealed = (b: Block): Block => ({ ...b, found: false, svg: "", heightPt: 0 });
+  // 退回源码：`found: false`（不可渲染）+ **清掉 noOutput** —— 这是"旧坐标/编译失败"的兜底，
+  // 与"引擎说这块没输出"是两回事：误隐藏会让用户刚打的字凭空消失，宁可显示源码。
+  const revealed = (b: Block): Block => ({ ...b, found: false, noOutput: false, svg: "", heightPt: 0 });
   for (const b of blocks) {
     if (revealedBy(b)) {
       const after = b.from >= span.to;

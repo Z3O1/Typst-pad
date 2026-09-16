@@ -633,6 +633,33 @@ function buildBlockCropDecorations(
 }
 
 /**
+ * **没有输出的块整格隐藏**（用户 2026-09-16 选定「完全隐藏，和 PDF 一样什么都看不到」）。
+ *
+ * 哪些块算"没有输出"：`#set` / `#show` / `#let` / 纯注释行 —— 引擎对它们**什么都不画**
+ * （实测：用户真实文档首行 `#show math.equation: set text(...)` 的块 `found=false`、
+ * 高度 `0.0pt`、SVG 0KB），所以真排版里那一行本来就不存在。以前它照旧显示源码，
+ * 用户问「为什么 `#` 的代码还是会显示出来」。
+ *
+ * 实现要点：
+ *  - 只在 `cover.noOutput && !cover.revealed` 时隐藏 —— `revealed` 由选区判定（光标/选区进去就展开，
+ *    照旧可编辑）；**"块表过期 / 编译失败"那种不可渲染的块绝不能走这里**（见 block-plan 的注释）。
+ *  - 用**整行**的 `Decoration.replace({ block: true })`（不带 widget）= 把这几行藏掉、高度归零；
+ *    连**块尾空行**也一起藏（格子本来就含它，留着会凭空多一行空行）。
+ *  - 区间取格子（`coverFrom..coverTo`）而不是块本身，保证与切片装饰**不重叠**（同一格只有一个装饰）。
+ */
+function buildHiddenBlockDecorations(state: EditorState, covers: BlockCover[]): Range<Decoration>[] {
+  const out: Range<Decoration>[] = [];
+  for (const cover of covers) {
+    if (cover.revealed || !cover.noOutput) continue;
+    const from = Math.max(0, Math.min(cover.coverFrom, state.doc.length));
+    const to = Math.max(from, Math.min(cover.coverTo, state.doc.length));
+    if (to <= from) continue;
+    out.push(Decoration.replace({ block: true }).range(from, to));
+  }
+  return out;
+}
+
+/**
  * **整块被选中的围栏代码块：把两行围栏藏起来**（用户要求「选中整个代码块请不要展开」）。
  *
  * 背景：整块被选中时那一块本来就不展开（保持切片外观，见 block-plan 的 selected）。但**光标
@@ -784,6 +811,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
           .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
         const all = [
           ...buildBlockCropDecorations(state, doc, covers, opts),
+          ...buildHiddenBlockDecorations(state, covers),
           ...buildFenceHidingDecorations(state, covers),
           ...buildMathDecorations(state, opts, math, context, covered),
           ...buildMarkupDecorations(state, { opaque, math }, covered),

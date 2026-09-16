@@ -169,6 +169,60 @@ if (!headings) {
   }
 }
 
+// 「完全隐藏，和 PDF 一样什么都看不到」（用户 2026-09-16 选定）：
+// `#set` / `#show` / `#let` / 注释行这类"规则"在真排版里没有输出（引擎对它们没有帧项、高度 0），
+// 以前照旧显示源码（用户问「为什么 `#` 的代码还是会显示出来」）；现在整格隐藏、光标进去才展开。
+console.log("\n=== 没有输出的块（#set / #show）：整格隐藏，光标进去才展开");
+const setDoc = fixtures.find((f) => f.name === "文档级设置（12pt）");
+if (!setDoc) {
+  check("找到带 #set 的场景夹具", false, "夹具缺失");
+} else {
+  await loadScene(setDoc.doc);
+  const hidden = await c.evaluate(`(() => {
+    const v = document.querySelector(".cm-content").cmTile.root.view;
+    const d = v.state.doc.toString();
+    v.dispatch({ selection: { anchor: d.indexOf("这一段用来") + 2 } });
+    return true;
+  })()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const a = await c.evaluate(`(() => ({
+    text: document.querySelector(".cm-content").innerText,
+    crops: document.querySelectorAll(".cm-block-crop").length,
+    hiddenCovers: Array.from(document.querySelectorAll(".cm-block-crop")).length,
+  }))()`);
+  check(
+    "光标在正文里时 `#set text(size: 12pt)` 那一行**不在页面上**（与 PDF 一致）",
+    !a.text.includes("#set") && !a.text.includes("size: 12pt"),
+    JSON.stringify(a),
+  );
+  check(
+    // 标题那一块是切片（图片），它的文字**不会**出现在 innerText 里 —— 只能数切片
+    "正文与标题照常渲染（标题那张切片还在，正文是源码形态）",
+    a.text.includes("这一段用来") && a.crops >= 1,
+    JSON.stringify(a),
+  );
+  await c.screenshot(SHOT("scene-hidden-set"));
+  // 光标进那一行 → 展开成源码，能编辑
+  await c.evaluate(`(() => {
+    const v = document.querySelector(".cm-content").cmTile.root.view;
+    v.dispatch({ selection: { anchor: 3 } });
+    return true;
+  })()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const b = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+  check("光标进那一行 → 展开成源码（可编辑）", b.includes("#set text(size: 12pt)"), JSON.stringify(b.slice(0, 60)));
+  // 回到正文：又藏起来（可逆）
+  await c.evaluate(`(() => {
+    const v = document.querySelector(".cm-content").cmTile.root.view;
+    const d = v.state.doc.toString();
+    v.dispatch({ selection: { anchor: d.indexOf("这一段用来") + 2 } });
+    return true;
+  })()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const back = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+  check("光标离开后又藏起来（可逆）", !back.includes("#set"), JSON.stringify(back.slice(0, 60)));
+}
+
 
 console.log("\n=== 对照：文档级 #set 是否真的进到切片里");
 const plain = fixtures.find((f) => f.name === "文档级设置（默认字号）");

@@ -2,7 +2,8 @@
 //
 // 这里锁的是三条硬约束：
 //  1. **格子铺满全文且首尾相接**（不然"整篇都被 widget 盖住"会让光标无处可去，或者空行叠出多余空白）；
-//  2. **不可渲染的块（`#let` / `#show` / 注释行）永远保持可见**（源码透镜里它是"代码碎片"）；
+//  2. **"引擎说这块没有输出"的块（`#set` / `#show` / `#let` / 注释行）整格隐藏**（与 PDF 一致），
+//     光标/选区进去才展开；而"块表过期 / 编译失败"那种不可渲染的块**必须永远展开**（不许隐藏）；
 //  3. **永远至少有一格是源码形态**（否则用户没法打字）。
 import { describe, it, expect } from "vitest";
 import { Text } from "@codemirror/state";
@@ -139,7 +140,7 @@ describe("applyBlockSelection", () => {
     expect(covers.map((c) => c.revealed)).toEqual([false, false, true]);
   });
 
-  it("不可渲染的块永远展开（`#let` / `#show` 必须看得见）", () => {
+  it("**引擎说这块没有输出**（`#set` / `#show` / `#let`）→ 不展开（写作模式下整格隐藏，见 live-preview）", () => {
     const doc = "aaa\n\n#let x = 1\n\nbbb\n";
     const table = asciiTable(doc, [
       crop(0, 3),
@@ -148,7 +149,29 @@ describe("applyBlockSelection", () => {
     ]);
     const covers = planBlockCovers(table.blocks, Text.of(doc.split("\n")));
     applyBlockSelection(covers, [{ from: 0, to: 0 }], doc.length);
-    expect(covers.map((c) => c.revealed)).toEqual([true, true, false]);
+    // 第二块 noOutput=true → 光标不在里面就不展开（它会由 buildHiddenBlockDecorations 藏掉）
+    expect(covers.map((c) => c.noOutput)).toEqual([false, true, false]);
+    expect(covers.map((c) => c.revealed)).toEqual([true, false, false]);
+    // 光标进去 → 展开成源码，能编辑
+    applyBlockSelection(covers, [{ from: 6, to: 6 }], doc.length);
+    expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
+  });
+
+  it("**块表过期 / 编译失败**那种不可渲染（noOutput=false）仍然永远展开，绝不隐藏用户刚打的字", () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    const table = asciiTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]);
+    // 模拟 remapBlocksThroughEdit 把被改动的那一块标成不可渲染
+    const remapped = remapBlocksThroughEdit(table.blocks, table.doc, "aaa\n\nbXb\n\nccc\n");
+    const after = "aaa\n\nbXb\n\nccc\n";
+    const covers = planBlockCovers(remapped.blocks, Text.of(after.split("\n")));
+    applyBlockSelection(covers, [{ from: 0, to: 0 }], after.length);
+    const stale = covers.filter((c) => !c.renderable && !c.noOutput);
+    expect(stale.length).toBeGreaterThan(0);
+    expect(stale.every((c) => c.noOutput === false)).toBe(true);
+    // 过期块永远展开（这一条以前由 !renderable 兜着，现在被拆成两种情况，别回退）
+    for (const cover of covers) {
+      if (!cover.renderable && !cover.noOutput) expect(cover.revealed).toBe(true);
+    }
   });
 
   it("跨块选区：**只盖住一部分**的格子展开源码（高亮才精确）", () => {

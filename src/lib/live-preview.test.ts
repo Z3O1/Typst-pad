@@ -363,6 +363,7 @@ describe("livePreview 块级切片", () => {
     to,
     kind: "Paragraph",
     found: true,
+    noOutput: false,
     pages: 1,
     page: 1,
     xPt: 58,
@@ -770,6 +771,36 @@ describe("livePreview 块级切片", () => {
     }).not.toThrow();
     expect(host.querySelectorAll(".cm-block-crop").length).toBe(2);
     expect(host.querySelectorAll(".cm-math-block").length).toBe(0); // 公式块已被切片覆盖
+  });
+
+  // 「完全隐藏，和 PDF 一样什么都看不到」（用户 2026-09-16 选定）：
+  // `#set` / `#show` / `#let` / 注释行这类"规则"在真排版里没有输出（引擎对它们没有帧项、高度 0），
+  // 所以写作模式下整格隐藏；光标/选区进去才展开成源码（照旧可编辑）。
+  it("引擎没有输出的块（noOutput）整格隐藏；光标进去才展开成源码", () => {
+    const doc = "#let x = 1\n\naaa\n";
+    const blocks: Block[] = [
+      crop(0, 10, { found: false, noOutput: true, svg: "", heightPt: 0 }),
+      crop(12, 15),
+    ];
+    mount(doc, blocks); // 光标默认在文档末尾（第二块里）→ 第一块应被隐藏
+    const text = () => host.querySelector(".cm-content")?.textContent ?? "";
+    expect(text()).not.toContain("#let x = 1");
+    expect(text()).toContain("aaa"); // 光标所在的第二块是源码形态
+    expect(host.querySelectorAll(".cm-block-crop").length).toBe(0);
+    // 光标进那一块 → 展开源码（可编辑）；同时第二块变成切片
+    view.dispatch({ selection: { anchor: 5 } });
+    expect(text()).toContain("#let x = 1");
+    expect(host.querySelectorAll(".cm-block-crop").length).toBe(1);
+  });
+
+  it("**块表过期**的不可渲染块（noOutput=false）绝不隐藏 —— 它必须显示源码", () => {
+    const doc = "#let x = 1\n\naaa\n";
+    const blocks: Block[] = [
+      crop(0, 10, { found: false, noOutput: false, svg: "", heightPt: 0 }),
+      crop(12, 15),
+    ];
+    mount(doc, blocks);
+    expect(host.querySelector(".cm-content")?.textContent).toContain("#let x = 1");
   });
 
   it("暗色主题给切片挂 cm-block-crop-dark（typst 产物是白底黑字，需整体反色）", () => {
