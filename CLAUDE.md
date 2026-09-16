@@ -8,10 +8,10 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 
 **这是什么**：仿 Typora 的 Typst 桌面编辑器 —— 「写作模式」（单栏整页纸张、公式与标记就地排版、光标进入即展开源码）与「源代码模式」（`Ctrl+/`，双栏：等宽编辑器 + 整页预览）。纯本地运行：前端 SvelteKit SPA（adapter-static），桌面壳 Tauri 2，排版引擎是**内嵌的 typst crate**（Rust 进程内编译，没有 wasm、没有网络依赖，字体随包分发）。
 
-**交接时的状态（2026-09-15）**：
+**交接时的状态（2026-09-16）**：
 
-- 版本 `0.7.10`（2026-09-15 发，用户指令「发个新的小版本」；**主题是「把看着能用、其实没生效的问题修掉」**）：① **`.ttc`/`.otc` 字体集合逐 face 注册** + Windows 补上「仅为我安装」的字体目录 —— 旧代码只收 `.ttf/.otf` 且只取 face 0，Windows 的 SimSun / 微软雅黑 / 微软正黑体（都是 `.ttc`）**一个都没进 FontBook**，「改了字体没反应」的一条真实成因；② **「界面缩放未生效」的根因**（用户第五轮反馈）：**我们自己**的 resize 处理把 100% 基准带偏（见「界面缩放」那节的沉降窗口），引擎明明接受了却被判成拒绝并弹回 100%；③ **回车继承上一行缩进 + Tab 一档 = 4 个空格**；④ **关于弹窗重写**（原描述只写「左编辑 / 右实时预览」，漏了默认的写作模式）+「项目主页」按钮；⑤ **0.7.9 的「新建窗口」ACL 修复**（`core:webview:allow-create-webview-window`，并加了 `scripts/capabilities.test.mjs` 静态体检）。回看：**0.7.4 是「自动更新真的能生效」的第一个版本**（0.7.3 引入 updater 但仓库当时私有，客户端拉不到清单；仓库公开 + 0.7.4 发布之后这条链路才第一次跑通）；**0.7.8 起启动就检查更新、点过「稍后」不再自动打扰**。`main` 与 `origin/main` 同步；每次打 tag 后 `release.yml` 建草稿 Release，**由后台一次性任务自动 Publish**（不必等、不必问）。**发版后的验收就照这两条 curl 做**（见下）。
-- **发行状态（2026-09-15 更新）：`v0.7.10`、`v0.7.9`、`v0.7.8`、`v0.7.7`、`v0.7.6`、`v0.7.5`、`v0.7.4`、`v0.7.3`、`v0.7.2`、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）。**0.7.10 已匿名验证过（2026-09-15）**：`latest.json` 200 / `version: 0.7.10` / 安装包 200（16772701 字节，`Typst-pad_0.7.10_x64-setup.exe`）/ **签名与配置里的公钥验签通过**（keyid `4e79c0dd71347bb5`、alg `ED`）；`gh release view` 的 `isDraft` 为 `false`，资产齐全（latest.json / exe / exe.sig / msi / msi.sig）。0.7.9 那次的记录：安装包 200（16762871 字节）/ **签名验签也通过**（keyid `4e79c0dd71347bb5` + ed25519 verify：公钥取 `plugins.updater.pubkey` 第二行，签名的 alg `ED` = 先 BLAKE2b-512 再签，node:crypto 就能验）。发版时 `release.yml` 建的仍是**草稿**，**必须手动 Publish**（或按下方约定直接发）——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效。
+- 版本 `0.8.0`（2026-09-16 发，用户指令「就发 v0.8.0」；**主题是「缩放只归用户，软件别自己动」**）：① **撤掉整套「复核发现引擎没动就把档位拉回去」的机制** —— 用户第六轮反馈「用 Ctrl + 滚轮 会回退」「往下滚没反应」，根因是我们在**判错**（他那台机器上 CSS 布局宽度与 dpr 两条判据都读不出缩放）之后，把用户要的档位改回引擎（自认为）给的值，所以每次缩放都被自己弹回；现在 `setZoom` 只在用户操作时调一次，之后 `observeZoomEffect` **只观察、绝不改状态**（代价：引擎上限那类机器上死区会回来，用户明确接受）。② **`Ctrl+Shift+=` / `Ctrl+Shift+-` 键盘调档 ±1 格**（不经过滚轮手势，既是可用操作，也是判别「滚轮事件到底有没有到页面」的判据）。③ **`Ctrl+N` 新建前确认 + 空文档覆盖已有文件前确认**（用户问「编辑器会清空文件吗？？」后补的两道防护）。④ **新应用图标**「叠纸 + T」。回看：0.7.10 是「把看着能用、其实没生效的问题修掉」那一版（`.ttc` 字体集合逐 face 注册 / 缩放基准被自己的 resize 带偏 / 回车缩进 / Tab 四格 / 关于弹窗重写）；**0.7.4 是「自动更新真的能生效」的第一个版本**（0.7.3 引入 updater 但仓库当时私有，客户端拉不到清单；仓库公开 + 0.7.4 发布之后这条链路才第一次跑通）；**0.7.8 起启动就检查更新、点过「稍后」不再自动打扰**。`main` 与 `origin/main` 同步；每次打 tag 后 `release.yml` 建草稿 Release，**由后台一次性任务自动 Publish**（不必等、不必问）。**发版后的验收就照这两条 curl 做**（见下）。
+- **发行状态（2026-09-16 更新）：`v0.8.0`（2026-09-16 发，验签数据见下）、`v0.7.10`、`v0.7.9`、`v0.7.8`、`v0.7.7`、`v0.7.6`、`v0.7.5`、`v0.7.4`、`v0.7.3`、`v0.7.2`、`v0.7.0` 已发布；只有 `v0.7.1` 还是草稿**（handover 里曾把 v0.7.2 误记成草稿）。**0.7.10 已匿名验证过（2026-09-15）**：`latest.json` 200 / `version: 0.7.10` / 安装包 200（16772701 字节，`Typst-pad_0.7.10_x64-setup.exe`）/ **签名与配置里的公钥验签通过**（keyid `4e79c0dd71347bb5`、alg `ED`）；`gh release view` 的 `isDraft` 为 `false`，资产齐全（latest.json / exe / exe.sig / msi / msi.sig）。0.7.9 那次的记录：安装包 200（16762871 字节）/ **签名验签也通过**（keyid `4e79c0dd71347bb5` + ed25519 verify：公钥取 `plugins.updater.pubkey` 第二行，签名的 alg `ED` = 先 BLAKE2b-512 再签，node:crypto 就能验）。发版时 `release.yml` 建的仍是**草稿**，**必须手动 Publish**（或按下方约定直接发）——草稿资产不对外，客户端拉不到 `latest.json`，自动更新不会生效。
   - 发布后建议验一次：`gh api repos/Z3O1/Typst-pad/releases/latest --jq .tag_name` 应为新 tag；清单内容用 `gh api repos/Z3O1/Typst-pad/releases/assets/<latest.json 的 id> -H "Accept: application/octet-stream"` 取回核对（version / url / signature）。**匿名可达性是自动更新的硬前提，验这条最直接**：
     ```bash
     /mnt/c/Windows/System32/curl.exe -sL -o NUL -w '%{http_code}\n' https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json   # 期望 200
@@ -34,7 +34,7 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（30 个文件 / 469 项）
+npm test                 # 前端 + 脚本单测（30 个文件 / 484 项）
 cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（36 passed / 1 ignored）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
