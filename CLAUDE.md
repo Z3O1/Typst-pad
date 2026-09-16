@@ -199,6 +199,7 @@ src-tauri/fonts/            # 打包字体（见"字体"：**不放 static/**）
 - `vite.config.js`：SvelteKit + wasm 插件 + **dev 白屏修复三件套**（见"原生编译后端"末尾，勿动）；Tauri 开发用 `TAURI_DEV_HOST`。
 - `vitest.config.ts`：jsdom + `include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"]` + `server.fs.allow: [".."]`（scripts 那条是发布脚本的测试：脚本是普通 JS + node 内置模块，不参与 svelte-check，见"测试"）。
 - `svelte.config.js`：`@sveltejs/adapter-static`（SPA，`fallback: index.html`）。
+- `src-tauri/app-icon.svg`：**应用图标的源文件**（矢量、1024×1024，「叠纸 + T」造型：深墨蓝底 + 三张错落纸页 + 墨色 T + 三条正文线 + 品牌青光标本）。改图标只改它，然后 `npm run tauri icon src-tauri/app-icon.svg` 重新生成 `src-tauri/icons/` 全套（`.ico`/`.icns`/各尺寸 PNG/Store 那一串），网站 favicon（`static/favicon.png`，256px）同源导出。**两个坑**：① `tauri icon` 会顺带产出 `android/`、`ios/` 两个目录，本项目只做桌面端，**生成后删掉**；② 图标是**打包时嵌进 exe** 的，装了的用户要重装（或等下一个版本）才看得到，任务栏可能还留着旧缩略图缓存。生成用的 SVG 里有 `feDropShadow`，tauri 内置的 resvg 渲染正常（已核对 `.ico` 里 16/24/32/48/64/256 六档）。
 - `.github/workflows/`：`ci.yml`（test + build-bundles）、`release.yml`（tag 发草稿 Release），约定见"CI / 发布约定"。
 - `scripts/`：`check-fonts.mjs`（字体魔数校验）、`download-fonts.mjs`（重新下载字体）、`browser-check/`（CDP 验收）、`install-vs-buildtools.bat`/`verify-app.bat`（Windows 辅助）。
   `scripts/capabilities.test.mjs`：**Tauri capability 静态体检**（前端用到的插件命令 → 必须在 `src-tauri/capabilities/default.json` 里有对应权限；ACL 拒绝只在真机运行时才出现，浏览器验收碰不到，见「多窗口与页面级按键路由」）。

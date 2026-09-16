@@ -2,6 +2,12 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### Changed
+
+- **应用图标**：换掉 Tauri 脚手架自带那个黄青漩涡，改成「叠纸 + T」—— 深墨蓝底、三张错落的纸页，最上面一张压一个大号墨色 T，下面是三条正文线与一笔品牌青的光标（一图说清「写作 / 排版 / 光标位置」）。源文件是矢量的 `src-tauri/app-icon.svg`（改图标只改它），全套尺寸（Windows `.ico`、macOS `.icns`、`32/64/128/128@2x` 与 Windows Store 那串 `Square*Logo`/`StoreLogo`）由 `npm run tauri icon src-tauri/app-icon.svg` 生成，网站 favicon（`static/favicon.png`）与它同源。注意两点：`tauri icon` 会**顺带生成 `android/`、`ios/`**（本项目只做桌面端，生成后删掉）；**安装包里的图标是打包时嵌进 exe 的**，所以老用户要重装（或等下一个版本）才会看到新图标。
+
 ## [0.7.10] - 2026-09-15
 
 主题是**把「看着能用、其实没生效」的几个问题修掉**：字体集合、缩放复核、写作模式的缩进，外加一个说得更清楚的关于弹窗。
