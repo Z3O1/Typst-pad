@@ -62,7 +62,7 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 ## 测试与 CI
 
 - 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键、自动更新的纯逻辑（`update-utils`：启动检查延迟 / 进度换算 / 错误文案）、页面级按键路由（`app-keys`：Esc / Alt+Z / Ctrl+Shift+N / Ctrl+R / Ctrl+W 的判定顺序）、公式定界符配对与退格（`auto-pair`）、回车换行的缩进继承（`auto-indent`）、界面缩放（`zoom`）、预览重排（`preview-scale`）、源码模式换行（`word-wrap`），所见即所得链路（`typst-lex` 区域扫描 / `math-ranges` 公式范围 / `markup-ranges` 标记 / `live-preview` 装饰行为）、字体设置（`font-settings` 把选中的正文字体拼成字体族列表、`font-warnings` 把编译警告翻成可行动提示）；发布脚本的测试在 `scripts/generate-latest-json.test.mjs`（更新清单的生成与校验）
-- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（223 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
+- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（231 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
 - 浏览器端的**真实排版视觉验证**：`npm run fixtures:math` 导出 Rust 侧真实公式产物 → `node scripts/browser-check/wysiwyg-visual.mjs`。它把真实产物注入浏览器开发模式页面，实测 ① 行内公式基线与同行文字基线是否齐平（用零宽基线探针量，误差 < 1px）② 渲染尺寸是否等于真实 pt 尺寸 × 4/3 ③ 行间公式块级 widget 是否居中并独占整行 ④ 暗色主题下公式是否可见
 - Rust 单测（`typst_world.rs` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）、单公式渲染（`compile_math`：贴边 SVG、透明底、基线测量、前缀宏生效、语法错误回退）
 - CI（GitHub Actions，`.github/workflows/ci.yml`）：

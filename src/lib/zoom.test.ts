@@ -8,6 +8,10 @@ import {
   ZOOM_STEP,
   clampZoom,
   nextZoom,
+  accumulateWheelSteps,
+  createWheelAccumulator,
+  resetWheelAccumulator,
+  wheelPendingNotice,
   shouldRebaselineZoom,
   wheelZoomSteps,
   zoomIn,
@@ -64,8 +68,9 @@ describe("wheelZoomSteps", () => {
     expect(wheelZoomSteps(Number.NaN, Number.NaN)).toBe(0);
   });
 
-  it("触摸板的小 delta 不会一划到尾（下限 0.2 档）", () => {
-    expect(wheelZoomSteps(-4)).toBeCloseTo(0.2, 6);
+  it("触摸板的小 delta 不会一划到尾（下限 0.1 档，而且要由累加器攒起来）", () => {
+    expect(wheelZoomSteps(-4)).toBeCloseTo(0.1, 6);
+    expect(wheelZoomSteps(-40)).toBeCloseTo(0.4, 6);
   });
 
   it("大 delta / 页模式最多 3 档", () => {
@@ -76,6 +81,80 @@ describe("wheelZoomSteps", () => {
   it("行模式（deltaMode = 1）一格算一档", () => {
     expect(wheelZoomSteps(-1, 0, 1)).toBe(1);
     expect(wheelZoomSteps(-3, 0, 1)).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 滚轮余量累加器（2026-09-16 修的死区，见 zoom.ts 的注解）
+//
+// 用户反馈「Ctrl+滚轮常态是可以的，但是到上限不知道为什么就不可以了」，状态栏写着
+// 「缩放已是 250%（到边界了）」。真因：位移不足一档时（高倍缩放下每格位移会变小），
+// 4% 的位移被档位圆整抹掉，而每个事件独立计算 ⇒ 那种滚轮**永远**动不了。
+// 下面这几条就是那次反馈的回归网：**不足一档要攒着，攒够了就走一档**。
+// ---------------------------------------------------------------------------
+describe("accumulateWheelSteps（不足一档的位移要攒起来）", () => {
+  it("一整格（100px）照旧是一次一档、不留余量（老手感不许变）", () => {
+    const acc = createWheelAccumulator();
+    expect(accumulateWheelSteps(acc, -100)).toBe(1);
+    expect(acc.remainder).toBe(0);
+    expect(accumulateWheelSteps(acc, 100)).toBe(-1);
+  });
+
+  it("40px 一格：第一次不动（攒着），第二次走一档", () => {
+    const acc = createWheelAccumulator();
+    expect(accumulateWheelSteps(acc, -40)).toBe(0);
+    expect(acc.remainder).toBeCloseTo(0.4, 6);
+    expect(accumulateWheelSteps(acc, -40)).toBe(1);
+    expect(acc.remainder).toBeCloseTo(-0.2, 6);
+  });
+
+  it("4px 的触摸板小步长也能攒够一档（老代码里这是死区）", () => {
+    const acc = createWheelAccumulator();
+    const steps = [0, 1, 2, 3, 4].map(() => accumulateWheelSteps(acc, -4));
+    expect(steps.reduce((a, b) => a + b, 0)).toBe(1); // 五下 = 一档（4px × 5 = 20px，取下限）
+  });
+
+  it("一次大位移照旧最多 3 档", () => {
+    const acc = createWheelAccumulator();
+    expect(accumulateWheelSteps(acc, -1000)).toBe(3);
+  });
+
+  it("反向滚动丢掉余量（不然「滚一半再反滚」会被余量抵消，手感发黏）", () => {
+    const acc = createWheelAccumulator();
+    accumulateWheelSteps(acc, -40); // 攒下 0.4 档
+    expect(accumulateWheelSteps(acc, 100)).toBe(-1); // 直接缩一档，不是 -0.6
+    expect(acc.remainder).toBeCloseTo(0, 6);
+  });
+
+  it("余量不会攒成一大笔存款（圆整后必然落在 ±0.5 档以内）", () => {
+    const acc = createWheelAccumulator();
+    for (let i = 0; i < 20; i++) accumulateWheelSteps(acc, -40);
+    expect(Math.abs(acc.remainder)).toBeLessThanOrEqual(0.5);
+  });
+
+  it("resetWheelAccumulator 清账（键盘/菜单调档后调用）", () => {
+    const acc = createWheelAccumulator();
+    accumulateWheelSteps(acc, -40);
+    resetWheelAccumulator(acc);
+    expect(acc.remainder).toBe(0);
+  });
+
+  it("位移不足一档时把「攒了多少」说出来（否则与「事件没到页面」没法区分）", () => {
+    const acc = createWheelAccumulator();
+    accumulateWheelSteps(acc, -40);
+    expect(wheelPendingNotice(acc)).toContain("攒到 40%");
+    accumulateWheelSteps(acc, -40); // 走掉一档后余量翻成 -0.2
+    expect(wheelPendingNotice(acc)).toContain("攒到 20%");
+  });
+
+  it("**回归**：在 250% 上限处，40px 的滚轮两格就能缩回 240%（用户报的「到上限就不行」）", () => {
+    const acc = createWheelAccumulator();
+    let z: number = ZOOM_MAX;
+    for (let i = 0; i < 2; i++) {
+      const steps = accumulateWheelSteps(acc, 40);
+      if (steps !== 0) z = clampZoom(z + steps * ZOOM_STEP);
+    }
+    expect(z).toBe(2.4);
   });
 });
 

@@ -2736,6 +2736,97 @@ check(
   JSON.stringify({ requested: zReset.requested, tags: zReset.tags }),
 );
 
+// 第 40 组：**一次滚轮的位移不足一档时不许失灵**（用户 2026-09-16 反馈
+// 「Ctrl+滚轮常态是可以的，但是到上限不知道为什么就不可以了」+ 状态栏写着「缩放已是 250%（到边界了）」）
+//
+// 真因（`zoom.ts` 的 accumulateWheelSteps 注解）：滚轮位移可能不足一档（高倍缩放时每格位移会变小；
+// Chromium 在"浏览器→渲染器"之间会按比例缩放滚轮位移），而档位是 10% 一格、`clampZoom` 又会把
+// 计算出来的 4% 圆整抹掉 —— 每个事件独立算的话，这种滚轮**永远**动不了，还会被误报成"到边界了"。
+// 之前 223 项验收全绿是因为**脚本一直只发 ±100px**（正好在阈值上边），这条路径根本没被覆盖。
+// 下面用真实滚轮事件（差分机发的就是 40px）锁住：不足一档要攒起来、攒够了走一档，
+// 而且**没到边界时不许说"到边界了"**。
+console.log("40) 位移不足一档的滚轮：攒够再走一格（用户报的「到上限就不行」）");
+
+/** 在编辑区中心发 N 次 40px 的真实滚轮事件（Ctrl 修饰） */
+const smallWheel = async (deltaY, times) => {
+  const z = await c.evaluate(zoomProbe);
+  for (let i = 0; i < times; i++) await c.wheel(z.center.x, z.center.y, deltaY, { modifiers: 2 });
+  await new Promise((r) => setTimeout(r, 400));
+  return c.evaluate(zoomProbe);
+};
+
+// 起点归到 100%（上一组结束时已经是 100%，这里再确认一次并拿基准）
+const s0 = await c.evaluate(zoomProbe);
+check(
+  "第 40 组起点：缩放 100%（上一组收尾重置过）",
+  Math.abs((s0.requested ?? 0) - 1) < 0.001,
+  JSON.stringify({ requested: s0.requested }),
+);
+
+// ① 一格 40px（0.4 档）不足以走一档：档位不动，且**绝不能**说"到边界了"；
+//    同时要把"攒了多少"说出来（否则"位移太小"与"事件没到页面"在用户眼里完全一样）
+const s1 = await smallWheel(-40, 1);
+check(
+  "40px 一格：档位不动、状态栏**不出现**「到边界了」（旧代码在这里谎报边界），而是提示攒到 40%",
+  Math.abs((s1.requested ?? 0) - 1) < 0.001 &&
+    !s1.status.includes("到边界了") &&
+    s1.status.includes("攒到 40%"),
+  JSON.stringify({ requested: s1.requested, status: s1.status }),
+);
+
+// ② 再来一格（累计 0.8 档 ≥ 半档）：走一档 —— 这就是旧代码永远到不了的一步
+const s2 = await smallWheel(-40, 1);
+check(
+  "40px 两格（累计 0.8 档）→ 放大一档到 110%（余量攒够了就走）",
+  Math.abs((s2.requested ?? 0) - 1.1) < 0.001 && s2.status.includes("缩放 110%"),
+  JSON.stringify({ requested: s2.requested, status: s2.status }),
+);
+
+// ③ 反方向同理：往下滚两格 40px 回到 100%
+const s3 = await smallWheel(40, 2);
+check(
+  "40px 往下两格 → 缩回 100%（反方向也攒得起来）",
+  Math.abs((s3.requested ?? 0) - 1) < 0.001,
+  JSON.stringify({ requested: s3.requested }),
+);
+
+// ④ 上限处往下滚（用户报的正是这个）：先用键盘推到 250%，再用 40px 滚轮往下 —— 必须能缩小
+for (let i = 0; i < 15; i++) {
+  await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
+  await new Promise((r) => setTimeout(r, 80));
+}
+await new Promise((r) => setTimeout(r, 400));
+const sTop = await c.evaluate(zoomProbe);
+check(
+  "用键盘推到上限 250%（这一档 = 边界）",
+  Math.abs((sTop.requested ?? 0) - 2.5) < 0.001,
+  JSON.stringify({ requested: sTop.requested }),
+);
+const sTopUp = await smallWheel(-40, 4); // 已在边界，往上滚应当只提示"到边界了"
+check(
+  "真到边界时往上滚（40px ×4）→ 停在 250% 并提示「到边界了」（这句只许在真边界出现）",
+  Math.abs((sTopUp.requested ?? 0) - 2.5) < 0.001 && sTopUp.status.includes("到边界了"),
+  JSON.stringify({ requested: sTopUp.requested, status: sTopUp.status }),
+);
+const sDown = await smallWheel(40, 2);
+check(
+  "**回归**：上限处用 40px 滚轮往下两格 → 250% → 240%（用户报的「到上限就不行」）",
+  Math.abs((sDown.requested ?? 0) - 2.4) < 0.001 && sDown.status.includes("缩放 240%"),
+  JSON.stringify({ requested: sDown.requested, status: sDown.status }),
+);
+
+// 收尾：走菜单「重置缩放」回到 100%
+await openMenu("视图");
+await c.waitFor(`document.body.innerText.includes("重置缩放")`, { timeout: 5000 });
+await clickMenuItem("重置缩放");
+await new Promise((r) => setTimeout(r, 500));
+const sReset = await c.evaluate(zoomProbe);
+check(
+  "第 40 组收尾：重置回 100%（滚轮余量不残留：重置后按 40px 一格仍然不动）",
+  Math.abs((sReset.requested ?? 0) - 1) < 0.001,
+  JSON.stringify({ requested: sReset.requested }),
+);
+
 // 收尾：清回空文档并回写作模式
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
