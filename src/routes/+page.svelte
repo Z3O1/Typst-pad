@@ -229,7 +229,7 @@
    * 界面模式（两套 UI）：
    * - "write"  写作模式（仿 Typora，默认）：整页纸张、衬线正文、无行号，公式与标记就地排版；
    * - "source" 源码模式：等宽代码编辑器 + 行号，直接编辑 Typst 源码，右栏整页预览。
-   * 视图菜单 / Ctrl+/ 切换。
+   * 视图菜单 / Ctrl+E 切换（`Ctrl+/` 归注释，见 MenuBar 那段的注解）。
    */
   let viewMode = $state<"write" | "source">("write");
   // 是否显示右侧预览栏。所见即所得形态是**单栏**（Typora 式）：编辑区里已经是排版结果，
@@ -1140,7 +1140,11 @@
         items: [
           {
             label: "源代码模式",
-            shortcut: "Ctrl+/",
+            // 键位：**模式切换用 Ctrl+E**（2026-09-18 用户要求）。
+            // 原来挂的是 Ctrl+/（Typora 的习惯），但那一按会**同时**做两件事：编辑器的 CM keymap
+            // 处理 `Mod-/` 只 preventDefault、不阻断冒泡，而这里（MenuBar 的 window 级匹配）不看
+            // defaultPrevented ⇒ 按一次既注释又切模式。Ctrl+/ 现在只归注释（VS Code 习惯）。
+            shortcut: "Ctrl+E",
             checked: viewMode === "source",
             action: () => toggleViewMode(),
           },
@@ -2278,7 +2282,7 @@
         <p class="modal-text">版本 {appVersion || "…"}</p>
         <p class="modal-text">
           仿 Typora 的 Typst 桌面编辑器：<strong>写作模式</strong>（默认）整页纸张，公式与标记就地排版，
-          光标 / 选区进入即展开源码；<strong>源代码模式</strong>（Ctrl+/）双栏对照，源码 + 整页预览。
+          光标 / 选区进入即展开源码；<strong>源代码模式</strong>（Ctrl+E）双栏对照，源码 + 整页预览。
         </p>
         <p class="modal-text">
           排版由<strong>内置的 typst 引擎</strong>在本机完成：不联网，文档不出本机。

@@ -535,16 +535,16 @@ await c.evaluate(`document.querySelector(".cm-content").focus()`);
 await c.selectAll();
 await c.type("KEEP-A 写作输入\n");
 await new Promise((r) => setTimeout(r, 400));
-// Ctrl+/ 进源码模式
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+// Ctrl+E 进源码模式
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
 const inSource = await c.evaluate(`document.querySelector(".cm-content").innerText`);
 check("Ctrl+/ 切到源码模式后内容仍在", inSource.includes("KEEP-A"), JSON.stringify(inSource));
 // 在源码模式里继续输入
 await c.type("KEEP-B 源码输入\n");
 await new Promise((r) => setTimeout(r, 400));
-// Ctrl+/ 切回写作模式
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+// Ctrl+E 切回写作模式
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
 const backWrite = await c.evaluate(`document.querySelector(".cm-content").innerText`);
 check(
@@ -555,6 +555,55 @@ check(
 const sameNode = await c.evaluate(`document.querySelector(".cm-content") === window.__cm`);
 check("模式切换不重挂载编辑器（同一个 .cm-content 节点）", sameNode === true, String(sameNode));
 await c.screenshot(SHOT("wysiwyg-20-mode-switch-keeps-content"));
+
+// ── 键位归属（2026-09-18 用户要求）：`Ctrl+/` = 注释、`Ctrl+E` = 切换模式 ──
+// 为什么必须分开（这就是修之前的现场）：两件事曾经**同时**挂在 `Ctrl+/` 上 ——
+// 编辑器的 CM keymap 处理 `Mod-/` 时只 `preventDefault()`、不阻断冒泡，而菜单的 window 级匹配
+// 不看 `defaultPrevented` ⇒ 按一次既注释又切模式（模式还会被切走，用户要的是"只注释"）。
+// 这两条断言改之前是红的（当时打的是 `/* */`、模式也被切走），所以也是回退对照。
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 200));
+await c.type("COMMENT-TARGET"); // 不带尾换行：光标停在唯一那一行，注释的目标就是它
+await new Promise((r) => setTimeout(r, 400));
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 }); // Ctrl+/：应当只注释
+await new Promise((r) => setTimeout(r, 500));
+// 模式看**常驻标签**（.mode-tag 的「写作」/「源码」）而不是状态文字 ——
+// 状态文字会被编译状态（「就绪」）顶掉，拿它断言就是在测别的东西（第一版就栽在这上面）。
+const modeNow = () =>
+  c.evaluate(
+    `({
+      doc: document.querySelector(".cm-content").innerText,
+      tags: Array.from(document.querySelectorAll(".statusbar .mode-tag")).map((e) => e.textContent.trim()),
+    })`,
+  );
+const ctrlSlash = await modeNow();
+check(
+  "Ctrl+/ 只做行注释：文档里出现 typst 的 `//`，且模式仍是写作（不再顺带把模式切走）",
+  ctrlSlash.doc.includes("// COMMENT-TARGET") && ctrlSlash.tags.some((t) => t.includes("写作")),
+  JSON.stringify(ctrlSlash),
+);
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 }); // Ctrl+E：切模式
+await new Promise((r) => setTimeout(r, 500));
+const ctrlE1 = await modeNow();
+check(
+  "Ctrl+E 切到源代码模式（新键位生效）",
+  ctrlE1.tags.some((t) => t.includes("源码")),
+  JSON.stringify(ctrlE1),
+);
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 500));
+const ctrlE2 = await modeNow();
+check(
+  "再按一次 Ctrl+E 回到写作模式（双向都生效）",
+  ctrlE2.tags.some((t) => t.includes("写作")),
+  JSON.stringify(ctrlE2),
+);
+// 收尾：清掉这段内容，别影响后面的组
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 300));
 
 console.log("21) 启动恢复上次内容（会话安全网）：输入 → 重载 → 内容回来；开关关闭时不恢复");
 await c.evaluate(`localStorage.clear()`);
@@ -1408,7 +1457,7 @@ check(
 // 写作模式（文档模式）：**始终自动折行**，不需要 Alt+Z
 // 用户要求（2026-09-14）：「预览模式和文档模式的内容不应该有横向拖动，而是自动换行，
 // Alt+Z 只对代码起效」——实测改前一条长行会给写作模式带来 2855px 的横向滚动。
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
 const writeAuto = await c.evaluate(wrapProbe);
 check(
@@ -1428,7 +1477,7 @@ check(
 );
 
 // 回源码模式：换行开关仍是关（两个模式互不影响）
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
 const backToSource = await c.evaluate(wrapProbe);
 check(
@@ -1954,7 +2003,7 @@ check(
 );
 
 // ① 写作 → 源码
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
 const caretSource = await c.evaluate(caretProbe);
 const rowSource = await c.evaluate(cursorRow);
@@ -1970,7 +2019,7 @@ check(
 );
 
 // ② 源码 → 写作
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
 const caretBackWrite = await c.evaluate(caretProbe);
 check(
@@ -1982,7 +2031,7 @@ check(
 );
 
 // ③ 再回源码：逻辑位置（状态栏的「行」）必须与第一次切过去时一致
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
 const rowBack = await c.evaluate(cursorRow);
 check(
@@ -2647,9 +2696,9 @@ check(
 );
 
 // ④ 常见操作（切模式 / 缩放 / 等编译）之后仍然一次写盘都没有——把"应用从不自己写文件"钉得更死
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 }); // Ctrl+/ 切模式
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 }); // Ctrl+E 切模式
 await new Promise((r) => setTimeout(r, 500));
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 800));
 await c.wheel(400, 300, -120, { modifiers: 2 }); // Ctrl+滚轮缩放
 await new Promise((r) => setTimeout(r, 900));
@@ -2887,7 +2936,7 @@ const enterSourceAt = async (extra, viewportW, zoomSteps) => {
   // 写作 → 源代码模式；并**确认预览栏真的可见**（clientWidth > 0）——不确认的话，
   // 一旦这次按键没生效（焦点/时序问题），后面就会拿 clientWidth=0 去断言，报错信息毫无指向性（实测踩过）
   for (let attempt = 0; attempt < 3; attempt++) {
-    await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+    await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
     await new Promise((r) => setTimeout(r, 700));
     const visible = await c.evaluate(`document.querySelector(".preview-body").clientWidth > 0`);
     if (visible) break;
@@ -2969,7 +3018,7 @@ await new Promise((r) => setTimeout(r, 400));
 // 收尾：清回空文档并回写作模式
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 400));
 
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
