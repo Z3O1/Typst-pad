@@ -8,6 +8,10 @@
 
 - **预览栏底部的横向滚动条消失（文档自带 `#set page(...)` 时也不许横滚）**（用户反馈「为什么预览框还是会出现下方的滑动条」）：预览的页宽是**编译期**决定的，所以有两条路 —— ① 文档没写纸张时由我们注入 `#set page(width: …)` **按栏宽重排**（0.7.9 起，画布恒 ≤ 栏宽）；② 文档自己写了 `#set page(...)`（`paper:` / `width:` / `height:` 都算，他那份就写着 `#set page(paper: "a4", margin: …, numbering: "1")`）时**后写的赢**、注入被覆盖，退回「固定版心 + 等比缩放」老路。老路上界面缩放会把 **CSS 视口一起缩小**（1400px 窗口在 150% 下只有 933 CSS px，预览栏 685 → 451px），而画布被自然尺寸（A4 ≈ 568px）封顶 → **画布比栏宽还宽**，底部就出现横向滚动条（浏览器验收实测：150% 溢出 **117px**、250% 溢出 **304px**）；更亏的是画布在 568px 就已经不再变大了，这条横条后期「什么也没换来」。现在 `preview-scale.ts` 的画布宽度取 **min(缩放前栏宽, 当前栏宽, 自然尺寸)** —— **恒 ≤ 栏宽**，两条路的观感从此一致：**预览永不横滚**。代价（用户选定）：固定版心的文档在「页面刚好铺满预览栏」之后不再继续放大（铺满之前照旧跟着界面缩放变大）。验收新增**第 41 组**（5 项：真机几何 150% / 250%、宽栏 + 100% 观感不变、干净文档走重排路不受影响），并把第 30 组那条「退回等比缩放」的判据从「画布不等于栏宽」换成「**产物页宽仍是 A4**」（新规则下画布也铺满栏宽，旧指纹失效）。
 
+### Changed
+
+- **语法高亮换到上游"无 wasm"的解析器，修掉状态栏那行 `recursive use of an object detected which would lead to unsafe aliasing in rust`**：`codemirror-lang-typst` **0.4.0 → 0.6.0**，`typst()` → **`typst_lezer()`**（从 `codemirror-lang-typst/lezer` 导入）。原因：`typst()` 的语法高亮是 wasm-bindgen 产物（`typst_syntax_bg.wasm`），它把**同一个** wasm 解析器对象同时用于"文档变更时 `edit()`"与"lezer 解析时 `tree()`"，两者重叠就撞上 wasm-bindgen 的借用守卫并抛那句错误 —— 抛过之后**那个窗口的语法高亮静默失效**（要重开窗口才回来；编译/预览/导出走原生 Rust，不受影响）。`typst_lezer()` 是原生 Lezer 解析器、完全不碰 wasm（上游 0.5.0 起提供），这类 panic 从根上消失。顺带核对清楚一件事：**标题那条下划线的根因不是 typst 包，而是 `@codemirror/language` 的默认高亮**（`basicSetup` 自带 `{tag: tags.heading, textDecoration: "underline"}`，而 typst 把整棵 Heading 子树标成 `tags.heading`）——换解析器时一度把 `typst-highlight.ts` 那份覆盖补丁删掉，浏览器验收立刻把下划线揪了回来，补丁照旧保留（其单测的判据也从"typst 包那份样式"改成"默认高亮那份"）。
+
 ## [0.8.1] - 2026-09-17
 
 ### Fixed

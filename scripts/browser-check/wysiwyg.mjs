@@ -2884,7 +2884,15 @@ const enterSourceAt = async (extra, viewportW, zoomSteps) => {
     mobile: false,
   });
   await new Promise((r) => setTimeout(r, 700));
-  await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 }); // 写作 → 源代码模式
+  // 写作 → 源代码模式；并**确认预览栏真的可见**（clientWidth > 0）——不确认的话，
+  // 一旦这次按键没生效（焦点/时序问题），后面就会拿 clientWidth=0 去断言，报错信息毫无指向性（实测踩过）
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+    await new Promise((r) => setTimeout(r, 700));
+    const visible = await c.evaluate(`document.querySelector(".preview-body").clientWidth > 0`);
+    if (visible) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
   await new Promise((r) => setTimeout(r, 1800)); // 等预览重排（去抖 250ms + 一次编译）
   for (let i = 0; i < zoomSteps; i++) {
     await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });

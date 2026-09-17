@@ -5,7 +5,13 @@
   import { indentUnit } from "@codemirror/language";
   import type { DecorationSet } from "@codemirror/view";
   import { basicSetup } from "codemirror";
-  import { typst } from "codemirror-lang-typst";
+  // Typst 语言支持走**无 wasm**的 Lezer 入口（2026-09-18）：主入口 `typst()` 的语法高亮是
+  // wasm-bindgen 产物，它把同一个 wasm 解析器对象同时用于"文档变更时 edit()"与"lezer 解析时 tree()"，
+  // 两者重叠就抛 `recursive use of an object detected which would lead to unsafe aliasing in rust`，
+  // 之后那个窗口的语法高亮就废了（状态栏会挂一句「脚本错误」）。`typst_lezer()` 是原生 Lezer 实现，
+  // 完全不碰 wasm（上游 0.5.0 起提供）。顺带：0.6.0 的它不再给标题加下划线，
+  // 所以我们那份 `typst-highlight.ts` 覆盖补丁已经删掉（见 CHANGELOG）。
+  import { typst_lezer } from "codemirror-lang-typst/lezer";
   import { typstHeadingHighlight } from "./typst-highlight";
   import { editorKeymap } from "./editor-keymap";
   import { planDollarInput } from "./auto-pair";
@@ -123,8 +129,8 @@
       // 一档缩进 = 4 个空格（用户要求「Tab 应该是四格缩进」）：Tab / Shift+Tab 与语言侧自动缩进
       // 都走这个 facet。回车那条**不用它** —— 新行照抄上一行实际的前导空白（见 auto-indent.ts）。
       indentUnit.of(INDENT_UNIT),
-      typst(),
-      typstHeadingHighlight, // 压掉 codemirror-lang-typst 自带高亮给标题加的下划线（见模块注释）
+      typst_lezer(),
+      typstHeadingHighlight, // 压掉默认高亮给标题加的下划线（见 typst-highlight.ts 的根因注释）
       dollarAutoPair, // `$` 自动配对（空选区输入 `$` 时补出定界符）
       themeCompartment.of(theme === "dark" ? oneDark : []),
       diagnosticsCompartment.of(diagnosticsExtensions()),
