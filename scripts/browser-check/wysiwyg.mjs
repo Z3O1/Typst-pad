@@ -1596,14 +1596,22 @@ check(
   `字高 物理 ${base.textPhysPx} → ${zoom150.textPhysPx} → ${zoom250.textPhysPx} px`,
 );
 
-// 文档自己写了 #set page(...) 时注入会被覆盖 → 必须退回等比缩放，而不是硬套重排假设
+// 文档自己写了 #set page(...) 时注入会被覆盖 → 必须退回等比缩放，而不是硬套重排假设。
+// **判据换成"产物页宽"**（2026-09-18）：以前用"画布 ≠ 栏宽"当指纹，但那条路现在**也不许横滚**
+// （画布同样铺满栏宽），指纹就不成立了；直接看产物的 viewBox 才是真凭据 ——
+// 产物页宽 = A4（文档自己的纸型赢了），且与"请求的页宽"明显不同 = 确实没走重排。
 const fallback = await loadPreviewAt(WIN, 2.5, "&reflowfail=1");
 check(
-  "文档自带纸型（注入被覆盖）时退回等比缩放路径，不假装重排生效",
-  fallback.canvasCss !== null &&
+  "文档自带纸型（注入被覆盖）时退回等比缩放路径，且同样不横滚",
+  fallback.viewBoxW !== null &&
+    fallback.lastPreviewWidthPt !== null &&
+    Math.abs(fallback.viewBoxW - 595.28) <= 1 && // 产物仍是 A4 = 文档自己的纸型
+    Math.abs(fallback.viewBoxW - fallback.lastPreviewWidthPt) > 2 && // 不等于请求页宽 = 没假装重排生效
+    fallback.overflowX <= 0 && // 且不出现横向滚动条（2026-09-18 起）
+    fallback.canvasCss !== null &&
     fallback.container !== null &&
-    Math.abs(fallback.canvasCss - fallback.container) > 2,
-  `画布 ${fallback.canvasCss} vs 栏宽 ${fallback.container}（退回等比缩放 ⇒ 画布不再等于栏宽）`,
+    fallback.canvasCss <= fallback.container + 1,
+  `产物页宽 ${fallback.viewBoxW} vs 请求 ${fallback.lastPreviewWidthPt}；画布 ${fallback.canvasCss} / 栏宽 ${fallback.container}；横向溢出 ${fallback.overflowX}px`,
 );
 await c.screenshot(SHOT("wysiwyg-30-preview-reflow"));
 await c.send("Emulation.clearDeviceMetricsOverride");
@@ -2826,6 +2834,129 @@ check(
   Math.abs((sReset.requested ?? 0) - 1) < 0.001,
   JSON.stringify({ requested: sReset.requested }),
 );
+
+// 第 41 组：**文档自己写了 `#set page(...)` 时，预览栏也不许出现横向滚动条**
+// （用户 2026-09-18 反馈「为什么预览框还是会出现下方的滑动条」，并选定「永不横滚」）
+//
+// 背景：预览的页宽是**编译期**决定的，所以有两条路（见 preview-scale.ts）：
+//   ① 我们注入 `#set page(width: …)` → 按栏宽重排 → 画布恒 ≤ 栏宽（第 30 组锁的就是这条）；
+//   ② 文档自己写了 `#set page(...)`（`paper:` / `width:` / `height:` 都算）→ 我们的注入被它覆盖
+//      → 退回「固定版心 + 等比缩放」老路：画布被自然尺寸（A4 ≈ 568 CSS px）封顶。
+// 老路上界面缩放会把 **CSS 视口一起缩小**（1400px 窗口在 150% 下只有 933 CSS px，预览栏
+// 685 → 451px），于是 568 > 451 —— **预览栏底部出现横向滚动条**（实测溢出 117px）。
+// 而且画布在 568px 就已封顶，再放大并不会更大 ⇒ 这条横条"什么也没换来"。
+//
+// 真机上没法用 setZoom 放大（无头桩的 setZoom 是假的），所以用两条一起复现同一套几何：
+//   键盘 `Ctrl+Shift+=` 设 uiZoom 状态（放大档位）× `Emulation.setDeviceMetricsOverride`
+//   把视口压到"缩放后应有的 CSS 宽度"（真机上这一步由 webview 缩放自己完成）。
+// 视口变化会触发 ResizeObserver → applyPreviewScale，正是真机上缩放时走的那条路。
+console.log("41) 文档自带 #set page(...)（固定版心）时也不许横滚");
+
+const hProbe = `(() => {
+  const b = document.querySelector(".preview-body");
+  const h = document.querySelector("#preview-host");
+  const svg = h ? h.querySelector("svg") : null;
+  const cs = getComputedStyle(b);
+  return {
+    clientW: b.clientWidth,
+    scrollW: b.scrollWidth,
+    overX: b.scrollWidth - b.clientWidth,
+    // 横向滚动条是否真的"存在"（overflow-x 为 auto 且内容更宽才算）
+    showsScrollbar: b.scrollWidth > b.clientWidth && cs.overflowX !== "hidden",
+    hostW: h ? +h.getBoundingClientRect().width.toFixed(1) : null,
+    hostStyleW: h ? h.style.width : null,
+    viewBox: svg ? svg.getAttribute("viewBox") : null,
+    uiZoom: JSON.parse(localStorage.getItem("typst-pad:state") || "{}").uiZoom ?? null,
+  };
+})()`;
+
+/** 进「源代码模式」并压到指定视口宽度；zoomSteps = 按几次 Ctrl+Shift+= */
+const enterSourceAt = async (extra, viewportW, zoomSteps) => {
+  await c.goto(`${DEV_URL}${extra}`);
+  await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+  await c.evaluate(`localStorage.clear()`); // 否则上次的 viewMode/缩放会残留
+  await c.goto(`${DEV_URL}${extra}`);
+  await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: viewportW,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await new Promise((r) => setTimeout(r, 700));
+  await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 }); // 写作 → 源代码模式
+  await new Promise((r) => setTimeout(r, 1800)); // 等预览重排（去抖 250ms + 一次编译）
+  for (let i = 0; i < zoomSteps; i++) {
+    await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
+    await new Promise((r) => setTimeout(r, 140));
+  }
+  // 再抖一下视口：真机上缩放本身就会让预览栏变窄并触发 ResizeObserver，
+  // 桩里 setZoom 是假的，所以用 1px 的变化把同一段代码（RO → applyPreviewScale）跑起来。
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: viewportW - 1,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await new Promise((r) => setTimeout(r, 1800));
+};
+
+// ① 固定版心 + 界面 150%（真机几何：1400px 窗口 → CSS 视口 933px，预览栏约 451px）
+await enterSourceAt("&reflowfail=1", 933, 5);
+const fix150 = await c.evaluate(hProbe);
+check(
+  "文档自带 #set page(...) + 界面 150%：预览栏没有横向滚动条（修前溢出 117px）",
+  fix150.overX === 0 && !fix150.showsScrollbar,
+  JSON.stringify(fix150),
+);
+check(
+  "同一档下画布**铺满**预览栏（不再是封顶的 568px 自然尺寸）",
+  fix150.hostW !== null && Math.abs(fix150.hostW - fix150.clientW) <= 1,
+  JSON.stringify(fix150),
+);
+await c.screenshot(SHOT("wysiwyg-41-fixedpage-150"));
+
+// ② 固定版心 + 界面 250%（真机几何：1400px 窗口 → CSS 视口 560px，预览栏约 265px）
+await enterSourceAt("&reflowfail=1", 560, 15);
+const fix250 = await c.evaluate(hProbe);
+check(
+  "文档自带 #set page(...) + 界面 250%：同样不横滚、画布铺满栏宽",
+  fix250.overX === 0 &&
+    !fix250.showsScrollbar &&
+    fix250.hostW !== null &&
+    Math.abs(fix250.hostW - fix250.clientW) <= 1,
+  JSON.stringify(fix250),
+);
+
+// ③ 宽栏 + 100%（1400px 窗口）：观感**不许变** —— 固定版心的页面仍停在自然尺寸居中，
+//    不因为"永不横滚"就被撑满整栏（那会改变所有老文档的默认外观）。
+await enterSourceAt("&reflowfail=1", 1400, 0);
+const fix100 = await c.evaluate(hProbe);
+check(
+  "宽栏 + 100%：固定版心的页面仍停在自然尺寸（≈568px，居中，没被撑满）",
+  fix100.overX === 0 && fix100.hostW !== null && Math.abs(fix100.hostW - 568) <= 2,
+  JSON.stringify(fix100),
+);
+
+// ④ 对照组：干净文档走「按栏宽重排」那条路，行为必须保持不变（不横滚、画布 = 栏宽）
+await enterSourceAt("", 933, 5);
+const reflow150 = await c.evaluate(hProbe);
+check(
+  "对照组（干净文档走重排路 + 界面 150%）：不横滚、画布仍铺满栏宽（这条路径没被动过）",
+  reflow150.overX === 0 &&
+    reflow150.hostW !== null &&
+    Math.abs(reflow150.hostW - reflow150.clientW) <= 1,
+  JSON.stringify(reflow150),
+);
+
+// 视口复位（后面的收尾逻辑依赖默认几何）
+await c.send("Emulation.setDeviceMetricsOverride", {
+  width: 1400,
+  height: 900,
+  deviceScaleFactor: 1,
+  mobile: false,
+});
+await new Promise((r) => setTimeout(r, 400));
 
 // 收尾：清回空文档并回写作模式
 await c.selectAll();

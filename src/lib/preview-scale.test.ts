@@ -92,15 +92,17 @@ describe("previewCanvasWidth（画布显示宽度）", () => {
   });
 });
 
-describe("界面缩放（uiZoom）：预览必须跟着变大", () => {
+describe("界面缩放（uiZoom）：预览必须跟着变大，但永不超出栏宽", () => {
   // 背景（2026-09-14 用户先后两次反馈「预览框大小还是没变」「预览框里面的字的大小还是没变」）：
   // 界面缩放走 webview setZoom，预览栏的 CSS 宽度会一起变小；若拿这个变小后的宽度算"铺满"，
   // 画布就缩回原样，引擎再放大一次正好抵消 —— 缩放对编辑区有效、对预览无效。
-  // 传 uiZoom 后按缩放前的栏宽算，画布 CSS 宽度保持 100% 时的值，由引擎把它真正放大（1.5 档大 1.5 倍）。
-  // 代价：页面是固定版心，放大到超过栏宽时预览栏出现横向滚动条（"跟着变大"与"永不横向滚动"只能二选一，
-  // 用户选了前者；配套的"左缘可达"见 +page.svelte 的 .preview-paper { margin-inline: auto }）。
+  // 传 uiZoom 后按缩放**前**的栏宽算画布，物理尺寸才跟着缩放真的变大（1.5 档大 1.5 倍）。
+  //
+  // **2026-09-18 用户反馈「为什么预览框还是会出现下方的滑动条」后改口「永不横滚」**：
+  // 画布再多也不能超过**当前**栏宽（min(缩放前栏宽, 当前栏宽)）—— 下面第一组用例就是那次
+  // 真机现场（文档自带 `#set page(paper: "a4")`，150% 下栏宽 451、画布原本 568 → 溢出 117px）。
 
-  it("150%：画布 CSS 宽度保持 100% 时的值，物理尺寸由引擎放大 1.5 倍", () => {
+  it("150%：画布铺满栏宽（不再溢出），物理尺寸仍接近 100% 时的画布宽", () => {
     const zoomedContainer = 331; // 1040px 窗口在 150% 下量到的栏宽
     const at100 = previewCanvasWidth({ containerWidth: 505, pageWidthPt: A4_WIDTH_PT });
     const zoomed = previewCanvasWidth({
@@ -108,12 +110,33 @@ describe("界面缩放（uiZoom）：预览必须跟着变大", () => {
       pageWidthPt: A4_WIDTH_PT,
       uiZoom: 1.5,
     });
-    // 不传 uiZoom 会缩回 331（这就是"预览没变"的现场）；传了之后与 100% 时的 505 基本一致
+    // 不传 uiZoom 会缩回 331（这就是"预览没变"的现场）；传了之后**也不许超过栏宽**
     expect(previewCanvasWidth({ containerWidth: zoomedContainer, pageWidthPt: A4_WIDTH_PT })).toBeCloseTo(331, 10);
-    expect(zoomed).toBeCloseTo(zoomedContainer * 1.5, 10);
-    expect(Math.abs(zoomed - at100) / at100).toBeLessThan(0.05);
-    // 物理尺寸（CSS × 缩放）真的变大 —— 用户要的就是这个
-    expect((zoomed * 1.5) / at100).toBeGreaterThan(1.4);
+    expect(zoomed).toBeCloseTo(zoomedContainer, 10);
+    // 但物理尺寸（CSS × 缩放）与 100% 时基本一致 —— 所以"跟着变大"这件事没有丢
+    expect((zoomed * 1.5) / at100).toBeGreaterThan(0.95);
+  });
+
+  it("**回归**（用户那份 A4 文档）：150% / 250% 下画布 = 栏宽，一点不溢出", () => {
+    // 真机几何：1400px 窗口在 150% 下 CSS 视口 933px → 预览栏 451px；250% 下 264px。
+    // 修前画布被自然尺寸（A4 ≈ 568px）封顶 → 分别溢出 117px / 304px（浏览器验收实测）。
+    for (const [containerWidth, uiZoom] of [
+      [451, 1.5],
+      [264, 2.5],
+    ] as const) {
+      const width = previewCanvasWidth({ containerWidth, pageWidthPt: A4_WIDTH_PT, uiZoom });
+      expect(width).toBeCloseTo(containerWidth, 10);
+      expect(width).toBeLessThanOrEqual(containerWidth);
+    }
+  });
+
+  it("任何缩放档位下画布都不超过栏宽（永不横滚的硬保证）", () => {
+    for (const zoom of [0.5, 0.8, 1, 1.2, 1.5, 2, 2.5]) {
+      for (const containerWidth of [180, 264, 451, 685, 1200]) {
+        const width = previewCanvasWidth({ containerWidth, pageWidthPt: A4_WIDTH_PT, uiZoom: zoom });
+        expect(width).toBeLessThanOrEqual(containerWidth + 1e-9);
+      }
+    }
   });
 
   it("缩放 200% 且栏宽换算后超过自然尺寸：仍被自然系数夹住（字号仍与编辑区一致）", () => {

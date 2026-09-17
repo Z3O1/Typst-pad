@@ -43,6 +43,16 @@ export interface PreviewScaleInput {
    * 调用方的配套要求见 +page.svelte 的 `.preview-paper { margin-inline: auto }`：溢出时居中会把
    * 左缘顶到滚动区之外（scrollLeft 不能为负 → 那部分永远看不到），auto 外边距在负剩余空间下
    * 会退化成 0，从而"装得下就居中、装不下就左对齐"。
+   *
+   * **2026-09-18 改口：永不横滚**（用户反馈「为什么预览框还是会出现下方的滑动条」后选了
+   * 「A. 永不横滚」）。原因是他那份文档自带 `#set page(paper: "a4", …)`，注入的重排被覆盖、
+   * 走的就是这条老路，于是：界面放大 → webview 缩放把 **CSS 视口一起缩小**（1400px 窗口在
+   * 150% 下只有 933 CSS px、预览栏 685 → 451px）→ 画布被自然尺寸封顶在 568px > 451px
+   * → **底部横向滚动条**（真浏览器实测溢出 117px；250% 时 304px）。而画布在 568px 就已经
+   * **不再变大**了 —— 也就是说这条横条后期"什么也没换来"。现在的规则：
+   *   画布 = min(缩放前栏宽, 当前栏宽, 自然尺寸) ⇒ **恒 ≤ 栏宽**（详见 previewScale）。
+   * 代价：固定版心的文档在"页面刚好铺满预览栏"之后不再跟着放大（铺满之前照旧跟着放大）。
+   * 与「按栏宽重排」那条路（干净文档）的观感从此一致：**预览永不横滚**。
    */
   uiZoom?: number;
 }
@@ -61,7 +71,7 @@ export function normalizeUiZoom(uiZoom: number | undefined): number {
  * 预览缩放系数（px/pt），画布显示宽度 = pageWidthPt × 系数：
  * - 容器足够宽：取自然系数——预览默认字号对齐输入区，字号恒定不随窗口放大；
  * - 容器比自然尺寸窄：取铺满系数（containerWidth / pageWidthPt）——画布等比缩小，
- *   文本按比例变小但不变形（等宽显示），不出现横向滚动条。
+ *   文本按比例变小但不变形（等宽显示），**不出现横向滚动条**。
  * 容器/页宽非法（非正数）时返回 NaN，调用方跳过应用（保留 CSS 回退 width: 100%）。
  */
 export function previewScale(input: PreviewScaleInput): number {
@@ -71,7 +81,12 @@ export function previewScale(input: PreviewScaleInput): number {
   // 还原成缩放前的宽度，"铺满"才是相对于缩放前的栏宽，引擎再放大才不会被抵消。
   const unzoomedWidth = containerWidth * normalizeUiZoom(input.uiZoom);
   const natural = naturalScale(input.targetFontPx ?? EDITOR_FONT_PX);
-  return Math.min(unzoomedWidth / pageWidthPt, natural);
+  // **画布恒 ≤ 栏宽**（用户 2026-09-18 选定「永不横滚」，见 PreviewScaleInput.uiZoom 注释末段）：
+  // 取「缩放前栏宽」与「当前栏宽」中的小者 —— 前者保留"跟着界面缩放一起变大"（引擎会把它放大），
+  // 后者保证界面放大把栏宽压窄时画布跟着收，不再溢出。界面缩放到"页面刚好铺满预览栏"之后，
+  // 画布不再继续变大（几何上再大就必须横拖才能看全，那正是用户否掉的形态）。
+  const fitWidth = Math.min(unzoomedWidth, containerWidth);
+  return Math.min(fitWidth / pageWidthPt, natural);
 }
 
 /** 画布显示宽度（px）：页宽 × 缩放系数；测量失败返回 NaN */
