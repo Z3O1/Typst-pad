@@ -110,27 +110,10 @@
     isUpdatePromptSuppressed,
     type UpdateFlow,
   } from "$lib/update-utils";
-  import {
-    ZOOM_DEFAULT,
-    ZOOM_CONFIRM_DELAY_MS,
-    ZOOM_MEASURE_SETTLE_MS,
-    ZOOM_VERIFY_RESET_DELAY_MS,
-    ZOOM_VERIFY_WAITS_MS,
-    ZOOM_SETTLE_MAX_MS,
-    zoomFromWidths,
-    clampZoom,
-    createWheelAccumulator,
-    accumulateWheelSteps,
-    resetWheelAccumulator,
-    shouldRebaselineZoom,
-    zoomApplied,
-    zoomIn,
-    zoomLabel,
-    zoomOut,
-    zoomProbeVerdict,
-    zoomUnobservedNotice,
-    wheelPendingNotice,
-  } from "$lib/zoom";
+  // zoom.ts 是纯逻辑（档位换算、判据、文案）；"引擎改档 + 复核"的编排在 zoom-controller.ts，
+  // 这里只留页面自己用得到的三样：默认档、收敛、档位文案。
+  import { ZOOM_DEFAULT, clampZoom, zoomLabel } from "$lib/zoom";
+  import { createZoomController } from "$lib/zoom-controller";
   // isWrapToggleKey 的判定已挪进 app-keys.decideAppKey（那里统一管按键路由，含它的顺序要求）
   import { WRAP_SOURCE_ONLY_NOTICE, wrapNotice } from "$lib/word-wrap";
 
@@ -304,44 +287,33 @@
    * webview 缩放发生在 CSS 层之下，所有这些单位都不动。
    */
   let uiZoom = $state(ZOOM_DEFAULT);
-  /** 缩放的"再确认一次"定时器（见 applyUiZoom / scheduleZoomConfirm） */
-  let zoomConfirmTimer: ReturnType<typeof setTimeout> | null = null;
   /**
-   * 我们对"引擎实际接受了多少缩放"的最佳估计（见 zoom.ts 的 zoomFromWidths）。
-   * 启动校准（先设 100%）后为 1；每次调档都按 CSS 布局宽度重新估一遍。
+   * 缩放编排（引擎改档 / 100% 基准 / 沉降窗口 / 复核代次 / 滚轮余量）在 zoom-controller.ts：
+   * 那边依赖全部由 hooks 注入，24 项单测把三条红线钉住了 —— ① 只观察、绝不改档（用户 2026-09-16
+   * 的取舍）；② 沉降窗口内 resize 不重校 100% 基准；③ 新复核一开始旧复核立刻作废。
+   * 这里只提供页面这一侧的东西：档位状态、状态栏反馈、真正的引擎 setZoom。
    */
-  let appliedZoom = 1;
-  /** 100% 时的 CSS 布局宽度（视口宽度判据的基准）；改档/窗口尺寸变化后按当前档位再校一遍 */
-  let zoomBaseline100 = 0;
-  /** 正在设一次缩放并测量（期间不接受 resize 事件改基准——那是缩放自己引起的） */
-  let zoomStepInFlight = false;
-  /**
-   * 本会话里**页面收到过多少次带 Ctrl 的滚轮事件**（只用于诊断，不参与任何判定）。
-   * 写进「界面缩放未生效」的文案里：0 次 ⇒ 事件压根没到页面（被引擎/系统吃掉了），
-   * 有次数 ⇒ 事件到了、是 `setZoom` 没生效。两种成因的修法完全不同，见 zoom.ts 的文案注解。
-   */
-  let zoomWheelEvents = 0;
-  /**
-   * 滚轮位移的"未走完余量"（见 zoom.ts 的 `accumulateWheelSteps` 注解）。
-   * 存在的理由（2026-09-16 用户反馈「Ctrl+滚轮常态可以、到上限就不行」，而状态栏写着
-   * 「缩放已是 250%（到边界了）」）：一次滚轮的位移可能不足一档（高倍缩放时每格位移会变小），
-   * 那种输入算出来的 4% 会被档位圆整抹掉 —— 没有累加器时这种滚轮**永远**动不了，还会被
-   * 误报成"到边界了"。攒够半档再走一档即可，100px 一格的手感完全不变。
-   */
-  const zoomWheelAcc = createWheelAccumulator();
-  /**
-   * 缩放沉降窗口的截止时间戳（见 zoom.ts 的注解）：从"我们让引擎改档"起算，到复核结束为止。
-   * 这期间收到的 `resize` **不许**重校 100% 基准 —— 引擎改档本身就会引发一次 resize，
-   * 而那时 `appliedZoom` 还是旧档位，一校就把基准压低成"新宽度"，复核随即把"引擎接受了"
-   * 读成"引擎没动"（2026-09-14 用户第五次反馈「还是会出现界面缩放未生效」的根因）。
-   */
-  let zoomSettlingUntil = 0;
-  /** 校准（100%）时的 devicePixelRatio：dpr 判据的基准（只作交叉验证，见 dprEngineZoomNow） */
-  let zoomDprAt100 = 0;
-  /** 复核的代次令牌：新的复核一开始，旧的立刻作废（否则旧复核会把新档位拉回引擎的旧读数） */
-  let zoomVerifySeq = 0;
-  /** 校准只做一次；并发调用共用同一个 promise */
-  let zoomCalibration: Promise<void> | null = null;
+  const zoom = createZoomController({
+    enabled: isTauri,
+    getLevel: () => uiZoom,
+    requestLevel: (level) => setUiZoom(level),
+    setStatus: (text) => {
+      statusText = text;
+    },
+    setWebviewZoom: (level) => getCurrentWebview().setZoom(level),
+    layoutWidth: () => document.documentElement.clientWidth,
+    devicePixelRatio: () => window.devicePixelRatio,
+    // 浏览器开发桩的 setZoom 是假的（`?browserdev=1` 的 fakeZoom）；zoomsim=1 是模拟引擎，照常复核
+    isFakeZoom: () =>
+      (window as unknown as { __browserDevStub?: { fakeZoom?: boolean } }).__browserDevStub
+        ?.fakeZoom === true,
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    nextFrame: () => new Promise((r) => requestAnimationFrame(() => r())),
+    setTimer: (fn, ms) => setTimeout(fn, ms) as unknown as number,
+    clearTimer: (id) => clearTimeout(id),
+    log: (msg) => dbg.log("zoom", msg),
+  });
   // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
   // Map 本身不需要响应式（变更后靠 mathVersion 代次通知编辑器重整装饰）
   const mathCache = new Map<string, MathRender>();
@@ -724,251 +696,48 @@
   }
 
   /**
-   * 把缩放系数交给 webview。非 Tauri 环境（提示页）或调用失败都静默忽略——
-   * 缩放不是关键路径，失败不该弹错（调试日志里留痕）。
-   *
-   * **为什么要"设完再确认一次"**（2026-09-14，实机反馈「放大根本没用、缩小有用」）：
-   * WebView2 在 Ctrl+滚轮这种缩放手势进行中/结束时，会用它自己那套逻辑处理这次手势
-   * （见 WebView2Feedback #1022：手势期间宿主设的 ZoomFactor 会被"还原"回手势开始时的值），
-   * 于是在滚轮事件里立刻就 setZoom 有可能被引擎抹掉。这里在**手势停下来之后**再设一遍同一个
-   * 系数：值没被抹掉时这次调用等价于空操作，被抹掉时就把界面拉回用户要的档位。
+   * 改缩放并反馈（滚轮 / 键盘 / 菜单共用）；值没变时提示"已到边界"，不重复写存档。
+   * **这是唯一的档位写入口**：控制器只通过 requestLevel 表达"用户要这个值"，不自己写 uiZoom。
    */
-  async function applyUiZoom(zoom: number) {
-    if (!isTauri()) return;
-    const target = clampZoom(zoom);
-    // 先校准 100% 基线（只做一次），后面才能把视口宽度换算成"引擎实际接受的档位"
-    await ensureZoomCalibration();
-    // 改档前若处于"已沉降"状态，先把基准按**当前档位**校一遍：沉降窗口里被跳过的 resize
-    // （用户拖了窗口）在这里自愈。连滚多档时不校 —— 那时的档位估计可能还没跟上真实值，
-    // 校了反而会把基准带偏（这正是用户第五次反馈的那条误判链路）。
-    const settled = shouldRebaselineZoom({
-      now: Date.now(),
-      settlingUntil: zoomSettlingUntil,
-      verifyInFlight: zoomStepInFlight,
-    });
-    if (settled) rebaselineZoom();
-    markZoomSettling();
-    try {
-      await getCurrentWebview().setZoom(target);
-      // `appliedZoom` = **我们请求的档位**（不再由复核改写）：它只用于诊断读数与基准换算
-      appliedZoom = target;
-      dbg.log("zoom", `set ${zoomLabel(target)}`);
-    } catch (e) {
-      dbg.log("zoom", "setZoom failed", e);
-      return;
-    }
-    scheduleZoomConfirm();
-  }
-
-  /**
-   * 记下"我们刚让引擎改档"：从这一刻起到复核结束，`resize` 一律当作缩放自己引发的，
-   * 不重校 100% 基准（见 zoom.ts 的「缩放沉降窗口」注解）。重复调用只是把窗口往后推。
-   */
-  function markZoomSettling() {
-    zoomSettlingUntil = Date.now() + ZOOM_SETTLE_MAX_MS;
-  }
-
-  /** 手势/连续调档停止后再确认一次缩放（见 applyUiZoom 的注解）；重复调用只保留最后一次 */
-  function scheduleZoomConfirm() {
-    if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
-    zoomConfirmTimer = setTimeout(() => {
-      zoomConfirmTimer = null;
-      const target = clampZoom(uiZoom);
-      markZoomSettling();
-      void getCurrentWebview()
-        .setZoom(target)
-        .then(() => {
-          dbg.log("zoom", `confirm ${zoomLabel(target)}`);
-          void observeZoomEffect(target);
-        })
-        // 这次是兜底重试，失败只记日志（首次调用已经把失败报过了）
-        .catch((e) => dbg.log("zoom", "confirm failed", e));
-    }, ZOOM_CONFIRM_DELAY_MS);
-  }
-
-  /** 浏览器开发桩的 setZoom 是假的吗（桩在 app.html 挂了 __browserDevStub；zoomsim 模式下是模拟的，照常复核） */
-  function zoomIsFaked(): boolean {
-    return (
-      (window as unknown as { __browserDevStub?: { fakeZoom?: boolean } }).__browserDevStub
-        ?.fakeZoom === true
-    );
-  }
-
-  /**
-   * 启动后校准一次：先把引擎设到 100%（顺便排掉 WebView2"记住上次站点缩放"的干扰），
-   * 记下此时的 **CSS 布局宽度** 作为基准。100% 是恒等档，任何引擎都会接受，所以这个基准可靠。
-   */
-  function ensureZoomCalibration(): Promise<void> {
-    if (zoomCalibration === null) {
-      zoomCalibration = (async () => {
-        try {
-          markZoomSettling(); // 校准本身也是一次改档（这一步引发的 resize 同样不该改基准）
-          await getCurrentWebview().setZoom(ZOOM_DEFAULT);
-          await new Promise((r) => setTimeout(r, 90));
-          const width = document.documentElement.clientWidth;
-          if (width > 0) {
-            zoomBaseline100 = width;
-            appliedZoom = ZOOM_DEFAULT;
-          }
-          // 100% 时的 dpr（= 显示器缩放 × 1）：它是**独立的第二条判据**，用来交叉验证宽度判据
-          // ——两条都读不出来时才是真的"量不到"（见 dprEngineZoomNow 与状态栏文案）。
-          const dpr = window.devicePixelRatio;
-          if (Number.isFinite(dpr) && dpr > 0) zoomDprAt100 = dpr;
-          dbg.log("zoom", `校准：100% 布局宽度 ${width}px，dpr ${dpr}`);
-        } catch (e) {
-          dbg.log("zoom", "缩放校准失败（本次不判定引擎档位）", e);
-        }
-      })();
-    }
-    return zoomCalibration;
-  }
-
-  /** 按"当前档位 × 当前宽度"重校基准：缩放与用户拖窗口之后都要校，否则判据会失真 */
-  function rebaselineZoom() {
-    const width = document.documentElement.clientWidth;
-    if (width > 0 && appliedZoom > 0) zoomBaseline100 = width * appliedZoom;
-  }
-
-  /** 引擎**实际接受**的档位（读 CSS 布局宽度；量不到时 null＝本次不判定） */
-  function engineZoomNow(): number | null {
-    return zoomFromWidths(zoomBaseline100, document.documentElement.clientWidth);
-  }
-
-  /**
-   * 用 `devicePixelRatio` 反推的引擎档位（`dpr = 显示器缩放 × 页面缩放`，所以比值就是档位）。
-   *
-   * **它是第二条独立判据，只用于交叉验证，不参与判定**（2026-09-14 的教训：真机上 dpr 不一定
-   * 跟随宿主设的 ZoomFactor，所以判据换成了布局宽度）。但两条一起写进"未生效"的状态栏文案，
-   * 一张截图就能分清"引擎真没动"（两条都说 1.00）与"我们自己量歪了"（宽度说 1.00、dpr 说 1.50）。
-   */
-  function dprEngineZoomNow(): number | null {
-    const dpr = window.devicePixelRatio;
-    if (!(zoomDprAt100 > 0) || !(dpr > 0) || !Number.isFinite(dpr)) return null;
-    return dpr / zoomDprAt100;
-  }
-
-  /** setTimeout 的 Promise 版（复核的等待节奏用） */
-  function sleep(ms: number): Promise<void> {
-    return new Promise((r) => setTimeout(r, ms));
-  }
-
-  /** 设完缩放后等引擎重排完，再读一次"引擎实际接受的档位" */
-  async function measureEngineZoom(): Promise<number | null> {
-    await new Promise((r) => requestAnimationFrame(() => r(null)));
-    await sleep(ZOOM_MEASURE_SETTLE_MS);
-    return engineZoomNow();
-  }
-
-  /**
-   * 改档之后**只观察、不改状态**（用户 2026-09-16 明确要求：「就应该缩放只有我能改，软件别自己动了」）。
-   *
-   * 历史（为什么以前会自己动）：从 0.7.4 起这里叫 `verifyZoomApplied` —— 设完档量一次，量到的档位与
-   * 请求值不一致就把 `uiZoom` **拉回引擎给的档位**，为的是防"引擎只肯到 100%、而状态一路涨到 250%，
-   * 于是往下滚要滚十几档才有反应"那个死区。代价是：**判断本身可能出错**，而一旦判错，用户要的缩放
-   * 就被我们自己弹回原档 —— 用户第六轮反馈的「用 Ctrl+滚轮会回退」正是它（他那台机器上两条判据都
-   * 读不出缩放变化，于是每一次缩放都被判成"引擎没动"并拉回）。用户已经明确取舍：**宁可没有死区
-   * 保护，也不要软件自己改缩放**。所以现在：
-   *   - 只在我们**执行用户操作**时调用 `setZoom`（见 applyUiZoom）；
-   *   - 这里量到的读数只用于**诊断**（调试日志 + 状态栏里一句"没观察到变化"的说明），
-   *     **绝不写 `uiZoom`、绝不改变引擎档位**；
-   *   - 因此"引擎上限"这类机器上状态可能高于引擎实际给的档位（死区回来了）——这是用户接受的代价，
-   *     真要再收，也应该由用户自己按 Ctrl+Shift+-，而不是我们偷偷改。
-   */
-  async function observeZoomEffect(target: number) {
-    if (zoomIsFaked()) return;
-    if (zoomCalibration === null) return; // 还没校准过（正常路径一定先经过 applyUiZoom）
-    const mySeq = ++zoomVerifySeq;
-    let observed: number | null = null;
-    let observedDpr: number | null = null;
-    let measurements = 0;
-    zoomStepInFlight = true;
-    markZoomSettling();
-    try {
-      for (const wait of ZOOM_VERIFY_WAITS_MS) {
-        if (wait > 0) await sleep(wait);
-        if (mySeq !== zoomVerifySeq) return; // 用户又调档了：这次观察作废
-        measurements += 1;
-        observed = await measureEngineZoom();
-        observedDpr = dprEngineZoomNow();
-        if (zoomApplied(target, observed) || zoomApplied(target, observedDpr)) break;
-      }
-    } catch (e) {
-      dbg.log("zoom", "观察缩放结果时出错", e);
-      return;
-    } finally {
-      if (mySeq === zoomVerifySeq) {
-        zoomStepInFlight = false;
-        zoomSettlingUntil = 0; // 观察收尾：之后引擎再触发 resize 就是用户拖窗口
-      }
-    }
-    if (mySeq !== zoomVerifySeq) return;
-    const currentWidth = document.documentElement.clientWidth;
-    if (zoomApplied(target, observed) || zoomApplied(target, observedDpr)) {
-      dbg.log("zoom", `观察：引擎侧与请求一致（${zoomLabel(target)}）`);
-      return;
-    }
-    // **没有观察到变化**：可能是引擎没接受，也可能是我们这两条判据读不出来（那台机器就是这样）。
-    // 无论哪种，都只写一句说明，档位保持用户操作后的值。
-    dbg.log(
-      "zoom",
-      `观察：没看到引擎侧变化（请求 ${zoomLabel(target)}，实测 ${observed === null ? "读不到" : observed.toFixed(3)}，` +
-        `量了 ${measurements} 次；布局宽度 ${Math.round(zoomBaseline100)}→${Math.round(currentWidth)}）`,
-    );
-    statusText = zoomUnobservedNotice(target, observed, {
-      measurements,
-      widths: { baseline: zoomBaseline100, current: currentWidth },
-      dpr: window.devicePixelRatio,
-      dprFactor: observedDpr,
-      wheelEvents: zoomWheelEvents,
-    });
-  }
-
-
-  /** 改缩放并反馈（滚轮 / 菜单共用）；值没变时提示"已到边界"，不重复写存档 */
   function setUiZoom(next: number) {
     const target = clampZoom(next);
     if (target === uiZoom) {
       statusText = `缩放已是 ${zoomLabel(target)}（到边界了）`;
       return;
     }
-    uiZoom = target; // $effect 把它交给 webview（见下方 applyUiZoom 的 effect）
+    uiZoom = target; // $effect 把它交给 webview（见下方 zoom.apply 的 effect）
     statusText = `缩放 ${zoomLabel(target)}`;
     schedulePersist();
   }
 
-  /** 缩放复位 100%（视图菜单） */
+  /** 缩放复位 100%（视图菜单）：整档操作，先丢掉滚轮余量 */
   function resetUiZoom() {
     if (uiZoom === ZOOM_DEFAULT) {
       statusText = "缩放已是 100%";
       return;
     }
-    resetWheelAccumulator(zoomWheelAcc);
+    zoom.resetWheel();
     setUiZoom(ZOOM_DEFAULT);
   }
 
   /**
    * `Ctrl+Shift+=` / `Ctrl+Shift+-`：±1 格（用户 2026-09-16 要求）。
    *
-   * 与滚轮走**同一条** setUiZoom → applyUiZoom → 复核链路，所以状态栏文案、存档、引擎复核
-   * 三处行为完全一致；差别只在于**没有滚轮手势**——WebView2 那条"手势结束时把 ZoomFactor 抹回去"
-   * 的路径（#1022）碰不到这里，这也是它被用户当"缩放失败的备用手段"的原因（见 app-keys.zoomKeySteps）。
+   * 与滚轮走**同一条** setUiZoom → 引擎改档 → 复核链路，所以状态栏文案、存档、复核三处行为完全
+   * 一致；差别只在于**没有滚轮手势**——WebView2 那条"手势结束时把 ZoomFactor 抹回去"的路径
+   * （#1022）碰不到这里，这也是它被用户当"缩放失败的备用手段"的原因（见 app-keys.zoomKeySteps）。
    */
   function zoomBySteps(steps: 1 | -1) {
-    resetWheelAccumulator(zoomWheelAcc); // 键盘调档没有"半格"这回事：丢掉滚轮留下的余量
-    setUiZoom(steps > 0 ? zoomIn(uiZoom) : zoomOut(uiZoom));
+    zoom.step(steps); // 里面先丢掉滚轮余量（键盘调档没有"半格"这回事）
   }
 
   /**
    * Ctrl+滚轮：放大/缩小整个界面（编辑区 + 预览 + 菜单 + 状态栏）。
    *
-   * 命中时**必须 preventDefault**：否则这次滚动会继续滚动编辑器/预览区，WebView2 还可能顺手
-   * 用它自己那套系数缩放页面（与我们的系数打架，表现为"缩放了但系数对不上"）。
-   * 位移量同时看 deltaY / deltaX（见 zoom.ts 的注解）：按 Shift 滚轮时浏览器把纵向转成横向。
-   *
-   * **位移不足一档时要攒着**（2026-09-16 修的死区，见 zoom.ts 的 `accumulateWheelSteps`）：
-   * 一次 40px 的滚轮折合 0.4 档 = 4%，直接算进档位会被 `clampZoom` 圆整抹掉 —— 那种输入
-   * 以前是"永远不动 + 状态栏误报「到边界了」"。所以这里累加余量，够了才 `setUiZoom`：
-   * 不足一档**什么都不做**（连状态栏都不动），这样「到边界了」重新只意味着"真到边界"。
+   * 命中时**必须 preventDefault**：否则这次滚动会继续滚动编辑器/预览区，WebView2 还可能顺手用
+   * 它自己那套系数缩放页面（与我们的系数打架，表现为"缩放了但系数对不上"）。位移量同时看
+   * deltaY / deltaX（按 Shift 滚轮时浏览器把纵向转成横向）；"不足一档要攒着"的余量逻辑在
+   * zoom-controller.ts（那里还有 2026-09-16 修的那个死区）。
    *
    * 监听挂在 `window` 的**捕获阶段**（注册见 onMount），不是挂在 `<main>` 上：
    * ① 鼠标在菜单栏/状态栏上滚也该能缩放（原先只有编辑区/预览区那一块有效）；
@@ -979,25 +748,12 @@
   function handleZoomWheel(e: WheelEvent) {
     if (!e.ctrlKey) return;
     e.preventDefault();
-    // 计数只用于**诊断**（写进"未生效"文案，见 zoomRejectedNotice）：用户从 0.7.5 起反复反馈
-    // 「缩放调整失败」，而"页面压根没收到 Ctrl+滚轮"与"收到了但引擎没动"是完全不同的两个成因
-    // —— 前者说明事件在到达页面之前就被吃掉了（例如引擎自己那套缩放控件开着），
-    // 后者才是 setZoom 没生效。累计计数（不重置）就是为了让这条一眼可辨。
-    zoomWheelEvents += 1;
-    // 返回的是"这一次该走的整档数"（不足一档时是 0，余量留在累加器里）
-    const steps = accumulateWheelSteps(zoomWheelAcc, e.deltaY, e.deltaX, e.deltaMode);
-    if (steps === 0) {
-      // 不足一档：不动档位，但把"攒了多少"说出来 —— 否则"位移太小"和"事件没到页面"
-      // 在用户眼里完全一样（都是滚了没反应），而那两件事的修法完全不同（见 zoom.ts）。
-      statusText = wheelPendingNotice(zoomWheelAcc);
-      return;
-    }
-    setUiZoom(steps > 0 ? zoomIn(uiZoom, steps) : zoomOut(uiZoom, -steps));
+    zoom.wheel(e.deltaY, e.deltaX, e.deltaMode);
   }
 
   // 缩放变化（含启动恢复后的首次赋值）→ 交给 webview；失败不影响其它逻辑
   $effect(() => {
-    void applyUiZoom(uiZoom);
+    void zoom.apply(uiZoom);
   });
 
   /** 写作模式 ↔ 源码模式（仿 Typora 的"源代码模式"）：预览栏随模式联动 */
@@ -2080,7 +1836,7 @@
       {
         toggleWrap: toggleEditorWrap,
         runFormat,
-        // Ctrl+Shift+= / Ctrl+Shift+-：±1 格（走和滚轮同一条 setUiZoom → applyUiZoom → 复核）。
+        // Ctrl+Shift+= / Ctrl+Shift+-：±1 格（走和滚轮同一条 setUiZoom → 引擎改档 → 复核）。
         // 必须 preventDefault（runAppKeyAction 统一做了）：否则引擎自己那套缩放会一并插手。
         zoom: zoomBySteps,
         // reloadFile 只在有文件时才会走到（没文件时 decideAppKey 返回 null，放行给浏览器刷新）
@@ -2194,16 +1950,9 @@
     const onWindowResize = () => {
       // 写作模式的版心宽跟着编辑器列宽走：窗口/分栏变化后复核一次（去抖在函数里）
       scheduleWritingReflow();
-      const allowed = shouldRebaselineZoom({
-        now: Date.now(),
-        settlingUntil: zoomSettlingUntil,
-        verifyInFlight: zoomStepInFlight,
-      });
-      if (!allowed) {
-        dbg.log("zoom", "resize（缩放沉降窗口内，跳过基准重校）");
-        return;
-      }
-      rebaselineZoom();
+      // 视口判据的 100% 基准要跟着校；"缩放自己引发的 resize"由控制器按沉降窗口让开
+      // （判据是纯函数 shouldRebaselineZoom，见 zoom-controller.onResize）
+      zoom.onResize();
     };
     window.addEventListener("resize", onWindowResize);
     // 回到前台/重新聚焦时把当前档位再设一遍：WebView2 在一些时机（失焦、被系统改过缩放状态）
@@ -2211,8 +1960,7 @@
     // 值没被丢时这次调用是空操作；丢掉时它自己会走复核，结论照样写进状态栏（见 verifyZoomApplied）。
     const reapplyZoomOnReturn = () => {
       if (document.visibilityState !== "visible") return;
-      if (zoomIsFaked()) return;
-      void applyUiZoom(uiZoom);
+      zoom.reapply(); // 假引擎（浏览器桩）在里面直接返回
     };
     window.addEventListener("focus", reapplyZoomOnReturn);
     document.addEventListener("visibilitychange", reapplyZoomOnReturn);
@@ -2313,7 +2061,7 @@
       window.removeEventListener("resize", onWindowResize);
       window.removeEventListener("focus", reapplyZoomOnReturn);
       document.removeEventListener("visibilitychange", reapplyZoomOnReturn);
-      if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
+      zoom.dispose(); // 取消还没落地的"缩放再确认一次"
       if (pendingOpenTimer !== null) clearTimeout(pendingOpenTimer); // 关窗时取消还没落地的兜底打开
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
