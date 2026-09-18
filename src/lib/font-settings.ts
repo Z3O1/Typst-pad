@@ -6,7 +6,7 @@
 // typst 的自动回退；而回退打分是「先比衬线标记（Libertinus 的 panose 全 0 → 被判无衬线，
 // 于是所有宋体都被扣分）→ 再比家族名谁短」：Windows 落到楷体/隶书，Linux 落到 Noto Sans CJK
 // 的日文字形。Rust 侧用 FontConfig 往 Library.styles 注入默认字体族来终结这件事
-// （见 typst_world.rs 的 DEFAULT_FONT_FAMILIES），本模块负责把用户的选择拼成那个列表。
+// （见 typst_world/fonts.rs 的 DEFAULT_FONT_FAMILIES），本模块负责把用户的选择拼成那个列表。
 
 /** 设置里「默认」选项的值：不指定正文字体，交给 Rust 的默认列表 */
 export const FONT_CHOICE_DEFAULT = "";

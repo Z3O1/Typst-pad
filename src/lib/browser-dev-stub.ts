@@ -519,7 +519,7 @@ export function fakeBlocks(doc: string): {
 // ---------------------------------------------------------------------------
 // 假"点击定位"（block_hit_test 的桩）
 //
-// 真实实现（src-tauri/src/block_geometry.rs 的 pick_hit）在**排版引擎的帧**里找最近的字形，
+// 真实实现（src-tauri/src/block_geometry/hit.rs 的 pick_hit）在**排版引擎的帧**里找最近的字形，
 // 浏览器里没有帧，所以分两条路：
 //
 // ① **注入了真实夹具**（writing-blocks-hit.mjs / writing-blocks-visual.mjs 那种）：夹具里带着
@@ -610,7 +610,7 @@ function syntheticHit(args: Record<string, unknown>): number | null {
  * 浏览器开发模式下的假字体列表（设置 → 正文字体 的下拉数据源）。
  * 真实字体集由 Rust 侧 FontBook 提供（打包字体 + 系统字体 + 额外目录），浏览器里没有；
  * 这里给出与真实形状一致的数据，让验收脚本能覆盖"下拉/额外字体目录"这条 UI 链路。
- * DEFAULT 与 typst_world.rs 的 DEFAULT_FONT_FAMILIES 保持一致。
+ * DEFAULT 与 typst_world/fonts.rs 的 DEFAULT_FONT_FAMILIES 保持一致。
  */
 const FAKE_FONT_FAMILIES = [
   "DejaVu Sans Mono",
@@ -691,7 +691,7 @@ async function handleCommand(
       // **故意发 `path: null`**：那是 Rust 0.4.0~0.8.2 的真实写法，前端的判据必须容忍它
       // （曾经只认 undefined/""，于是桌面版从 0.4.0 起一条波浪线都不画 —— 桩过去干脆不发
       // path 字段，所以浏览器验收一直抓不到，2026-09-18 才查出来）。Rust 侧现在改成
-      // "主源不带 path 键"，那条由 typst_world.rs 的序列化单测锁。
+      // "主源不带 path 键"，那条由 typst_world/tests.rs 的序列化单测锁。
       const marker = "DIAG-ERROR-MARKER";
       const at = src.indexOf(marker);
       if (at >= 0) {

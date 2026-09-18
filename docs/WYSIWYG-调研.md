@@ -87,7 +87,7 @@
 |---|---|---|
 | **CM6 装饰管线**（`Compartment` + `StateField` + `Decoration`） | `src/lib/Editor.svelte`（`diagnosticsCompartment` / `diagTheme`，现用于红色波浪线） | "选区进出切表示"与"画波浪线"是**同一套机制**，只是装饰类型从 `mark` 换成 `replace({ widget })` |
 | **位置映射**：编译源（前缀+文档）位置 → 文档位置 | `src/lib/diagnostics-utils.ts`（`mapCompiledPosToDoc`、`squiggleRanges`） | 公式范围坐标换算可直接复用此模式（注意前缀区偏移） |
-| **编译链路** | `src/lib/typst-engine.ts` → `compile_doc`（Rust 侧 `src-tauri/src/typst_world.rs`） | 公式级编译可复用；⚠️ 见下方风险 |
+| **编译链路** | `src/lib/typst-engine.ts` → `compile_doc`（Rust 侧 `src-tauri/src/typst_world/compile.rs`） | 公式级编译可复用；⚠️ 见下方风险 |
 | **SVG 分页与画布缩放** | `src/lib/svg-paginate.ts`、`src/lib/preview-scale.ts` | 单公式渲染成 SVG 后可直接内联进 widget |
 
 ### 3.2 实现要点与风险（待验证的设想，非实测结论）
@@ -178,7 +178,7 @@ http://localhost:1420/?browserdev=1
 | 公式范围识别（`$x$` 行内 / `$ x $` 行间）、缓存键、选区相交判定 | `src/lib/math-ranges.ts` |
 | 常用标记拆解（标题/粗体/斜体/行内代码/列表符号/`#link`） | `src/lib/markup-ranges.ts` |
 | CM6 装饰：公式 replace widget + 标记隐藏/替换 + 渲染请求 | `src/lib/live-preview.ts` |
-| 单公式编译为贴边透明 SVG + pt 尺寸 + 基线 | `compile_math`（`src-tauri/src/typst_world.rs`） |
+| 单公式编译为贴边透明 SVG + pt 尺寸 + 基线 | `compile_math`（`src-tauri/src/typst_world/math.rs`） |
 
 **实测修正了调研中的三处设想**：
 
