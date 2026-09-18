@@ -50,6 +50,7 @@
   import { installEditorFonts, loadBundledFont } from "$lib/editor-font";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
+  import { buildMenuGroups } from "$lib/menu-model";
   import ContextMenu from "$lib/ContextMenu.svelte";
   import type { ContextMenuItem } from "$lib/ContextMenu.svelte";
   import {
@@ -1315,104 +1316,34 @@
     statusText = "已新建";
   }
 
+  /**
+   * 菜单表：结构由 menu-model.ts 的 buildMenuGroups 纯函数产出（快捷键 → 命令映射、勾选态
+   * 都有单测，见 menu-model.test.ts）；这里只把当前状态与命令回调喂进去。
+   */
   function menuGroups(): MenuGroup[] {
-    return [
-      {
-        label: "文件",
-        accessKey: "F",
-        items: [
-          // shortcut 同时是菜单项右侧灰字显示与全局 Ctrl/Meta 组合键的触发来源（MenuBar 统一处理）
-          { label: "新建", shortcut: "Ctrl+N", action: handleNew },
-          {
-            // 带 Shift 的组合键 MenuBar 的匹配器不认（见 menu-keys.shortcutMatches 排除 Shift），
-            // 所以这里只是把姿势当灰字提示显示出来，真正的触发在 handleKeydown → openNewWindow
-            label: "新建窗口",
-            shortcut: "Ctrl+Shift+N",
-            action: openNewWindow,
-          },
-          { label: "打开…", shortcut: "Ctrl+O", action: handleOpen },
-          { label: "保存", shortcut: "Ctrl+S", action: handleSave },
-          { label: "设置…", shortcut: "Ctrl+,", action: openSettings },
-          { label: "导出 PDF…", shortcut: "Ctrl+P", action: handleExportPdf },
-        ],
-      },
-      {
-        label: "格式",
-        accessKey: "O",
-        items: [
-          { label: "加粗", shortcut: "Ctrl+B", action: () => runFormat("bold") },
-          { label: "斜体", shortcut: "Ctrl+I", action: () => runFormat("italic") },
-          { label: "行内代码", shortcut: "Ctrl+Shift+`", action: () => runFormat("code") },
-          { label: "行内公式", shortcut: "Ctrl+M", action: () => runFormat("math-inline") },
-          { label: "公式块", shortcut: "Ctrl+Shift+M", action: () => runFormat("math-block") },
-          { label: "标题 1", shortcut: "Ctrl+1", action: () => runFormat("heading1") },
-          { label: "标题 2", shortcut: "Ctrl+2", action: () => runFormat("heading2") },
-          { label: "标题 3", shortcut: "Ctrl+3", action: () => runFormat("heading3") },
-          { label: "正文", shortcut: "Ctrl+0", action: () => runFormat("body") },
-          { label: "无序列表", shortcut: "Ctrl+Shift+]", action: () => runFormat("bullet") },
-          { label: "有序列表", shortcut: "Ctrl+Shift+[", action: () => runFormat("ordered") },
-          { label: "引用", shortcut: "Ctrl+Shift+Q", action: () => runFormat("quote") },
-          { label: "代码块", shortcut: "Ctrl+Shift+C", action: () => runFormat("code-block") },
-          { label: "链接", shortcut: "Ctrl+K", action: () => runFormat("link") },
-        ],
-      },
-      {
-        label: "视图",
-        accessKey: "V",
-        items: [
-          {
-            label: "源代码模式",
-            // 键位：**模式切换用 Ctrl+E**（2026-09-18 用户要求）。
-            // 原来挂的是 Ctrl+/（Typora 的习惯），但那一按会**同时**做两件事：编辑器的 CM keymap
-            // 处理 `Mod-/` 只 preventDefault、不阻断冒泡，而这里（MenuBar 的 window 级匹配）不看
-            // defaultPrevented ⇒ 按一次既注释又切模式。Ctrl+/ 现在只归注释（VS Code 习惯）。
-            shortcut: "Ctrl+E",
-            checked: viewMode === "source",
-            action: () => toggleViewMode(),
-          },
-          {
-            label: "显示预览栏",
-            checked: showPreview,
-            action: () => (showPreview = !showPreview),
-          },
-          {
-            label: "自动换行",
-            // 同样只是灰字提示（MenuBar 的匹配器只认「Ctrl+单键」，不会命中 Alt+Z）；
-            // 真正的触发在 +page.svelte 的 handleKeydown 里
-            shortcut: "Alt+Z",
-            checked: editorWrap,
-            action: () => toggleEditorWrap(),
-          },
-          {
-            label: "放大",
-            // 灰字提示：Ctrl+滚轮 是手势（写不进快捷键匹配），Ctrl+Shift+= 是这一对键盘键里的"加"
-            shortcut: "Ctrl+滚轮 / Ctrl+Shift+=",
-            action: () => zoomBySteps(1),
-          },
-          {
-            label: "缩小",
-            shortcut: "Ctrl+Shift+-",
-            action: () => zoomBySteps(-1),
-          },
-          {
-            label: "重置缩放",
-            checked: uiZoom === ZOOM_DEFAULT,
-            action: resetUiZoom,
-          },
-          { label: "主题：自动", checked: theme === "system", action: () => (theme = "system") },
-          { label: "主题：暗", checked: theme === "dark", action: () => (theme = "dark") },
-          { label: "主题：明", checked: theme === "light", action: () => (theme = "light") },
-        ],
-      },
-      {
-        label: "帮助",
-        accessKey: "H",
-        items: [
-          { label: "检查更新…", action: () => checkUpdates(true) },
-          { label: "关于 Typst-pad", action: () => (showAbout = true) },
-        ],
-      },
-    ];
+    return buildMenuGroups({
+      viewMode,
+      showPreview,
+      editorWrap,
+      uiZoom,
+      theme,
+      onNew: handleNew,
+      onNewWindow: openNewWindow,
+      onOpen: handleOpen,
+      onSave: handleSave,
+      onOpenSettings: openSettings,
+      onExportPdf: handleExportPdf,
+      runFormat,
+      onToggleViewMode: toggleViewMode,
+      onTogglePreview: () => (showPreview = !showPreview),
+      onToggleWrap: toggleEditorWrap,
+      onZoomIn: () => zoomBySteps(1),
+      onZoomOut: () => zoomBySteps(-1),
+      onResetZoom: resetUiZoom,
+      onSetTheme: (t) => (theme = t),
+      onCheckUpdates: () => checkUpdates(true),
+      onShowAbout: () => (showAbout = true),
+    });
   }
 
   /**
