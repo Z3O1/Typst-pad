@@ -54,6 +54,7 @@
   import type { ContextMenuItem } from "$lib/ContextMenu.svelte";
   import AboutDialog from "$lib/AboutDialog.svelte";
   import ClosePromptDialog from "$lib/ClosePromptDialog.svelte";
+  import StatusBar from "$lib/StatusBar.svelte";
   import SettingsDialog from "$lib/SettingsDialog.svelte";
   import UpdateDialog from "$lib/UpdateDialog.svelte";
   // 弹窗共享外壳样式见 src/lib/modal.css（页面作用域命中不了子组件）
@@ -67,8 +68,6 @@
   } from "$lib/context-menu-utils";
   import { clearState } from "$lib/persistence";
   import {
-    formatErrorLoc,
-    hasErrorToShow,
     isErrorLineInPrefix,
     prefixLineCharOffset,
     formatDiagnosticForClipboard,
@@ -76,13 +75,7 @@
     type ErrorListItem,
     type LocatedErrorItem,
   } from "$lib/error-list";
-  import {
-    badgePopoverStyle,
-    errorPopoverVisible,
-    nextBadgePopover,
-    warningPopoverVisible,
-    type BadgeKind,
-  } from "$lib/badge-popover";
+  import { nextBadgePopover, type BadgeKind } from "$lib/badge-popover";
   import {
     buildErrorItems,
     buildWarningItems,
@@ -96,7 +89,6 @@
   import { copyPlainText } from "$lib/clipboard";
   import { mark, reportStartup } from "$lib/startup-timing";
   import { dbg, setCliDebug } from "$lib/debug";
-  import { clampPopoverRect } from "$lib/popover-utils";
   import {
     TYPST_DEFAULT_TEXT_PT,
     isReflowApplied,
@@ -268,35 +260,14 @@
   let jumpTarget = $state<{ line: number; col: number; seq: number } | null>(null); // 编辑器跳转目标
   /**
    * 编译警告（Rust 侧 warnings）：字体族写错只会以警告形式出现，必须显示出来。
-   * 声明位置在徽标状态之前 —— 下面 `warningPopoverOpen` 这个 `$derived` 要读它
-   * （`$derived` 的表达式虽然是惰性的，但 TS 的"先用后声明"检查不认，实测会让 `npm run check` 报错）。
+   * 条数传给状态栏的警告徽标（DiagnosticBadge），条目由 warningItems() 组装。
    */
   let compileWarnings = $state<Diagnostic[]>([]);
-  let errorWrapEl = $state<HTMLElement | undefined>(undefined); // 错误徽标 + Popover 的外层容器（锚点，供外部点击判定）
-  let warningWrapEl = $state<HTMLElement | undefined>(undefined); // 警告徽标 + Popover 的外层容器（同上）
-  let errorPopoverEl = $state<HTMLElement | undefined>(undefined); // 错误列表 Popover 元素（打开后测量收边）
-  let warningPopoverEl = $state<HTMLElement | undefined>(undefined); // 警告列表 Popover 元素（同上）
-  // Popover 视口收边结果（打开时计算一次）：transform 平移量 + 可选限宽，内联样式应用。
-  // 两个浮层共用一份 —— 同一时刻只会开一个（见 openBadgePopover）。
-  let popoverClamp = $state({ translateX: 0, translateY: 0, maxWidth: 0 });
-
-  /** 错误浮层是否可见（开着 + 确实有内容）。有内容才让浮层存在：空浮层（只有标题）没意义 */
-  const errorPopoverOpen = $derived(
-    errorPopoverVisible(openBadgePopover, errorCount, lastNonPosError),
-  );
-  /** 警告浮层是否可见（同上） */
-  const warningPopoverOpen = $derived(
-    warningPopoverVisible(openBadgePopover, compileWarnings.length),
-  );
-
+  // 浮层的可见性判定、Esc/点外部关闭、打开时视口收边都在 DiagnosticBadge 组件里
+  // （两个徽标共用同一份行为）；这里只留开合状态本身 —— 点浮层条目跳转后也要收起它。
   /** 点徽标/Enter：开这个、并顺手把另一个关掉（两个徽标共用一份状态 ⇒ 一次只开一个） */
   function toggleBadgePopover(kind: BadgeKind) {
     openBadgePopover = nextBadgePopover(openBadgePopover, kind);
-  }
-
-  /** 两个浮层共用的收边内联样式（打开瞬间由下面的 $effect 算一次） */
-  function popoverStyle(): string {
-    return badgePopoverStyle(popoverClamp);
   }
   // 设置弹窗组件句柄（bind:this）：错误落在前缀代码内时用它定位到对应行（见 focusPrefixLine）
   let settingsDialogRef = $state<{ focusPrefixLine(line: number): void } | null>(null);
@@ -1949,72 +1920,6 @@
     }
   }
 
-  // 浮层的内容一旦没了就收起（错误修好 / 警告消失）。**这条不能省**：
-  // ① 错误侧以前只关 `{#if showErrors}`，修好错误后会留一个只有标题的空浮层；
-  // ② 警告侧以前只靠 `{#if … && compileWarnings.length > 0}` 隐藏、状态仍留在"开着"，
-  //    于是同一份文档里警告一回来浮层就自己弹开（验收第 43 组锁这两条）。
-  // 写在 effect 里是因为它读的 errorCount / lastNonPosError / compileWarnings 都是编译结果：
-  // 赋值后本 effect 再跑一次会走空分支，不会成环。
-  $effect(() => {
-    if (openBadgePopover === "errors" && !hasErrorToShow(errorCount, lastNonPosError)) {
-      openBadgePopover = "none";
-    } else if (openBadgePopover === "warnings" && compileWarnings.length === 0) {
-      openBadgePopover = "none";
-    }
-  });
-
-  // 浮层打开期间：Esc 关闭；点击浮层外部（mousedown，先于 click）关闭。
-  // **两个徽标同一条规则**（警告侧以前完全没有这段，所以浮层只能靠再点一次徽标关掉）。
-  // 徽标本身在自己的 wrap 内，所以点徽标的切换逻辑不受外部判定干扰。
-  // （Svelte 5 runes：effect 内注册/清理监听）
-  $effect(() => {
-    if (openBadgePopover === "none") return;
-    const wrap = openBadgePopover === "errors" ? errorWrapEl : warningWrapEl;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") openBadgePopover = "none";
-    };
-    const onMouseDown = (e: MouseEvent) => {
-      if (wrap && !wrap.contains(e.target as Node)) {
-        openBadgePopover = "none";
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("mousedown", onMouseDown);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("mousedown", onMouseDown);
-    };
-  });
-
-  // 浮层打开时做一次视口收边：徽标在状态栏内靠左排布（状态文本短时不在窗口右侧），
-  // 而浮层是 `left: 0` 锚定的 520px 宽块，窄窗口下会从窗口右缘溢出（用户在 400px 宽的
-  // 视口下实测右缘 406 > 400）。下一 tick 等 {#if} 渲染完成后再测量 getBoundingClientRect，
-  // 越界则用 transform 平移（必要时叠加限宽）收回视口内，不破坏锚定关系。
-  // 仅在打开瞬间 clamp 一次；窗口 resize 不重算——本页无现成 resize 监听，
-  // 且缩放时浮层通常已关闭，保持最小实现（ContextMenu 组件另有自己的重算逻辑）。
-  // **两个浮层共用这套收边**（同一时刻只开一个，所以共用一份结果就够了）。
-  $effect(() => {
-    const open = openBadgePopover;
-    if (open === "none") return;
-    let disposed = false;
-    // 关键：先复位上次打开遗留的 clamp（$state 在关闭时不自动清零）——否则第二次打开时
-    // 浮层带着旧的 transform 渲染，测量到的是已平移的正确矩形，算出位移 ≈ 0，
-    // 把变换清零后浮层跳回自然（溢出窗口）位置（实测「第一次对，第二次错」）。
-    // 复位触发一次额外渲染，tick() 在其后执行，保证测到的是未变换的自然矩形。
-    popoverClamp = { translateX: 0, translateY: 0, maxWidth: 0 };
-    void tick().then(() => {
-      const el = open === "errors" ? errorPopoverEl : warningPopoverEl;
-      if (disposed || !el) return;
-      popoverClamp = clampPopoverRect(el.getBoundingClientRect(), {
-        width: window.innerWidth,
-        height: window.innerHeight,
-      });
-    });
-    return () => {
-      disposed = true;
-    };
-  });
-
   /** 脚本错误统一提示：状态栏给出可读原因 + 调试日志留完整堆栈 */
   /**
    * Chromium 自己的提示，不算应用的脚本错误：
@@ -2489,188 +2394,28 @@
     </section>
   </main>
 
-  <footer class="statusbar">
-    <!-- 左侧最前：编译错误 + 编译警告计数（VS Code 状态栏同序：⊗ 0 ⚠ 0，用户给的参照图）。
-         两者都**常驻显示**（无问题时是 0）——它们在同一列里，常驻才能一眼看出"编译干净"，
-         也避免数字出现/消失时整条状态栏左右抖动。错误在警告**左边**。 -->
-    <span class="badge-group">
-      <span class="error-badge-wrap" bind:this={errorWrapEl}>
-        <span
-          class="error-badge"
-          class:clickable={hasErrorToShow(errorCount, lastNonPosError)}
-          class:active={errorPopoverOpen}
-          role="button"
-          tabindex="0"
-          aria-expanded={errorPopoverOpen}
-          title="编译错误（渲染已停止）"
-          onclick={() => {
-            if (hasErrorToShow(errorCount, lastNonPosError)) toggleBadgePopover("errors");
-          }}
-          onkeydown={(e) => {
-            if (e.key === "Enter" && hasErrorToShow(errorCount, lastNonPosError)) {
-              toggleBadgePopover("errors");
-            }
-          }}
-        >
-          <!-- 圆圈叉（VS Code 的 error 图标形状）：**整幅内联 SVG**，圆圈与叉一起画。
-               以前是 CSS 圆环 + `✕` 字形，字形随系统字体变粗变细、叉的粗细与圆圈对不上，
-               用户比对参照图后指出"不像"——现在两个图标都是 16×16 视图框里的描边图形，
-               线宽比例也照参照图定（圆环 1.5、叉 1.35，叉的线略细于圆环）。 -->
-          <svg class="error-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <circle cx="8" cy="8" r="7.25" fill="none" stroke="currentColor" stroke-width="1.5" />
-            <path
-              d="M5 5 11 11M11 5 5 11"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.35"
-              stroke-linecap="round"
-            />
-          </svg><span class="error-count">{errorCount}</span>
-        </span>
-        {#if errorPopoverOpen}
-          <div
-            class="error-popover"
-            bind:this={errorPopoverEl}
-            role="dialog"
-            aria-label="编译错误列表"
-            style={popoverStyle()}
-          >
-            <div class="error-popover-title">
-              <span>编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}</span>
-              <!-- 复制整份列表（首行是这段标题原文，其后每条一行，路径在行列前面） -->
-              <button
-                class="error-copy-all"
-                title="复制全部错误信息（含文件路径与行列）"
-                aria-label="复制全部错误信息"
-                onclick={() => void copyDiagnosticList("errors")}
-              >复制全部</button>
-            </div>
-            <div class="error-list">
-              {#each errorItems() as item}
-                <!-- 每条 = 「条目（点击跳转）」+「复制」两个兄弟按钮：
-                     按钮不能嵌按钮（HTML 非法），所以必须有这层 row 包裹 -->
-                <div class="error-item-row">
-                  {#if item.kind === "located"}
-                    <button class="error-item" onclick={() => onDiagnosticItemClick(item)}>
-                      <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                      <span class="error-item-msg">{item.message}</span>
-                    </button>
-                  {:else}
-                    <div class="error-item error-item-generic">
-                      <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                      <span class="error-item-msg">{item.message}</span>
-                    </div>
-                  {/if}
-                  <button
-                    class="error-item-copy"
-                    title="复制这条错误信息（含文件路径与行列）"
-                    aria-label="复制这条错误信息"
-                    onclick={() => void copyDiagnostic(item, "errors")}
-                  >复制</button>
-                </div>
-              {/each}
-            </div>
-          </div>
-        {/if}
-      </span>
-      <span class="error-badge-wrap warning-badge-wrap" bind:this={warningWrapEl}>
-        <span
-          class="error-badge warning-badge"
-          class:clickable={compileWarnings.length > 0}
-          class:active={warningPopoverOpen}
-          role="button"
-          tabindex="0"
-          aria-expanded={warningPopoverOpen}
-          title="编译警告（不中断渲染）"
-          onclick={() => {
-            if (compileWarnings.length > 0) toggleBadgePopover("warnings");
-          }}
-          onkeydown={(e) => {
-            if (e.key === "Enter" && compileWarnings.length > 0) {
-              toggleBadgePopover("warnings");
-            }
-          }}
-        >
-          <!-- 三角形内部感叹号（VS Code 的 warning 图标形状）：内联 SVG，用 currentColor
-               上色（不用 ⚠ 字形——跨字体渲染差异大，而且它是彩色 emoji 字体）。
-               描边路径的三个角都是**显式圆弧**（半径 1.25），比 stroke-linejoin 的圆角更接近
-               参照图里那种圆钝的三角；感叹号按参照图量出来的比例：竖杠略粗于三角线宽、圆点稍大。 -->
-          <svg class="warning-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <path
-              d="M15.09 12.83A1.3 1.3 0 0 1 13.95 14.75L2.05 14.75A1.3 1.3 0 0 1 0.91 12.83L6.86 1.93A1.3 1.3 0 0 1 9.14 1.93Z"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linejoin="round"
-            />
-            <path d="M8 5.4V9.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-            <circle cx="8" cy="11.6" r="0.9" fill="currentColor" />
-          </svg>
-          <span class="error-count">{compileWarnings.length}</span>
-        </span>
-        {#if warningPopoverOpen}
-          <div
-            class="error-popover warning-popover"
-            bind:this={warningPopoverEl}
-            role="dialog"
-            aria-label="编译警告列表"
-            style={popoverStyle()}
-          >
-            <div class="error-popover-title">
-              <span>编译警告（{compileWarnings.length} 处）</span>
-              <button
-                class="error-copy-all"
-                title="复制全部警告信息（含文件路径与行列）"
-                aria-label="复制全部警告信息"
-                onclick={() => void copyDiagnosticList("warnings")}
-              >复制全部</button>
-            </div>
-            <div class="error-list">
-              {#each warningItems() as item}
-                <div class="error-item-row">
-                  {#if item.kind === "located"}
-                    <button class="error-item" onclick={() => onDiagnosticItemClick(item)}>
-                      <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                      <span class="error-item-msg">{item.message}</span>
-                    </button>
-                  {:else}
-                    <div class="error-item error-item-generic">
-                      <span class="error-item-msg">{item.message}</span>
-                    </div>
-                  {/if}
-                  <button
-                    class="error-item-copy"
-                    title="复制这条警告信息（含文件路径与行列）"
-                    aria-label="复制这条警告信息"
-                    onclick={() => void copyDiagnostic(item, "warnings")}
-                  >复制</button>
-                </div>
-              {/each}
-            </div>
-          </div>
-        {/if}
-      </span>
-    </span>
-    <!-- 状态文字：占满剩余空间、单行省略（可伸缩项，见 .status-text 的样式） -->
-    <span class="status-text">{statusText}</span>
-    {#if updateNotice}
-      <button
-        class="status-update"
-        title="打开更新窗口"
-        onclick={openUpdateDialogFromNotice}
-      >{updateNotice}</button>
-    {/if}
-    <span class="spacer"></span>
-    <span class="mode-tag">{viewMode === "write" ? "写作" : "源码"}</span>
-    {#if uiZoom !== ZOOM_DEFAULT}
-      <!-- 只在非 100% 时出现：缩放是"整界面都在变"的状态，得有个常驻的地方能看出来 -->
-      <span class="mode-tag" title="Ctrl+滚轮缩放；视图 → 重置缩放">缩放 {zoomLabel(uiZoom)}</span>
-    {/if}
-    <span>{charCount} 字符 · {pageCount} 页</span>
-    {#if viewMode === "source"}
-      <span>行 {cursorLine}, 列 {cursorCol}</span>
-    {/if}
-  </footer>
+  <StatusBar
+    {statusText}
+    {updateNotice}
+    onOpenUpdate={openUpdateDialogFromNotice}
+    {viewMode}
+    {uiZoom}
+    {charCount}
+    {pageCount}
+    {cursorLine}
+    {cursorCol}
+    {errorCount}
+    {lastNonPosError}
+    errorItems={errorItems()}
+    warningCount={compileWarnings.length}
+    warningItems={warningItems()}
+    openBadge={openBadgePopover}
+    onToggleBadge={toggleBadgePopover}
+    onCloseBadge={() => (openBadgePopover = "none")}
+    onItemClick={onDiagnosticItemClick}
+    onCopyOne={(item, kind) => void copyDiagnostic(item, kind)}
+    onCopyAll={(kind) => void copyDiagnosticList(kind)}
+  />
 
   {#if showAbout}
     <AboutDialog
@@ -2842,14 +2587,6 @@
     box-shadow: 0 0 12px rgba(0, 0, 0, 0.12);
   }
 
-  .mode-tag {
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    color: var(--fg-dim);
-    font-size: 12px;
-  }
-
   /* 单栏（所见即所得）：编辑区占满整宽，预览栏整体不参与布局 */
   .panes.single .preview-pane {
     display: none;
@@ -2883,99 +2620,6 @@
     overflow: auto;
   }
 
-  .statusbar {
-    display: flex;
-    flex-wrap: nowrap; /* 不许换行：换行会让状态栏长成一大块（缩放到 190% + 长报错时实测过） */
-    align-items: center;
-    gap: 16px;
-    padding: 4px 12px;
-    background: var(--bg-toolbar);
-    border-top: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--fg-dim);
-    user-select: none;
-  }
-
-  /* 状态文字：占满剩余空间、**单行省略**（以前会被压成多行，把整条状态栏顶高）。
-     按**类名**定位而不是 `:first-child` —— 左侧最前现在是警告/错误两个徽标（2026-09-14 用户要求）。 */
-  .statusbar > .status-text {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-
-  /* 其余徽标/标签/计数：保持原尺寸，既不被压缩也不换行。
-     两条 `:not()` 都不可省：`.spacer`（撑开左右两组）与 `.status-text`（要可伸缩 + 省略号）
-     都在这条规则的命中范围里，漏掉就会被 `flex: none` 压成不可伸缩。 */
-  .statusbar > span:not(.spacer):not(.status-text) {
-    flex: none;
-    white-space: nowrap;
-  }
-
-  /* 左侧最前的两个计数徽标（警告、错误）成组：组内间距比状态栏主间距紧凑一点 */
-  .statusbar > .badge-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .spacer {
-    flex: 1;
-  }
-
-  /* 编译错误徽标：圆圈 ✕ + 个数，常驻显示（无错误时为 0） */
-  .error-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--fg-dim);
-  }
-
-  /* 两个状态徽标的图标：都是 16×16 视图框、显示 14px 的内联 SVG（尺寸与线宽都照
-     参照图标定：图标高度 / 数字高度 ≈ 1.6）。别再退回 CSS 圆环 + `✕` 字形或 `⚠` 字形 ——
-     字形随系统字体变粗细，跟旁边的描边图形不是一套观感（用户比对参照图后指出过）。 */
-  .error-icon,
-  .warning-icon {
-    display: block;
-    flex: none;
-  }
-
-  .error-count {
-    font-variant-numeric: tabular-nums; /* 数字变化时宽度稳定，不抖动 */
-  }
-
-  /* 徽标可点击（存在可展示内容时）：指针 + 悬停变亮，提示可查看详情。
-     **警告徽标也吃这条**（它的类名是 `error-badge warning-badge`）—— 所以这里的
-     `cursor: pointer` 是两个徽标共用的，别只留下面的黄色规则、把这条当成错误专用
-     （验收第 43 组两个徽标都断言 cursor: pointer，拆类名会让警告侧悄悄丢掉指针）。 */
-  .error-badge.clickable {
-    cursor: pointer;
-    color: #ff8a8a;
-  }
-
-  .error-badge.clickable:hover {
-    color: #ffc9c9;
-  }
-
-  /* 徽标 Popover 展开中：保持高亮，提示再次点击可收起 */
-  .error-badge.clickable.active {
-    color: #ffc9c9;
-  }
-
-  /* 编译警告徽标：与错误徽标同款但偏黄——警告不中断渲染，别让人以为编译挂了。
-     图标是内联 SVG 三角形+感叹号（VS Code 形状），用 currentColor 上色；
-     指针（`cursor: pointer`）由上面 `.error-badge.clickable` 那条一起给（类名共用）。 */
-  .warning-badge.clickable {
-    color: #e5c07b;
-  }
-  .warning-badge.clickable:hover,
-  .warning-badge.clickable.active {
-    color: #ffd79a;
-  }
-
-  /* 设置弹窗里的字体项：下拉与目录列表 */
   .preview-body {
     display: flex;
     flex-direction: column;
@@ -3068,153 +2712,6 @@
     font-size: 12px;
   }
 
-  /* 设置弹窗 */
-  /* 错误徽标容器：Popover 的定位锚点（徽标 + 浮层同一容器） */
-  .error-badge-wrap {
-    position: relative;
-    display: inline-flex;
-  }
-
-  /* 编译错误/警告 Popover：锚定徽标上方，圆角阴影风格与菜单下拉一致，不遮全屏。
-     `left: 0` 而不是 `right: 0` —— 徽标现在在状态栏最左（2026-09-14），右对齐会把 520px 宽的
-     浮层整体推到窗口左侧外面（靠 clampPopoverRect 也能救回来，但那样每次都是"被夹住"的状态）。 */
-  .error-popover {
-    /* 与弹窗/菜单同一套固定浅色面板（做法见 `:root` 的 --panel-*）：
-       浮层本体白底，里面的**每一条诊断（.error-item）用浅灰块**——条目灰、面板白，
-       这是用户 2026-09-18 指定的（此前是浅色主题下的反过来的组合：灰面板 + 白条目）。 */
-    --bg-pane: var(--panel-soft-bg);
-    --border: var(--panel-border);
-    --fg: var(--panel-fg);
-    --fg-dim: var(--panel-fg-dim);
-    --accent: var(--panel-accent);
-    position: absolute;
-    left: 0;
-    bottom: calc(100% + 8px);
-    width: 520px;
-    max-width: 90vw;
-    max-height: 70vh;
-    display: flex;
-    flex-direction: column;
-    background: var(--panel-bg);
-    border: 1px solid var(--panel-border);
-    border-radius: 6px;
-    box-shadow: var(--panel-shadow);
-    color: var(--panel-fg); /* 不写这条 = 白底 + 深色主题的浅灰字（见 :root 那段） */
-    padding: 8px;
-    z-index: 50;
-    /* 状态栏整条是 user-select: none，这里必须显式放开：浮层里的诊断文字要能拖选复制
-       （「复制」按钮之外的第二条出路，用户 2026-09-18 要求"复制错误信息"） */
-    user-select: text;
-  }
-
-  /* 标题行：左边标题、右边「复制全部」（两个浮层同款） */
-  .error-popover-title {
-    margin: 2px 4px 6px;
-    color: var(--fg-dim);
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  /* 一条诊断 = 「条目」+「复制」两个兄弟按钮（按钮不能嵌按钮，见 markup 注释）。
-     条目占满剩余宽度（原来靠 width:100%，进了 flex row 要改成 flex: 1） */
-  .error-item-row {
-    display: flex;
-    align-items: stretch;
-    gap: 6px;
-  }
-
-  .error-item-row > .error-item {
-    flex: 1 1 auto;
-    /* min-width: 0 不能省：flex 项默认 min-width: auto，长消息会把 row 撑宽、
-       把旁边的「复制」挤出浮层（消息本身已有 word-break，交给它换行） */
-    min-width: 0;
-  }
-
-  /* 复制按钮：透明底、无边框的小字，悬停才描边 —— 不加色块（"界面不要多余凸出"） */
-  .error-item-copy,
-  .error-copy-all {
-    flex: none;
-    align-self: center;
-    padding: 3px 8px;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--fg-dim);
-    font-family: inherit;
-    font-size: 12px;
-    line-height: 1.4;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .error-item-copy:hover,
-  .error-copy-all:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .error-list {
-    margin-top: 4px;
-    min-height: 0; /* 允许在 max-height 的 Popover 内收缩，列表内部滚动 */
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  /* 可点击的错误条目：左对齐、等宽定位、悬停高亮。
-     底色走 `--bg-pane`（浮层里已重绑成 --panel-soft-bg 的浅灰）——
-     「白面板 + 灰条目」是用户 2026-09-18 指定的组合。 */
-  .error-item {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    width: 100%;
-    padding: 6px 10px;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    background: var(--bg-pane);
-    color: var(--fg);
-    font-size: 13px;
-    text-align: left;
-    cursor: pointer;
-    font-family: inherit;
-  }
-
-  .error-item:hover {
-    background: var(--panel-hover-bg);
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .error-item-loc {
-    flex: none;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: 12px;
-    color: var(--fg-dim);
-    white-space: nowrap;
-  }
-
-  .error-item-msg {
-    min-width: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  /* 非定位错误条目：纯文本展示，不可点击（悬停不高亮 —— 连底色也不许变） */
-  .error-item-generic {
-    cursor: default;
-  }
-
-  .error-item-generic:hover {
-    background: var(--bg-pane);
-    border-color: transparent;
-    color: var(--fg);
-  }
-
   /* 浏览器提示页（非 Tauri 环境；已移除浏览器支持） */
   .browser-gate {
     height: 100vh;
@@ -3252,21 +2749,6 @@
   }
 
   /* 状态栏的更新提示：只作文字强调（无底色块，保持状态栏干净），点击重开更新弹窗 */
-  .status-update {
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: var(--accent);
-    font-size: 12px;
-    font-family: inherit;
-    cursor: pointer;
-    text-decoration: underline dotted;
-  }
-
-  .status-update:hover {
-    text-decoration: underline solid;
-  }
-
   /* 更新弹窗：说明可能很长，限宽 + 内部滚动，不把弹窗撑到屏幕外。
      内容是 update-notes.ts 渲染的受控 HTML（标题/列表/粗体/行内代码），不是 <pre> 原文 */
 </style>
