@@ -43,7 +43,7 @@
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { loadState, saveState } from "$lib/persistence";
-  import { decideAppKey, topModal } from "$lib/app-keys";
+  import { decideAppKey, runAppKeyAction, topModal } from "$lib/app-keys";
   import type { AppModal } from "$lib/app-keys";
   import { isEffectiveDirty, ensureTrailingNewline } from "$lib/doc-utils";
   import { failureStatus } from "$lib/failure-text";
@@ -2189,55 +2189,40 @@
   }
 
   /**
-   * 页面级快捷键：按键 → 动作的判定全在 app-keys.decideAppKey（纯函数，有单测），这里只负责执行。
+   * 页面级快捷键：判定在 app-keys.decideAppKey（纯函数，有单测），执行在 app-keys.runAppKeyAction
+   * （动作 → 回调表，preventDefault 统一在动作之前）。这里只提供当前状态与回调。
+   *
    * **判定顺序本身就是行为**：`Ctrl+Shift+N` 必须排在 Shift 格式表之前，否则新建窗口会被整段吞掉
-   * —— 0.7.0 起就是这个状态，用户 2026-09-14 报「Ctrl+Shift+N 新建窗口」没反应。
+   * —— 0.7.0 起就是这个状态，用户 2026-09-14 报「Ctrl+Shift+N 新建窗口」没反应（顺序锁在
+   * decideAppKey 里，app-keys.test.ts 逐条对着）。
    * 菜单项的全局快捷键（Ctrl+N 新建 / Ctrl+O 打开 / Ctrl+S 保存 / Ctrl+, 设置 / Ctrl+P 导出 PDF）
    * 由 MenuBar 的 window keydown 统一处理，不在此重复绑定（避免同一组合键双重触发）。
    */
   function handleKeydown(e: KeyboardEvent) {
-    const action = decideAppKey(e, {
-      hasFilePath: filePath !== null,
-      openModal: topModal({
-        "close-prompt": showClosePrompt,
-        update: showUpdateDialog,
-        settings: showSettings,
-        about: showAbout,
+    runAppKeyAction(
+      decideAppKey(e, {
+        hasFilePath: filePath !== null,
+        openModal: topModal({
+          "close-prompt": showClosePrompt,
+          update: showUpdateDialog,
+          settings: showSettings,
+          about: showAbout,
+        }),
       }),
-    });
-    if (!action) return;
-    switch (action.type) {
-      case "wrap-toggle":
-        e.preventDefault();
-        toggleEditorWrap();
-        return;
-      case "format":
-        e.preventDefault();
-        runFormat(action.command);
-        return;
-      case "zoom":
-        // Ctrl+Shift+= / Ctrl+Shift+-：±1 格（用户要求）。走和滚轮同一条 setUiZoom → applyUiZoom → 复核。
-        // 必须 preventDefault：否则引擎自己那套缩放会一并插手（与我们的系数打架）。
-        e.preventDefault();
-        zoomBySteps(action.steps);
-        return;
-      case "reload-file":
-        e.preventDefault(); // 仅在有文件时拦（没文件时 decideAppKey 已经返回 null，放行给浏览器刷新）
-        reloadFile();
-        return;
-      case "new-window":
-        e.preventDefault();
-        openNewWindow();
-        return;
-      case "close-window":
-        e.preventDefault();
-        closeCurrentWindow();
-        return;
-      case "dismiss-modal":
-        e.preventDefault();
-        dismissModal(action.modal);
-        return;
-    }
+      {
+        toggleWrap: toggleEditorWrap,
+        runFormat,
+        // Ctrl+Shift+= / Ctrl+Shift+-：±1 格（走和滚轮同一条 setUiZoom → applyUiZoom → 复核）。
+        // 必须 preventDefault（runAppKeyAction 统一做了）：否则引擎自己那套缩放会一并插手。
+        zoom: zoomBySteps,
+        // reloadFile 只在有文件时才会走到（没文件时 decideAppKey 返回 null，放行给浏览器刷新）
+        reloadFile,
+        openNewWindow,
+        closeWindow: () => void closeCurrentWindow(),
+        dismissModal,
+      },
+      () => e.preventDefault(),
+    );
   }
 
   onMount(() => {

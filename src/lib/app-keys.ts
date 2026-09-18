@@ -115,3 +115,56 @@ export function decideAppKey(e: WrapKeyEvent, state: AppKeyState): AppKeyAction 
   if (key === "w") return { type: "close-window" };
   return null;
 }
+
+/**
+ * 执行动作要用到的页面回调（+page.svelte 提供，一个动作一个）。
+ * 决策（decideAppKey）与执行分开：执行侧只认这张表，页面不再自己写 switch。
+ */
+export interface AppKeyHandlers {
+  toggleWrap(): void;
+  runFormat(command: WriteCommand): void;
+  zoom(steps: 1 | -1): void;
+  reloadFile(): void;
+  openNewWindow(): void;
+  closeWindow(): void;
+  dismissModal(modal: AppModal): void;
+}
+
+/**
+ * 执行 decideAppKey 给出的动作，返回是否处理了（false = 放行给编辑器/浏览器/系统）。
+ *
+ * **`preventDefault` 统一在动作之前调用**：原来 +page.svelte 的 switch 每个分支都是
+ * "先 preventDefault 再执行"，顺序不能反 —— 例如 Ctrl+R 只在有文件时走到这里（没文件时
+ * decideAppKey 已经返回 null，放行给浏览器刷新）。
+ */
+export function runAppKeyAction(
+  action: AppKeyAction | null,
+  handlers: AppKeyHandlers,
+  preventDefault: () => void,
+): boolean {
+  if (!action) return false;
+  preventDefault();
+  switch (action.type) {
+    case "wrap-toggle":
+      handlers.toggleWrap();
+      return true;
+    case "format":
+      handlers.runFormat(action.command);
+      return true;
+    case "zoom":
+      handlers.zoom(action.steps);
+      return true;
+    case "reload-file":
+      handlers.reloadFile();
+      return true;
+    case "new-window":
+      handlers.openNewWindow();
+      return true;
+    case "close-window":
+      handlers.closeWindow();
+      return true;
+    case "dismiss-modal":
+      handlers.dismissModal(action.modal);
+      return true;
+  }
+}
