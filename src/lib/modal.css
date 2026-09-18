@@ -1,0 +1,121 @@
+/* 弹窗的**共享外壳**样式（关于 / 设置 / 更新 / 未保存确认四个弹窗共用）。
+ *
+ * 为什么是一个普通 CSS 文件而不是某个组件的 `<style>`：四个弹窗已经拆成独立组件
+ * （AboutDialog / SettingsDialog / UpdateDialog / ClosePromptDialog），而 Svelte 的
+ * `<style>` 是**按组件作用域**的 —— 放在页面里就命中不了子组件里的元素（主题覆盖那两条
+ * `.app.light .modal-overlay*` 尤其如此）。这份文件不经过 Svelte 的作用域处理，选择器与
+ * 拆分前逐字一致，`+page.svelte` 里 `import "$lib/modal.css"` 一次即可。
+ *
+ * 各弹窗自己的样式（`.about-*` / `.settings-*` / `.update-*`）仍留在各自组件的 `<style>` 里。 */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  border: none;
+  padding: 0;
+  cursor: default;
+}
+
+.app.light .modal-overlay {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+/* 弹窗（关于 / 设置 / 更新 / 未保存确认）：**固定浅色面板**，做法见 `:root` 的 --panel-*。
+   就地重绑主题变量 ⇒ 弹窗里的标题（--accent）、正文（--fg）、按钮与输入框（--bg-pane/--border）、
+   更新说明（--fg-dim）全都自动跟着变，不用逐个改。 */
+.modal {
+  --bg-pane: var(--panel-soft-bg);
+  --bg-toolbar: var(--panel-bg);
+  --border: var(--panel-border);
+  --fg: var(--panel-fg);
+  --fg-dim: var(--panel-fg-dim);
+  --accent: var(--panel-accent);
+  min-width: 320px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: var(--panel-shadow);
+  color: var(--panel-fg); /* 见 :root 那段：不写这条就等于白底 + 深色主题的浅灰字 */
+  padding: 20px 24px;
+}
+
+.modal-title {
+  margin: 0 0 8px;
+  color: var(--accent);
+}
+
+.modal-text {
+  margin: 4px 0;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.modal-close {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 6px 18px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-pane);
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.modal-close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 关闭确认弹窗（纯静态遮罩：不响应点击，必须选择按钮） */
+.modal-overlay-static {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.app.light .modal-overlay-static {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  justify-content: flex-end;
+}
+
+.modal-btn {
+  padding: 6px 18px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-pane);
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.modal-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.modal-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.modal-btn.primary:hover {
+  opacity: 0.9;
+}

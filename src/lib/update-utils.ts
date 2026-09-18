@@ -68,6 +68,22 @@ export interface DownloadProgress {
 }
 
 /**
+ * 更新流程状态机（原来内联在 +page.svelte，现在页面与 UpdateDialog 共用这一份类型）。
+ *
+ * 刻意做成**单个可判别联合**而不是若干布尔量：状态栏提示、弹窗内容、按钮可用性都由它派生，
+ * 避免出现"弹窗开着但状态是 idle""下载中又是 available"这类自相矛盾的组合
+ * （更新流程有 7 个阶段，布尔量一多必然打架）。
+ */
+export type UpdateFlow =
+  | { kind: "idle" }
+  | { kind: "checking"; manual: boolean }
+  | { kind: "latest" }
+  | { kind: "available"; version: string; currentVersion: string; notes: string }
+  | { kind: "downloading"; version: string; progress: DownloadProgress }
+  | { kind: "installing"; version: string }
+  | { kind: "error"; message: string };
+
+/**
  * 由「已下载字节 / 总字节」算进度。总数未知（服务端没给 Content-Length）或非法时
  * percent = null —— 不能用 0 冒充，否则进度条会一直空着却以为在动弹。
  */

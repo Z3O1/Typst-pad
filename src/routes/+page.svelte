@@ -52,6 +52,12 @@
   import { buildMenuGroups } from "$lib/menu-model";
   import ContextMenu from "$lib/ContextMenu.svelte";
   import type { ContextMenuItem } from "$lib/ContextMenu.svelte";
+  import AboutDialog from "$lib/AboutDialog.svelte";
+  import ClosePromptDialog from "$lib/ClosePromptDialog.svelte";
+  import SettingsDialog from "$lib/SettingsDialog.svelte";
+  import UpdateDialog from "$lib/UpdateDialog.svelte";
+  // 弹窗共享外壳样式见 src/lib/modal.css（页面作用域命中不了子组件）
+  import "$lib/modal.css";
   import {
     resolveContextZone,
     previewSelectionHasContent,
@@ -109,11 +115,9 @@
     AUTO_CHECK_DELAY_MS,
     UPDATE_DISMISS_NOTICE,
     formatBytes,
-    formatProgress,
     isUpdatePromptSuppressed,
-    type DownloadProgress,
+    type UpdateFlow,
   } from "$lib/update-utils";
-  import { renderUpdateNotes } from "$lib/update-notes";
   import {
     ZOOM_DEFAULT,
     ZOOM_CONFIRM_DELAY_MS,
@@ -294,7 +298,8 @@
   function popoverStyle(): string {
     return badgePopoverStyle(popoverClamp);
   }
-  let settingsPrefixTextarea = $state<HTMLTextAreaElement | undefined>(undefined); // 设置弹窗中的前缀代码 textarea（错误落前缀时定位）
+  // 设置弹窗组件句柄（bind:this）：错误落在前缀代码内时用它定位到对应行（见 focusPrefixLine）
+  let settingsDialogRef = $state<{ focusPrefixLine(line: number): void } | null>(null);
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
   let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
   /**
@@ -539,20 +544,8 @@
   let autoCheckUpdates = $state(true);
   let settingsAutoCheckUpdates = $state(true);
 
-  /**
-   * 更新流程状态机。刻意做成**单个对象**而不是若干布尔量：状态栏提示、弹窗内容、
-   * 按钮可用性都由它派生，避免出现"弹窗开着但状态是 idle""下载中又是 available"这类
-   * 自相矛盾的组合（更新流程有 7 个阶段，布尔量一多必然打架）。
-   */
-  type UpdateFlow =
-    | { kind: "idle" }
-    | { kind: "checking"; manual: boolean }
-    | { kind: "latest" }
-    | { kind: "available"; version: string; currentVersion: string; notes: string }
-    | { kind: "downloading"; version: string; progress: DownloadProgress }
-    | { kind: "installing"; version: string }
-    | { kind: "error"; message: string };
-
+  // 更新流程状态机：类型与语义见 update-utils.ts 的 UpdateFlow（刻意做成单个可判别联合，
+  // 而不是若干布尔量——理由写在那边的注释里）
   let updateFlow = $state<UpdateFlow>({ kind: "idle" });
   // 待安装的更新句柄：持有 Rust 侧资源（rid），不进响应式（模板不渲染它），换版本时 close
   let updateHandle: AvailableUpdate | null = null;
@@ -1948,21 +1941,12 @@
     if (prefixEnabled && isErrorLineInPrefix(item.line, prefixCode)) {
       openBadgePopover = "none";
       openSettings(); // 载入当前前缀副本到 settingsPrefixCode，点“保存”才生效
-      void tick().then(() => locatePrefixLine(item.line)); // 下一 tick：等设置弹窗渲染出 textarea
+      // 下一 tick：等设置弹窗渲染出前缀 textarea，再让组件自己定位（偏移按草稿前缀算）
+      void tick().then(() => settingsDialogRef?.focusPrefixLine(item.line));
     } else {
       jumpTarget = { line: item.line, col: item.col, seq: ++jumpSeq };
       openBadgePopover = "none";
     }
-  }
-
-  /** 在设置弹窗的前缀代码 textarea 中定位第 line 行起点（偏移按 settingsPrefixCode 计算） */
-  function locatePrefixLine(line: number) {
-    const textarea = settingsPrefixTextarea;
-    if (!textarea) return;
-    const offset = prefixLineCharOffset(settingsPrefixCode, line);
-    textarea.focus();
-    textarea.setSelectionRange(offset, offset);
-    textarea.scrollIntoView({ block: "nearest" });
   }
 
   // 浮层的内容一旦没了就收起（错误修好 / 警告消失）。**这条不能省**：
@@ -2689,183 +2673,48 @@
   </footer>
 
   {#if showAbout}
-    <button
-      class="modal-overlay"
-      aria-label="关闭关于窗口"
-      onclick={(e) => {
-        if (e.target === e.currentTarget) showAbout = false;
-      }}
-    >
-      <div class="modal about-modal">
-        <h3 class="modal-title">Typst-pad</h3>
-        <p class="modal-text">版本 {appVersion || "…"}</p>
-        <p class="modal-text">
-          仿 Typora 的 Typst 桌面编辑器：<strong>写作模式</strong>（默认）整页纸张，公式与标记就地排版，
-          光标 / 选区进入即展开源码；<strong>源代码模式</strong>（Ctrl+E）双栏对照，源码 + 整页预览。
-        </p>
-        <p class="modal-text">
-          排版由<strong>内置的 typst 引擎</strong>在本机完成：不联网，文档不出本机。
-        </p>
-        <p class="modal-text about-note">
-          MIT License © 2026 Z3O1 · 内置字体 Noto Serif CJK / Libertinus / New Computer Modern /
-          DejaVu Sans Mono 遵循各自的开源许可
-        </p>
-        <div class="modal-actions">
-          <span
-            class="modal-close"
-            role="button"
-            tabindex="0"
-            title={PROJECT_URL}
-            onclick={openProjectPage}
-            onkeydown={(e) => e.key === "Enter" && openProjectPage()}
-          >项目主页</span>
-          <span
-            class="modal-close"
-            role="button"
-            tabindex="0"
-            onclick={() => (showAbout = false)}
-            onkeydown={(e) => e.key === "Enter" && (showAbout = false)}
-          >关闭</span>
-        </div>
-      </div>
-    </button>
+    <AboutDialog
+      version={appVersion}
+      projectUrl={PROJECT_URL}
+      onClose={() => (showAbout = false)}
+      onOpenProject={openProjectPage}
+    />
   {/if}
 
   {#if showClosePrompt}
-    <div class="modal-overlay-static">
-      <div class="modal">
-        <h3 class="modal-title">未保存的修改</h3>
-        <p class="modal-text">当前文档有未保存的修改，是否保存？</p>
-        <div class="modal-actions">
-          <button class="modal-btn primary" onclick={onClosePromptSave}>保存</button>
-          <button class="modal-btn" onclick={onClosePromptDiscard}>不保存</button>
-          <button class="modal-btn" onclick={onClosePromptCancel}>取消</button>
-        </div>
-      </div>
-    </div>
+    <ClosePromptDialog
+      onSave={onClosePromptSave}
+      onDiscard={onClosePromptDiscard}
+      onCancel={onClosePromptCancel}
+    />
   {/if}
 
   {#if showSettings}
-    <div class="modal-overlay-static">
-      <div class="modal settings-modal">
-        <h3 class="modal-title">设置</h3>
-        <p class="modal-text">编译/导出时自动在代码前插入前缀代码（可配置页面、字体等全局项）。</p>
-        <label class="settings-row">
-          <input type="checkbox" bind:checked={settingsRestoreSession} />
-          <span>启动时恢复上次内容（未保存的修改不会丢）</span>
-        </label>
-        <label class="settings-row">
-          <input type="checkbox" bind:checked={settingsAutoCheckUpdates} />
-          <span>启动时自动检查更新（发现新版本会先询问，不会自己下载）</span>
-        </label>
-        <label class="settings-row">
-          <input type="checkbox" bind:checked={settingsPrefixEnabled} />
-          <span>启用前缀代码</span>
-        </label>
-        <textarea
-          class="settings-textarea"
-          bind:value={settingsPrefixCode}
-          bind:this={settingsPrefixTextarea}
-          placeholder="#set page(margin: 2cm)"
-          spellcheck="false"
-        ></textarea>
-        <label class="settings-row settings-row-font">
-          <span>正文字体（中文）</span>
-          <select class="settings-select" bind:value={settingsChineseFont}>
-            <option value={FONT_CHOICE_DEFAULT}>默认（思源宋体，缺字回退系统宋体）</option>
-            {#each availableFonts as font (font)}
-              <option value={font}>{font}</option>
-            {/each}
-          </select>
-        </label>
-        <p class="settings-hint">
-          只认字体文件里的英文族名；用「额外字体目录」加入自己的字体后，这里会多出对应选项。
-        </p>
-        <div class="settings-block">
-          <div class="settings-block-title">
-            额外字体目录（放进这里的字体立即可用，等同于 typst CLI 的 --font-path）
-          </div>
-          {#each settingsFontDirs as dir (dir)}
-            <div class="settings-dir">
-              <span class="settings-dir-path" title={dir}>{dir}</span>
-              <button class="modal-btn" onclick={() => removeFontDir(dir)}>移除</button>
-            </div>
-          {/each}
-          <div class="settings-dir-actions">
-            <button class="modal-btn" onclick={addFontDir} disabled={fontsLoading}>
-              添加字体目录…
-            </button>
-            {#if fontsLoading}
-              <span class="settings-hint">正在读取字体…</span>
-            {:else if availableFonts.length > 0}
-              <span class="settings-hint">可用字体族 {availableFonts.length} 个</span>
-            {/if}
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="modal-btn primary" onclick={saveSettings}>保存</button>
-          <button class="modal-btn" onclick={closeSettings}>关闭</button>
-        </div>
-      </div>
-    </div>
+    <SettingsDialog
+      bind:this={settingsDialogRef}
+      bind:restoreSession={settingsRestoreSession}
+      bind:autoCheckUpdates={settingsAutoCheckUpdates}
+      bind:prefixEnabled={settingsPrefixEnabled}
+      bind:prefixCode={settingsPrefixCode}
+      bind:chineseFont={settingsChineseFont}
+      bind:fontDirs={settingsFontDirs}
+      availableFonts={availableFonts}
+      fontsLoading={fontsLoading}
+      onAddFontDir={addFontDir}
+      onRemoveFontDir={removeFontDir}
+      onSave={saveSettings}
+      onClose={closeSettings}
+    />
   {/if}
 
   {#if showUpdateDialog && updateFlow.kind !== "latest" && updateFlow.kind !== "checking"}
-    <div class="modal-overlay-static">
-      <div class="modal update-modal">
-        {#if updateFlow.kind === "available"}
-          <h3 class="modal-title">发现新版本</h3>
-          <p class="modal-text">
-            当前 v{updateFlow.currentVersion} → 最新 v{updateFlow.version}
-          </p>
-          {#if updateFlow.notes}
-            <!-- 更新说明是 CHANGELOG 的 Markdown 原文（见 generate-latest-json.mjs）：
-                 交给 update-notes.ts 渲染成受控子集的安全 HTML，别再退回 <pre> 显示原文 -->
-            <div class="update-notes">{@html renderUpdateNotes(updateFlow.notes)}</div>
-          {/if}
-          <p class="modal-text update-hint">
-            下载并安装后应用会自动重启；安装包有签名校验，来源不对会被拒绝。
-          </p>
-          <div class="modal-actions">
-            <button class="modal-btn primary" onclick={startUpdateInstall}>下载并安装</button>
-            <!-- 「稍后」= 用户选择不更新：此后自动检查只更新状态栏、不再弹窗（见 dismissUpdatePrompt） -->
-            <button class="modal-btn" onclick={dismissUpdatePrompt}>稍后</button>
-          </div>
-        {:else if updateFlow.kind === "downloading"}
-          <h3 class="modal-title">正在下载更新 v{updateFlow.version}</h3>
-          <div class="update-progress">
-            <div
-              class="update-progress-fill"
-              style="width: {updateFlow.progress.percent ?? 0}%"
-            ></div>
-          </div>
-          <p class="modal-text">{formatProgress(updateFlow.progress)}</p>
-          <div class="modal-actions">
-            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>
-              后台继续下载
-            </button>
-          </div>
-        {:else if updateFlow.kind === "installing"}
-          <h3 class="modal-title">更新已就绪</h3>
-          <p class="modal-text">
-            应用即将退出并安装 v{updateFlow.version}，安装完成后会自动重新打开。
-          </p>
-          <p class="modal-text update-hint">有未保存的修改请先返回保存（安装期间窗口会关闭）。</p>
-          <div class="modal-actions">
-            <!-- Windows 上安装器会自己把应用拉起来；留个关闭按钮是为了非 Windows
-                 （安装完不退出的平台）不会被一个没有按钮的弹窗卡住 -->
-            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>关闭</button>
-          </div>
-        {:else if updateFlow.kind === "error"}
-          <h3 class="modal-title">更新失败</h3>
-          <p class="modal-text">{updateFlow.message}</p>
-          <div class="modal-actions">
-            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>关闭</button>
-            <button class="modal-btn primary" onclick={() => checkUpdates(true)}>重试</button>
-          </div>
-        {/if}
-      </div>
-    </div>
+    <UpdateDialog
+      flow={updateFlow}
+      onInstall={startUpdateInstall}
+      onDismiss={dismissUpdatePrompt}
+      onClose={() => (showUpdateDialog = false)}
+      onRetry={() => checkUpdates(true)}
+    />
   {/if}
 
   {#if contextMenu}
@@ -2970,129 +2819,6 @@
     background: var(--bg-pane);
     border-bottom: 1px solid var(--border);
     user-select: none;
-  }
-
-  .modal-overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0, 0, 0, 0.45);
-    border: none;
-    padding: 0;
-    cursor: default;
-  }
-
-  .app.light .modal-overlay {
-    background: rgba(255, 255, 255, 0.55);
-  }
-
-  /* 弹窗（关于 / 设置 / 更新 / 未保存确认）：**固定浅色面板**，做法见 `:root` 的 --panel-*。
-     就地重绑主题变量 ⇒ 弹窗里的标题（--accent）、正文（--fg）、按钮与输入框（--bg-pane/--border）、
-     更新说明（--fg-dim）全都自动跟着变，不用逐个改。 */
-  .modal {
-    --bg-pane: var(--panel-soft-bg);
-    --bg-toolbar: var(--panel-bg);
-    --border: var(--panel-border);
-    --fg: var(--panel-fg);
-    --fg-dim: var(--panel-fg-dim);
-    --accent: var(--panel-accent);
-    min-width: 320px;
-    background: var(--panel-bg);
-    border: 1px solid var(--panel-border);
-    border-radius: 8px;
-    box-shadow: var(--panel-shadow);
-    color: var(--panel-fg); /* 见 :root 那段：不写这条就等于白底 + 深色主题的浅灰字 */
-    padding: 20px 24px;
-  }
-
-  .modal-title {
-    margin: 0 0 8px;
-    color: var(--accent);
-  }
-
-  .modal-text {
-    margin: 4px 0;
-    font-size: 13px;
-    color: var(--fg);
-  }
-
-  .modal-close {
-    display: inline-block;
-    margin-top: 12px;
-    padding: 6px 18px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-pane);
-    color: var(--fg);
-    font-size: 13px;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .modal-close:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  /* 关于弹窗：正文长一点，限宽换行才好看（其余弹窗是标签 + 输入框，不需要） */
-  .about-modal {
-    max-width: 460px;
-    line-height: 1.7;
-  }
-
-  .about-note {
-    font-size: 12px;
-    color: var(--fg-dim);
-  }
-
-  /* 关闭确认弹窗（纯静态遮罩：不响应点击，必须选择按钮） */
-  .modal-overlay-static {
-    position: fixed;
-    inset: 0;
-    z-index: 200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0, 0, 0, 0.45);
-  }
-
-  .app.light .modal-overlay-static {
-    background: rgba(255, 255, 255, 0.55);
-  }
-
-  .modal-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 16px;
-    justify-content: flex-end;
-  }
-
-  .modal-btn {
-    padding: 6px 18px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-pane);
-    color: var(--fg);
-    font-size: 13px;
-    cursor: pointer;
-  }
-
-  .modal-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .modal-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #ffffff;
-  }
-
-  .modal-btn.primary:hover {
-    opacity: 0.9;
   }
 
   .panes {
@@ -3250,53 +2976,6 @@
   }
 
   /* 设置弹窗里的字体项：下拉与目录列表 */
-  .settings-row-font {
-    justify-content: space-between;
-    cursor: default;
-  }
-  .settings-select {
-    max-width: 260px;
-    padding: 4px 6px;
-    background: var(--bg-pane);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--fg);
-    font-size: 13px;
-  }
-  .settings-block {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin: 10px 0 4px;
-  }
-  .settings-block-title {
-    color: var(--fg-dim);
-    font-size: 12px;
-  }
-  .settings-hint {
-    margin: 2px 0;
-    color: var(--fg-dim);
-    font-size: 12px;
-  }
-  .settings-dir {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .settings-dir-path {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: 12px;
-  }
-  .settings-dir-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
   .preview-body {
     display: flex;
     flex-direction: column;
@@ -3390,49 +3069,6 @@
   }
 
   /* 设置弹窗 */
-  .settings-modal {
-    width: 520px;
-    max-width: 90vw;
-  }
-
-  .settings-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 10px 0 4px;
-    color: var(--fg);
-    font-size: 13px;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .settings-row input[type="checkbox"] {
-    accent-color: var(--accent);
-    width: 15px;
-    height: 15px;
-  }
-
-  .settings-textarea {
-    width: 100%;
-    min-height: 160px;
-    margin-top: 8px;
-    padding: 8px 10px;
-    background: var(--bg-pane);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--fg);
-    font-family: Consolas, "Cascadia Code", "Courier New", monospace;
-    font-size: 13px;
-    line-height: 1.5;
-    resize: vertical;
-    box-sizing: border-box;
-  }
-
-  .settings-textarea:focus {
-    outline: none;
-    border-color: var(--accent);
-  }
-
   /* 错误徽标容器：Popover 的定位锚点（徽标 + 浮层同一容器） */
   .error-badge-wrap {
     position: relative;
@@ -3633,86 +3269,4 @@
 
   /* 更新弹窗：说明可能很长，限宽 + 内部滚动，不把弹窗撑到屏幕外。
      内容是 update-notes.ts 渲染的受控 HTML（标题/列表/粗体/行内代码），不是 <pre> 原文 */
-  .update-modal {
-    max-width: 560px;
-  }
-
-  .update-notes {
-    margin: 8px 0 0;
-    padding: 8px 12px;
-    max-height: 260px;
-    overflow-y: auto;
-    background: var(--bg-pane);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--fg);
-    font-size: 12.5px;
-    line-height: 1.7;
-    word-break: break-word;
-  }
-
-  .update-notes :global(h4),
-  .update-notes :global(h5) {
-    margin: 10px 0 4px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--fg);
-  }
-
-  /* 第一节的小标题不需要上边距，免得贴着一片空白 */
-  .update-notes :global(:first-child) {
-    margin-top: 0;
-  }
-
-  .update-notes :global(p) {
-    margin: 0 0 6px;
-  }
-
-  .update-notes :global(ul),
-  .update-notes :global(ol) {
-    margin: 0 0 6px;
-    padding-left: 20px;
-  }
-
-  .update-notes :global(li) {
-    margin: 2px 0;
-  }
-
-  .update-notes :global(strong) {
-    font-weight: 600;
-  }
-
-  .update-notes :global(code) {
-    padding: 1px 4px;
-    border-radius: 3px;
-    background: var(--bg-hover, rgba(128, 128, 128, 0.16));
-    font-family: var(--mono-font, ui-monospace, monospace);
-    font-size: 11.5px;
-  }
-
-  .update-notes :global(hr) {
-    margin: 8px 0;
-    border: none;
-    border-top: 1px solid var(--border);
-  }
-
-  .update-hint {
-    color: var(--fg-dim);
-    font-size: 12px;
-  }
-
-  .update-progress {
-    height: 6px;
-    margin: 12px 0 6px;
-    border-radius: 3px;
-    background: var(--bg-pane);
-    border: 1px solid var(--border);
-    overflow: hidden;
-  }
-
-  .update-progress-fill {
-    height: 100%;
-    background: var(--accent);
-    transition: width 0.2s linear; /* 进度回调是分片的，平滑一点免得跳 */
-  }
 </style>
