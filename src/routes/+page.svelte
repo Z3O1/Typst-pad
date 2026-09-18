@@ -23,7 +23,6 @@
   import { clampHitOffset } from "$lib/block-hit";
   import type { Block } from "$lib/block-plan";
   import { buildFontFamilies, FONT_CHOICE_DEFAULT, normalizeFontDirs } from "$lib/font-settings";
-  import { describeCompileWarning } from "$lib/font-warnings";
   import type { MathRequest } from "$lib/live-preview";
   import type { WriteCommand } from "$lib/write-commands";
   import {
@@ -63,7 +62,6 @@
   import { clearState } from "$lib/persistence";
   import {
     formatErrorLoc,
-    formatCompileFailMessage,
     hasErrorToShow,
     isErrorLineInPrefix,
     prefixLineCharOffset,
@@ -87,6 +85,7 @@
     diagnosticListTitle,
     truncateStatus,
   } from "$lib/status-view";
+  import { reduceCompileStatus, type CompileStatusSource } from "$lib/compile-status";
   import { isBenignScriptError, scriptErrorMessage, scriptErrorStatus } from "$lib/script-errors";
   import { copyPlainText } from "$lib/clipboard";
   import { mark, reportStartup } from "$lib/startup-timing";
@@ -1733,6 +1732,25 @@
     }, 250);
   }
 
+  /**
+   * 把编译结果这份派生状态落到页面（组装在 compile-status.ts，有单测）：
+   * 状态栏文案、错误/警告计数、波浪线、字符数。
+   * **成功才动页数与字符数**——失败时保留上一次成功预览（两条编译路径共用这一条语义）。
+   */
+  function applyCompileStatus(result: CompileStatusSource, docLength: number) {
+    const patch = reduceCompileStatus(result, docLength);
+    editorDiagnostics = patch.editorDiagnostics;
+    errorCount = patch.errorCount;
+    compileWarnings = patch.compileWarnings;
+    lastNonPosError = patch.lastNonPosError;
+    statusText = patch.statusText;
+    if (patch.ok) {
+      pageCount = patch.pageCount;
+      charCount = patch.charCount;
+      previewStatus = "ready";
+    }
+  }
+
   async function runCompile() {
     if (compileSeq === 0) mark("compile-request");
     const mySeq = ++compileSeq;
@@ -1813,35 +1831,13 @@
       previewHost.innerHTML = result.svg;
       previewPageWidthUsed = requestedPreviewWidthPt; // 本次产物的请求页宽（0 = 没请求重排）
       applyPreviewScale(); // 新产物注入后按当前容器宽度重算画布宽度
-      pageCount = result.pageCount;
-      previewStatus = "ready";
-      editorDiagnostics = [];
-      errorCount = 0; // 编译成功：错误徽标归零（与状态栏文本同源）
-      lastNonPosError = null; // 编译成功：无非定位错误
-      charCount = doc.length;
-      // 编译警告（典型：unknown font family）必须可见——typst 对写错的字体族名只发 warning
-      // 然后静默改用其他字体，不显示出来用户只会看到"改了字体没用"（见 font-warnings.ts）
-      compileWarnings = result.warnings ?? [];
-      statusText =
-        compileWarnings.length > 0
-          ? truncateStatus(`警告：${describeCompileWarning(compileWarnings[0].message)}`)
-          : "就绪";
+      applyCompileStatus(result, doc.length);
       // 调试日志：编译结果摘要（ok/页数/耗时），排查编译链路时对照 compile-diagnostics
       dbg.log("compile", `ok pages:${result.pageCount} t:${(performance.now() - t0).toFixed(1)}ms`);
     } else {
       // 编译错误：保留最后一次成功预览（不置 error、不隐藏预览、不显示错误面板），
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
-      editorDiagnostics = result.errors;
-      errorCount = result.errors.length; // 与状态栏文本「编译错误：N 处」同源
-      compileWarnings = []; // 编译失败时 Rust 不返回 warnings（错误优先，避免两套提示打架）
-      // 非定位错误（如包不存在 / 访问模型异常）单独记录，供徽标弹窗展示
-      // （定位错误存在时与第一条同源，弹窗内不重复展示）
-      lastNonPosError = result.errors.length === 0 ? result.error : null;
-      // 非定位错误（如包不存在 / 访问模型异常）必须可见，不再被吞掉
-      statusText =
-        result.errors.length === 0 && result.error
-          ? formatCompileFailMessage(0, result.error)
-          : `编译错误：${result.errors.length} 处`;
+      applyCompileStatus(result, doc.length);
       // 调试日志：编译失败摘要（错误数/耗时），错误详情见 compile-diagnostics
       dbg.log("compile", `fail errors:${result.errors.length} t:${(performance.now() - t0).toFixed(1)}ms`);
     }
@@ -1876,17 +1872,7 @@
           `切片窗口：新渲 ${result.blocks.filter((b) => b.svg).length} / 沿用 ${carried.carried} / 待渲 ${carried.missing}`,
         );
       }
-      pageCount = result.pageCount;
-      previewStatus = "ready";
-      editorDiagnostics = [];
-      errorCount = 0;
-      lastNonPosError = null;
-      charCount = doc.length;
-      compileWarnings = result.warnings ?? [];
-      statusText =
-        compileWarnings.length > 0
-          ? truncateStatus(`警告：${describeCompileWarning(compileWarnings[0].message)}`)
-          : "就绪";
+      applyCompileStatus(result, doc.length);
       dbg.log(
         "compile",
         `blocks ok blocks:${result.blocks.length} 页宽:${result.pageWidthPt.toFixed(1)}pt t:${(
@@ -1907,14 +1893,7 @@
     writingBlocksDoc = doc;
     writingBlocksExact = false;
     blocksVersion++;
-    editorDiagnostics = result.errors;
-    errorCount = result.errors.length;
-    compileWarnings = [];
-    lastNonPosError = result.errors.length === 0 ? result.error : null;
-    statusText =
-      result.errors.length === 0 && result.error
-        ? formatCompileFailMessage(0, result.error)
-        : `编译错误：${result.errors.length} 处`;
+    applyCompileStatus(result, doc.length);
     dbg.log(
       "compile",
       `blocks fail errors:${result.errors.length} 保留切片:${remap.kept}/${remap.blocks.length} t:${(
