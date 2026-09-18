@@ -362,7 +362,14 @@ class BlockCropWidget extends WidgetType {
       a.style.top = `${(link.yPt / block.heightPt) * 100}%`;
       a.style.width = `${(link.widthPt / block.widthPt) * 100}%`;
       a.style.height = `${(link.heightPt / block.heightPt) * 100}%`;
-      a.addEventListener("mousedown", (e) => e.stopPropagation());
+      a.addEventListener("mousedown", (e) => {
+        e.stopPropagation();
+        // **必须 preventDefault**：不拦的话浏览器会把这个 mousedown 当成"聚焦到链接"，
+        // 编辑区随之失焦 —— 用户点完链接回来打字时**一个字都打不进去**
+        // （Windows WebView2 / Chromium 上都这样；点链接是"打开外部"语义，不该夺走编辑焦点）。
+        // 链接本身仍然可点：打开动作在下面的 click 里走 onOpenLink。
+        e.preventDefault();
+      });
       a.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -921,6 +928,15 @@ export function livePreview(opts: LivePreviewOptions): Extension {
   class CropSelection {
     private anchor: number | null = null;
     private head: number | null = null;
+    /**
+     * **Shift 扩选的固定端**（null = 本次按下不是扩选）。
+     *
+     * CM 的默认鼠标选择里 Shift+点击 = "从原选区（空选区时是光标）扩到点处"，而这里过去
+     * 一律 `EditorSelection.single(anchor, head)`：锚点是**按下那一刻解析出来的位置**，
+     * 于是 Shift+点击 / Shift+拖选切片不但没有扩选，反而把原选区**收掉**了
+     * （PR #60 审查的第 6 条；验收当时只覆盖了 Shift+方向键）。
+     */
+    private readonly extendFrom: number | null;
     private moved = false;
     private busy = false;
     /** 松手那次解析可能撞上"上一次解析还没回来" —— 记下"要收尾"，等这一轮跑完照样收尾 */
@@ -936,6 +952,10 @@ export function livePreview(opts: LivePreviewOptions): Extension {
     ) {
       this.start = { x: event.clientX, y: event.clientY };
       this.last = { ...this.start };
+      // 与 CM 默认选择同一口径：扩选的固定端是"原选区的锚点"，原选区为空时就是光标
+      // （那种情况下 anchor == head，等于从光标处扩起）。
+      const current = view.state.selection.main;
+      this.extendFrom = event.shiftKey ? (current.empty ? current.head : current.anchor) : null;
       /**
        * 松手要自己听：CM 的 `MouseSelection.up()` 只在 `dragging == null` 时才重新问 style，
        * 而且问的是**上一次 move 事件**（不是 mouseup）—— 靠 `get()` 是拿不到"松手了"这个信号的。
@@ -992,9 +1012,9 @@ export function livePreview(opts: LivePreviewOptions): Extension {
       if (this.moved) return this.view.state.selection;
       // 注意用 `single` 而不是 `range`：`EditorSelection.range()` 返回的是 **SelectionRange**
       // （没有 ranges/main，CM 的 MouseSelection 会拿它当 EditorSelection 用 → 读 undefined 崩掉）
-      return extend && !current.empty
-        ? EditorSelection.create([current.extend(this.head ?? anchor)])
-        : EditorSelection.single(anchor, this.head ?? anchor);
+      // 扩选：固定端是 extendFrom（= 原选区那一端），活动端跟着指针 —— 与 CM 默认一致
+      const from = this.extendFrom ?? anchor;
+      return EditorSelection.single(from, this.head ?? from);
     }
 
     /** 解析当前指针位置（同一时刻只跑一次；期间指针又动了就再跑一轮） */
@@ -1023,11 +1043,16 @@ export function livePreview(opts: LivePreviewOptions): Extension {
 
     /** 松手（或还没拖动时的单击）：把选区真正落下去 —— 版面这一步会变（相关块展开成源码） */
     private commit(point: { x: number; y: number }): void {
-      if (this.anchor === null || this.head === null) return;
+      if (this.head === null) return;
+      // 扩选时锚点来自原选区，按下那一刻解析出来的位置不作数（见 extendFrom 的说明）；
+      // 非扩选且没拖动过 = 普通单击 → 光标落在点处。
+      const from = this.extendFrom ?? this.anchor;
+      if (from === null) return;
       this.clearSweep();
-      const selection = this.moved
-        ? EditorSelection.single(this.anchor, this.head)
-        : EditorSelection.single(this.head, this.head);
+      const selection =
+        this.moved || this.extendFrom !== null
+          ? EditorSelection.single(from, this.head)
+          : EditorSelection.single(this.head, this.head);
       // 只点不动时把被点的字钉在指针那一带（与阶段 2 的单击行为完全一致）
       const pin = this.moved ? null : anchorPosEffect(this.view, this.head, point.y, "center");
       try {

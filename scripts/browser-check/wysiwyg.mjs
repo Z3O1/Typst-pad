@@ -3578,7 +3578,7 @@ await c.send("Emulation.setDeviceMetricsOverride", {
 });
 await new Promise((r) => setTimeout(r, 400));
 
-console.log("43) 选中整个公式不展开（用户要求「选中整个公式请写不展开」）：完整盖住 → 保持渲染 + 淡色底");
+console.log("31b) 选中整个公式不展开（用户要求「选中整个公式请不展开」）：完整盖住 → 保持渲染 + 淡色底");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });

@@ -49,7 +49,7 @@
 | Typsastra | 16.8 MB | MIT | 复杂文字（高棉/老挝）优先；驱动 Tinymist |
 | Katvan | 50.8 MB | GPL-3.0 | Qt6，RTL/BiDi 支持最好；内建 Windows 拼写检查 |
 | Typwriter | 41.7 MB | — | 带 typstyle 格式化 + Harper 语法检查 |
-| **Typst-pad（本仓库）** | — | MIT | README 首句即「**非所见即所得**」 |
+| **Typst-pad（本仓库）** | — | MIT | 写作模式**已经是**块级渲染的「渲染表面 + 源码透镜」（非光标块是引擎切片、光标块展开源码，仿 Typora；**不再**是"非所见即所得"，见 `docs/文档模式渲染保真-调研.md`）；源代码模式仍是分栏源码 + 整页预览 |
 
 ### 2.3 已死 / 用不了
 
@@ -183,7 +183,7 @@ http://localhost:1420/?browserdev=1
 **实测修正了调研中的三处设想**：
 
 1. **基线不能从 typst 的 Page 帧读**：`page.frame.baseline()` 实测返回盒底（`has_baseline=false`）。改为「两页探针法」——第 2 页放同一公式 + 挂在基线下 100pt 的零宽盒，页高 = ascent + 100pt。外层 `#box(...)` 不可省，否则行间公式的探针会另起段落（ascent 由 11.75pt 变 31.67pt）。
-2. **公式编译无需单独设计缩放**：把公式按编辑器字号（14px = 10.5pt）编译，SVG 的 pt 与编辑器 CSS 的 pt 1:1，直接写 `width/height: Npt` + `vertical-align: -(height-baseline)pt`。
+2. **公式编译无需单独设计缩放**：把公式按编辑器字号（14px = 10.5pt）编译，SVG 的 pt 与编辑器 CSS 的 pt 1:1，直接写 `width/height: Npt` + `vertical-align: -(height-baseline)pt`。（**2026-09-15 起**：写作模式的公式字号跟随文档实际字号 —— Rust 侧 `compile_blocks` 的 `textPt` → `--write-doc-px`，源码模式的兜底值仍是 14px = 10.5pt。）
 3. **暗色主题要反色**：typst 产物是黑字透明底，深色编辑器里会看不见 → widget 整体 `filter: invert(1)`（不能用 `&dark` 选择器，`EditorView.theme` 不支持，实测会让页面整页渲染成 500）。
 
 **第二轮补齐**（同一形态的延伸）：
@@ -198,6 +198,6 @@ http://localhost:1420/?browserdev=1
 - **围栏代码块**：```` ``` ```` 整段（含围栏行）替换为等宽代码块 widget，围栏自动收起，代码按 typst 语义剔除公共缩进；光标进入即整段回到源码。纯文本展示，不需要编译。
 - **鲁棒性网**：`typst-scan-fuzz.test.ts` 用 120 份固定种子随机文档 + 15 组病态输入（未闭合 `$`、超长围栏、全符号、嵌套方括号等）断言三个扫描器不抛异常、区间有序不越界不重叠、区域无缝覆盖全文——这些扫描器**每次按键**都跑在任意用户文本上。
 
-**仍未覆盖**（保持源码显示，可后续增量）：表格/图片/引用块等块级结构；多行或含内容块的 `#let` 定义不参与公式上下文。
+**仍未覆盖**（保持源码显示，可后续增量）：多行或含内容块的 `#let` 定义不参与公式上下文；写作模式的块级结构（表格/图片/引用块）**后来由块级切片覆盖**（表格仍按整块切、切片上没有文字层，见 `docs/文档模式渲染保真-调研.md`），本文写的是加块级渲染**之前**的状态。
 
-验证：`cargo test compile_math`（真实排版与基线测量）、`npm test`（区域扫描/标记拆解/jsdom 装饰行为）、`node scripts/browser-check/wysiwyg.mjs`（真实浏览器 + 真实输入 + 真实选区的 23 项验收与截图）。
+验证：`cargo test compile_math`（真实排版与基线测量）、`npm test`（区域扫描/标记拆解/jsdom 装饰行为）、`node scripts/browser-check/wysiwyg.mjs`（真实浏览器 + 真实输入 + 真实选区的 23 项验收与截图；**这套验收后来一直在长，现在已经是 290 项**）。

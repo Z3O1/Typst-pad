@@ -1490,7 +1490,10 @@
     // 让公式先拿到锁 —— 否则"打完公式半天不显示"（实测慢编译桩下，版面对齐要等 338ms）。
     if (viewMode === "write" && writeCompileTimer !== undefined) {
       clearTimeout(writeCompileTimer);
-      writeCompileTimer = setTimeout(() => void runCompile(), MATH_COMPILE_HEADSTART_MS);
+      writeCompileTimer = setTimeout(() => {
+        writeCompileTimer = undefined;
+        void runCompile();
+      }, MATH_COMPILE_HEADSTART_MS);
     }
     mathTimer = setTimeout(drainMathQueue, 120);
   }
@@ -1633,6 +1636,12 @@
 
   /** 写作模式"打字期间不编译"的去抖时长（见 scheduleCompile） */
   const WRITE_COMPILE_DEBOUNCE_MS = 150;
+  /**
+   * 挂着的写作模式编译定时器（去抖）。
+   * **跑完要置回 undefined**：它同时被当成"有没有挂着的编译"的判据（见 handleMathRequest：
+   * 有挂着的块编译才把公式优先级提前）。不置回的话，每一个公式请求都会在 240ms 后再排一次
+   * 整篇编译 —— 公式多的文档接近双倍编译量（PR #60 审查的第 8 条）。
+   */
   let writeCompileTimer: ReturnType<typeof setTimeout> | undefined;
 
   /**
@@ -1678,7 +1687,12 @@
   function scheduleCompile() {
     if (viewMode === "write") {
       clearTimeout(writeCompileTimer);
-      writeCompileTimer = setTimeout(() => void runCompile(), WRITE_COMPILE_DEBOUNCE_MS);
+      // **跑完必须置回 undefined**（`let` 声明处有说明）：这个变量同时是"有没有挂着的编译"
+      // 的判据 —— handleMathRequest 只在有挂着的编译时才把块编译往后推。
+      writeCompileTimer = setTimeout(() => {
+        writeCompileTimer = undefined;
+        void runCompile();
+      }, WRITE_COMPILE_DEBOUNCE_MS);
       return;
     }
     runCompile();

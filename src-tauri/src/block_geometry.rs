@@ -352,10 +352,14 @@ fn glyph_range(
 ) -> Option<Range<usize>> {
     let base = world.range(glyph.span.0)?;
     let start = (base.start + usize::from(glyph.span.1)).min(base.end);
+    // 取不到这一段的字符串时用"这个字符的 UTF-8 长度"兜底，**不是写死 1**：
+    // 写死 1 会把 CJK（3 字节）/ emoji（4 字节）切在半截上，落点就会落在字符中间
+    // （PR #60 审查的第 10 条）。
     let len = text
         .text
         .get(glyph.range())
         .map(|s| s.len())
+        .or_else(|| text.text.get(start..).and_then(|s| s.chars().next()).map(char::len_utf8))
         .unwrap_or(1);
     let end = (start + len).min(base.end);
     Some(start..end.max(start))
@@ -650,9 +654,12 @@ pub fn compile_blocks(
     // 2) 按 (页, y) 排序后，用相邻块的"中点"切带：相邻两块各自分到一半间距，
     //    于是各块高度之和 = 排版里的纵向总高度，按顺序摞起来就还原版式。
     let mut order: Vec<usize> = (0..geoms.len()).filter(|i| geoms[*i].is_some()).collect();
+    // `total_cmp` 而不是 `partial_cmp().unwrap()`：坐标理论上不会是 NaN，但真出现 NaN 时
+    // `unwrap()` 会 **panic 在整个编译命令里**（渲染表面直接没了），而 total_cmp 只是排序
+    // 顺序退化 —— 这是"宁可丑、不可崩"的那一类（PR #60 审查的第 10 条）。
     order.sort_by(|a, b| {
         let (ga, gb) = (geoms[*a].as_ref().unwrap(), geoms[*b].as_ref().unwrap());
-        (ga.page, ga.top).partial_cmp(&(gb.page, gb.top)).unwrap()
+        ga.page.cmp(&gb.page).then(ga.top.total_cmp(&gb.top))
     });
 
     // 2b) **越界夹紧**：块自己的纵向区间不许越过它在 y 序里的下一个块的顶。
@@ -1042,7 +1049,7 @@ pub fn probe_blocks(
 
     // 连续性：只对"找得到几何"的块按 (page, y) 排序后看相邻块之间的空隙
     let mut found: Vec<&ProbeBlock> = out_blocks.iter().filter(|b| b.found).collect();
-    found.sort_by(|a, b| (a.pages, a.y).partial_cmp(&(b.pages, b.y)).unwrap());
+    found.sort_by(|a, b| a.pages.cmp(&b.pages).then(a.y.total_cmp(&b.y)));
     let mut min_gap = f64::INFINITY;
     let mut max_gap = f64::NEG_INFINITY;
     let mut negative = 0usize;
@@ -1425,6 +1432,70 @@ mod tests {
             None,
             "没有这一页 → None"
         );
+    }
+
+    /// **脚注文档的裁剪带：一块都不许丢、也不许被压扁**（PR #60 审查的第 11 条：
+    /// 这条回归当年只在 `#[ignore]` 的夹具导出里出现过，没有常驻锁）。
+    ///
+    /// 背景（CLAUDE.md 里那条红线的由来）：typst 允许把内容排到远处（脚注正文在页底），
+    /// 而块的墨迹包围盒是**并集** —— 带脚注的段落会得到一个一直伸到页底的高盒子，
+    /// 把后面几块的中点切带压扁：实测代码块被压到 ≤0.5pt（切片被丢弃 → 回退成源码，
+    /// 而它的内容又被那张超长切片又画了一遍，截图里代码块出现两次）。
+    /// 现在 `compile_blocks` 的第 2b 步把每块的 bottom 夹到 y 序下一个块的顶。
+    #[test]
+    fn footnote_doc_keeps_every_band_and_stays_contiguous() {
+        const COLUMN_PT: f64 = 371.25;
+        let doc = "= 结构与脚注\n\n                   正文里有一个脚注#footnote[脚注正文会被排到页底]，这是写作模式的已知不足点。\n\n\n                   ```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n                   #table(columns: 2, [甲], [乙], [1], [2])\n\n                   表格之后的段落。\n";
+        let out = compile_blocks(
+            doc.to_string(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
+        // ① 一块都不许丢：每块都找得到几何，而且真的有切片（空 SVG 会被前端当成"不可渲染"）
+        let dropped: Vec<(usize, f64, bool)> = out
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.found || b.svg.is_empty())
+            .map(|(i, b)| (i, b.height_pt, b.found))
+            .collect();
+        assert!(dropped.is_empty(), "不该有块被丢掉（索引/带高/找到没）: {dropped:?}");
+        // ② 一块都不许被压扁（最小带 0.75pt）
+        let squashed: Vec<(usize, f64)> = out
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.height_pt < 0.75)
+            .map(|(i, b)| (i, b.height_pt))
+            .collect();
+        assert!(squashed.is_empty(), "裁剪带被压扁了（脚注段吞掉了后面的块？）: {squashed:?}");
+        // ③ **首尾相接**：同页相邻块 i 的底 == 块 i+1 的顶（"切片摞起来 == 原版式"的来源，
+        //    也是夹紧生效的判据 —— 不夹紧时脚注段的底会远超下一块的顶）
+        for w in out.blocks.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            if a.page != b.page {
+                continue;
+            }
+            let a_bottom = a.y_pt + a.height_pt;
+            assert!(
+                a_bottom <= b.y_pt + 0.01,
+                "相邻切片必须首尾相接（不许重叠）：块 {} 底 {a_bottom:.2} > 块顶 {:.2}",
+                a.start,
+                b.y_pt
+            );
+            assert!(
+                (a_bottom - b.y_pt).abs() < 0.51,
+                "相邻切片之间不该有空隙：块 {} 底 {a_bottom:.2} vs 块顶 {:.2}",
+                a.start,
+                b.y_pt
+            );
+        }
     }
 
     /// **几何编号对不上就拒绝命中**（PR #60 审查的第 4 条：多窗口串味）。

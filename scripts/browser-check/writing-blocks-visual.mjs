@@ -219,6 +219,23 @@ for (const fx of fixtures) {
         JSON.stringify({ opened }),
       );
       check(`${fx.name}：点热区不会挪动光标`, headAfter === headBefore, JSON.stringify({ headBefore, headAfter }));
+      // **点完链接还得能打字**：热区的 mousedown 不 preventDefault 的话，浏览器会把焦点给这个
+      // `<a>`，编辑区随之失焦（Windows WebView2 / Chromium 上都这样）——用户点完链接回来
+      // 一个字都打不进去（PR #60 审查的第 6 条）。所以断言焦点仍在编辑区里。
+      // 判据必须是"焦点就在 `.cm-content` 这个 contenteditable 上"，**不能**只判"焦点在
+      // 编辑区里面"—— 热区 `<a>` 本身就是 `.cm-content` 的后代，永远满足 contains()，
+      // 那条判据等于恒真（实测：把 preventDefault 去掉它照样绿）。
+      const focused = await c.evaluate(`(() => {
+        const ae = document.activeElement;
+        const content = document.querySelector(".cm-content");
+        return { isContent: !!ae && ae === content,
+                 tag: ae ? ae.tagName : null, cls: ae ? String(ae.className) : null };
+      })()`);
+      check(
+        `${fx.name}：点热区之后焦点仍在编辑内容元素上（不然点完链接打不进字）`,
+        focused.isContent === true,
+        JSON.stringify(focused),
+      );
       await c.evaluate(`window.__browserDevOpenUrls = []`);
     }
   }

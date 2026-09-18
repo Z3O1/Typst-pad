@@ -407,7 +407,8 @@ await new Promise((r) => setTimeout(r, 1400)); // 等窗口化补渲
 
 const midCrop = await c.evaluate(MIDDLE_CROP);
 check("视口中间找得到一张切片", midCrop !== null, JSON.stringify(midCrop));
-if (midCrop) {
+if (!midCrop) throw new Error("视口中间没有切片，这一组（点击锚定）无法进行");
+{
   // 点在切片的下半部分（横向上偏左）：光标应当落到这一块里更靠后的字符上
   const cx = Math.round(midCrop.left + midCrop.width * 0.3);
   const cyLow = Math.round(midCrop.top + midCrop.height * 0.75);
@@ -529,7 +530,11 @@ const beforeErr = await c.evaluate(CROPS);
 check("失败前：非光标块是切片", beforeErr >= 3, `实际 ${beforeErr}`);
 // 点中间那张切片 → 光标进到那一块，再插入 @err（桩据此返回"这一行有编译错误"）
 const target = await c.evaluate(MIDDLE_CROP);
-if (target) {
+// 这一段下面挂着 6 条断言（编译失败时的取舍），**不能**写成 `if (target) { ... }`：
+// 那样"没找到目标块"和"都验过了"看起来一样（PR #60 审查的第 12 条）。
+check("编译失败这组的前提：视口中间找得到目标切片", !!target, JSON.stringify(target));
+if (!target) throw new Error("中间没有切片，编译失败那组无法进行");
+{
   await c.click(Math.round(target.left + target.width * 0.4), Math.round(target.top + target.height * 0.5));
   await new Promise((r) => setTimeout(r, 350));
   await c.type("@err");
@@ -556,18 +561,20 @@ if (target) {
   }
   await new Promise((r) => setTimeout(r, 800));
   const other = await c.evaluate(MIDDLE_CROP);
-  if (other) {
-    await c.click(Math.round(other.left + other.width * 0.4), Math.round(other.top + other.height * 0.5));
-    await new Promise((r) => setTimeout(r, 500));
-    const cropFromsFixed = await c.evaluate(
-      `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
-    );
-    check(
-      "改好之后那一块重新变回切片（编译恢复）",
-      cropFromsFixed.includes(target.from),
-      JSON.stringify({ cropFromsFixed, from: target.from }),
-    );
-  }
+  // **别写成 `if (other) {...}`**：那样"中间那块根本不在视口里"与"验过了"看起来一样，
+  // 整条断言静默消失（PR #60 审查的第 12 条）。前置断言代替静默跳过。
+  check("编译恢复后中间那块仍在视口里（下面那条断言的前提）", !!other, JSON.stringify(other));
+  if (!other) throw new Error("中间块不在视口里，第 11 组的恢复断言无法进行");
+  await c.click(Math.round(other.left + other.width * 0.4), Math.round(other.top + other.height * 0.5));
+  await new Promise((r) => setTimeout(r, 500));
+  const cropFromsFixed = await c.evaluate(
+    `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
+  );
+  check(
+    "改好之后那一块重新变回切片（编译恢复）",
+    cropFromsFixed.includes(target.from),
+    JSON.stringify({ cropFromsFixed, from: target.from }),
+  );
 }
 
 
@@ -987,7 +994,15 @@ const blockPoint = await c.evaluate(`(() => {
   return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 })()`);
 const rawRect = await rectOf("Raw");
-if (rawRect && blockPoint) {
+// 同上：这里原本是 `if (rawRect && blockPoint)`，一次静默吞掉下面 6 条断言
+// （PR #60 审查的第 12 条）。改成前置断言 + 断言失败即停。
+check(
+  "代码块切片在视口里（拖选跨块那一组的前提）",
+  !!rawRect && !!blockPoint,
+  JSON.stringify({ rawRect, blockPoint }),
+);
+if (!rawRect || !blockPoint) throw new Error("代码块切片不在视口里，拖选跨块那组无法进行");
+{
   await c.click(blockPoint.x, blockPoint.y); // 点进代码块 → 它展开成源码
   await new Promise((r) => setTimeout(r, 500));
   // 展开后按**真实源码行**算起止点：第一行（```rust）的左缘 → 最后一行（```）的右缘
@@ -1214,6 +1229,148 @@ check(
   !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"),
 );
 await c.screenshot(SHOT("writing-blocks-math-size"));
+
+// ---------------------------------------------------------------------------
+// 19) 汉字输入法合成（IME composition）
+// ---------------------------------------------------------------------------
+// PR #60 审查的第 5 条：`blocksVersion++` 在**每次编辑**都发生，而 Editor 里那个"重整装饰"
+// 的 $effect 没有 `view.composing` 守卫 —— 合成中途换掉 widget DOM 会把候选串/合成状态一起
+// 弄坏。修法是合成期间攒着、`compositionend` 后补一次刷新。
+// 这一组补的是**验收里从来没有过的 composition 覆盖**（在此之前一个合成事件都没发过）：
+// 用 CDP 的 `Input.imeSetComposition` / `Input.insertText` 走真实的合成 → 提交路径，
+// 断言合成文本真的进了文档、提交后编辑区照常、切片照常回来、控制台干净。
+console.log("19) 汉字输入法合成（composition）不弄坏编辑区");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 800));
+await c.click(400, 300);
+await c.selectAll();
+await c.type("第一段正文。\n\n第二段正文。\n\n第三段正文。\n");
+await c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 文档末尾
+await new Promise((r) => setTimeout(r, 500));
+
+// 合成中：拼音串 + 候选（Chrome 的 imeSetComposition = "正在合成这段文本"）
+await c.send("Input.imeSetComposition", { text: "zhong", selectionStart: 5, selectionEnd: 5 });
+await new Promise((r) => setTimeout(r, 250));
+const composing = await c.evaluate(`(() => ({
+  text: document.querySelector(".cm-content").textContent,
+  crops: document.querySelectorAll(".cm-block-crop").length,
+}))()`);
+check(
+  "合成中的文本进了编辑区（合成期间打字不会被丢掉）",
+  composing.text.includes("zhong"),
+  JSON.stringify(composing),
+);
+check(
+  "合成期间切片仍在（没有因为重建装饰把版面弄空）",
+  composing.crops >= 2,
+  JSON.stringify(composing),
+);
+
+// 提交：IME 用 insertText 落地最终文本（这里模拟选中了「中」）
+await c.send("Input.insertText", { text: "中" });
+await new Promise((r) => setTimeout(r, 700));
+const committed = await c.evaluate(`(() => ({
+  text: document.querySelector(".cm-content").textContent,
+  crops: document.querySelectorAll(".cm-block-crop").length,
+  errors: document.body.innerText.includes("脚本错误"),
+}))()`);
+check(
+  "合成提交后最终文本落进文档（`zhong` → `中`，不留拼音残留）",
+  committed.text.includes("中") && !committed.text.includes("zhong"),
+  JSON.stringify(committed.text.slice(-40)),
+);
+check(
+  "合成结束后切片照常回来（攒下的那次刷新没丢）",
+  committed.crops >= 2,
+  String(committed.crops),
+);
+check("合成这条路径不产生脚本错误", committed.errors === false, JSON.stringify(committed));
+
+// 合成之后继续正常打字（合成不该把编辑区变成只读或半死状态）
+await c.type("后续输入正常");
+await new Promise((r) => setTimeout(r, 400));
+const after = await c.evaluate(`document.querySelector(".cm-content").textContent`);
+check("合成之后继续打字照常生效", after.includes("后续输入正常"), JSON.stringify(after.slice(-30)));
+await c.screenshot(SHOT("writing-blocks-ime"));
+
+// ---------------------------------------------------------------------------
+// 20) Shift+点击切片 = **扩选**（不许把原选区收掉）
+// ---------------------------------------------------------------------------
+// PR #60 审查的第 6 条：`CropSelection.commit()` 一律 `EditorSelection.single(anchor, head)`，
+// 而锚点是"按下那一刻解析出来的位置" —— 于是 Shift+点击/Shift+拖选切片不但没扩选，
+// 反而把原选区收掉了（验收当时只覆盖了 Shift+方向键）。
+// 现在与 CM 默认同一口径：扩选的固定端 = 原选区（空选区时是光标）。
+console.log("20) Shift+点击切片 = 扩选");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+await c.click(400, 300);
+await c.selectAll();
+await c.type("第一段正文。\n\n第二段正文。\n\n第三段正文。\n\n第四段正文。\n");
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home → 第一块
+await new Promise((r) => setTimeout(r, 800));
+
+/** 视口里的前两张切片（上、下各一张） */
+const TWO_CROPS = `(() => {
+  const list = Array.from(document.querySelectorAll(".cm-block-crop"))
+    .map((el) => ({ from: Number(el.dataset.blockFrom), rect: el.getBoundingClientRect() }))
+    .filter((c) => c.from === c.from && c.rect.height > 4)
+    .sort((a, b) => a.rect.top - b.rect.top);
+  if (list.length < 2) return null;
+  const pt = (c, fx, fy) => ({ x: Math.round(c.rect.left + c.rect.width * fx), y: Math.round(c.rect.top + c.rect.height * fy) });
+  return { a: { from: list[0].from, ...pt(list[0], 0.3, 0.5) }, b: { from: list[1].from, ...pt(list[1], 0.3, 0.5) } };
+})()`;
+
+const two = await c.evaluate(TWO_CROPS);
+check("视口里至少有两张切片（Shift 扩选那组的前提）", !!two, JSON.stringify(two));
+if (!two) throw new Error("切片不足两张，Shift 扩选那组无法进行");
+const SEL = `(() => {
+  const s = document.querySelector(".cm-content").cmTile.root.view.state.selection.main;
+  return { anchor: s.anchor, head: s.head, empty: s.empty, from: s.from, to: s.to };
+})()`;
+
+// ① 先点上面那张切片：光标进到它里面（选区为空）
+await c.click(two.a.x, two.a.y);
+await new Promise((r) => setTimeout(r, 600));
+const first = await c.evaluate(SEL);
+check("点第一张切片 → 光标落在这一块里（选区为空）", first.empty === true, JSON.stringify(first));
+
+// ② Shift+点下面那张切片：应当**从原位置扩选**到这一块，而不是收掉选区
+const shiftClick = async (x, y) => {
+  await c.send("Input.dispatchMouseEvent", {
+    type: "mousePressed", x, y, button: "left", clickCount: 1, buttons: 1, modifiers: 8,
+  });
+  await c.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased", x, y, button: "left", clickCount: 1, buttons: 0, modifiers: 8,
+  });
+};
+await shiftClick(two.b.x, two.b.y);
+await new Promise((r) => setTimeout(r, 700));
+const extended = await c.evaluate(SEL);
+check(
+  "Shift+点击另一张切片 → 选区**扩**到那一段（不是收掉）",
+  extended.empty === false && extended.from <= first.head && extended.to >= first.head,
+  JSON.stringify({ first: first.head, extended }),
+);
+check(
+  "扩选的方向对：固定端仍在原来那块、活动端进到新点的那块",
+  extended.anchor === first.head && extended.head !== extended.anchor,
+  JSON.stringify(extended),
+);
+
+// ③ 再 Shift+点回上面那张：仍是扩选（不许因为"锚点被覆盖"而收起）
+await shiftClick(two.a.x, two.a.y);
+await new Promise((r) => setTimeout(r, 700));
+const back = await c.evaluate(SEL);
+check(
+  "Shift+点回原来那块仍然是非空选区（连续扩选不收起）",
+  back.empty === false,
+  JSON.stringify(back),
+);
+await c.screenshot(SHOT("writing-blocks-shift-click"));
 
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
 process.exit(process.exitCode ?? 0);

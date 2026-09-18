@@ -2,16 +2,16 @@
 
 [![CI](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml/badge.svg)](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml)
 
-仿 Typora 的 Typst 桌面编辑器：**写作模式**下是整页纸张的所见即所得编辑（公式就地排版、标记符号自动收起，无行号），**源代码模式**下是等宽代码编辑器 + 右栏整页预览。两种模式用 `Ctrl+E` 或「视图 → 源代码模式」切换（`Ctrl+/` 是注释/取消注释，见下表）。
+仿 Typora 的 Typst 桌面编辑器：**写作模式**下是整页纸张的所见即所得编辑 —— 非光标所在块整块显示成 typst 引擎自己排版的那一块切片，光标所在块展开成源码（公式与标记就地排版、符号自动收起，无行号）；**源代码模式**下是等宽代码编辑器 + 右栏整页预览。两种模式用 `Ctrl+E` 或「视图 → 源代码模式」切换（`Ctrl+/` 是注释/取消注释，见下表）。
 
 ## 两套界面
 
 | | 写作模式（默认，仿 Typora） | 源代码模式（`Ctrl+E`） |
 |---|---|---|
 | 布局 | 单栏：灰底 + 居中纸张（≤900px）+ 轻阴影 | 双栏：左源码 / 右整页预览 |
-| 正文 | 衬线（思源宋体，与预览/PDF 输出一致）、16px、行距 1.9 | 等宽 14px |
+| 正文 | 衬线，与切片/PDF 同一套打包字体（Libertinus Serif → 思源宋体 → 系统宋体兜底）；字号跟随文档实际字号（默认 11pt = 14.6667px）、行距 1.65 | 等宽 14px |
 | 行号 | 无 | 有 |
-| 内容 | 公式与标记就地排版（所见即所得） | Typst 源码原文 |
+| 内容 | 非光标块是引擎排版切片，光标所在块展开成源码（所见即所得） | Typst 源码原文 |
 | 状态栏 | 「写作」标识 + 字符数 | 「源码」标识 + 字符数 + 行列 |
 
 格式操作走**菜单 + 快捷键**（Typora 没有工具条）：「格式」菜单里有加粗 `Ctrl+B`、斜体 `Ctrl+I`、行内代码、行内公式 `Ctrl+M`、公式块 `Ctrl+Shift+M`、标题 1/2/3 `Ctrl+1/2/3`、正文 `Ctrl+0`、无序/有序列表、引用、代码块、链接 `Ctrl+K`。另外：公式定界符 `$` **自动配对**（见下），代码模式 `Alt+Z` 切换自动换行，**Ctrl+Shift+N** 新建窗口（「文件 → 新建窗口」同一入口）、**Ctrl+W** 关闭当前窗口，**`Ctrl+/`** 注释/取消注释当前行或选区（VS Code 习惯，打出 typst 的 `//`；块注释留在 `Ctrl+Shift+/`），**Esc** 关掉当前弹窗（在设置弹窗上按 Esc 等于点「关闭」，即放弃未保存的草稿）。
@@ -20,6 +20,7 @@
 
 - **所见即所得编辑**（写作模式默认开启，视图菜单可关；需要整页对照时可打开预览栏）：
   - 公式 `$x^2$` 在编辑区**就地渲染**成排版结果（由 Rust 侧 typst 逐公式编译为 SVG，按 pt 尺寸与基线对齐）；独占整行的行间公式 `$ … $`（含跨行书写）整行替换为**居中**排版式子；
+  - 非光标所在的块**整块显示成 typst 引擎自己排版的那一块**（Rust 侧 `compile_blocks` 把整篇编译结果按源块切成 SVG 切片，断词、字距、`#set`、宏与 `@preview` 包全都在切片里），光标所在块展开成源码 —— 即 Typora 的「切片 + 源码透镜」形态（细节见 `docs/文档模式渲染保真-调研.md`）；
   - 光标 / 选区进入公式或标记范围时**自动展开源码**，可直接编辑（Typora 式）；
   - 常用标记同样就地呈现：标题 `= ` 分级放大、`*粗体*`、`_斜体_`、行内 `` `代码` ``、```` ``` ```` 围栏代码块（整段渲染为等宽代码块、围栏自动收起）、无序列表 `- ` → `• `、有序列表 `+ ` → `1. `、链接 `#link("url")[文字]` 只显示文字；
   - 渲染失败或还没渲染好时**保持源码显示**，不出现空占位。
@@ -61,8 +62,9 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 
 ## 测试与 CI
 
-- 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键、自动更新的纯逻辑（`update-utils`：启动检查延迟 / 进度换算 / 错误文案）、页面级按键路由（`app-keys`：Esc / Alt+Z / Ctrl+Shift+N / Ctrl+R / Ctrl+W 的判定顺序）、公式定界符配对与退格（`auto-pair`）、回车换行的缩进继承（`auto-indent`）、界面缩放（`zoom`）、预览重排（`preview-scale`）、源码模式换行（`word-wrap`），所见即所得链路（`typst-lex` 区域扫描 / `math-ranges` 公式范围 / `markup-ranges` 标记 / `live-preview` 装饰行为）、字体设置（`font-settings` 把选中的正文字体拼成字体族列表、`font-warnings` 把编译警告翻成可行动提示）；发布脚本的测试在 `scripts/generate-latest-json.test.mjs`（更新清单的生成与校验）
-- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（231 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
+- 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键、自动更新的纯逻辑（`update-utils`：启动检查延迟 / 进度换算 / 错误文案）、页面级按键路由（`app-keys`：Esc / Alt+Z / Ctrl+Shift+N / Ctrl+R / Ctrl+W 的判定顺序）、公式定界符配对与退格（`auto-pair`）、回车换行的缩进继承（`auto-indent`）、界面缩放（`zoom`）、预览重排（`preview-scale`）、源码模式换行（`word-wrap`），所见即所得链路（`typst-lex` 区域扫描 / `math-ranges` 公式范围 / `markup-ranges` 标记 / `live-preview` 装饰行为）、写作模式块级渲染的规划与坐标换算（`block-plan` 切片覆盖与编辑重映射 / `block-hit` 点击坐标 / `block-offsets` 字节偏移 / `scroll-anchor` 滚动锚定 / `editor-font` 打包字体）、字体设置（`font-settings` 把选中的正文字体拼成字体族列表、`font-warnings` 把编译警告翻成可行动提示）；发布脚本的测试在 `scripts/generate-latest-json.test.mjs`（更新清单的生成与校验）
+- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（290 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
+- 写作模式**块级渲染**的验收（需要 headless Chromium，见脚本头部注释）：`writing-blocks.mjs`（128 项，桩产物：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/各种输入）、`writing-blocks-visual.mjs`（75 项，`npm run fixtures:blocks` 导出真实切片后验几何等价 + 链接热区）、`writing-blocks-hit.mjs`（27 项 / 136 次点击全中，点击 → 精确字符）、`writing-mode-scenes.mjs`（64 项，9 篇场景 + 截图）
 - 浏览器端的**真实排版视觉验证**：`npm run fixtures:math` 导出 Rust 侧真实公式产物 → `node scripts/browser-check/wysiwyg-visual.mjs`。它把真实产物注入浏览器开发模式页面，实测 ① 行内公式基线与同行文字基线是否齐平（用零宽基线探针量，误差 < 1px）② 渲染尺寸是否等于真实 pt 尺寸 × 4/3 ③ 行间公式块级 widget 是否居中并独占整行 ④ 暗色主题下公式是否可见
 - Rust 单测（`typst_world.rs` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）、单公式渲染（`compile_math`：贴边 SVG、透明底、基线测量、前缀宏生效、语法错误回退）
 - CI（GitHub Actions，`.github/workflows/ci.yml`）：
@@ -97,12 +99,14 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 
 ```
 src/
-├── routes/+page.svelte     # 主界面：工具栏 / 双栏 / 状态栏，立即编译调度（代次令牌丢弃过期结果）
+├── routes/+page.svelte     # 主界面：菜单栏 / 双栏 / 状态栏，立即编译调度（代次令牌丢弃过期结果）
 ├── lib/Editor.svelte       # CodeMirror 6 封装（Typst 语法、主题、外部 doc 同步）
-├── lib/typst-engine.ts     # 编译引擎：Tauri invoke 包装（compile_doc / export_pdf）+ 结构化诊断
+├── lib/typst-engine.ts     # 编译引擎：Tauri invoke 包装（compile_doc / compile_blocks / compile_math / block_hit_test / export_pdf）+ 结构化诊断
+├── lib/block-plan.ts       # 写作模式块级渲染的规划（块表 → 哪几格被切片覆盖 / 哪一块展开源码 / 编辑后重映射，纯函数）
 └── lib/file-ops.ts         # 打开/保存文件（Tauri dialog + invoke）
 src-tauri/
-├── src/lib.rs              # Rust 壳：read_file / write_file / compile_doc / export_pdf 等命令 + dialog/opener 插件
+├── src/lib.rs              # Rust 壳：read_file / write_file / compile_doc / compile_blocks / block_hit_test / export_pdf / bundled_font 等命令 + dialog/opener 插件
+├── src/block_geometry.rs   # 写作模式的块级渲染：源块划分 + 帧遍历（字形 → 源字节）+ 按 y 序切带 + 点击命中测试
 ├── src/packages.rs         # 包系统：@local 读取 / @preview 自动下载缓存（与 CLI 目录规范一致）
 └── src/typst_world.rs      # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 包解析接线 / 诊断转换（SVG/PDF）
 ```
@@ -120,9 +124,9 @@ src-tauri/
 
 **中文默认字体是显式指定的，不靠 typst 自动回退**：typst 默认正文字体 `Libertinus Serif` 不含汉字，不指定时所有中文都走"自动回退"，而回退打分优先"与基准字体同衬线"（`Libertinus Serif` 的 panose 全 0，被判定无衬线，于是思源宋体等宋体全被扣分）再比"家族名长短"——实测（typst 0.15.1）Windows 会渲染成楷体/隶书、Linux 成 Noto Sans CJK 的日文字形。所以 typst-pad 在编译时把默认字体族列表注入基础样式层：`Libertinus Serif` → 打包的思源宋体 → 系统宋体兜底（打包那份是子集，生僻字靠 `SimSun`/`Songti SC` 接住）→ `Microsoft YaHei` 收尾。**文档里的 `#set text(font:)` 优先级更高**（与原生 typst 一致），设置里也可以从「正文字体」下拉直接选一个真实族名。字体族名写错时 typst 只发警告不报错（会静默改用别的字体），所以编译警告会显示在状态栏徽标里，并提示"族名要用英文名 / 可放进额外字体目录"。
 
-字体目录刻意**不放在前端静态目录**：放 `static/` 会被 SvelteKit 整份拷进前端产物，而前端从不引用它们（编辑器用的是系统字体栈，见下），安装包里会白多一份约 5.7MB。
+字体目录刻意**不放在前端静态目录**：放 `static/` 会被 SvelteKit 整份拷进前端产物，而前端**不通过静态目录**取它们（写作模式要的那几份走 Rust 的 `bundled_font` 命令读 `resources/fonts/`，见下），安装包里会白多一份约 5.7MB。
 
-预览与公式的 SVG **不依赖字体**：`typst_svg` 把字形导出成矢量轮廓（`<symbol>`/`<use>`/`<path>`，无 `<text>`），所以预览在任何机器上渲染一致。编辑器自身的界面文本仍走系统字体栈（写作模式衬线、源码模式等宽），**没有** `@font-face`——界面里的中文与预览/PDF 的思源宋体不保证完全一致。
+预览与公式的 SVG **不依赖字体**：`typst_svg` 把字形导出成矢量轮廓（`<symbol>`/`<use>`/`<path>`，无 `<text>`），所以预览在任何机器上渲染一致。**写作模式的正文装的是同一套打包字体**：启动时 `editor-font.ts` 的 `installEditorFonts` 经 Rust 命令 `bundled_font` 取字节（`src-tauri/src/typst_world.rs` 的 `EDITOR_FONT_FILES`：`LibertinusSerif-Regular.otf` / `LibertinusSerif-Bold.otf` / `NotoSerifCJKsc-Regular.otf`）、用 `FontFace` 注册，字体栈 `WRITE_FONT_STACK` = `Libertinus Serif` → `Noto Serif CJK SC` → 系统宋体兜底 —— 这样光标进出块时源码与切片才是同一套字（装不上就什么都不做、退回系统族）。**源代码模式**仍是等宽系统栈（那本来就该是代码字体）。
 
 ### 启动耗时观测
 
@@ -141,9 +145,9 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 原生编译验证（中文+
 - 单文件编辑，无文件树 / 多标签页（**Ctrl+Shift+N** 可以开第二个窗口，但那是「空白草稿窗口」：它不恢复上次内容，关掉应用后再打开也不会被记住 —— 只有主窗口的会话会恢复）
 - 预览不跟随滚动
 - 预览按预览栏宽度重新排版，所以预览里的换行与分页与导出的 PDF 不完全一致（PDF 用文档自己的纸型）
-- 所见即所得的覆盖范围：公式（行内 + 独占整行的行间，含跨行书写）、常用标记与围栏代码块；表格/图片/引用块等块级结构仍显示源码（保持可编辑，不做块级 widget）
+- 所见即所得的覆盖范围：写作模式下**非光标块整块就是引擎切片**（表格、图片、引用、列表等块级结构都在切片里，字体/断行/`#set` 全对），光标所在块展开成源码（公式与标记另有就地渲染）；两个取舍：**表格仍按整块切**（按行切会把表格线切开）、**切片上没有文字层**（浏览器查找 / 拼写检查 / 无障碍拿不到；跨块拖选与 Ctrl+C 是靠"指针 → 源码位置"做到的，复制出来是源码）。另外脚注正文（页底装饰）与 `#place` 这类块区间之外的排版内容在写作模式不显示。细节见 `docs/文档模式渲染保真-调研.md`
 - 公式渲染的编译上下文 = 「设置里的前缀代码 + 文档自身的**单行顶层** `#let` 定义」（多行定义与内容块 `[...]` 里的定义不取；取不到时退化为仅前缀）。文档定义本身有错或与前缀重名时，会退回「仅前缀」重试一次；仍失败则保持源码显示（不渲染出错位内容）
-- 前缀里若改了正文字号，编辑区公式仍按编辑器字号（14px = 10.5pt）渲染，以保证与编辑器正文对齐
+- 内联公式的字号 = 编辑区正文字号：写作模式跟随**文档实际字号**（Rust 侧 `compile_blocks` 的 `textPt` → `--write-doc-px`），所以前缀里改了正文字号时公式与正文一起变，不会错位；源码模式不开内联渲染，兜底基准是 14px = 10.5pt
 - 支持 `@local` 本地包（读取 typst 数据目录）与 `@preview` 在线包（首次使用时自动下载到 typst 共享缓存目录，离线后直接命中缓存；网络不可用时给出明确诊断）——包目录规范与 typst CLI 一致，可通过 `TYPST_PACKAGE_PATH` / `TYPST_PACKAGE_CACHE_PATH` 环境变量覆盖
 - 未保存文档时相对 `#import` / `#include` 无法解析磁盘路径（Rust 侧给出"需要先保存文档"的明确诊断）
 - 相对导入只能落在**同一个盘/卷**内：文档引用到更上层目录时项目根会自动放宽（`#import "../templates/a.typ"` 这类可以用了），但**跨盘/跨卷**（例如文档在 `\\wsl.localhost\` 里、模板在 `D:\`）typst 引擎本身不支持——请把被引用的文件放进文档所在的盘/卷；真遇到时状态栏的错误里会写明当前项目根

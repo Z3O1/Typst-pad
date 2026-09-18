@@ -201,6 +201,20 @@
       wrapCompartment.of(wrap ? EditorView.lineWrapping : []),
       diagTheme,
       livePreview(livePreviewOptions), // 公式内联渲染（开关与缓存由父组件注入）
+      // 汉字输入法：合成结束时把"合成期间攒下的装饰刷新"补上（见下面 $effect 的说明）。
+      // 不这么做的话，合成期间那次刷新就彻底丢了 —— 公式 widget / 切片要等下一次编辑才回来。
+      EditorView.domEventHandlers({
+        compositionend: () => {
+          if (!refreshPendingRefresh) return false;
+          refreshPendingRefresh = false;
+          // 推到微任务：让 CodeMirror 先把合成的最终文本落进 state（否则刷新看到的是半个字）
+          queueMicrotask(() => {
+            if (!view) return;
+            view.dispatch({ effects: refreshLivePreview.of(null) });
+          });
+          return false;
+        },
+      }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !applyingExternal) {
           onDocChange?.(update.state.doc.toString());
@@ -372,12 +386,27 @@
    * 高度变化会被它补偿）—— 第一版在这里又加了一层自己的锚定，结果与它叠加（见 scroll-anchor.ts
    * 的说明）。只有"把光标钉在某个屏幕高度"（点击定位 / 翻页）才需要我们显式给滚动目标。
    */
+  /**
+   * 合成期间攒下的刷新请求（见下面的守卫与 `compositionend` 处理器）。
+   * 用普通变量而不是 `$state`：它只在这两个地方读写，不需要触发任何响应式更新。
+   */
+  let refreshPendingRefresh = false;
+
   $effect(() => {
     if (!view) return;
     void mode;
     void mathVersion;
     void blocksVersion; // 新的块切片到货 → 重整块装饰
     void prefixCode; // 前缀变化 → 编译上下文与缓存键变化，重新请求与渲染
+    // **输入法合成期间不许重建装饰**（用户是中文作者，这是每天都要走的路）：
+    // 合成中的文本由 IME 持有，这一刻把公式 widget / 切片整个换掉会把候选串与合成状态一起
+    // 弄坏（表现为打着打着候选消失、字重排）。攒到 `compositionend` 再刷一次，
+    // 中间这段显示旧装饰（合成文本自己是源码形态，看得见）。
+    if (view.composing) {
+      refreshPendingRefresh = true;
+      return;
+    }
+    refreshPendingRefresh = false;
     view.dispatch({ effects: refreshLivePreview.of(null) });
   });
 
