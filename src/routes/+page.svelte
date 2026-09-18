@@ -2993,6 +2993,27 @@
     --fg: #d4d4d4;
     --fg-dim: #9d9d9d;
     --accent: #4fc1ff;
+
+    /* 「弹出来的面板」的固定浅色（2026-09-18 用户要求：先「把上方菜单栏的展开菜单改成白色」，
+       再「所有弹出来的窗口、错误/警告浮层改成白色（每一个条目改成灰色）」）——
+       菜单下拉、右键菜单、弹窗（关于/设置/更新/未保存确认）、错误/警告浮层**共用这一组**，
+       **深色主题下也是白底黑字**，所以这几条**不跟上面那组主题变量走**。
+       用法（三处都一样，别逐个改子元素的颜色）：在面板根元素上把主题变量就地重绑一遍 ——
+       `.modal` / `.error-popover` / `.context-menu` 里的子元素本来就只用
+       --fg / --fg-dim / --bg-pane / --border / --accent，重绑一次就整体变浅色、
+       而且不用去数有几个标题几个按钮。**必须同时给定面板自己的 `color`**：
+       继承下来的是 `.app` 上算好的 #d4d4d4（深色主题的浅灰），白底上等于看不见。
+       要调色只改这几行；**别把某一条改回主题变量**（白底 + 浅灰字 = 看不见）。 */
+    --panel-bg: #ffffff;
+    --panel-soft-bg: #f0f0f0; /* 影子面板上的「凹下去」的东西：诊断条目 / 输入框 / 进度槽 */
+    --panel-border: #d9d9d9;
+    --panel-fg: #1f1f1f;
+    --panel-fg-dim: #6b6b6b;
+    --panel-accent: #0b6bb5; /* 白底上的蓝用浅色主题那一支（深色的 #4fc1ff 在白底上太浅） */
+    --panel-hover-bg: #e8f2f9; /* 悬停：浅蓝底 + 蓝字（白底上用「亮蓝底 + 白字」看不清） */
+    --panel-hover-fg: #0b6bb5;
+    /* 白底面板的阴影要比深色面板时代浅（原来 0.45~0.5 会让白块边缘发黑） */
+    --panel-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
   }
 
   .app.light {
@@ -3048,12 +3069,22 @@
     background: rgba(255, 255, 255, 0.55);
   }
 
+  /* 弹窗（关于 / 设置 / 更新 / 未保存确认）：**固定浅色面板**，做法见 `:root` 的 --panel-*。
+     就地重绑主题变量 ⇒ 弹窗里的标题（--accent）、正文（--fg）、按钮与输入框（--bg-pane/--border）、
+     更新说明（--fg-dim）全都自动跟着变，不用逐个改。 */
   .modal {
+    --bg-pane: var(--panel-soft-bg);
+    --bg-toolbar: var(--panel-bg);
+    --border: var(--panel-border);
+    --fg: var(--panel-fg);
+    --fg-dim: var(--panel-fg-dim);
+    --accent: var(--panel-accent);
     min-width: 320px;
-    background: var(--bg-toolbar);
-    border: 1px solid var(--border);
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
     border-radius: 8px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--panel-shadow);
+    color: var(--panel-fg); /* 见 :root 那段：不写这条就等于白底 + 深色主题的浅灰字 */
     padding: 20px 24px;
   }
 
@@ -3492,6 +3523,14 @@
      `left: 0` 而不是 `right: 0` —— 徽标现在在状态栏最左（2026-09-14），右对齐会把 520px 宽的
      浮层整体推到窗口左侧外面（靠 clampPopoverRect 也能救回来，但那样每次都是"被夹住"的状态）。 */
   .error-popover {
+    /* 与弹窗/菜单同一套固定浅色面板（做法见 `:root` 的 --panel-*）：
+       浮层本体白底，里面的**每一条诊断（.error-item）用浅灰块**——条目灰、面板白，
+       这是用户 2026-09-18 指定的（此前是浅色主题下的反过来的组合：灰面板 + 白条目）。 */
+    --bg-pane: var(--panel-soft-bg);
+    --border: var(--panel-border);
+    --fg: var(--panel-fg);
+    --fg-dim: var(--panel-fg-dim);
+    --accent: var(--panel-accent);
     position: absolute;
     left: 0;
     bottom: calc(100% + 8px);
@@ -3500,10 +3539,11 @@
     max-height: 70vh;
     display: flex;
     flex-direction: column;
-    background: var(--bg-toolbar);
-    border: 1px solid var(--border);
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
     border-radius: 6px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    box-shadow: var(--panel-shadow);
+    color: var(--panel-fg); /* 不写这条 = 白底 + 深色主题的浅灰字（见 :root 那段） */
     padding: 8px;
     z-index: 50;
     /* 状态栏整条是 user-select: none，这里必须显式放开：浮层里的诊断文字要能拖选复制
@@ -3569,7 +3609,9 @@
     gap: 6px;
   }
 
-  /* 可点击的错误条目：左对齐、等宽定位、悬停高亮 */
+  /* 可点击的错误条目：左对齐、等宽定位、悬停高亮。
+     底色走 `--bg-pane`（浮层里已重绑成 --panel-soft-bg 的浅灰）——
+     「白面板 + 灰条目」是用户 2026-09-18 指定的组合。 */
   .error-item {
     display: flex;
     align-items: baseline;
@@ -3587,6 +3629,7 @@
   }
 
   .error-item:hover {
+    background: var(--panel-hover-bg);
     border-color: var(--accent);
     color: var(--accent);
   }
@@ -3605,12 +3648,13 @@
     word-break: break-word;
   }
 
-  /* 非定位错误条目：纯文本展示，不可点击（悬停不高亮） */
+  /* 非定位错误条目：纯文本展示，不可点击（悬停不高亮 —— 连底色也不许变） */
   .error-item-generic {
     cursor: default;
   }
 
   .error-item-generic:hover {
+    background: var(--bg-pane);
     border-color: transparent;
     color: var(--fg);
   }

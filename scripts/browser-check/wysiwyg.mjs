@@ -3710,7 +3710,202 @@ check(
   JSON.stringify(selMultiLine),
 );
 
+// ---------------------------------------------------------------------------
+// 第 45 组：「弹出来的东西」一律白底
+// 背景（用户 2026-09-18 原话：「把所有弹出来的窗口，和 错误 警告 的浮窗（把每一个条目改成
+// 灰色），改成白色」）：上一版只把**菜单下拉**改成固定浅色（第 16 组），这一版把同一套
+// --panel-* 用到右键菜单、四个弹窗、错误/警告两个浮层上；浮层里的**条目**改浅灰
+// （原来是「浅色主题下灰面板 + 白条目」，现在反过来：白面板 + 灰条目）。
+//
+// 断言分两段：① 先在**深色主题**下量（这几处原来跟 --bg-toolbar(#2d2d30)/--fg(#d4d4d4) 走，
+// 改回主题变量这条立刻红 —— 浅色主题下改回去只是 #ececec 的白，肉眼不容易发现，恰恰是
+// 用户报的那种"灰面板"）；② 再量浮层条目与文字（白底 + 浅灰字 = 看不见，所以单独钉住
+// 文字颜色）。更新弹窗与这里量到的四个弹窗共用 `.modal` 一条规则，不另测。
+// ---------------------------------------------------------------------------
+console.log("45) 弹出来的面板一律白底（弹窗 / 错误·警告浮层 / 右键菜单），浮层条目是浅灰");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+/** 某个选择器上的一条计算样式（取不到元素时返回 null，不抛） */
+const style45 = (sel, prop) =>
+  `(() => { const e = document.querySelector(${JSON.stringify(sel)}); return e ? getComputedStyle(e).${prop} : null; })()`;
+const PANEL45_BG = "rgb(255, 255, 255)"; // --panel-bg
+const PANEL45_SOFT = "rgb(240, 240, 240)"; // --panel-soft-bg（浮层里的条目）
+const PANEL45_FG = "rgb(31, 31, 31)"; // --panel-fg
+
+// 切到深色主题再量（入口同第 16 组；本组结束时切回「自动」复原）
+await openMenu("视图");
+await c.waitFor(`!!document.querySelector(".menu-dropdown")`, { timeout: 5000 });
+await clickMenuItem("主题：暗");
+await c.waitFor(`!document.querySelector(".app").classList.contains("light")`, { timeout: 5000 });
+const panel45Toolbar = await c.evaluate(style45(".toolbar", "backgroundColor"));
+check(
+  "（前置）确实是深色主题：工具栏仍是深色",
+  panel45Toolbar !== PANEL45_BG,
+  String(panel45Toolbar),
+);
+
+// —— 设置弹窗（弹窗里元素最多的一种：标题 / 正文 / 说明文字 / 下拉 / 多行输入框 / 按钮）——
+await openMenu("文件");
+await c.waitFor(`document.body.innerText.includes("设置")`, { timeout: 5000 });
+await clickMenuItem("设置");
+await c.waitFor(`!!document.querySelector(".settings-modal")`, { timeout: 5000 });
+await new Promise((r) => setTimeout(r, 300));
+const set45 = {
+  bg: await c.evaluate(style45(".settings-modal", "backgroundColor")),
+  color: await c.evaluate(style45(".settings-modal .modal-text", "color")),
+  dim: await c.evaluate(style45(".settings-modal .settings-hint", "color")),
+  areaBg: await c.evaluate(style45(".settings-modal .settings-textarea", "backgroundColor")),
+  areaColor: await c.evaluate(style45(".settings-modal .settings-textarea", "color")),
+};
+check("深色主题下设置弹窗是白底", set45.bg === PANEL45_BG, JSON.stringify(set45));
+check(
+  "弹窗里的正文是深色、说明是灰字（白底上都读得出来）",
+  set45.color === PANEL45_FG && set45.dim === "rgb(107, 107, 107)",
+  JSON.stringify(set45),
+);
+check(
+  "多行输入框是浅灰底 + 深色字（不是深色主题的深灰底浅灰字）",
+  set45.areaBg === PANEL45_SOFT && set45.areaColor === PANEL45_FG,
+  JSON.stringify(set45),
+);
+await c.screenshot(SHOT("wysiwyg-45-settings-white-dark"));
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 400));
+
+// —— 关于弹窗（同一套 .modal）——
+await openMenu("帮助");
+await c.waitFor(`document.body.innerText.includes("关于 Typst-pad")`, { timeout: 5000 });
+await clickMenuItem("关于 Typst-pad");
+await c.waitFor(`!!document.querySelector(".about-modal")`, { timeout: 5000 });
+await new Promise((r) => setTimeout(r, 300));
+const about45 = {
+  bg: await c.evaluate(style45(".about-modal", "backgroundColor")),
+  title: await c.evaluate(style45(".about-modal .modal-title", "color")),
+  note: await c.evaluate(style45(".about-modal .about-note", "color")),
+};
+check(
+  "深色主题下关于弹窗也是白底（共用 .modal 那条规则）",
+  about45.bg === PANEL45_BG && about45.title === "rgb(11, 107, 181)" && about45.note === "rgb(107, 107, 107)",
+  JSON.stringify(about45),
+);
+await c.screenshot(SHOT("wysiwyg-45-about-white-dark"));
+await c.evaluate(`document.querySelector(".about-modal .modal-actions .modal-close").click()`);
+await new Promise((r) => setTimeout(r, 300));
+
+// —— 警告浮层：白底 + 灰条目 ——
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 200));
+await c.type('#set text(font: "微软雅黑")'); // 桩按「font 值是中文名」回一条 warning
+await c.waitFor(`!!document.querySelector(".warning-badge.clickable")`, { timeout: 8000 });
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(`!!document.querySelector("[aria-label='编译警告列表']")`, { timeout: 3000 });
+await new Promise((r) => setTimeout(r, 250));
+const warn45 = {
+  bg: await c.evaluate(style45(".warning-popover", "backgroundColor")),
+  titleColor: await c.evaluate(style45(".warning-popover .error-popover-title", "color")),
+  itemBg: await c.evaluate(style45(".warning-popover .error-item", "backgroundColor")),
+  itemColor: await c.evaluate(style45(".warning-popover .error-item-msg", "color")),
+};
+check(
+  "深色主题下警告浮层是白底、条目标题是灰字",
+  warn45.bg === PANEL45_BG && warn45.titleColor === "rgb(107, 107, 107)",
+  JSON.stringify(warn45),
+);
+check(
+  "警告浮层里的每一个条目是浅灰底 + 深色字（用户指定的组合）",
+  warn45.itemBg === PANEL45_SOFT && warn45.itemColor === PANEL45_FG,
+  JSON.stringify(warn45),
+);
+await c.screenshot(SHOT("wysiwyg-45-warning-white-dark"));
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 300));
+
+// —— 错误浮层：同款（两个浮层共用 .error-popover 规则，但两边的入口各自走一遍）——
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 200));
+await c.type("DIAG-ERROR-MARKER"); // 见 group 42
+await c.waitFor(`!!document.querySelector(".error-badge.clickable")`, { timeout: 8000 });
+await c.evaluate(`document.querySelector(".error-badge:not(.warning-badge)").click()`);
+await c.waitFor(`!!document.querySelector("[aria-label='编译错误列表']")`, { timeout: 3000 });
+await new Promise((r) => setTimeout(r, 250));
+const err45 = {
+  bg: await c.evaluate(style45(".error-popover", "backgroundColor")),
+  itemBg: await c.evaluate(style45(".error-popover .error-item", "backgroundColor")),
+  itemLoc: await c.evaluate(style45(".error-popover .error-item-loc", "color")),
+  copyColor: await c.evaluate(style45(".error-popover .error-item-copy", "color")),
+};
+check(
+  "深色主题下错误浮层是白底 + 浅灰条目（与警告侧同款）",
+  err45.bg === PANEL45_BG && err45.itemBg === PANEL45_SOFT,
+  JSON.stringify(err45),
+);
+check(
+  "错误浮层里的行列与「复制」按钮是灰字（白底上仍读得出来）",
+  err45.itemLoc === "rgb(107, 107, 107)" && err45.copyColor === "rgb(107, 107, 107)",
+  JSON.stringify(err45),
+);
+await c.screenshot(SHOT("wysiwyg-45-error-white-dark"));
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 300));
+
+// —— 右键菜单：同一套 --panel-*（**真实右键**：不是合成事件）——
+const ctx45Point = await c.evaluate(`(() => {
+  const r = document.querySelector(".cm-content").getBoundingClientRect();
+  return { x: Math.round(r.left + 60), y: Math.round(r.top + 20) };
+})()`);
+await c.send("Input.dispatchMouseEvent", {
+  type: "mousePressed",
+  x: ctx45Point.x,
+  y: ctx45Point.y,
+  button: "right",
+  buttons: 2,
+  clickCount: 1,
+});
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseReleased",
+  x: ctx45Point.x,
+  y: ctx45Point.y,
+  button: "right",
+  buttons: 0,
+  clickCount: 1,
+});
+await c.waitFor(`!!document.querySelector(".context-menu")`, { timeout: 5000 });
+const ctx45 = {
+  bg: await c.evaluate(style45(".context-menu", "backgroundColor")),
+  // 逐个条目读：空文档上「剪切 / 复制」是 disabled（灰字），别拿第一条当代表
+  items: await c.evaluate(`Array.from(document.querySelectorAll(".context-menu .menu-item")).map((e) => ({
+    text: e.textContent.trim(),
+    color: getComputedStyle(e).color,
+    disabled: e.disabled,
+  }))`),
+};
+check(
+  "深色主题下右键菜单是白底 + 可用条目是深色字（禁用的那几条照旧灰字）",
+  ctx45.bg === PANEL45_BG &&
+    ctx45.items.some((i) => !i.disabled && i.color === PANEL45_FG) &&
+    ctx45.items.every((i) => i.color === PANEL45_FG || i.color === "rgb(107, 107, 107)"),
+  JSON.stringify(ctx45),
+);
+await c.screenshot(SHOT("wysiwyg-45-context-white-dark"));
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 250));
+check("Esc 收起右键菜单", !(await c.evaluate(`!!document.querySelector(".context-menu")`)));
+
+// 收尾：切回「自动」主题（后面的收尾/下一次运行不该受本组影响）
+await openMenu("视图");
+await c.waitFor(`!!document.querySelector(".menu-dropdown")`, { timeout: 5000 });
+await clickMenuItem("主题：自动");
+await c.waitFor(`document.querySelector(".app").classList.contains("light")`, { timeout: 5000 });
+
 // 收尾：清回空文档并回写作模式
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });

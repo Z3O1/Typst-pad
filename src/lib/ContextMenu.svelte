@@ -2,7 +2,8 @@
   // 受控右键菜单弹层：props 传入条目与弹出位置，position 为 null 时不渲染。
   // - 弹出位置超出视口时自动收边（computeMenuPosition 纯函数）；
   // - 点击外部 / Escape / 窗口滚动（捕获阶段，覆盖内部滚动）/ 窗口失焦时回调 onClose。
-  // 样式与 MenuBar 下拉一致（--bg-toolbar/--border/--fg/--accent，圆角阴影）。
+  // 样式与 MenuBar 下拉一致（共用 +page.svelte `:root` 里那组「弹出来的面板」固定浅色
+  // --panel-*，圆角阴影同款；深色主题下也是白底黑字）。
   import { computeMenuPosition } from "./context-menu-utils";
 
   export type ContextMenuItem =
@@ -107,13 +108,20 @@
 
 <style>
   .context-menu {
+    /* 与菜单下拉/弹窗/诊断浮层共用「弹出来的面板」固定浅色（--panel-*，定义在 +page.svelte 的 :root）。
+       做法同 MenuBar 下拉：就地重绑主题变量 + 面板自己的 color（不写 color 会继承深色主题的浅灰字）。 */
+    --border: var(--panel-border);
+    --fg: var(--panel-fg);
+    --fg-dim: var(--panel-fg-dim);
+    --accent: var(--panel-accent);
     position: fixed;
     z-index: 150; /* 高于 MenuBar 下拉(50)，低于弹窗遮罩(200) */
     min-width: 160px;
-    background: var(--bg-toolbar);
-    border: 1px solid var(--border);
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
     border-radius: 6px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    box-shadow: var(--panel-shadow);
+    color: var(--panel-fg);
     padding: 4px;
     display: flex;
     flex-direction: column;
@@ -134,8 +142,8 @@
   }
 
   .menu-item:hover {
-    background: var(--accent);
-    color: #ffffff;
+    background: var(--panel-hover-bg); /* 浅蓝底 + 蓝字：与菜单下拉的悬停一致（白底上用蓝底白字不清楚） */
+    color: var(--panel-hover-fg);
   }
 
   .menu-item:disabled {

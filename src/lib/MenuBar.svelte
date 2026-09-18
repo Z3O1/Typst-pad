@@ -238,23 +238,26 @@
   }
 
   /* 展开菜单：**固定浅色面板**（用户 2026-09-18 要求「把上方菜单栏的展开菜单改成白色」）——
-     深色主题下也保持白底黑字，所以这里的颜色**不跟 --bg-toolbar / --fg 走**，
-     而是就地声明一组局部变量（要调色只改这几行，别把某一条改回主题变量：白底 + 浅灰字 = 看不见）。
-     面板是白底 ⇒ 阴影比深色面板时代（0.35）压浅一些，否则白块边缘发黑。 */
+     深色主题下也保持白底黑字，所以这里的颜色**不跟 --bg-toolbar / --fg 走**。
+     具体色值统一在 +page.svelte 的 `:root` 里那组 --panel-*（同一个白色现在也用在
+     右键菜单 / 弹窗 / 诊断浮层上，四处共用一个定义）；这里只把主题变量就地重绑，
+     子元素（.menu-item / .menu-item-shortcut）自动跟着走。
+     面板是白底 ⇒ 阴影比深色面板时代（0.35）浅，否则白块边缘发黑（--panel-shadow）。 */
   .menu-dropdown {
-    --menu-bg: #ffffff;
-    --menu-fg: #1f1f1f;
-    --menu-fg-dim: #6b6b6b;
-    --menu-hover-bg: #e8f2f9; /* 浅蓝底：比亮蓝底白字在白色面板上清楚得多 */
-    --menu-hover-fg: #0b6bb5;
+    --menu-bg: var(--panel-bg);
+    --menu-fg: var(--panel-fg);
+    --menu-fg-dim: var(--panel-fg-dim);
+    --menu-hover-bg: var(--panel-hover-bg); /* 浅蓝底：比亮蓝底白字在白色面板上清楚得多 */
+    --menu-hover-fg: var(--panel-hover-fg);
+    color: var(--panel-fg); /* 面板自己的字号继承——不写这条会拿到深色主题的浅灰字 */
     position: absolute;
     top: 100%;
     left: 0;
     min-width: 180px;
     background: var(--menu-bg);
-    border: 1px solid #d9d9d9;
+    border: 1px solid var(--panel-border);
     border-radius: 6px;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--panel-shadow);
     padding: 4px;
     z-index: 50;
     display: flex;
