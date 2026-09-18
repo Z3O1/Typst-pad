@@ -319,10 +319,10 @@ check(
   "编辑没有把页面打坏（无脚本错误）",
   !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"),
 );
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 700));
 check("Ctrl+/ 切到源码模式：切片消失", (await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`)) === 0);
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
 check("切回写作模式：切片回来", (await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`)) >= 1);
 

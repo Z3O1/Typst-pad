@@ -123,7 +123,7 @@ check(
 );
 
 console.log("5) 源码模式不受影响（Ctrl+/）：全部源码、无切片；切回来恢复切片");
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 }); // Ctrl+/
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 }); // Ctrl+E 切模式（0.8.2 起 Ctrl+/ 归注释）
 await new Promise((r) => setTimeout(r, 700));
 check(
   "状态栏切到了源代码模式",
@@ -132,7 +132,7 @@ check(
 );
 check("源码模式下没有切片", (await c.evaluate(CROPS)) === 0, "仍有切片");
 check("源码模式下正文全部可见", (await c.evaluate(LINES_TEXT)).includes("第一段正文"), "源码未显示");
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
 check("切回写作模式后切片回来", (await c.evaluate(CROPS)) >= 1, "没有切片");
 

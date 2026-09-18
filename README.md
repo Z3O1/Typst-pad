@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml/badge.svg)](https://github.com/Z3O1/Typst-pad/actions/workflows/ci.yml)
 
-仿 Typora 的 Typst 桌面编辑器：**写作模式**下是整页纸张的所见即所得编辑（公式就地排版、标记符号自动收起，无行号），**源代码模式**下是等宽代码编辑器 + 右栏整页预览。两种模式用 `Ctrl+/` 或「视图 → 源代码模式」切换。
+仿 Typora 的 Typst 桌面编辑器：**写作模式**下是整页纸张的所见即所得编辑（公式就地排版、标记符号自动收起，无行号），**源代码模式**下是等宽代码编辑器 + 右栏整页预览。两种模式用 `Ctrl+E` 或「视图 → 源代码模式」切换（`Ctrl+/` 是注释/取消注释，见下表）。
 
 ## 两套界面
 
-| | 写作模式（默认，仿 Typora） | 源代码模式（`Ctrl+/`） |
+| | 写作模式（默认，仿 Typora） | 源代码模式（`Ctrl+E`） |
 |---|---|---|
 | 布局 | 单栏：灰底 + 居中纸张（≤900px）+ 轻阴影 | 双栏：左源码 / 右整页预览 |
 | 正文 | 衬线（思源宋体，与预览/PDF 输出一致）、16px、行距 1.9 | 等宽 14px |
@@ -14,7 +14,7 @@
 | 内容 | 公式与标记就地排版（所见即所得） | Typst 源码原文 |
 | 状态栏 | 「写作」标识 + 字符数 | 「源码」标识 + 字符数 + 行列 |
 
-格式操作走**菜单 + 快捷键**（Typora 没有工具条）：「格式」菜单里有加粗 `Ctrl+B`、斜体 `Ctrl+I`、行内代码、行内公式 `Ctrl+M`、公式块 `Ctrl+Shift+M`、标题 1/2/3 `Ctrl+1/2/3`、正文 `Ctrl+0`、无序/有序列表、引用、代码块、链接 `Ctrl+K`。另外：公式定界符 `$` **自动配对**（见下），代码模式 `Alt+Z` 切换自动换行，**Ctrl+Shift+N** 新建窗口（「文件 → 新建窗口」同一入口）、**Ctrl+W** 关闭当前窗口，**Esc** 关掉当前弹窗（在设置弹窗上按 Esc 等于点「关闭」，即放弃未保存的草稿）。
+格式操作走**菜单 + 快捷键**（Typora 没有工具条）：「格式」菜单里有加粗 `Ctrl+B`、斜体 `Ctrl+I`、行内代码、行内公式 `Ctrl+M`、公式块 `Ctrl+Shift+M`、标题 1/2/3 `Ctrl+1/2/3`、正文 `Ctrl+0`、无序/有序列表、引用、代码块、链接 `Ctrl+K`。另外：公式定界符 `$` **自动配对**（见下），代码模式 `Alt+Z` 切换自动换行，**Ctrl+Shift+N** 新建窗口（「文件 → 新建窗口」同一入口）、**Ctrl+W** 关闭当前窗口，**`Ctrl+/`** 注释/取消注释当前行或选区（VS Code 习惯，打出 typst 的 `//`；块注释留在 `Ctrl+Shift+/`），**Esc** 关掉当前弹窗（在设置弹窗上按 Esc 等于点「关闭」，即放弃未保存的草稿）。
 
 ## 功能
 
@@ -62,7 +62,7 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 ## 测试与 CI
 
 - 前端单元测试（vitest + jsdom）：`npm test`，覆盖引擎调用契约（`typst-engine`）、诊断位置映射（`diagnostics-utils`）、错误列表、文件操作、持久化、SVG 分页、PDF 文件名推导、菜单/快捷键、自动更新的纯逻辑（`update-utils`：启动检查延迟 / 进度换算 / 错误文案）、页面级按键路由（`app-keys`：Esc / Alt+Z / Ctrl+Shift+N / Ctrl+R / Ctrl+W 的判定顺序）、公式定界符配对与退格（`auto-pair`）、回车换行的缩进继承（`auto-indent`）、界面缩放（`zoom`）、预览重排（`preview-scale`）、源码模式换行（`word-wrap`），所见即所得链路（`typst-lex` 区域扫描 / `math-ranges` 公式范围 / `markup-ranges` 标记 / `live-preview` 装饰行为）、字体设置（`font-settings` 把选中的正文字体拼成字体族列表、`font-warnings` 把编译警告翻成可行动提示）；发布脚本的测试在 `scripts/generate-latest-json.test.mjs`（更新清单的生成与校验）
-- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（223 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
+- 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（231 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
 - 浏览器端的**真实排版视觉验证**：`npm run fixtures:math` 导出 Rust 侧真实公式产物 → `node scripts/browser-check/wysiwyg-visual.mjs`。它把真实产物注入浏览器开发模式页面，实测 ① 行内公式基线与同行文字基线是否齐平（用零宽基线探针量，误差 < 1px）② 渲染尺寸是否等于真实 pt 尺寸 × 4/3 ③ 行间公式块级 widget 是否居中并独占整行 ④ 暗色主题下公式是否可见
 - Rust 单测（`typst_world.rs` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）、单公式渲染（`compile_math`：贴边 SVG、透明底、基线测量、前缀宏生效、语法错误回退）
 - CI（GitHub Actions，`.github/workflows/ci.yml`）：
@@ -145,7 +145,8 @@ cargo test --manifest-path src-tauri/Cargo.toml   # 原生编译验证（中文+
 - 公式渲染的编译上下文 = 「设置里的前缀代码 + 文档自身的**单行顶层** `#let` 定义」（多行定义与内容块 `[...]` 里的定义不取；取不到时退化为仅前缀）。文档定义本身有错或与前缀重名时，会退回「仅前缀」重试一次；仍失败则保持源码显示（不渲染出错位内容）
 - 前缀里若改了正文字号，编辑区公式仍按编辑器字号（14px = 10.5pt）渲染，以保证与编辑器正文对齐
 - 支持 `@local` 本地包（读取 typst 数据目录）与 `@preview` 在线包（首次使用时自动下载到 typst 共享缓存目录，离线后直接命中缓存；网络不可用时给出明确诊断）——包目录规范与 typst CLI 一致，可通过 `TYPST_PACKAGE_PATH` / `TYPST_PACKAGE_CACHE_PATH` 环境变量覆盖
-- 未保存文档时相对 `include` 无法解析磁盘路径（Rust 侧给出"需要先保存文档"的明确诊断）
+- 未保存文档时相对 `#import` / `#include` 无法解析磁盘路径（Rust 侧给出"需要先保存文档"的明确诊断）
+- 相对导入只能落在**同一个盘/卷**内：文档引用到更上层目录时项目根会自动放宽（`#import "../templates/a.typ"` 这类可以用了），但**跨盘/跨卷**（例如文档在 `\\wsl.localhost\` 里、模板在 `D:\`）typst 引擎本身不支持——请把被引用的文件放进文档所在的盘/卷；真遇到时状态栏的错误里会写明当前项目根
 - `tauri.conf.json` 的 `csp` 保持 `null`：wasm 编译管线已移除（wasm 限制解除），但 CSP 未实测启用；如需启用请在 `npm run tauri build` 后实机验证
 
 ## License

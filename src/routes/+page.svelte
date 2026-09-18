@@ -105,7 +105,9 @@
     ZOOM_SETTLE_MAX_MS,
     zoomFromWidths,
     clampZoom,
-    nextZoom,
+    createWheelAccumulator,
+    accumulateWheelSteps,
+    resetWheelAccumulator,
     shouldRebaselineZoom,
     zoomApplied,
     zoomIn,
@@ -113,6 +115,7 @@
     zoomOut,
     zoomProbeVerdict,
     zoomUnobservedNotice,
+    wheelPendingNotice,
   } from "$lib/zoom";
   // isWrapToggleKey 的判定已挪进 app-keys.decideAppKey（那里统一管按键路由，含它的顺序要求）
   import { WRAP_SOURCE_ONLY_NOTICE, wrapNotice } from "$lib/word-wrap";
@@ -246,7 +249,7 @@
    * 界面模式（两套 UI）：
    * - "write"  写作模式（仿 Typora，默认）：整页纸张、衬线正文、无行号，公式与标记就地排版；
    * - "source" 源码模式：等宽代码编辑器 + 行号，直接编辑 Typst 源码，右栏整页预览。
-   * 视图菜单 / Ctrl+/ 切换。
+   * 视图菜单 / Ctrl+E 切换（`Ctrl+/` 归注释，见 MenuBar 那段的注解）。
    */
   let viewMode = $state<"write" | "source">("write");
   // 是否显示右侧预览栏。所见即所得形态是**单栏**（Typora 式）：编辑区里已经是排版结果，
@@ -290,6 +293,14 @@
    * 有次数 ⇒ 事件到了、是 `setZoom` 没生效。两种成因的修法完全不同，见 zoom.ts 的文案注解。
    */
   let zoomWheelEvents = 0;
+  /**
+   * 滚轮位移的"未走完余量"（见 zoom.ts 的 `accumulateWheelSteps` 注解）。
+   * 存在的理由（2026-09-16 用户反馈「Ctrl+滚轮常态可以、到上限就不行」，而状态栏写着
+   * 「缩放已是 250%（到边界了）」）：一次滚轮的位移可能不足一档（高倍缩放时每格位移会变小），
+   * 那种输入算出来的 4% 会被档位圆整抹掉 —— 没有累加器时这种滚轮**永远**动不了，还会被
+   * 误报成"到边界了"。攒够半档再走一档即可，100px 一格的手感完全不变。
+   */
+  const zoomWheelAcc = createWheelAccumulator();
   /**
    * 缩放沉降窗口的截止时间戳（见 zoom.ts 的注解）：从"我们让引擎改档"起算，到复核结束为止。
    * 这期间收到的 `resize` **不许**重校 100% 基准 —— 引擎改档本身就会引发一次 resize，
@@ -905,6 +916,7 @@
       statusText = "缩放已是 100%";
       return;
     }
+    resetWheelAccumulator(zoomWheelAcc);
     setUiZoom(ZOOM_DEFAULT);
   }
 
@@ -916,6 +928,7 @@
    * 的路径（#1022）碰不到这里，这也是它被用户当"缩放失败的备用手段"的原因（见 app-keys.zoomKeySteps）。
    */
   function zoomBySteps(steps: 1 | -1) {
+    resetWheelAccumulator(zoomWheelAcc); // 键盘调档没有"半格"这回事：丢掉滚轮留下的余量
     setUiZoom(steps > 0 ? zoomIn(uiZoom) : zoomOut(uiZoom));
   }
 
@@ -924,7 +937,12 @@
    *
    * 命中时**必须 preventDefault**：否则这次滚动会继续滚动编辑器/预览区，WebView2 还可能顺手
    * 用它自己那套系数缩放页面（与我们的系数打架，表现为"缩放了但系数对不上"）。
-   * 位移量同时看 deltaY / deltaX（见 zoom.ts 的注解）：按 Shift 滚轮时浏览器把纵向滚动转成横向。
+   * 位移量同时看 deltaY / deltaX（见 zoom.ts 的注解）：按 Shift 滚轮时浏览器把纵向转成横向。
+   *
+   * **位移不足一档时要攒着**（2026-09-16 修的死区，见 zoom.ts 的 `accumulateWheelSteps`）：
+   * 一次 40px 的滚轮折合 0.4 档 = 4%，直接算进档位会被 `clampZoom` 圆整抹掉 —— 那种输入
+   * 以前是"永远不动 + 状态栏误报「到边界了」"。所以这里累加余量，够了才 `setUiZoom`：
+   * 不足一档**什么都不做**（连状态栏都不动），这样「到边界了」重新只意味着"真到边界"。
    *
    * 监听挂在 `window` 的**捕获阶段**（注册见 onMount），不是挂在 `<main>` 上：
    * ① 鼠标在菜单栏/状态栏上滚也该能缩放（原先只有编辑区/预览区那一块有效）；
@@ -940,7 +958,15 @@
     // —— 前者说明事件在到达页面之前就被吃掉了（例如引擎自己那套缩放控件开着），
     // 后者才是 setZoom 没生效。累计计数（不重置）就是为了让这条一眼可辨。
     zoomWheelEvents += 1;
-    setUiZoom(nextZoom(uiZoom, e.deltaY, e.deltaX, e.deltaMode));
+    // 返回的是"这一次该走的整档数"（不足一档时是 0，余量留在累加器里）
+    const steps = accumulateWheelSteps(zoomWheelAcc, e.deltaY, e.deltaX, e.deltaMode);
+    if (steps === 0) {
+      // 不足一档：不动档位，但把"攒了多少"说出来 —— 否则"位移太小"和"事件没到页面"
+      // 在用户眼里完全一样（都是滚了没反应），而那两件事的修法完全不同（见 zoom.ts）。
+      statusText = wheelPendingNotice(zoomWheelAcc);
+      return;
+    }
+    setUiZoom(steps > 0 ? zoomIn(uiZoom, steps) : zoomOut(uiZoom, -steps));
   }
 
   // 缩放变化（含启动恢复后的首次赋值）→ 交给 webview；失败不影响其它逻辑
@@ -1288,7 +1314,11 @@
         items: [
           {
             label: "源代码模式",
-            shortcut: "Ctrl+/",
+            // 键位：**模式切换用 Ctrl+E**（2026-09-18 用户要求）。
+            // 原来挂的是 Ctrl+/（Typora 的习惯），但那一按会**同时**做两件事：编辑器的 CM keymap
+            // 处理 `Mod-/` 只 preventDefault、不阻断冒泡，而这里（MenuBar 的 window 级匹配）不看
+            // defaultPrevented ⇒ 按一次既注释又切模式。Ctrl+/ 现在只归注释（VS Code 习惯）。
+            shortcut: "Ctrl+E",
             checked: viewMode === "source",
             action: () => toggleViewMode(),
           },
@@ -1309,12 +1339,12 @@
             label: "放大",
             // 灰字提示：Ctrl+滚轮 是手势（写不进快捷键匹配），Ctrl+Shift+= 是这一对键盘键里的"加"
             shortcut: "Ctrl+滚轮 / Ctrl+Shift+=",
-            action: () => setUiZoom(zoomIn(uiZoom)),
+            action: () => zoomBySteps(1),
           },
           {
             label: "缩小",
             shortcut: "Ctrl+Shift+-",
-            action: () => setUiZoom(zoomOut(uiZoom)),
+            action: () => zoomBySteps(-1),
           },
           {
             label: "重置缩放",
@@ -2618,7 +2648,7 @@
         <p class="modal-text">版本 {appVersion || "…"}</p>
         <p class="modal-text">
           仿 Typora 的 Typst 桌面编辑器：<strong>写作模式</strong>（默认）整页纸张，公式与标记就地排版，
-          光标 / 选区进入即展开源码；<strong>源代码模式</strong>（Ctrl+/）双栏对照，源码 + 整页预览。
+          光标 / 选区进入即展开源码；<strong>源代码模式</strong>（Ctrl+E）双栏对照，源码 + 整页预览。
         </p>
         <p class="modal-text">
           排版由<strong>内置的 typst 引擎</strong>在本机完成：不联网，文档不出本机。

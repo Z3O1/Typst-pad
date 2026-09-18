@@ -672,6 +672,33 @@ async function handleCommand(
       // 仍是 A4 —— 前端据此退回旧的等比缩放路径（见 preview-scale.isReflowApplied）。
       const requested = typeof a.previewWidthPt === "number" && a.previewWidthPt > 0 ? a.previewWidthPt : undefined;
       const honored = new URLSearchParams(window.location.search).has("reflowfail") ? undefined : requested;
+      // 假编译错误：文档里出现标记 `DIAG-ERROR-MARKER` 时返回一条**主源错误诊断**，
+      // 专门给验收锁住"编译错误必须在编辑器里画红波浪线"这条链路。
+      // **故意发 `path: null`**：那是 Rust 0.4.0~0.8.2 的真实写法，前端的判据必须容忍它
+      // （曾经只认 undefined/""，于是桌面版从 0.4.0 起一条波浪线都不画 —— 桩过去干脆不发
+      // path 字段，所以浏览器验收一直抓不到，2026-09-18 才查出来）。Rust 侧现在改成
+      // "主源不带 path 键"，那条由 typst_world.rs 的序列化单测锁。
+      const marker = "DIAG-ERROR-MARKER";
+      const at = src.indexOf(marker);
+      if (at >= 0) {
+        const before = src.slice(0, at);
+        const line = before.split("\n").length;
+        const column = at - (before.lastIndexOf("\n") + 1) + 1;
+        return {
+          ok: false,
+          diagnostics: [
+            {
+              message: "模拟编译错误：这一行是为了验收红波浪线",
+              severity: "error",
+              line,
+              column,
+              endLine: line,
+              endColumn: column + marker.length,
+              path: null,
+            },
+          ],
+        };
+      }
       // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
       return { ok: true, pages: fakePages(src, honored), warnings };
     }

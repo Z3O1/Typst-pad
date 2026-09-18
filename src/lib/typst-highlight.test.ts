@@ -1,40 +1,45 @@
 import { describe, expect, it } from "vitest";
 import { tags } from "@lezer/highlight";
 import type { Tag } from "@lezer/highlight";
-import { TypstHighlightSytle } from "codemirror-lang-typst";
+import { defaultHighlightStyle } from "@codemirror/language";
 import { typstHeadingHighlightStyle } from "./typst-highlight";
 
-// 这组用例锁的是「标题没有下划线」这件事本身：下划线来自依赖自带的高亮样式，
-// 我们只能再挂一份把它压掉，所以"压掉了什么、为什么压得住"都要有断言兜住。
-describe("标题高亮覆盖（压掉依赖自带的下划线）", () => {
+// 这组用例锁的是「标题没有下划线」这件事本身：下划线来自**编辑器默认高亮**
+// （`defaultHighlightStyle`，basicSetup 自带）——typst 包把整棵 Heading 子树标成 tags.heading，
+// 于是标题正文也吃到默认高亮那条 `textDecoration: underline`。我们只能再挂一份把它压掉，
+// 所以"压掉了什么、为什么压得住"都要有断言兜住。
+//
+// 历史：最早以为是 typst 包自带的高亮；0.6.0 换到无 wasm 的 Lezer 入口时才发现它那份里已经
+// 没有 heading 规则，而下划线照旧 —— 真正那条在 @codemirror/language 里（浏览器验收当场抓到）。
+describe("标题高亮覆盖（压掉默认高亮给标题加的下划线）", () => {
   it("给标题写的是 text-decoration: none，且带 !important（不依赖样式表顺序）", () => {
     expect(rulesOf(typstHeadingHighlightStyle)).toMatch(/text-decoration:\s*none\s*!important/);
   });
 
-  it("依赖那份给标题的类与我们的不是同一个类 —— CM6 是「类并集」，靠 !important 取胜", () => {
+  it("默认高亮那份给标题的类与我们的不是同一个类 —— CM6 是「类并集」，靠 !important 取胜", () => {
     const ours = classNameOf(typstHeadingHighlightStyle);
-    const theirs = classNameOf(TypstHighlightSytle);
+    const theirs = classNameOf(defaultHighlightStyle);
     expect(ours).not.toBe("");
     expect(theirs).not.toBe("");
     expect(ours).not.toBe(theirs);
   });
 
-  it("前提仍然成立：依赖确实在给标题加下划线（哪天它自己修好了，这条会红，补丁就可以删）", () => {
-    expect(rulesOf(TypstHighlightSytle)).toMatch(/text-decoration:\s*underline/);
+  it("前提仍然成立：默认高亮确实在给标题加下划线（哪天上游修好了，这条会红，补丁就可以删）", () => {
+    expect(rulesOf(defaultHighlightStyle)).toMatch(/text-decoration:\s*underline/);
   });
 
   // 下面两条用 jsdom 真实跑一遍级联：CM6 把两份高亮样式的类都加在同一个元素上（类并集），
   // 最终算出来的 text-decoration 必须是我们的 none —— 这就是补丁生效的判据。
   // 取值一律用 text-decoration **简写**：jsdom 没实现 text-decoration-line 长写（恒为 none）。
   it("两个类同在时算出来是 none", () => {
-    mountStyles([rulesOf(TypstHighlightSytle), rulesOf(typstHeadingHighlightStyle)]);
-    const el = headingElement([classNameOf(TypstHighlightSytle), classNameOf(typstHeadingHighlightStyle)]);
+    mountStyles([rulesOf(defaultHighlightStyle), rulesOf(typstHeadingHighlightStyle)]);
+    const el = headingElement([classNameOf(defaultHighlightStyle), classNameOf(typstHeadingHighlightStyle)]);
     expect(getComputedStyle(el).textDecoration).toBe("none");
   });
 
-  it("对照：同样一条 none 规则、没有 !important 又排在依赖那份之前时，会被盖回 underline", () => {
-    mountStyles([".cm-plain-none {text-decoration: none;}", rulesOf(TypstHighlightSytle)]);
-    const el = headingElement([classNameOf(TypstHighlightSytle), "cm-plain-none"]);
+  it("对照：同样一条 none 规则、没有 !important 又排在默认那份之前时，会被盖回 underline", () => {
+    mountStyles([".cm-plain-none {text-decoration: none;}", rulesOf(defaultHighlightStyle)]);
+    const el = headingElement([classNameOf(defaultHighlightStyle), "cm-plain-none"]);
     expect(getComputedStyle(el).textDecoration).toBe("underline");
   });
 });

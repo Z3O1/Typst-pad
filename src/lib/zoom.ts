@@ -50,13 +50,17 @@ export function zoomLabel(zoom: number | null | undefined): string {
 }
 
 /**
- * 一次滚轮事件相当于几档（0.2 ~ 3，可带符号：正 = 放大）。
+ * 一次滚轮事件相当于几档（**可带小数**，如 0.4，可带符号：正 = 放大）。
  *
  * 两个真机坑都在这里处理：
  * 1. **位移量要同时看 deltaY 与 deltaX**：按着 Shift 滚轮时 Chromium 把纵向滚动转成横向
  *    （`deltaY = 0`、`deltaX` 有值），只读 deltaY 会"按了没反应"（实测踩过）。
- * 2. **三种 deltaMode 的"一格"差别很大**：像素模式（鼠标一格 ≈ 100）按此折算并在 < 50 时
- *    视为触摸板小步长（下限 0.2 档，否则触摸板一划就窜到顶）；行模式一格算一档；页模式给 3 档。
+ * 2. **三种 deltaMode 的"一格"差别很大**：像素模式（鼠标一格 ≈ 100）按此折算，小步长
+ *    （触摸板 / 高分辨率滚轮）给一个下限 0.1 档，否则一次 4px 的事件折算成 0.04 档太碎；行模式
+ *    一格算一档；页模式给 3 档。
+ *
+ * **返回值可以不是整数**，所以**不要**直接拿它去算缩放（那会把 0.4 档圆整掉、滚轮彻底失灵，
+ * 见下方 `accumulateWheelSteps` 与 `clampZoom` 的注解）；要用 `accumulateWheelSteps`。
  */
 export function wheelZoomSteps(deltaY: number, deltaX = 0, deltaMode = 0): number {
   const y = Number.isFinite(deltaY) ? deltaY : 0;
@@ -68,20 +72,90 @@ export function wheelZoomSteps(deltaY: number, deltaX = 0, deltaMode = 0): numbe
   if (deltaMode === 1) notches = Math.min(3, Math.max(1, abs));
   else if (deltaMode === 2) notches = 3;
   else if (abs >= 50) notches = Math.min(3, Math.max(1, Math.round(abs / 100)));
-  else notches = Math.max(0.2, abs / 100);
+  else notches = Math.max(0.1, abs / 100);
 
   // 滚轮向上（deltaY < 0）= 放大
   return (effective < 0 ? 1 : -1) * notches;
 }
 
-/** 滚轮 → 新的缩放系数（已收敛、已圆整） */
+// ---------------------------------------------------------------------------
+// 滚轮位移累加器（2026-09-16 加，修的是一个**真死区**）
+//
+// 用户反馈「Ctrl+滚轮常态是可以的，但是到上限不知道为什么就不可以了」——状态栏还写着
+// 「缩放已是 250%（到边界了）」。真因：一次滚轮的位移可能**不足一档**
+// （他自己那台机器上高倍时每格位移变小；Chromium 在"浏览器→渲染器"之间会按比例缩放滚轮位移，
+// 见 ui/events/blink/blink_event_util.cc 的 ScaleWebMouseWheelEvent），而 `nextZoom` 是
+// 「当前档位 + 档数 × 10%」再交给 `clampZoom` **圆整到 10% 的倍数**：
+//     40px 位移 → 0.4 档 → 4% → 圆整回原档 → 界面不动
+// 而且每个事件都是**独立**算的、余数不累积 —— 于是这种滚轮**永远**动不了（两个方向都不动），
+// 同时 `setUiZoom` 看到 target === uiZoom，就报了一句「到边界了」——**在 100% 也这么说**，
+// 等于状态栏在对我们撒谎（同一次会话里实测：delta 40/45/49 全部无效，50 才动）。
+//
+// 修法：把不足一档的余量**跨事件攒起来**，攒够半档再走一档（余数继续留着）。这样
+// 100px 一格照旧= 1 档（手感完全不变），而 40px 滚两格 = 1 档、4px 的触摸板滚五下 = 1 档。
+// ---------------------------------------------------------------------------
+
+/** 滚轮余量累加器（就地更新；`remainder` 单位 = 档，记的是"还没走完的那部分"） */
+export interface WheelStepAccumulator {
+  remainder: number;
+}
+
+export function createWheelAccumulator(): WheelStepAccumulator {
+  return { remainder: 0 };
+}
+
+/** 丢掉未走完的余量（用户改用键盘/菜单调档后调用：那两条路没有"半格"这回事） */
+export function resetWheelAccumulator(acc: WheelStepAccumulator): void {
+  acc.remainder = 0;
+}
+
+/**
+ * 把一次滚轮位移并进累加器，返回**这一次该走的整档数**（不足一档时返回 0，余量留在累加器里）。
+ *
+ * - 反向滚动丢掉余量：否则"往上滚一半、再往下滚"会先被上一次的余量抵消，手感发黏。
+ * - 用 `Math.round` 收整档，所以余量天然落在 ±0.5 档以内，不会攒出一大笔"存款"。
+ */
+export function accumulateWheelSteps(
+  acc: WheelStepAccumulator,
+  deltaY: number,
+  deltaX = 0,
+  deltaMode = 0,
+): number {
+  const notches = wheelZoomSteps(deltaY, deltaX, deltaMode);
+  if (notches === 0) return 0;
+  const base = Math.sign(acc.remainder) === Math.sign(notches) ? acc.remainder : 0;
+  const total = base + notches;
+  const whole = Math.round(total);
+  acc.remainder = Number((total - whole).toFixed(6)); // 圆整浮点毛刺，别写进状态
+  return whole;
+}
+
+/**
+ * 位移不足一档时的状态栏文案（见 `accumulateWheelSteps`）。
+ *
+ * 为什么值得写出来：不写的话，"位移太小、正在攒"与"事件压根没到页面"在用户眼里**一模一样**
+ * （都是"滚了没反应、状态栏不动"）—— 而这两件事的修法完全不同。把攒了多少如实说出来，
+ * 一张截图就能分清（正常滚轮走不到这里：一次 100px 就是一档，会直接换成"缩放 N%"）。
+ */
+export function wheelPendingNotice(acc: WheelStepAccumulator): string {
+  const pct = Math.min(99, Math.round(Math.abs(acc.remainder) * 100));
+  return `滚轮这一格不足一档（攒到 ${pct}%），再滚一下就动`;
+}
+
+/**
+ * 滚轮 → 新的缩放系数（已收敛、已圆整）。
+ *
+ * **只在"一次输入就该走到位"的场合用**（测试、桩、以及任何没有跨事件余量的调用方）：它内部用
+ * 一个一次性的累加器，所以 40px 这种不足一档的输入**不会**产生变化（真实滚轮路径必须用
+ * `accumulateWheelSteps` 把余量攒起来，见上方注解）。
+ */
 export function nextZoom(
   current: number | null | undefined,
   deltaY: number,
   deltaX = 0,
   deltaMode = 0,
 ): number {
-  const steps = wheelZoomSteps(deltaY, deltaX, deltaMode);
+  const steps = accumulateWheelSteps(createWheelAccumulator(), deltaY, deltaX, deltaMode);
   return clampZoom(clampZoom(current) + steps * ZOOM_STEP);
 }
 

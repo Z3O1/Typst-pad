@@ -552,16 +552,16 @@ await c.evaluate(`document.querySelector(".cm-content").focus()`);
 await c.selectAll();
 await c.type("KEEP-A 写作输入\n");
 await new Promise((r) => setTimeout(r, 400));
-// Ctrl+/ 进源码模式
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+// Ctrl+E 进源码模式
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
 const inSource = await c.evaluate(`document.querySelector(".cm-content").innerText`);
 check("Ctrl+/ 切到源码模式后内容仍在", inSource.includes("KEEP-A"), JSON.stringify(inSource));
 // 在源码模式里继续输入
 await c.type("KEEP-B 源码输入\n");
 await new Promise((r) => setTimeout(r, 400));
-// Ctrl+/ 切回写作模式
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+// Ctrl+E 切回写作模式
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
 const backWrite = await c.evaluate(`document.querySelector(".cm-content").innerText`);
 check(
@@ -572,6 +572,55 @@ check(
 const sameNode = await c.evaluate(`document.querySelector(".cm-content") === window.__cm`);
 check("模式切换不重挂载编辑器（同一个 .cm-content 节点）", sameNode === true, String(sameNode));
 await c.screenshot(SHOT("wysiwyg-20-mode-switch-keeps-content"));
+
+// ── 键位归属（2026-09-18 用户要求）：`Ctrl+/` = 注释、`Ctrl+E` = 切换模式 ──
+// 为什么必须分开（这就是修之前的现场）：两件事曾经**同时**挂在 `Ctrl+/` 上 ——
+// 编辑器的 CM keymap 处理 `Mod-/` 时只 `preventDefault()`、不阻断冒泡，而菜单的 window 级匹配
+// 不看 `defaultPrevented` ⇒ 按一次既注释又切模式（模式还会被切走，用户要的是"只注释"）。
+// 这两条断言改之前是红的（当时打的是 `/* */`、模式也被切走），所以也是回退对照。
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 200));
+await c.type("COMMENT-TARGET"); // 不带尾换行：光标停在唯一那一行，注释的目标就是它
+await new Promise((r) => setTimeout(r, 400));
+await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 }); // Ctrl+/：应当只注释
+await new Promise((r) => setTimeout(r, 500));
+// 模式看**常驻标签**（.mode-tag 的「写作」/「源码」）而不是状态文字 ——
+// 状态文字会被编译状态（「就绪」）顶掉，拿它断言就是在测别的东西（第一版就栽在这上面）。
+const modeNow = () =>
+  c.evaluate(
+    `({
+      doc: document.querySelector(".cm-content").innerText,
+      tags: Array.from(document.querySelectorAll(".statusbar .mode-tag")).map((e) => e.textContent.trim()),
+    })`,
+  );
+const ctrlSlash = await modeNow();
+check(
+  "Ctrl+/ 只做行注释：文档里出现 typst 的 `//`，且模式仍是写作（不再顺带把模式切走）",
+  ctrlSlash.doc.includes("// COMMENT-TARGET") && ctrlSlash.tags.some((t) => t.includes("写作")),
+  JSON.stringify(ctrlSlash),
+);
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 }); // Ctrl+E：切模式
+await new Promise((r) => setTimeout(r, 500));
+const ctrlE1 = await modeNow();
+check(
+  "Ctrl+E 切到源代码模式（新键位生效）",
+  ctrlE1.tags.some((t) => t.includes("源码")),
+  JSON.stringify(ctrlE1),
+);
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 500));
+const ctrlE2 = await modeNow();
+check(
+  "再按一次 Ctrl+E 回到写作模式（双向都生效）",
+  ctrlE2.tags.some((t) => t.includes("写作")),
+  JSON.stringify(ctrlE2),
+);
+// 收尾：清掉这段内容，别影响后面的组
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 300));
 
 console.log("21) 启动恢复上次内容（会话安全网）：输入 → 重载 → 内容回来；开关关闭时不恢复");
 await c.evaluate(`localStorage.clear()`);
@@ -1425,7 +1474,7 @@ check(
 // 写作模式（文档模式）：**始终自动折行**，不需要 Alt+Z
 // 用户要求（2026-09-14）：「预览模式和文档模式的内容不应该有横向拖动，而是自动换行，
 // Alt+Z 只对代码起效」——实测改前一条长行会给写作模式带来 2855px 的横向滚动。
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
 const writeAuto = await c.evaluate(wrapProbe);
 check(
@@ -1445,7 +1494,7 @@ check(
 );
 
 // 回源码模式：换行开关仍是关（两个模式互不影响）
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
 const backToSource = await c.evaluate(wrapProbe);
 check(
@@ -1613,14 +1662,22 @@ check(
   `字高 物理 ${base.textPhysPx} → ${zoom150.textPhysPx} → ${zoom250.textPhysPx} px`,
 );
 
-// 文档自己写了 #set page(...) 时注入会被覆盖 → 必须退回等比缩放，而不是硬套重排假设
+// 文档自己写了 #set page(...) 时注入会被覆盖 → 必须退回等比缩放，而不是硬套重排假设。
+// **判据换成"产物页宽"**（2026-09-18）：以前用"画布 ≠ 栏宽"当指纹，但那条路现在**也不许横滚**
+// （画布同样铺满栏宽），指纹就不成立了；直接看产物的 viewBox 才是真凭据 ——
+// 产物页宽 = A4（文档自己的纸型赢了），且与"请求的页宽"明显不同 = 确实没走重排。
 const fallback = await loadPreviewAt(WIN, 2.5, "&reflowfail=1");
 check(
-  "文档自带纸型（注入被覆盖）时退回等比缩放路径，不假装重排生效",
-  fallback.canvasCss !== null &&
+  "文档自带纸型（注入被覆盖）时退回等比缩放路径，且同样不横滚",
+  fallback.viewBoxW !== null &&
+    fallback.lastPreviewWidthPt !== null &&
+    Math.abs(fallback.viewBoxW - 595.28) <= 1 && // 产物仍是 A4 = 文档自己的纸型
+    Math.abs(fallback.viewBoxW - fallback.lastPreviewWidthPt) > 2 && // 不等于请求页宽 = 没假装重排生效
+    fallback.overflowX <= 0 && // 且不出现横向滚动条（2026-09-18 起）
+    fallback.canvasCss !== null &&
     fallback.container !== null &&
-    Math.abs(fallback.canvasCss - fallback.container) > 2,
-  `画布 ${fallback.canvasCss} vs 栏宽 ${fallback.container}（退回等比缩放 ⇒ 画布不再等于栏宽）`,
+    fallback.canvasCss <= fallback.container + 1,
+  `产物页宽 ${fallback.viewBoxW} vs 请求 ${fallback.lastPreviewWidthPt}；画布 ${fallback.canvasCss} / 栏宽 ${fallback.container}；横向溢出 ${fallback.overflowX}px`,
 );
 await c.screenshot(SHOT("wysiwyg-30-preview-reflow"));
 await c.send("Emulation.clearDeviceMetricsOverride");
@@ -1963,7 +2020,7 @@ check(
 );
 
 // ① 写作 → 源码
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
 const caretSource = await c.evaluate(caretProbe);
 const rowSource = await c.evaluate(cursorRow);
@@ -1979,7 +2036,7 @@ check(
 );
 
 // ② 源码 → 写作
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
 const caretBackWrite = await c.evaluate(caretProbe);
 check(
@@ -1991,7 +2048,7 @@ check(
 );
 
 // ③ 再回源码：逻辑位置（状态栏的「行」）必须与第一次切过去时一致
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
 const rowBack = await c.evaluate(cursorRow);
 check(
@@ -2656,9 +2713,9 @@ check(
 );
 
 // ④ 常见操作（切模式 / 缩放 / 等编译）之后仍然一次写盘都没有——把"应用从不自己写文件"钉得更死
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 }); // Ctrl+/ 切模式
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 }); // Ctrl+E 切模式
 await new Promise((r) => setTimeout(r, 500));
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 800));
 await c.wheel(400, 300, -120, { modifiers: 2 }); // Ctrl+滚轮缩放
 await new Promise((r) => setTimeout(r, 900));
@@ -2753,7 +2810,280 @@ check(
   JSON.stringify({ requested: zReset.requested, tags: zReset.tags }),
 );
 
-console.log("40) 选中整个公式不展开（用户要求「选中整个公式请写不展开」）：完整盖住 → 保持渲染 + 淡色底");
+// 第 40 组：**一次滚轮的位移不足一档时不许失灵**（用户 2026-09-16 反馈
+// 「Ctrl+滚轮常态是可以的，但是到上限不知道为什么就不可以了」+ 状态栏写着「缩放已是 250%（到边界了）」）
+//
+// 真因（`zoom.ts` 的 accumulateWheelSteps 注解）：滚轮位移可能不足一档（高倍缩放时每格位移会变小；
+// Chromium 在"浏览器→渲染器"之间会按比例缩放滚轮位移），而档位是 10% 一格、`clampZoom` 又会把
+// 计算出来的 4% 圆整抹掉 —— 每个事件独立算的话，这种滚轮**永远**动不了，还会被误报成"到边界了"。
+// 之前 223 项验收全绿是因为**脚本一直只发 ±100px**（正好在阈值上边），这条路径根本没被覆盖。
+// 下面用真实滚轮事件（差分机发的就是 40px）锁住：不足一档要攒起来、攒够了走一档，
+// 而且**没到边界时不许说"到边界了"**。
+console.log("40) 位移不足一档的滚轮：攒够再走一格（用户报的「到上限就不行」）");
+
+/** 在编辑区中心发 N 次 40px 的真实滚轮事件（Ctrl 修饰） */
+const smallWheel = async (deltaY, times) => {
+  const z = await c.evaluate(zoomProbe);
+  for (let i = 0; i < times; i++) await c.wheel(z.center.x, z.center.y, deltaY, { modifiers: 2 });
+  await new Promise((r) => setTimeout(r, 400));
+  return c.evaluate(zoomProbe);
+};
+
+// 起点归到 100%（上一组结束时已经是 100%，这里再确认一次并拿基准）
+const s0 = await c.evaluate(zoomProbe);
+check(
+  "第 40 组起点：缩放 100%（上一组收尾重置过）",
+  Math.abs((s0.requested ?? 0) - 1) < 0.001,
+  JSON.stringify({ requested: s0.requested }),
+);
+
+// ① 一格 40px（0.4 档）不足以走一档：档位不动，且**绝不能**说"到边界了"；
+//    同时要把"攒了多少"说出来（否则"位移太小"与"事件没到页面"在用户眼里完全一样）
+const s1 = await smallWheel(-40, 1);
+check(
+  "40px 一格：档位不动、状态栏**不出现**「到边界了」（旧代码在这里谎报边界），而是提示攒到 40%",
+  Math.abs((s1.requested ?? 0) - 1) < 0.001 &&
+    !s1.status.includes("到边界了") &&
+    s1.status.includes("攒到 40%"),
+  JSON.stringify({ requested: s1.requested, status: s1.status }),
+);
+
+// ② 再来一格（累计 0.8 档 ≥ 半档）：走一档 —— 这就是旧代码永远到不了的一步
+const s2 = await smallWheel(-40, 1);
+check(
+  "40px 两格（累计 0.8 档）→ 放大一档到 110%（余量攒够了就走）",
+  Math.abs((s2.requested ?? 0) - 1.1) < 0.001 && s2.status.includes("缩放 110%"),
+  JSON.stringify({ requested: s2.requested, status: s2.status }),
+);
+
+// ③ 反方向同理：往下滚两格 40px 回到 100%
+const s3 = await smallWheel(40, 2);
+check(
+  "40px 往下两格 → 缩回 100%（反方向也攒得起来）",
+  Math.abs((s3.requested ?? 0) - 1) < 0.001,
+  JSON.stringify({ requested: s3.requested }),
+);
+
+// ④ 上限处往下滚（用户报的正是这个）：先用键盘推到 250%，再用 40px 滚轮往下 —— 必须能缩小
+for (let i = 0; i < 15; i++) {
+  await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
+  await new Promise((r) => setTimeout(r, 80));
+}
+await new Promise((r) => setTimeout(r, 400));
+const sTop = await c.evaluate(zoomProbe);
+check(
+  "用键盘推到上限 250%（这一档 = 边界）",
+  Math.abs((sTop.requested ?? 0) - 2.5) < 0.001,
+  JSON.stringify({ requested: sTop.requested }),
+);
+const sTopUp = await smallWheel(-40, 4); // 已在边界，往上滚应当只提示"到边界了"
+check(
+  "真到边界时往上滚（40px ×4）→ 停在 250% 并提示「到边界了」（这句只许在真边界出现）",
+  Math.abs((sTopUp.requested ?? 0) - 2.5) < 0.001 && sTopUp.status.includes("到边界了"),
+  JSON.stringify({ requested: sTopUp.requested, status: sTopUp.status }),
+);
+const sDown = await smallWheel(40, 2);
+check(
+  "**回归**：上限处用 40px 滚轮往下两格 → 250% → 240%（用户报的「到上限就不行」）",
+  Math.abs((sDown.requested ?? 0) - 2.4) < 0.001 && sDown.status.includes("缩放 240%"),
+  JSON.stringify({ requested: sDown.requested, status: sDown.status }),
+);
+
+// 收尾：走菜单「重置缩放」回到 100%
+await openMenu("视图");
+await c.waitFor(`document.body.innerText.includes("重置缩放")`, { timeout: 5000 });
+await clickMenuItem("重置缩放");
+await new Promise((r) => setTimeout(r, 500));
+const sReset = await c.evaluate(zoomProbe);
+check(
+  "第 40 组收尾：重置回 100%（滚轮余量不残留：重置后按 40px 一格仍然不动）",
+  Math.abs((sReset.requested ?? 0) - 1) < 0.001,
+  JSON.stringify({ requested: sReset.requested }),
+);
+
+// 第 41 组：**文档自己写了 `#set page(...)` 时，预览栏也不许出现横向滚动条**
+// （用户 2026-09-18 反馈「为什么预览框还是会出现下方的滑动条」，并选定「永不横滚」）
+//
+// 背景：预览的页宽是**编译期**决定的，所以有两条路（见 preview-scale.ts）：
+//   ① 我们注入 `#set page(width: …)` → 按栏宽重排 → 画布恒 ≤ 栏宽（第 30 组锁的就是这条）；
+//   ② 文档自己写了 `#set page(...)`（`paper:` / `width:` / `height:` 都算）→ 我们的注入被它覆盖
+//      → 退回「固定版心 + 等比缩放」老路：画布被自然尺寸（A4 ≈ 568 CSS px）封顶。
+// 老路上界面缩放会把 **CSS 视口一起缩小**（1400px 窗口在 150% 下只有 933 CSS px，预览栏
+// 685 → 451px），于是 568 > 451 —— **预览栏底部出现横向滚动条**（实测溢出 117px）。
+// 而且画布在 568px 就已封顶，再放大并不会更大 ⇒ 这条横条"什么也没换来"。
+//
+// 真机上没法用 setZoom 放大（无头桩的 setZoom 是假的），所以用两条一起复现同一套几何：
+//   键盘 `Ctrl+Shift+=` 设 uiZoom 状态（放大档位）× `Emulation.setDeviceMetricsOverride`
+//   把视口压到"缩放后应有的 CSS 宽度"（真机上这一步由 webview 缩放自己完成）。
+// 视口变化会触发 ResizeObserver → applyPreviewScale，正是真机上缩放时走的那条路。
+console.log("41) 文档自带 #set page(...)（固定版心）时也不许横滚");
+
+const hProbe = `(() => {
+  const b = document.querySelector(".preview-body");
+  const h = document.querySelector("#preview-host");
+  const svg = h ? h.querySelector("svg") : null;
+  const cs = getComputedStyle(b);
+  return {
+    clientW: b.clientWidth,
+    scrollW: b.scrollWidth,
+    overX: b.scrollWidth - b.clientWidth,
+    // 横向滚动条是否真的"存在"（overflow-x 为 auto 且内容更宽才算）
+    showsScrollbar: b.scrollWidth > b.clientWidth && cs.overflowX !== "hidden",
+    hostW: h ? +h.getBoundingClientRect().width.toFixed(1) : null,
+    hostStyleW: h ? h.style.width : null,
+    viewBox: svg ? svg.getAttribute("viewBox") : null,
+    uiZoom: JSON.parse(localStorage.getItem("typst-pad:state") || "{}").uiZoom ?? null,
+  };
+})()`;
+
+/** 进「源代码模式」并压到指定视口宽度；zoomSteps = 按几次 Ctrl+Shift+= */
+const enterSourceAt = async (extra, viewportW, zoomSteps) => {
+  await c.goto(`${DEV_URL}${extra}`);
+  await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+  await c.evaluate(`localStorage.clear()`); // 否则上次的 viewMode/缩放会残留
+  await c.goto(`${DEV_URL}${extra}`);
+  await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: viewportW,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await new Promise((r) => setTimeout(r, 700));
+  // 写作 → 源代码模式；并**确认预览栏真的可见**（clientWidth > 0）——不确认的话，
+  // 一旦这次按键没生效（焦点/时序问题），后面就会拿 clientWidth=0 去断言，报错信息毫无指向性（实测踩过）
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+    await new Promise((r) => setTimeout(r, 700));
+    const visible = await c.evaluate(`document.querySelector(".preview-body").clientWidth > 0`);
+    if (visible) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  await new Promise((r) => setTimeout(r, 1800)); // 等预览重排（去抖 250ms + 一次编译）
+  for (let i = 0; i < zoomSteps; i++) {
+    await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
+    await new Promise((r) => setTimeout(r, 140));
+  }
+  // 再抖一下视口：真机上缩放本身就会让预览栏变窄并触发 ResizeObserver，
+  // 桩里 setZoom 是假的，所以用 1px 的变化把同一段代码（RO → applyPreviewScale）跑起来。
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: viewportW - 1,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await new Promise((r) => setTimeout(r, 1800));
+};
+
+// ① 固定版心 + 界面 150%（真机几何：1400px 窗口 → CSS 视口 933px，预览栏约 451px）
+await enterSourceAt("&reflowfail=1", 933, 5);
+const fix150 = await c.evaluate(hProbe);
+check(
+  "文档自带 #set page(...) + 界面 150%：预览栏没有横向滚动条（修前溢出 117px）",
+  fix150.overX === 0 && !fix150.showsScrollbar,
+  JSON.stringify(fix150),
+);
+check(
+  "同一档下画布**铺满**预览栏（不再是封顶的 568px 自然尺寸）",
+  fix150.hostW !== null && Math.abs(fix150.hostW - fix150.clientW) <= 1,
+  JSON.stringify(fix150),
+);
+await c.screenshot(SHOT("wysiwyg-41-fixedpage-150"));
+
+// ② 固定版心 + 界面 250%（真机几何：1400px 窗口 → CSS 视口 560px，预览栏约 265px）
+await enterSourceAt("&reflowfail=1", 560, 15);
+const fix250 = await c.evaluate(hProbe);
+check(
+  "文档自带 #set page(...) + 界面 250%：同样不横滚、画布铺满栏宽",
+  fix250.overX === 0 &&
+    !fix250.showsScrollbar &&
+    fix250.hostW !== null &&
+    Math.abs(fix250.hostW - fix250.clientW) <= 1,
+  JSON.stringify(fix250),
+);
+
+// ③ 宽栏 + 100%（1400px 窗口）：观感**不许变** —— 固定版心的页面仍停在自然尺寸居中，
+//    不因为"永不横滚"就被撑满整栏（那会改变所有老文档的默认外观）。
+await enterSourceAt("&reflowfail=1", 1400, 0);
+const fix100 = await c.evaluate(hProbe);
+check(
+  "宽栏 + 100%：固定版心的页面仍停在自然尺寸（≈568px，居中，没被撑满）",
+  fix100.overX === 0 && fix100.hostW !== null && Math.abs(fix100.hostW - 568) <= 2,
+  JSON.stringify(fix100),
+);
+
+// ④ 对照组：干净文档走「按栏宽重排」那条路，行为必须保持不变（不横滚、画布 = 栏宽）
+await enterSourceAt("", 933, 5);
+const reflow150 = await c.evaluate(hProbe);
+check(
+  "对照组（干净文档走重排路 + 界面 150%）：不横滚、画布仍铺满栏宽（这条路径没被动过）",
+  reflow150.overX === 0 &&
+    reflow150.hostW !== null &&
+    Math.abs(reflow150.hostW - reflow150.clientW) <= 1,
+  JSON.stringify(reflow150),
+);
+
+// ── 第 42 组：编译错误的红波浪线（主源诊断必须真的画出来） ──
+// 回归背景（2026-09-18 排查「还是没法 #import 别的文件」时查出来的老 bug）：
+// Rust 对主源诊断发的是 `"path":null`，而 squiggleRanges 的判据只认
+// `undefined` / `""` / `main.typ` ⇒ `null` 被判成"非主源文件"跳过，
+// **桌面版从 0.4.0 起编译错误的波浪线一条都不画**。桩当时干脆不发 path 字段，
+// 所以浏览器验收一直没覆盖这条链路 —— 现在桩按真实形状（`path: null`）发一条 error，
+// 把它钉住：判据退回旧写法，这四条就会红。
+console.log("42) 编译错误的红波浪线（主源诊断 path: null）");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+const diagProbe = `(() => {
+  const bar = document.querySelector(".statusbar");
+  const wavy = Array.from(document.querySelectorAll(".cm-diag-wavy"));
+  const errBadge = bar.querySelector(".error-badge:not(.warning-badge)");
+  return {
+    count: wavy.length,
+    texts: wavy.map((e) => e.textContent),
+    errCount: errBadge?.querySelector(".error-count")?.textContent?.trim() ?? null,
+  };
+})()`;
+
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 200));
+await c.type("DIAG-ERROR-MARKER"); // 桩按这个标记回一条主源 error 诊断（见 browser-dev-stub.ts）
+await new Promise((r) => setTimeout(r, 800));
+const diag = await c.evaluate(diagProbe);
+check("主源编译错误画出红波浪线（.cm-diag-wavy）", diag.count >= 1, JSON.stringify(diag));
+check(
+  "波浪线落在出错的那段文本上（不是画到别处）",
+  diag.texts.some((t) => t.includes("DIAG-ERROR-MARKER")),
+  JSON.stringify(diag.texts),
+);
+check("错误计数徽标同步为 1", diag.errCount === "1", String(diag.errCount));
+await c.screenshot(SHOT("wysiwyg-42-diag-squiggle"));
+
+// 清掉标记 ⇒ 编译成功 ⇒ 波浪线与计数一起归零（不许留"幽灵错误"）
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 800));
+const diagClean = await c.evaluate(diagProbe);
+check(
+  "清掉标记后波浪线与错误计数一起归零",
+  diagClean.count === 0 && diagClean.errCount === "0",
+  JSON.stringify(diagClean),
+);
+
+// 视口复位（后面的收尾逻辑依赖默认几何）
+await c.send("Emulation.setDeviceMetricsOverride", {
+  width: 1400,
+  height: 900,
+  deviceScaleFactor: 1,
+  mobile: false,
+});
+await new Promise((r) => setTimeout(r, 400));
+
+console.log("43) 选中整个公式不展开（用户要求「选中整个公式请写不展开」）：完整盖住 → 保持渲染 + 淡色底");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
@@ -2890,7 +3220,7 @@ check(
 // 收尾：清回空文档并回写作模式
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
-await c.key("/", { code: "Slash", keyCode: 191, modifiers: 2 });
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 400));
 
 console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
