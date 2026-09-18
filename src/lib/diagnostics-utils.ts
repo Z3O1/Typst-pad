@@ -51,8 +51,10 @@ export interface SquiggleRange {
 
 /**
  * 计算应在编辑器中画波浪线的错误区间。
- * - 非主源文件（本地 .typ 库等）的错误不在主文档内，跳过（path 为空/缺失视为主源，
- *   兼容 Rust 契约与旧数据）；
+ * - 非主源文件（本地 .typ 库等）的错误不在主文档内，跳过；**主源的表示有三种**：
+ *   键缺失（Rust 现在的写法）、`null`（0.4.0~0.8.2 的写法）、空串 —— 都要画。
+ *   这里曾经只认 `undefined`/`""`，`null` 被当成"别的文件"⇒ **桌面版编译错误一条
+ *   波浪线都不画**（浏览器验收的桩不发该字段，所以 0.4.0 起一直没被抓住）。
  * - prefixCode 非空时先做编译源 → 用户文档映射，前缀区错误跳过；
  * - 越界区间 clamp 到文档范围；单点/行尾错误保证至少画出 1 个字符；空文档返回空列表。
  */
@@ -64,7 +66,7 @@ export function squiggleRanges(
 ): SquiggleRange[] {
   const out: SquiggleRange[] = [];
   for (const d of diags) {
-    if (d.path !== undefined && d.path !== "" && d.path !== mainPath) continue;
+    if (d.path != null && d.path !== "" && d.path !== mainPath) continue;
     const start = mapCompiledPosToDoc(d.line, d.col, prefixCode);
     if (start.kind === "prefix") continue;
     let from = offsetAt(doc, start.line, start.col);

@@ -123,6 +123,24 @@ describe("squiggleRanges（编辑器波浪线区间）", () => {
     expect(ranges).toHaveLength(1);
   });
 
+  it("path 为 null（Rust 0.4.0~0.8.2 发的就是 null）：同样视为主源，必须画波浪线", () => {
+    // 回归背景：判据曾经只认 undefined/""，`null` 被当成"非主源文件"跳过 ⇒ 桌面版从
+    // 0.4.0 起编译错误的红波浪线一条都不画（浏览器验收用的桩不发该字段，所以没抓住）。
+    const ranges = squiggleRanges(doc, [
+      err({ line: 1, col: 10, endLine: 1, endCol: 11, path: null }),
+    ]);
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].from).toBe(9);
+    expect(ranges[0].to).toBe(10);
+  });
+
+  it("path 是 main.typ（历史默认值）也当主源", () => {
+    const ranges = squiggleRanges(doc, [
+      err({ line: 1, col: 10, endLine: 1, endCol: 11, path: "main.typ" }),
+    ]);
+    expect(ranges).toHaveLength(1);
+  });
+
   it("前缀启用：错误行号按编译源映射回用户文档", () => {
     // 前缀 "A\n" 一行，用户第 1 行 = 编译源第 2 行；实测 "#set ...\n#let a = b" → "1:9-1:10"
     const ranges = squiggleRanges(doc, [

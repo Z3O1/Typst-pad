@@ -16,7 +16,14 @@ import { dbg } from "./debug";
 // include 根解析，属错误用法。
 // ---------------------------------------------------------------------------
 
-/** Rust 侧结构化诊断：1-based 行列；path 为空表示主文档 */
+/**
+ * Rust 侧结构化诊断：1-based 行列；**缺省（或旧版本的 `null`/空串）表示主文档**。
+ *
+ * 契约细节（2026-09-18 修）：Rust 侧对主源诊断**整个键都不发**
+ * （`Diagnostic::path` 带 `skip_serializing_if`），子文件（include/import）才给路径。
+ * 这里仍然收 `null` —— 0.4.0~0.8.2 发的是 `"path":null`，前端按 `undefined`/`""` 判定，
+ * 于是主源编译错误全被当成"非主源文件"跳过、**一条波浪线都不画**（见 diagnostics-utils.ts）。
+ */
 export interface Diagnostic {
   message: string;
   severity: "error" | "warning";
@@ -24,7 +31,7 @@ export interface Diagnostic {
   column: number;
   endLine?: number;
   endColumn?: number;
-  path?: string;
+  path?: string | null;
 }
 
 /** compile_doc 成功产物：pages 为每页 SVG 字符串（按页序） */
@@ -49,8 +56,11 @@ export interface CompileErrorLocation {
   col: number;
   endLine: number;
   endCol: number;
-  /** 诊断来源路径；空/缺失表示主文档（编辑器为其画波浪线），本地库等为各自路径（跳过） */
-  path?: string;
+  /**
+   * 诊断来源路径；**缺失 / `null` / 空串都表示主文档**（编辑器为它画波浪线），
+   * 本地库等为各自路径（跳过）。`null` 是 Rust 0.4.0~0.8.2 的写法，见 Diagnostic 注释。
+   */
+  path?: string | null;
 }
 
 export interface CompileOk {
@@ -134,7 +144,11 @@ export interface PdfExportFail {
 
 export type PdfExportResult = PdfExportOk | PdfExportCancelled | PdfExportFail;
 
-/** 单条结构化诊断 → 编辑器用的错误位置（end 缺省回退为起点；1-based 原样透传） */
+/** 单条结构化诊断 → 编辑器用的错误位置（end 缺省回退为起点；1-based 原样透传）
+ *
+ * `path` 归一化：Rust 的 `null`（0.8.2 及更早的写法）与「键缺失」都收敛成 `undefined`，
+ * 下游只需要认一种"这是主源"的表示（见 Diagnostic 的注释）。
+ */
 export function diagnosticToLocation(d: Diagnostic): CompileErrorLocation {
   return {
     message: d.message,
@@ -142,7 +156,7 @@ export function diagnosticToLocation(d: Diagnostic): CompileErrorLocation {
     col: d.column,
     endLine: d.endLine ?? d.line,
     endCol: d.endColumn ?? d.column,
-    path: d.path,
+    path: d.path ?? undefined,
   };
 }
 

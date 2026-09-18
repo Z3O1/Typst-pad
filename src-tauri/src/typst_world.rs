@@ -25,7 +25,7 @@
 //! - Diagnostic  -> { message, severity, line, column, endLine, endColumn, path }
 //!   （行列均为 1-based，CodeMirror 波浪线直接消费）
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -101,6 +101,12 @@ pub struct Diagnostic {
     pub end_line: Option<u32>,
     pub end_column: Option<u32>,
     /// 出错文件路径：主文档为 None，include 文件给出其路径
+    ///
+    /// **None 时整个键都不发**（前端按「`path` 缺失/空 ⇒ 主源，要画波浪线」消费，见
+    /// `diagnostics-utils.ts` 的 squiggleRanges）。曾经发 `"path":null`，而前端那条判据
+    /// 只认 `undefined`/`""` ⇒ `null` 被判成"非主源文件"跳过，**桌面版从 0.4.0 起编译错误
+    /// 一直不画波浪线**（浏览器验收用的是不发该字段的桩，所以没人发现，2026-09-18 才查出来）。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
 
@@ -141,27 +147,25 @@ impl TypstWorld {
         let (book, fonts) = cached_fonts(fonts_dir, &font_config.dirs);
         let library = build_library(&font_config.families);
 
-        // 项目根 = 主文档所在目录；主 FileId 的虚拟路径相对该根（盘符前缀被剥离）
+        // 项目根 = 文档所在目录（再按文档实际引用到的相对路径往上放宽，见
+        // resolve_project_root）；主 FileId 的虚拟路径相对该根（盘符前缀被剥离）
         let (root, main_id) = match document_path {
             Some(path) => {
-                let raw = PathBuf::from(path);
-                let (root, main_id) = match (raw.parent(), raw.file_name()) {
-                    // 规范化父目录（去 `..`/符号链接），保证虚拟化后的路径不越界
-                    (Some(parent), Some(name)) => {
-                        let root =
-                            fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-                        let abs = root.join(name);
-                        match VirtualPath::virtualize(&root, &abs) {
+                // canonicalize 父目录（去 `..`/符号链接），保证虚拟化后的路径不越界；
+                // 解析不出（没父目录/没文件名）时当作未保存文档处理
+                match resolve_project_root(&src, &path) {
+                    Some(ProjectRoot { root, main_file }) => {
+                        match VirtualPath::virtualize(&root, &main_file) {
                             Ok(vpath) => (
                                 Some(root),
                                 RootedPath::new(VirtualRoot::Project, vpath).intern(),
                             ),
+                            // 理论上不会发生（放宽只取文档目录的祖先）；兜底成匿名主文档
                             Err(_) => (Some(root), Self::anonymous_main_id()),
                         }
                     }
-                    _ => (None, Self::anonymous_main_id()),
-                };
-                (root, main_id)
+                    None => (None, Self::anonymous_main_id()),
+                }
             }
             None => (None, Self::anonymous_main_id()),
         };
@@ -221,6 +225,11 @@ impl TypstWorld {
             s.insert(id, source.clone());
         }
         Ok(source)
+    }
+
+    /// 本次编译用的项目根（未保存文档为 None）：只用于把越界诊断讲清楚（见 escape_hint）
+    pub fn project_root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 
     /// 用户可读的出错文件路径（主文档为 None，include 为磁盘路径）
@@ -1073,8 +1082,14 @@ fn to_diagnostic(
     // 主源诊断的行号减回注入的行（include 文件的行号是它自己的，不动）
     let shift = if path.is_none() { main_line_offset } else { 0 };
 
+    // 「越界」这类只有引擎黑话的诊断补上可操作信息（见 escape_hint）
+    let message = match escape_hint(&diag.message, world.project_root()) {
+        Some(hint) => format!("{} {hint}", diag.message),
+        None => diag.message.to_string(),
+    };
+
     Some(Diagnostic {
-        message: diag.message.to_string(),
+        message,
         severity: severity.to_string(),
         line: (start.0 as u32).saturating_sub(shift) + 1,
         column: start.1 as u32 + 1,
@@ -1108,46 +1123,240 @@ fn fix_span_end(
     end
 }
 
-/// 未保存文档时预检相对 include：`#include "x.typ"`（含 `/` 绝对虚拟路径）无法解析，
-/// 直接返回"需要先保存文档"诊断；`@` 开头的包导入不依赖文档位置，编译期经包解析
-/// （packages.rs）正常处理，无需保存文档，故保持跳过。
-fn check_relative_imports(src: &str) -> Option<Vec<Diagnostic>> {
+// ---------------------------------------------------------------------------
+// 项目根：相对导入的解析基准（`#import "…"` / `#include "…"`）
+// ---------------------------------------------------------------------------
+
+/// 递归扫描的深度上限（文档 → 它引用的文件 → …）：正常项目 2~3 层足够，防病态自引用
+const ROOT_SCAN_MAX_DEPTH: usize = 8;
+
+/// `#import` / `#include` 里的一个字符串字面量路径
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyntaxPath {
+    /// 节点在源码里的字节偏移（把诊断定位到那一行）
+    offset: usize,
+    path: String,
+}
+
+/// 扫描源码里所有 `#import` / `#include` 的字符串字面量路径（按出现顺序）。
+///
+/// 只认节点子树里的第一个字符串字面量 —— 那正是 typst 的路径参数位置。**动态路径**
+/// （`#import ("a" + ".typ")`）扫不到，那种情况交给编译期报错 + 越界提示兜住。
+fn syntax_paths(src: &str) -> Vec<SyntaxPath> {
     let root = typst_syntax::parse(src);
-    let mut diags = Vec::new();
-    // LinkedNode 自带字节偏移（SyntaxNode 不公开 offset），用于定位 include 的行列
+    let mut out = Vec::new();
+    // LinkedNode 自带字节偏移（SyntaxNode 不公开 offset）
     let mut stack: Vec<LinkedNode> = vec![LinkedNode::new(&root)];
     while let Some(node) = stack.pop() {
-        if node.get().kind() == SyntaxKind::ModuleInclude {
-            // include 的路径参数：子树中第一个字符串字面量
-            let mut path: Option<String> = None;
+        let kind = node.get().kind();
+        if kind == SyntaxKind::ModuleImport || kind == SyntaxKind::ModuleInclude {
             let mut inner: Vec<LinkedNode> = node.children().collect();
             while let Some(child) = inner.pop() {
                 if child.get().kind() == SyntaxKind::Str {
                     if let Some(v) = child.get().cast::<typst::syntax::ast::Str>() {
-                        path = Some(v.get().to_string());
+                        out.push(SyntaxPath {
+                            offset: node.offset(),
+                            path: v.get().to_string(),
+                        });
                     }
                     break;
                 }
                 inner.extend(child.children());
             }
-            if let Some(path) = path {
-                // 以 / 开头的虚拟绝对路径也要项目根，同样需要已保存文档；
-                // @ 开头的是包导入（@local/@preview），不依赖文档位置，交给编译期处理
-                if !path.starts_with('@') {
-                    let (line, column) = offset_to_line_column(src, node.offset());
-                    diags.push(Diagnostic {
-                        message: "相对导入需要先保存文档（include 的文件路径基于文档所在目录解析，请先保存后重试）".to_string(),
-                        severity: "error".to_string(),
-                        line,
-                        column,
-                        end_line: None,
-                        end_column: None,
-                        path: None,
-                    });
-                }
-            }
         }
         stack.extend(node.children());
+    }
+    out.sort_by_key(|p| p.offset);
+    out
+}
+
+/// 一条相对路径冲出「引用它的文件所在目录」的层数。
+///
+/// 与 typst 的路径归一化**同构**（`Segments::push_component`，typst-syntax 的
+/// `src/path.rs`）：`Normal` 压栈、`..` 弹栈，弹不动就是冲出根 —— 于是项目根必须在
+/// 引用文件目录之上至少 `need` 层，否则 typst 直接报 `would escape the project root`。
+/// 注意分隔符只认 `/`：typst 的 `components()` 只按 `/` 切，反斜杠算非法字符。
+fn needed_levels(path: &str) -> usize {
+    let mut depth = 0usize;
+    let mut need = 0usize;
+    for comp in path.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                if depth > 0 {
+                    depth -= 1;
+                } else {
+                    need += 1;
+                }
+            }
+            _ => depth += 1,
+        }
+    }
+    need
+}
+
+/// `anc` 是不是 `p` 的祖先（组件级）。Windows 磁盘不区分大小写，而 `Path::starts_with`
+/// 是逐字节比较 —— 这里补一层忽略大小写的兜底（`\\wsl.localhost\Ubuntu` 与
+/// `\\wsl.localhost\ubuntu` 是同一个目录，2026-08-06 的 issue #34 就是大小写匹配栽的）。
+fn is_ancestor_of(anc: &Path, p: &Path) -> bool {
+    if p.starts_with(anc) {
+        return true;
+    }
+    if !cfg!(windows) {
+        return false;
+    }
+    let fold = |path: &Path| -> Vec<String> {
+        path.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let a = fold(anc);
+    let b = fold(p);
+    b.len() >= a.len() && a.iter().zip(&b).all(|(x, y)| x == y)
+}
+
+/// 两个绝对路径的最近公共祖先；找不到（不在同一个卷/盘上）时原样返回 `a` ——
+/// 跨卷是 typst 单根模型的硬限制（CLI 也一样），交给越界提示说清楚。
+fn common_ancestor(a: &Path, b: &Path) -> PathBuf {
+    a.ancestors()
+        .find(|cand| is_ancestor_of(cand, b))
+        .map_or_else(|| a.to_path_buf(), PathBuf::from)
+}
+
+/// 词法规范化（去掉 `.` / `..`），**不碰文件系统**：typst 解析路径就是纯词法的，
+/// 目标文件还不存在（写错名字、还没建）时也得能算出它落在哪，否则连"该往哪放宽"都不知道。
+fn lexical_normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            // 已经到卷根就再也上不去了（绝对路径不会有 `..` 逃出卷根的那一天）
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// 主文档的（目录, 绝对路径）。目录做 canonicalize（与 main_id 的虚拟化同源，
+/// 保证后续 join 出来的路径与它共享同一个前缀），失败就退回原样。
+fn doc_dir_and_file(document_path: &str) -> Option<(PathBuf, PathBuf)> {
+    let raw = PathBuf::from(document_path);
+    let (parent, name) = (raw.parent()?, raw.file_name()?);
+    let dir = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let file = dir.join(name);
+    Some((dir, file))
+}
+
+/// 递归收集"项目根的最低要求"：文档（以及它引用到的本地 .typ）里每条相对路径都要求
+/// 根在引用文件目录之上若干层，这里把每条的**最低可满足根**收集起来，最后取公共祖先。
+fn collect_required_roots(
+    src: &str,
+    dir: &Path,
+    depth: usize,
+    visited: &mut HashSet<PathBuf>,
+    out: &mut Vec<PathBuf>,
+) {
+    for p in syntax_paths(src) {
+        let path = p.path.as_str();
+        // `@` = 包（自己的虚拟根，不受项目根影响）；`/` 开头 = 根相对（永远不越界）；
+        // 绝对路径（Windows 盘符等）在 typst 里本来就非法，放宽根也救不了 —— 都跳过
+        if path.starts_with('@') || path.starts_with('/') || Path::new(path).is_absolute() {
+            continue;
+        }
+        if let Some(required) = dir.ancestors().nth(needed_levels(path)) {
+            out.push(required.to_path_buf());
+        }
+        // 引用到的本地 .typ 里可能还有自己的相对引用，它们同样要落在根内（递归看一遍）
+        if depth >= ROOT_SCAN_MAX_DEPTH {
+            continue;
+        }
+        let target = lexical_normalize(&dir.join(path));
+        let is_typ = target
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("typ"));
+        if !is_typ || !target.is_file() || !visited.insert(target.clone()) {
+            continue;
+        }
+        if let (Ok(text), Some(parent)) = (fs::read_to_string(&target), target.parent()) {
+            collect_required_roots(&text, parent, depth + 1, visited, out);
+        }
+    }
+}
+
+/// 项目根 + 主文档绝对路径（编译世界按这个根把虚拟路径落到磁盘上）
+pub struct ProjectRoot {
+    pub root: PathBuf,
+    pub main_file: PathBuf,
+}
+
+/// 解析项目根：**文档所在目录起手，再按文档实际引用到的路径往上放宽**。
+///
+/// 为什么不是"文档目录"就够了（2026-09-18 用户报「还是没法 `#import` 别的文件」）：
+/// typst 的 `..` 是按**虚拟路径**判越界的（`typst-syntax/src/path.rs` 的
+/// `Segments::push_component`：`..` 弹不动就 `PathError::Escapes`），目标文件哪怕确实
+/// 躺在磁盘上、只是比根高一层，也会直接报
+/// ``path "../touying/z.typ" would escape the project root``。所以根必须是"能容纳所有
+/// 相对引用的最低目录"，等价于 typst CLI 的 `--root` 自动版（CLI 靠用户手填）。
+///
+/// 放宽只跟着文档自己写了什么走：同卷内相对引用 ⇒ 根抬到它们的公共祖先；跨卷（例如
+/// 文档在 `\\wsl.localhost\…` 而模板在 `D:\…`）没有公共祖先 ⇒ 根保持文档目录，编译期
+/// 报越界时由 [`escape_hint`] 把根和原因说清楚。
+fn resolve_project_root(src: &str, document_path: &str) -> Option<ProjectRoot> {
+    let (dir, main_file) = doc_dir_and_file(document_path)?;
+    let mut visited = HashSet::new();
+    let mut required = Vec::new();
+    collect_required_roots(src, &dir, 0, &mut visited, &mut required);
+    let mut root = dir;
+    for req in required {
+        root = common_ancestor(&root, &req);
+    }
+    Some(ProjectRoot { root, main_file })
+}
+
+/// 越界诊断补一句"当前项目根 + 下一步"：typst 原文只有
+/// `path "…" would escape the project root` 加一句 hint（`cannot access files outside of
+/// the project sandbox`），而 hint 在 `SourceDiagnostic.hints` 里、我们只取 message ⇒
+/// 用户看到的就是没头没尾的一句。这里把根与"同一卷内会自动放宽"的规则讲明白。
+fn escape_hint(message: &str, root: Option<&Path>) -> Option<String> {
+    if !message.contains("would escape the project root") {
+        return None;
+    }
+    Some(match root {
+        Some(root) => format!(
+            "（当前项目根：{}；同一卷内的相对引用会自动把项目根放宽到能容纳它们，\
+             仍越界通常是目标在另一个盘/卷上 —— typst 引擎不支持跨卷导入，\
+             请把被引用的文件放进文档所在的盘/卷）",
+            root.display()
+        ),
+        None => "（文档尚未保存，无法确定项目根；相对导入需要先保存文档）".to_string(),
+    })
+}
+
+/// 未保存文档时预检相对导入：`#import "x.typ": …` / `#include "x.typ"`（含 `/` 绝对
+/// 虚拟路径）都无法解析磁盘路径，直接返回"需要先保存文档"诊断；`@` 开头的包导入不依赖
+/// 文档位置，编译期经包解析（packages.rs）正常处理，无需保存文档，故保持跳过。
+///
+/// `#import` 与 `#include` 都收（2026-09-18 之前只认 include，于是文档没保存时
+/// `#import` 会掉进引擎那句笼统的 failed to load file）。
+fn check_relative_imports(src: &str) -> Option<Vec<Diagnostic>> {
+    let mut diags = Vec::new();
+    for p in syntax_paths(src) {
+        if p.path.starts_with('@') {
+            continue;
+        }
+        let (line, column) = offset_to_line_column(src, p.offset);
+        diags.push(Diagnostic {
+            message: "相对导入需要先保存文档（#import / #include 的路径按文档所在目录解析，请先保存后重试）".to_string(),
+            severity: "error".to_string(),
+            line,
+            column,
+            end_line: None,
+            end_column: None,
+            path: None,
+        });
     }
     if diags.is_empty() {
         None
@@ -1619,6 +1828,262 @@ hello"
             .expect("诊断应带 include 文件路径");
         assert!(d.line >= 1 && d.column >= 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 相对 #import：同目录子模块（`#import "t.typ": hello` + `#hello`）。
+    /// 顺带补上一个长期空白：此前**一条本地相对 import 的单测都没有**（只有 include
+    /// 与 @preview/@local 包），所以 import 这条分支坏了也没人拦。
+    #[test]
+    fn relative_import_same_dir_ok() {
+        let dir =
+            std::env::temp_dir().join(format!("typst-pad-test-{}-imp-same", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("t.typ"), "#let hello() = [来自子模块]\n").unwrap();
+        fs::write(
+            dir.join("main.typ"),
+            "#import \"t.typ\": hello
+
+#hello()
+",
+        )
+        .unwrap();
+
+        let src = fs::read_to_string(dir.join("main.typ")).unwrap();
+        let doc_path = dir.join("main.typ").to_string_lossy().to_string();
+        let out = compile(src, Some(doc_path), &fonts_dir(), &FontConfig::default());
+        assert!(
+            out.ok,
+            "同目录 import 应成功，实际诊断: {:?}",
+            out.diagnostics
+        );
+        assert!(!out.pages.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 相对 #import：**上一层目录**里的模板 —— 本次回归的核心。
+    ///
+    /// 用户报「还是没法 #import 别的文件」，原话场景是
+    /// `Typst/2026.6.3-随机化和近似算法/…….typ` 里的 `#import "../touying/z.typ": *`。
+    /// typst 的 `..` 是按**虚拟路径**判越界的：项目根若还钉在文档目录，`..` 一弹就
+    /// 报 `path "…" would escape the project root`（见 resolve_project_root）。
+    ///
+    /// 这里连模板**自己**的跨目录引用一起验（`touying/z.typ` → `../shared/util.typ`）：
+    /// 根得放宽到能一次容纳两层引用。
+    #[test]
+    fn relative_import_parent_dir_ok() {
+        let base =
+            std::env::temp_dir().join(format!("typst-pad-test-{}-imp-up", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let docs = base.join("2026.6.3-随机化和近似算法");
+        let lib = base.join("touying");
+        let shared = base.join("shared");
+        fs::create_dir_all(&docs).unwrap();
+        fs::create_dir_all(&lib).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("util.typ"), "#let two() = [嵌套引用]\n").unwrap();
+        fs::write(
+            lib.join("z.typ"),
+            "#import \"../shared/util.typ\": two
+
+#let hi(x) = [模板: #x / #two()]
+",
+        )
+        .unwrap();
+        fs::write(
+            docs.join("main.typ"),
+            "#import \"../touying/z.typ\": hi
+
+#hi(1)
+",
+        )
+        .unwrap();
+
+        let src = fs::read_to_string(docs.join("main.typ")).unwrap();
+        let doc_path = docs.join("main.typ").to_string_lossy().to_string();
+        let out = compile(src, Some(doc_path), &fonts_dir(), &FontConfig::default());
+        assert!(
+            out.ok,
+            "引用上一层目录的 import 应成功，实际诊断: {:?}",
+            out.diagnostics
+        );
+        assert!(!out.pages.is_empty());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `needed_levels` 与 typst 的路径归一化同构（`Segments::push_component`）：
+    /// `Normal` 压栈、`..` 弹栈，弹不动的次数就是"根要比引用文件目录高几层"
+    #[test]
+    fn needed_levels_matches_typst_semantics() {
+        assert_eq!(needed_levels("t.typ"), 0);
+        assert_eq!(needed_levels("./t.typ"), 0);
+        assert_eq!(needed_levels("sub/t.typ"), 0);
+        assert_eq!(needed_levels("sub/../t.typ"), 0);
+        assert_eq!(needed_levels("../t.typ"), 1);
+        assert_eq!(needed_levels("../touying/z.typ"), 1);
+        assert_eq!(needed_levels("../../t.typ"), 2);
+        assert_eq!(needed_levels("sub/../../t.typ"), 1);
+        // typst 只按 `/` 切分（反斜杠是非法字符，那种路径根本编不过）
+        assert_eq!(needed_levels("..\\t.typ"), 0);
+    }
+
+    /// 项目根放宽规则（纯函数，本次改动的核心逻辑）：
+    /// ① 同目录引用**不许**无谓放宽；② 引用上一层目录 ⇒ 放宽到公共祖先；
+    /// ③ 被引用文件**自己**还往上走时也要算进去 —— 只按"目标文件的公共祖先"算是错的，
+    /// 必须按 `..` 的层数算（否则 `base/notes` 里的 `sub/head.typ` 写 `../../x` 仍会越界）。
+    #[test]
+    fn project_root_widening_rules() {
+        let base =
+            std::env::temp_dir().join(format!("typst-pad-test-{}-root", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let notes = base.join("notes");
+        let sub = notes.join("sub");
+        let lib = base.join("touying");
+        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(lib.join("z.typ"), "#let hi() = [模板]\n").unwrap();
+        // 被引用文件自己的引用要往上两层：根不放宽到 base 就会越界
+        fs::write(
+            sub.join("head.typ"),
+            "#import \"../../touying/z.typ\": hi
+
+#hi()
+",
+        )
+        .unwrap();
+        let doc = notes.join("main.typ");
+        let doc_s = doc.to_string_lossy().to_string();
+        // 临时目录本身可能是符号链接（macOS 的 /var → /private/var），两边都 canonicalize
+        let canon_base = fs::canonicalize(&base).unwrap();
+        let canon_notes = fs::canonicalize(&notes).unwrap();
+
+        let same = resolve_project_root("#import \"t.typ\": a\n", &doc_s).expect("能解析出根");
+        assert_eq!(same.root, canon_notes, "同目录引用不该放宽项目根");
+        assert_eq!(same.main_file, canon_notes.join("main.typ"));
+
+        let up =
+            resolve_project_root("#import \"../touying/z.typ\": hi\n", &doc_s).expect("能解析出根");
+        assert_eq!(up.root, canon_base, "引用上一层目录应放宽到公共祖先");
+
+        let nested = resolve_project_root("#import \"sub/head.typ\": hi\n", &doc_s)
+            .expect("能解析出根");
+        assert_eq!(
+            nested.root, canon_base,
+            "被引用文件自己的 `../../` 也要落在根内（要递归看它引用了什么）"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 目标文件不存在（名字写错 / 还没建）时：报"找不到"，**不再**报越界 ——
+    /// 放宽是纯词法的，所以"文档目录之外"本身不再构成错误。
+    #[test]
+    fn relative_import_missing_target_reports_not_found() {
+        let base =
+            std::env::temp_dir().join(format!("typst-pad-test-{}-imp-gone", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let docs = base.join("week2");
+        fs::create_dir_all(&docs).unwrap();
+        fs::write(
+            docs.join("main.typ"),
+            "#import \"../weekly-template/不存在.typ\": hi
+
+#hi(1)
+",
+        )
+        .unwrap();
+
+        let src = fs::read_to_string(docs.join("main.typ")).unwrap();
+        let doc_path = docs.join("main.typ").to_string_lossy().to_string();
+        let out = compile(src, Some(doc_path), &fonts_dir(), &FontConfig::default());
+        assert!(!out.ok, "目标不存在当然编译失败");
+        assert!(
+            out.diagnostics.iter().all(|d| !d.message.contains("escape")),
+            "不该再报越界（放宽是纯词法的），实际: {:?}",
+            out.diagnostics
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 越界诊断的补充说明（纯函数）：把当前项目根与"跨卷是硬限制"讲清楚
+    #[test]
+    fn escape_hint_explains_project_root() {
+        let msg = "path `\"../z.typ\"` would escape the project root";
+        let hint = escape_hint(msg, Some(Path::new("/proj/docs"))).expect("越界要给提示");
+        assert!(hint.contains("/proj/docs"), "要说清当前项目根: {hint}");
+        assert!(hint.contains("跨卷"), "要讲清跨卷是硬限制: {hint}");
+        assert!(
+            escape_hint("其它错误", Some(Path::new("/proj"))).is_none(),
+            "别的错误不该被加料"
+        );
+        assert!(
+            escape_hint(msg, None).unwrap().contains("未保存"),
+            "没有根时要说清是未保存"
+        );
+    }
+
+    /// 未保存文档 + 相对 #import：同样给出"需要先保存文档"（此前只认 #include，
+    /// `#import` 会掉进引擎那句笼统的 failed to load file）
+    #[test]
+    fn unsaved_relative_import_precheck() {
+        let out = compile(
+            "#import \"chapter.typ\": x
+
+#x
+"
+            .to_string(),
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+        );
+        assert!(!out.ok);
+        let d = out
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("保存"))
+            .expect("应有\"需要先保存文档\"诊断");
+        assert_eq!(d.line, 1, "import 在第 1 行");
+        assert!(d.column >= 1);
+    }
+
+    /// 契约：主文档的诊断**不带** `path` 键，子文件（include/import）的才带。
+    ///
+    /// 前端按「`path` 缺失/空 ⇒ 主源，要画波浪线」消费（`squiggleRanges`）。曾经发
+    /// `"path":null` 而前端只认 `undefined`/`""` ⇒ 主源错误全被判成"非主源文件"跳过，
+    /// 桌面版从 0.4.0 起**编译错误一条波浪线都不画**（浏览器验收的桩不发该字段，抓不到）。
+    #[test]
+    fn diagnostic_path_key_omitted_for_main_source() {
+        let main = Diagnostic {
+            message: "m".into(),
+            severity: "error".into(),
+            line: 1,
+            column: 1,
+            end_line: Some(1),
+            end_column: Some(2),
+            path: None,
+        };
+        let json = serde_json::to_string(&main).unwrap();
+        assert!(!json.contains("path"), "主源诊断不该发 path 键: {json}");
+
+        let other = Diagnostic {
+            path: Some("sub/a.typ".into()),
+            ..main
+        };
+        let json = serde_json::to_string(&other).unwrap();
+        assert!(json.contains(r#""path":"sub/a.typ""#), "子文件诊断要带 path: {json}");
+
+        // 真实编译结果（主源语法错误）整包 JSON 里也不该出现 path
+        let out = compile(
+            "#let = 3
+hello"
+                .to_string(),
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+        );
+        assert!(!out.ok);
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(!json.contains("path"), "整包输出不该有 path: {json}");
     }
 
     /// 未保存文档 + 相对 include：给出"需要先保存文档"明确诊断

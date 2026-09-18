@@ -3006,6 +3006,57 @@ check(
   JSON.stringify(reflow150),
 );
 
+// ── 第 42 组：编译错误的红波浪线（主源诊断必须真的画出来） ──
+// 回归背景（2026-09-18 排查「还是没法 #import 别的文件」时查出来的老 bug）：
+// Rust 对主源诊断发的是 `"path":null`，而 squiggleRanges 的判据只认
+// `undefined` / `""` / `main.typ` ⇒ `null` 被判成"非主源文件"跳过，
+// **桌面版从 0.4.0 起编译错误的波浪线一条都不画**。桩当时干脆不发 path 字段，
+// 所以浏览器验收一直没覆盖这条链路 —— 现在桩按真实形状（`path: null`）发一条 error，
+// 把它钉住：判据退回旧写法，这四条就会红。
+console.log("42) 编译错误的红波浪线（主源诊断 path: null）");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+const diagProbe = `(() => {
+  const bar = document.querySelector(".statusbar");
+  const wavy = Array.from(document.querySelectorAll(".cm-diag-wavy"));
+  const errBadge = bar.querySelector(".error-badge:not(.warning-badge)");
+  return {
+    count: wavy.length,
+    texts: wavy.map((e) => e.textContent),
+    errCount: errBadge?.querySelector(".error-count")?.textContent?.trim() ?? null,
+  };
+})()`;
+
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 200));
+await c.type("DIAG-ERROR-MARKER"); // 桩按这个标记回一条主源 error 诊断（见 browser-dev-stub.ts）
+await new Promise((r) => setTimeout(r, 800));
+const diag = await c.evaluate(diagProbe);
+check("主源编译错误画出红波浪线（.cm-diag-wavy）", diag.count >= 1, JSON.stringify(diag));
+check(
+  "波浪线落在出错的那段文本上（不是画到别处）",
+  diag.texts.some((t) => t.includes("DIAG-ERROR-MARKER")),
+  JSON.stringify(diag.texts),
+);
+check("错误计数徽标同步为 1", diag.errCount === "1", String(diag.errCount));
+await c.screenshot(SHOT("wysiwyg-42-diag-squiggle"));
+
+// 清掉标记 ⇒ 编译成功 ⇒ 波浪线与计数一起归零（不许留"幽灵错误"）
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 800));
+const diagClean = await c.evaluate(diagProbe);
+check(
+  "清掉标记后波浪线与错误计数一起归零",
+  diagClean.count === 0 && diagClean.errCount === "0",
+  JSON.stringify(diagClean),
+);
+
 // 视口复位（后面的收尾逻辑依赖默认几何）
 await c.send("Emulation.setDeviceMetricsOverride", {
   width: 1400,

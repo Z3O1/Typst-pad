@@ -53,6 +53,14 @@ describe("diagnosticToLocation（Rust 结构化诊断 → 编辑器位置）", (
         .path,
     ).toBe("lib.typ");
   });
+
+  it("path: null（Rust 0.4.0~0.8.2 的写法）归一化为 undefined", () => {
+    // 下游只认一种"这是主源"的表示（见 squiggleRanges）：不归一化的话 `null` 会被当成
+    // "别的文件"⇒ 桌面版编译错误不画波浪线（2026-09-18 查出来的老 bug）
+    expect(
+      diagnosticToLocation({ message: "m", severity: "error", line: 1, column: 1, path: null }),
+    ).toEqual({ message: "m", line: 1, col: 1, endLine: 1, endCol: 1, path: undefined });
+  });
 });
 
 describe("errorLocations（错误级过滤）", () => {
