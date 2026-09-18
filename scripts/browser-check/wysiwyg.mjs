@@ -429,6 +429,27 @@ const viewMenu = await c.evaluate(`(() => {
 })()`);
 await c.click(viewMenu.x, viewMenu.y);
 await c.waitFor(`document.body.innerText.includes("显示预览栏")`, { timeout: 5000 });
+// 展开菜单固定浅色面板（用户 2026-09-18 要求「把上方菜单栏的展开菜单改成白色」）：
+// 断言实测计算样式，而不是"面板出现了"——把颜色改回主题变量（--bg-toolbar/--fg）这条就会红
+const menuPalette = await c.evaluate(`(() => {
+  const panel = document.querySelector(".menu-dropdown");
+  const item = panel ? panel.querySelector(".menu-item") : null;
+  return {
+    panelBg: panel ? getComputedStyle(panel).backgroundColor : null,
+    itemColor: item ? getComputedStyle(item).color : null,
+  };
+})()`);
+check(
+  "展开菜单是白色面板（不跟深色主题走）",
+  menuPalette.panelBg === "rgb(255, 255, 255)",
+  JSON.stringify(menuPalette),
+);
+check(
+  "菜单项文字是深色（白底可读）",
+  menuPalette.itemColor === "rgb(31, 31, 31)",
+  JSON.stringify(menuPalette),
+);
+await c.screenshot(SHOT("wysiwyg-16-menu-white"));
 const previewItem = await c.evaluate(`(() => {
   const el = Array.from(document.querySelectorAll(".menu-dropdown .menu-item"))
     .find(e => (e.textContent || "").includes("显示预览栏"));
@@ -444,6 +465,55 @@ const split = await c.evaluate(`(() => {
 })()`);
 check("打开「显示预览栏」后回到双栏（编辑区约半宽）", split.editorWidth < split.panesWidth * 0.6, JSON.stringify(split));
 await c.screenshot(SHOT("wysiwyg-16-split-again"));
+
+// 展开菜单在**深色主题**下也必须是白底黑字（用户提这条需求时用的就是深色主题）。
+// 组内前面那次是「主题：自动」，而无头 Chrome 报浅色偏好 ⇒ 上面截的是浅色主题的菜单；
+// 这里显式切到「主题：暗」再验一遍，最后切回「自动」复原（后面的组不该受这次切换影响）。
+const pickMenu16 = async (label) => {
+  const rect = await c.evaluate(`(() => {
+    const el = Array.from(document.querySelectorAll(".menu-dropdown .menu-item"))
+      .find(e => (e.textContent || "").trim().startsWith(${JSON.stringify(label)}));
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  })()`);
+  await c.click(rect.x, rect.y);
+};
+const openView16 = async () => {
+  const rect = await c.evaluate(`(() => {
+    const el = Array.from(document.querySelectorAll(".menubar .menu-title"))
+      .find(e => (e.textContent || "").trim().startsWith("视图"));
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  })()`);
+  await c.click(rect.x, rect.y);
+  await c.waitFor(`!!document.querySelector(".menu-dropdown")`, { timeout: 5000 });
+};
+await openView16();
+await pickMenu16("主题：暗");
+await c.waitFor(`!document.querySelector(".app").classList.contains("light")`, { timeout: 5000 });
+await openView16();
+const darkMenu = await c.evaluate(`(() => {
+  const panel = document.querySelector(".menu-dropdown");
+  const item = panel.querySelector(".menu-item");
+  return {
+    panelBg: getComputedStyle(panel).backgroundColor,
+    itemColor: getComputedStyle(item).color,
+    toolbarBg: getComputedStyle(document.querySelector(".toolbar")).backgroundColor,
+  };
+})()`);
+check(
+  "深色主题下展开菜单仍是白底（面板不跟主题走）",
+  darkMenu.panelBg === "rgb(255, 255, 255)" && darkMenu.toolbarBg !== "rgb(255, 255, 255)",
+  JSON.stringify(darkMenu),
+);
+check(
+  "深色主题下菜单项文字仍是深色（白底可读）",
+  darkMenu.itemColor === "rgb(31, 31, 31)",
+  JSON.stringify(darkMenu),
+);
+await c.screenshot(SHOT("wysiwyg-16-menu-white-dark"));
+await pickMenu16("主题：自动"); // 复原
+await c.waitFor(`document.querySelector(".app").classList.contains("light")`, { timeout: 5000 });
 
 console.log("17) 切到源代码模式 → 自动回到双栏（源码 + 预览）");
 const viewMenu2 = await c.evaluate(`(() => {
@@ -1115,9 +1185,26 @@ const zoomProbe2 = `(() => {
   };
 })()`;
 
-/** 导航到"模拟引擎"的页面并等界面就绪 */
+/**
+ * 导航到"模拟引擎"的页面并等界面就绪，**并保证从"没有存档"的干净状态起步**（缩放 100%）。
+ *
+ * 为什么不能写成"在旧页面上 clear 后立刻导航"（老写法，实测偶发红）：存档是 300ms 防抖写的，
+ * 旧页面在 clear 之后、被导航销毁之前的那一小段时间里仍可能把迟到的存档写回去（带着它自己的
+ * uiZoom），于是新页带着上一段的缩放起步 —— 第 27 组 E 段本该从 100% 滚 3 格到 130%，
+ * 偶发从 130% 起步滚出 160%，两条断言同时红（2026-09-18 实测一次）。
+ * 现在改成：**先把旧页导航掉**（页面连同它的定时器一起销毁，不会再有迟到写入），
+ * 再用 CDP 按 origin 清 localStorage，最后才加载目标页。
+ */
 const gotoSim = async (extra) => {
-  await c.evaluate(`localStorage.clear()`);
+  await c.send("Page.navigate", { url: "about:blank" });
+  try {
+    await c.send("Storage.clearDataForOrigin", {
+      origin: new URL(DEV_URL).origin,
+      storageTypes: "local_storage",
+    });
+  } catch {
+    await c.evaluate(`localStorage.clear()`); // CDP 域不可用时退回页面内清理（仍好过旧写法）
+  }
   await c.goto(`${DEV_URL}${extra}`);
   await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
   await new Promise((r) => setTimeout(r, 900));
@@ -3056,6 +3143,412 @@ check(
   diagClean.count === 0 && diagClean.errCount === "0",
   JSON.stringify(diagClean),
 );
+
+// ---------------------------------------------------------------------------
+// 第 43 组：状态栏两个徽标的 Popover 交互必须一致
+// 背景（用户反馈 2026-09-18：「状态栏 点击警告 关闭警告的行为应该和错误是一样的」）：
+// 两个徽标当时只有「点一下切换」是同款 —— 警告浮层**没有** Esc / 点外部关闭、点条目跳转后
+// 不收起、窄窗口不做视口收边（错误侧这几条都有；`cursor: pointer` 倒是早就有了，因为警告
+// 徽标的类名里带着 `error-badge`，`.error-badge.clickable` 那条规则对它同样生效 ——
+// 本组第 1 条把它一起钉住，免得以后拆类名时悄悄丢掉）。
+// 断言分三段：警告侧 8 条、错误侧做同样对照 4 条、窄视口收边 1 条。
+// 「行 N, 列 M」只在源码模式的状态栏里显示（写作模式不显示行列），所以本组切到源码模式。
+// 浮层的选择器按 `aria-label` 取（两个浮层共用 `.error-popover` 类名 —— 修前两侧可以同时
+// 开着，用类名会取错那个）。
+// ---------------------------------------------------------------------------
+console.log("43) 状态栏两个徽标的 Popover 交互一致（Esc / 点外部 / 点条目 / 收边）");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+const POP43_WARN = "[aria-label='编译警告列表']";
+const POP43_ERR = "[aria-label='编译错误列表']";
+
+/** 状态栏 + 两个浮层的联合探针（本组所有断言都读它） */
+const pop43Probe = `(() => {
+  const bar = document.querySelector(".statusbar");
+  const warn = bar.querySelector(".warning-badge");
+  const err = bar.querySelector(".error-badge:not(.warning-badge)");
+  const info = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      text: el.innerText.split("\\n").join(" ").slice(0, 40),
+      left: Math.round(r.left),
+      right: Math.round(r.right),
+    };
+  };
+  return {
+    warnCls: warn?.className ?? null,
+    errCls: err?.className ?? null,
+    warnCursor: warn ? getComputedStyle(warn).cursor : null,
+    errCursor: err ? getComputedStyle(err).cursor : null,
+    warnCount: warn?.querySelector(".error-count")?.textContent?.trim() ?? null,
+    errCount: err?.querySelector(".error-count")?.textContent?.trim() ?? null,
+    warnPop: info(${JSON.stringify(POP43_WARN)}),
+    errPop: info(${JSON.stringify(POP43_ERR)}),
+    win: window.innerWidth,
+    barText: bar.innerText.split("\\n").join(" "),
+  };
+})()`;
+
+/** 清空文档（先把焦点还给编辑器，否则 Ctrl+A 选的是别的东西） */
+async function pop43ClearDoc() {
+  await c.evaluate(`document.querySelector(".cm-content").focus()`);
+  await c.selectAll();
+  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+  await new Promise((r) => setTimeout(r, 250));
+}
+
+/** 每个小段开始前把两个浮层都关掉（用徽标点击，不依赖本组正在验证的那几条行为）——
+ *  这样某条红了也不会连带把后面的断言卡死，控制实验里能一次看全所有红项 */
+const POP43_ERR_BADGE = `document.querySelector(".error-badge:not(.warning-badge)").click()`;
+async function pop43CloseAll() {
+  if (await c.evaluate(`!!document.querySelector(${JSON.stringify(POP43_WARN)})`)) {
+    await c.evaluate(`document.querySelector(".warning-badge").click()`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  if (await c.evaluate(`!!document.querySelector(${JSON.stringify(POP43_ERR)})`)) {
+    await c.evaluate(POP43_ERR_BADGE);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+/** 取元素中心坐标（浮层内的点击必须走真实鼠标事件：内部/外部判定的路径就是 mousedown） */
+const pop43CenterOf = (sel) => `(() => {
+  const el = document.querySelector(${JSON.stringify(sel)});
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: Math.round(r.left + Math.min(60, r.width / 2)), y: Math.round(r.top + r.height / 2) };
+})()`;
+
+const pop43OpenWarn = `!!document.querySelector(${JSON.stringify(POP43_WARN)})`;
+const pop43OpenErr = `!!document.querySelector(${JSON.stringify(POP43_ERR)})`;
+
+// ---- 警告侧（源码模式：状态栏能看到行列）----
+await pop43ClearDoc();
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.type('第一行内容\n#set text(font: "微软雅黑")');
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+await c.waitFor(`document.querySelector(".statusbar").innerText.includes("源码")`, { timeout: 5000 });
+await c.waitFor(`!!document.querySelector(".warning-badge.clickable")`, { timeout: 8000 });
+await new Promise((r) => setTimeout(r, 400));
+
+const pop43W0 = await c.evaluate(pop43Probe);
+check(
+  "警告徽标可点时鼠标指针是 pointer（与错误徽标同款）",
+  pop43W0.warnCursor === "pointer" && pop43W0.warnCls.includes("clickable"),
+  JSON.stringify({ cursor: pop43W0.warnCursor, cls: pop43W0.warnCls }),
+);
+
+await pop43CloseAll();
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(pop43OpenWarn, { timeout: 3000 });
+const pop43W1 = await c.evaluate(pop43Probe);
+check(
+  "点警告徽标开出警告浮层（标题写明「编译警告」）",
+  pop43W1.warnPop !== null && pop43W1.warnPop.text.includes("编译警告"),
+  JSON.stringify(pop43W1.warnPop),
+);
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await new Promise((r) => setTimeout(r, 250));
+check("再点一次收起（开合是同一个手势）", !(await c.evaluate(pop43OpenWarn)));
+
+await pop43CloseAll();
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(pop43OpenWarn, { timeout: 3000 });
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 250));
+check("Esc 收起警告浮层", !(await c.evaluate(pop43OpenWarn)));
+
+await pop43CloseAll();
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(pop43OpenWarn, { timeout: 3000 });
+const pop43Title = await c.evaluate(pop43CenterOf(`${POP43_WARN} .error-popover-title`));
+await c.click(pop43Title.x, pop43Title.y);
+await new Promise((r) => setTimeout(r, 250));
+check(
+  "点浮层内部（标题区）不收起 —— 外部判定按外框包含关系来",
+  await c.evaluate(pop43OpenWarn),
+  JSON.stringify(pop43Title),
+);
+
+// 点定位条目：跳转 + 收起。桩的警告固定报「行 1, 列 1」，而光标在文档末尾（第 2 行）
+const pop43BeforeJump = await c.evaluate(pop43Probe);
+const pop43Item = await c.evaluate(pop43CenterOf(`${POP43_WARN} .error-item`));
+await c.click(pop43Item.x, pop43Item.y);
+await new Promise((r) => setTimeout(r, 300));
+const pop43AfterJump = await c.evaluate(pop43Probe);
+check(
+  "点定位警告条目 → 跳到 行 1, 列 1 且浮层收起",
+  pop43AfterJump.barText.includes("行 1, 列 1") &&
+    pop43AfterJump.warnPop === null &&
+    pop43BeforeJump.barText.includes("行 2"),
+  `点前…${pop43BeforeJump.barText.slice(-16)} / 点后…${pop43AfterJump.barText.slice(-16)}`,
+);
+
+await pop43CloseAll();
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(pop43OpenWarn, { timeout: 3000 });
+await c.click(400, 300); // 编辑器区（在徽标外框之外）
+await new Promise((r) => setTimeout(r, 250));
+check("点浮层外部（编辑器区）收起警告浮层", !(await c.evaluate(pop43OpenWarn)));
+
+await pop43CloseAll();
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(pop43OpenWarn, { timeout: 3000 });
+await pop43ClearDoc();
+await new Promise((r) => setTimeout(r, 700));
+const pop43Gone = await c.evaluate(pop43Probe);
+check(
+  "警告消失后浮层不残留（徽标归零）",
+  pop43Gone.warnPop === null && pop43Gone.warnCount === "0",
+  JSON.stringify({ pop: pop43Gone.warnPop, warnCount: pop43Gone.warnCount }),
+);
+
+// 修前这里会红：`showWarnings` 还留着 true（只靠 {#if} 隐藏），警告一回来浮层自己就弹开了
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.type('#set text(font: "微软雅黑")');
+await c.waitFor(`!!document.querySelector(".warning-badge.clickable")`, { timeout: 8000 });
+await new Promise((r) => setTimeout(r, 400));
+const pop43Back = await c.evaluate(pop43Probe);
+check(
+  "警告再次出现时浮层不会自己弹回来（状态没留在「开着」）",
+  pop43Back.warnPop === null && pop43Back.warnCount !== "0",
+  JSON.stringify({ pop: pop43Back.warnPop, warnCount: pop43Back.warnCount }),
+);
+
+// ---- 错误侧对照（错误在文档第 1 行、光标停在末尾 ⇒ 跳转方向可辨）----
+await pop43ClearDoc();
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.type("DIAG-ERROR-MARKER\n第一行内容");
+await c.waitFor(`!!document.querySelector(".cm-diag-wavy")`, { timeout: 8000 });
+await new Promise((r) => setTimeout(r, 400));
+const pop43E0 = await c.evaluate(pop43Probe);
+check(
+  "错误徽标可点时鼠标指针也是 pointer（两侧一致）",
+  pop43E0.errCursor === "pointer" && pop43E0.errCls.includes("clickable"),
+  JSON.stringify({ cursor: pop43E0.errCursor, cls: pop43E0.errCls }),
+);
+
+await pop43CloseAll();
+await c.evaluate(POP43_ERR_BADGE);
+await c.waitFor(pop43OpenErr, { timeout: 3000 });
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 250));
+check("Esc 收起错误浮层（警告侧要对齐的基准行为）", !(await c.evaluate(pop43OpenErr)));
+
+await pop43CloseAll();
+await c.evaluate(POP43_ERR_BADGE);
+await c.waitFor(pop43OpenErr, { timeout: 3000 });
+const pop43ErrItem = await c.evaluate(pop43CenterOf(`${POP43_ERR} .error-item`));
+await c.click(pop43ErrItem.x, pop43ErrItem.y);
+await new Promise((r) => setTimeout(r, 300));
+const pop43AfterErrJump = await c.evaluate(pop43Probe);
+check(
+  "点定位错误条目 → 跳到 行 1, 列 1 且浮层收起",
+  pop43AfterErrJump.barText.includes("行 1, 列 1") && pop43AfterErrJump.errPop === null,
+  pop43AfterErrJump.barText.slice(-28),
+);
+
+// 修前这里会红：错误列表清空后 {#if showErrors} 还在，留下一个只有标题的空浮层
+await pop43CloseAll();
+await c.evaluate(POP43_ERR_BADGE);
+await c.waitFor(pop43OpenErr, { timeout: 3000 });
+await pop43ClearDoc();
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.type("普通文本");
+await new Promise((r) => setTimeout(r, 800));
+const pop43EGone = await c.evaluate(pop43Probe);
+check(
+  "错误消失后浮层不残留（修前会留一个只有标题的空浮层）",
+  pop43EGone.errPop === null && pop43EGone.errCount === "0",
+  JSON.stringify({ pop: pop43EGone.errPop, errCount: pop43EGone.errCount }),
+);
+
+// ---- 窄视口：警告浮层的视口收边 ----
+await pop43CloseAll();
+await pop43ClearDoc();
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.type('#set text(font: "微软雅黑")');
+await c.waitFor(`!!document.querySelector(".warning-badge.clickable")`, { timeout: 8000 });
+await c.send("Emulation.setDeviceMetricsOverride", {
+  width: 400,
+  height: 460,
+  deviceScaleFactor: 1,
+  mobile: false,
+});
+await new Promise((r) => setTimeout(r, 500));
+// 注意 closeAll 必须放在**警告真的出现之后**：修前 `showWarnings` 会因"只隐藏不复位"
+// 留在 true，坏字体一出现浮层就自己开好了 —— 那时再点徽标反而把它关掉，waitFor 直接超时
+// （实测：这一段的 closeAll 原来放在打字之前，控制实验就卡在这里）。
+await pop43CloseAll();
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(pop43OpenWarn, { timeout: 3000 });
+await new Promise((r) => setTimeout(r, 300));
+const pop43Narrow = await c.evaluate(pop43Probe);
+check(
+  "窄视口（400px）下警告浮层被收进视口内",
+  pop43Narrow.warnPop !== null &&
+    pop43Narrow.warnPop.left >= 7 &&
+    pop43Narrow.warnPop.right <= pop43Narrow.win - 7,
+  JSON.stringify({ pop: pop43Narrow.warnPop, win: pop43Narrow.win }),
+);
+await c.screenshot(SHOT("wysiwyg-43-badge-popover"));
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await c.send("Emulation.clearDeviceMetricsOverride");
+await new Promise((r) => setTimeout(r, 300));
+
+// ---------------------------------------------------------------------------
+// 第 44 组：复制编译错误/警告信息（用户要求「需要功能：复制错误信息」）
+// 形态：两个浮层（错误 / 警告）每条右侧一个「复制」按钮，标题行右侧一个「复制全部」。
+// 复制文本 = 「路径: 行 N, 列 M：消息」，整份列表第一行是浮层标题原文（路径贴在行列前面
+// 是用户当场指定的）。浏览器开发模式文档未保存 ⇒ 没有路径，省略路径前缀，这一组正好把
+// 这条分支也钉住；带路径的两种情形（诊断自带路径 / 回退当前文档路径）由 error-list.test.ts 覆盖。
+// 「到底往剪贴板塞了什么」由桩的假剪贴板记录（window.__browserDevCopied，
+// 见 browser-dev-stub.ts）：它拦 document.execCommand("copy")，把**被选中的文本**记下来。
+// 用源码模式是为了状态栏显示「行 N, 列 M」：这样才能断言"点复制没有顺带跳转"。
+// ---------------------------------------------------------------------------
+console.log("44) 复制编译错误/警告信息（浮层里的「复制」按钮）");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 700));
+
+/** 复制记录 + 浮层状态 + 状态栏（含源码模式的行列）探针 */
+const copy44Probe = `(() => {
+  const w = window;
+  const errPop = document.querySelector("[aria-label='编译错误列表']");
+  const warnPop = document.querySelector("[aria-label='编译警告列表']");
+  const pop = errPop ?? warnPop;
+  const copied = Array.isArray(w.__browserDevCopied) ? w.__browserDevCopied : null;
+  return {
+    copied,
+    last: copied && copied.length > 0 ? copied[copied.length - 1] : null,
+    errPop: !!errPop,
+    warnPop: !!warnPop,
+    itemCopies: pop ? pop.querySelectorAll(".error-item-copy").length : 0,
+    copyAll: pop ? (pop.querySelector(".error-copy-all")?.textContent ?? "").trim() : "",
+    userSelect: pop ? getComputedStyle(pop).userSelect : null,
+    status: document.querySelector(".statusbar .status-text")?.textContent ?? "",
+    barText: document.querySelector(".statusbar").innerText.split("\\n").join(" "),
+  };
+})()`;
+
+/** 清空文档（焦点先还给编辑器） */
+async function copy44ClearDoc() {
+  await c.evaluate(`document.querySelector(".cm-content").focus()`);
+  await c.selectAll();
+  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+  await new Promise((r) => setTimeout(r, 250));
+}
+
+/** 取元素中心坐标（真实鼠标点击：顺带验证"点复制不会误触发跳转/关浮层"） */
+const copy44CenterOf = (sel) => `(() => {
+  const el = document.querySelector(${JSON.stringify(sel)});
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+})()`;
+
+const COPY44_ERR_POP = "[aria-label='编译错误列表']";
+const COPY44_WARN_POP = "[aria-label='编译警告列表']";
+const COPY44_ERR_BADGE = `document.querySelector(".error-badge:not(.warning-badge)").click()`;
+
+// ---- 错误侧（错误在文档第 2 行、光标停在末尾 ⇒ "有没有跳转"可辨）----
+await copy44ClearDoc();
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.type("第一行内容\nDIAG-ERROR-MARKER");
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 }); // 源码模式：状态栏显示行列
+await c.waitFor(`document.querySelector(".statusbar").innerText.includes("源码")`, { timeout: 5000 });
+await c.waitFor(`!!document.querySelector(".cm-diag-wavy")`, { timeout: 8000 });
+await new Promise((r) => setTimeout(r, 500));
+await c.evaluate(COPY44_ERR_BADGE);
+await c.waitFor(`!!document.querySelector(${JSON.stringify(COPY44_ERR_POP)})`, { timeout: 3000 });
+
+const copy44Err = await c.evaluate(copy44Probe);
+check(
+  "错误浮层每条都有「复制」按钮、标题行有「复制全部」",
+  copy44Err.itemCopies === 1 && copy44Err.copyAll === "复制全部",
+  JSON.stringify({ itemCopies: copy44Err.itemCopies, copyAll: copy44Err.copyAll }),
+);
+check(
+  "浮层文字可拖选（user-select: text —— 状态栏整条是 none，必须在这一层放开）",
+  copy44Err.userSelect === "text",
+  String(copy44Err.userSelect),
+);
+
+// 点条目上的「复制」（真实鼠标事件；复制按钮是条目的兄弟，点击不能冒泡成"跳转"）
+const copy44ItemBtn = await c.evaluate(copy44CenterOf(`${COPY44_ERR_POP} .error-item-copy`));
+await c.click(copy44ItemBtn.x, copy44ItemBtn.y);
+await new Promise((r) => setTimeout(r, 300));
+const copy44One = await c.evaluate(copy44Probe);
+check(
+  "点条目「复制」→ 剪贴板拿到「行 2, 列 1：模拟编译错误：这一行是为了验收红波浪线」（未保存文档省略路径前缀）",
+  Array.isArray(copy44One.copied) &&
+    copy44One.copied.length === 1 &&
+    copy44One.last === "行 2, 列 1：模拟编译错误：这一行是为了验收红波浪线",
+  JSON.stringify(copy44One.copied),
+);
+check("复制之后浮层仍然开着（可以接着复制第二条）", copy44One.errPop === true);
+check("状态栏给出「已复制」反馈", copy44One.status.includes("已复制"), copy44One.status);
+check(
+  "点「复制」没有顺带跳转（光标仍在 行 2, 列 18，没被挪到错误处）",
+  copy44Err.barText.includes("行 2, 列 18") && copy44One.barText.includes("行 2, 列 18"),
+  `点前 ${copy44Err.barText.slice(-14)} / 点后 ${copy44One.barText.slice(-14)}`,
+);
+
+// 「复制全部」：首行是浮层标题原文，其后每条一行
+const copy44AllBtn = await c.evaluate(copy44CenterOf(`${COPY44_ERR_POP} .error-copy-all`));
+await c.click(copy44AllBtn.x, copy44AllBtn.y);
+await new Promise((r) => setTimeout(r, 300));
+const copy44All = await c.evaluate(copy44Probe);
+check(
+  "点「复制全部」→ 首行是浮层标题、其后每条一行",
+  copy44All.copied !== null &&
+    copy44All.copied.length === 2 &&
+    copy44All.last ===
+      "编译错误（1 处）\n行 2, 列 1：模拟编译错误：这一行是为了验收红波浪线",
+  JSON.stringify(copy44All.last),
+);
+
+// ---- 警告侧（同款按钮，复制到的是界面上那份中文提示）----
+await c.evaluate(COPY44_ERR_BADGE); // 收起错误浮层
+await copy44ClearDoc();
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.type('#set text(font: "微软雅黑")');
+await c.waitFor(`!!document.querySelector(".warning-badge.clickable")`, { timeout: 8000 });
+await new Promise((r) => setTimeout(r, 400));
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await c.waitFor(`!!document.querySelector(${JSON.stringify(COPY44_WARN_POP)})`, { timeout: 3000 });
+
+const copy44WarnPop = await c.evaluate(copy44Probe);
+check(
+  "警告浮层同样有「复制」与「复制全部」",
+  copy44WarnPop.itemCopies === 1 && copy44WarnPop.copyAll === "复制全部" && copy44WarnPop.warnPop,
+  JSON.stringify({ itemCopies: copy44WarnPop.itemCopies, copyAll: copy44WarnPop.copyAll }),
+);
+
+const copy44WarnBtn = await c.evaluate(copy44CenterOf(`${COPY44_WARN_POP} .error-item-copy`));
+await c.click(copy44WarnBtn.x, copy44WarnBtn.y);
+await new Promise((r) => setTimeout(r, 300));
+const copy44Warn = await c.evaluate(copy44Probe);
+check(
+  "警告复制到的是界面上那份中文提示（不是引擎原文 unknown font family）",
+  typeof copy44Warn.last === "string" &&
+    copy44Warn.last.startsWith("行 1, 列 1：未知字体族「微软雅黑」") &&
+    copy44Warn.last.includes("额外字体目录"),
+  JSON.stringify(copy44Warn.last),
+);
+await c.screenshot(SHOT("wysiwyg-44-copy-diagnostic"));
+
+// 收尾：关浮层、清空文档、回写作模式
+await c.evaluate(`document.querySelector(".warning-badge").click()`);
+await copy44ClearDoc();
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 400));
 
 // 视口复位（后面的收尾逻辑依赖默认几何）
 await c.send("Emulation.setDeviceMetricsOverride", {

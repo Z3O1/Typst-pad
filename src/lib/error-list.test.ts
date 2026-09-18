@@ -4,6 +4,8 @@ import type { CompileErrorLocation } from "./typst-engine";
 import {
   buildErrorListItems,
   formatErrorLoc,
+  formatDiagnosticForClipboard,
+  formatDiagnosticListForClipboard,
   hasErrorToShow,
   prefixLineCharOffset,
   prefixLineCount,
@@ -130,6 +132,72 @@ describe("prefixLineCharOffset", () => {
 
   it("空串（1 行）：第 1 行起点为 0", () => {
     expect(prefixLineCharOffset("", 1)).toBe(0);
+  });
+});
+
+describe("formatDiagnosticForClipboard / formatDiagnosticListForClipboard（复制诊断信息）", () => {
+  const win = "D:\\work\\报告.typ";
+
+  it("定位条目：路径 + 行列 + 消息（用户要求「路径贴到前面」）", () => {
+    expect(
+      formatDiagnosticForClipboard(
+        { kind: "located", message: "expected closing `)`", line: 3, col: 5, path: "D:\\work\\lib.typ" },
+        win,
+      ),
+    ).toBe("D:\\work\\lib.typ: 行 3, 列 5：expected closing `)`");
+  });
+
+  it("主源（无 path）：回退到当前文档路径", () => {
+    expect(
+      formatDiagnosticForClipboard({ kind: "located", message: "m", line: 1, col: 2 }, win),
+    ).toBe(`${win}: 行 1, 列 2：m`);
+  });
+
+  it("未保存文档（既无 path 也无回退）：省略路径前缀", () => {
+    expect(
+      formatDiagnosticForClipboard({ kind: "located", message: "m", line: 1, col: 2 }, null),
+    ).toBe("行 1, 列 2：m");
+  });
+
+  it("空串 path 与 null 回退都视为没有路径", () => {
+    expect(
+      formatDiagnosticForClipboard(
+        { kind: "located", message: "m", line: 9, col: 9, path: "" },
+        null,
+      ),
+    ).toBe("行 9, 列 9：m");
+  });
+
+  it("generic 条目（无位置，如包不存在）：有路径则带路径，否则只有消息", () => {
+    expect(formatDiagnosticForClipboard({ kind: "generic", message: "package not found" }, win)).toBe(
+      `${win}: package not found`,
+    );
+    expect(formatDiagnosticForClipboard({ kind: "generic", message: "package not found" }, null)).toBe(
+      "package not found",
+    );
+  });
+
+  it("整份列表：首行是浮层标题原文，其后每条一行，末尾不带换行", () => {
+    const text = formatDiagnosticListForClipboard(
+      "编译错误（2 处）",
+      [
+        { kind: "located", message: "a", line: 3, col: 5 },
+        { kind: "located", message: "b", line: 7, col: 1, path: "D:\\work\\z.typ" },
+      ],
+      win,
+    );
+    expect(text).toBe(
+      [
+        "编译错误（2 处）",
+        `${win}: 行 3, 列 5：a`,
+        "D:\\work\\z.typ: 行 7, 列 1：b",
+      ].join("\n"),
+    );
+    expect(text.endsWith("\n")).toBe(false);
+  });
+
+  it("空列表返回空串（浮层只在有内容时渲染）", () => {
+    expect(formatDiagnosticListForClipboard("编译警告（1 处）", [], win)).toBe("");
   });
 });
 

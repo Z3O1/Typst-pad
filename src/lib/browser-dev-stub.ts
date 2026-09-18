@@ -606,6 +606,36 @@ async function handleCommand(
 }
 
 // ---------------------------------------------------------------------------
+// 假剪贴板（验收第 44 组用）
+//
+// 无头 Chrome 里没有可信的系统剪贴板，`document.execCommand("copy")` 的返回值不可靠。
+// 这里包一层 execCommand：copy 时把**真正被选中的那段文本**记进 `window.__browserDevCopied`
+// （数组，按调用顺序），并**返回 true 当作成功** —— 这样走了生产代码的主路径（临时 textarea
+// + execCommand），验收也能断言"到底往剪贴板塞了什么字符串"，而不是只看状态栏文案。
+// 其余命令原样透传，不影响编辑器自己的 cut/paste。
+// ---------------------------------------------------------------------------
+function installFakeClipboard(): void {
+  const w = window as unknown as Record<string, unknown>;
+  if (w.__browserDevClipboardInstalled) return;
+  w.__browserDevClipboardInstalled = true;
+  w.__browserDevCopied = [];
+
+  const original = document.execCommand.bind(document);
+  document.execCommand = ((commandId: string, showUi?: boolean, value?: string) => {
+    if (commandId !== "copy") return original(commandId, showUi, value);
+    const active = document.activeElement;
+    const text =
+      active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement
+        ? active.value
+        : (window.getSelection()?.toString() ?? "");
+    const copied = w.__browserDevCopied as string[];
+    copied.push(text);
+    console.info(`[browser-dev] 假剪贴板：已"复制" ${text.length} 字符`);
+    return true;
+  }) as typeof document.execCommand;
+}
+
+// ---------------------------------------------------------------------------
 // 假 __TAURI_INTERNALS__
 // ---------------------------------------------------------------------------
 
@@ -672,6 +702,8 @@ export function installBrowserDevStub(): void {
   (window as unknown as Record<string, unknown>).__browserDevStub = {
     fakeZoom: !zoomSimEnabled,
   };
+
+  installFakeClipboard();
 
   // 开发信息：确认桩已生效
   console.info(
