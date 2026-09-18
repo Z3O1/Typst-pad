@@ -66,7 +66,7 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 - 浏览器端的交互验证（真实输入 + 真实选区 + 截图取证）：`node scripts/browser-check/wysiwyg.mjs`（290 项），前置为 `npm run dev -- --host 0.0.0.0` 与一个可被 CDP 驱动的 Chrome（详见脚本头部注释）
 - 写作模式**块级渲染**的验收（需要 headless Chromium，见脚本头部注释）：`writing-blocks.mjs`（133 项，桩产物：切片/展开/窗口化/竖直移动/点击锚定/翻页/编译失败/各种输入）、`writing-blocks-visual.mjs`（76 项，`npm run fixtures:blocks` 导出真实切片后验几何等价 + 链接热区）、`writing-blocks-hit.mjs`（27 项 / 136 次点击全中，点击 → 精确字符）、`writing-mode-scenes.mjs`（64 项，9 篇场景 + 截图）
 - 浏览器端的**真实排版视觉验证**：`npm run fixtures:math` 导出 Rust 侧真实公式产物 → `node scripts/browser-check/wysiwyg-visual.mjs`。它把真实产物注入浏览器开发模式页面，实测 ① 行内公式基线与同行文字基线是否齐平（用零宽基线探针量，误差 < 1px）② 渲染尺寸是否等于真实 pt 尺寸 × 4/3 ③ 行间公式块级 widget 是否居中并独占整行 ④ 暗色主题下公式是否可见
-- Rust 单测（`typst_world.rs` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）、单公式渲染（`compile_math`：贴边 SVG、透明底、基线测量、前缀宏生效、语法错误回退）
+- Rust 单测（`src-tauri/src/typst_world/` / `packages.rs` 内）：`cargo test`，覆盖中文+数学文档端到端编译（SVG/PDF）、字体注册、诊断行列转换、相对 include（含未保存文档提示）、@local/@preview 包解析与下载缓存（含 404/网络失败诊断区分、路径穿越防御）、单公式渲染（`compile_math`：贴边 SVG、透明底、基线测量、前缀宏生效、语法错误回退）
 - CI（GitHub Actions，`.github/workflows/ci.yml`）：
   - `test`（ubuntu）：push 到 main / PR 时跑 类型检查 → 单测 → 前端构建 → `cargo check`（首次编译 typst 依赖树较慢，之后命中 Rust 缓存）
   - `build-bundles`（windows）：仅 main push 触发，构建 .exe/.msi 安装包并 `upload-artifact`（同时写入缓存供 Release 复用）
@@ -106,9 +106,9 @@ src/
 └── lib/file-ops.ts         # 打开/保存文件（Tauri dialog + invoke）
 src-tauri/
 ├── src/lib.rs              # Rust 壳：read_file / write_file / compile_doc / compile_blocks / block_hit_test / export_pdf / bundled_font 等命令 + dialog/opener 插件
-├── src/block_geometry.rs   # 写作模式的块级渲染：源块划分 + 帧遍历（字形 → 源字节）+ 按 y 序切带 + 点击命中测试
+├── src/block_geometry/     # 写作模式的块级渲染：blocks 源块划分 / collect 帧遍历（字形 → 源字节）/ render 切带 SVG / crops 切片 / hit 点击命中 / probe 探针
 ├── src/packages.rs         # 包系统：@local 读取 / @preview 自动下载缓存（与 CLI 目录规范一致）
-└── src/typst_world.rs      # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 包解析接线 / 诊断转换（SVG/PDF）
+└── src/typst_world/        # 内嵌编译世界：world / fonts 字体加载（FontBook）/ compile 编译 / math 公式 / pdf / diagnostics 诊断 / paths 项目根
 ```
 
 ### 字体
@@ -126,7 +126,7 @@ src-tauri/
 
 字体目录刻意**不放在前端静态目录**：放 `static/` 会被 SvelteKit 整份拷进前端产物，而前端**不通过静态目录**取它们（写作模式要的那几份走 Rust 的 `bundled_font` 命令读 `resources/fonts/`，见下），安装包里会白多一份约 5.7MB。
 
-预览与公式的 SVG **不依赖字体**：`typst_svg` 把字形导出成矢量轮廓（`<symbol>`/`<use>`/`<path>`，无 `<text>`），所以预览在任何机器上渲染一致。**写作模式的正文装的是同一套打包字体**：启动时 `editor-font.ts` 的 `installEditorFonts` 经 Rust 命令 `bundled_font` 取字节（`src-tauri/src/typst_world.rs` 的 `EDITOR_FONT_FILES`：`LibertinusSerif-Regular.otf` / `LibertinusSerif-Bold.otf` / `NotoSerifCJKsc-Regular.otf`）、用 `FontFace` 注册，字体栈 `WRITE_FONT_STACK` = `Libertinus Serif` → `Noto Serif CJK SC` → 系统宋体兜底 —— 这样光标进出块时源码与切片才是同一套字（装不上就什么都不做、退回系统族）。**源代码模式**仍是等宽系统栈（那本来就该是代码字体）。
+预览与公式的 SVG **不依赖字体**：`typst_svg` 把字形导出成矢量轮廓（`<symbol>`/`<use>`/`<path>`，无 `<text>`），所以预览在任何机器上渲染一致。**写作模式的正文装的是同一套打包字体**：启动时 `editor-font.ts` 的 `installEditorFonts` 经 Rust 命令 `bundled_font` 取字节（`src-tauri/src/typst_world/fonts.rs` 的 `EDITOR_FONT_FILES`：`LibertinusSerif-Regular.otf` / `LibertinusSerif-Bold.otf` / `NotoSerifCJKsc-Regular.otf`）、用 `FontFace` 注册，字体栈 `WRITE_FONT_STACK` = `Libertinus Serif` → `Noto Serif CJK SC` → 系统宋体兜底 —— 这样光标进出块时源码与切片才是同一套字（装不上就什么都不做、退回系统族）。**源代码模式**仍是等宽系统栈（那本来就该是代码字体）。
 
 ### 启动耗时观测
 

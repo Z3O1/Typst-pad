@@ -2,8 +2,8 @@
 // 源码字节偏移 → CodeMirror 位置。
 //
 // 为什么坐标要这么绕：切片是一张 SVG 图片，DOM 里**没有**任何字符位置；能回答"这个点对应哪个
-// 字符"的只有排版引擎的帧（每个字形自带 `Span` + 自己的矩形，见 src-tauri/src/block_geometry.rs
-// 的 `walk_frame`）。所以链路是：
+// 字符"的只有排版引擎的帧（每个字形自带 `Span` + 自己的矩形，见 src-tauri/src/block_geometry/
+// collect.rs 的 `walk_frame`）。所以链路是：
 //
 //   ① 切片自己：`BlockCrop` 给了裁剪带在页面上的位置与尺寸（`x_pt` / `y_pt` / `width_pt` /
 //      `height_pt`），而 SVG 的坐标系原点就是裁剪带的左上角、画布就是带的尺寸 ⇒

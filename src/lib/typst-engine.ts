@@ -73,7 +73,7 @@ export interface CompileOk {
 }
 
 /**
- * 传给 Rust 的字体配置（对应 typst_world.rs 的 FontConfig）。
+ * 传给 Rust 的字体配置（对应 typst_world/fonts.rs 的 FontConfig）。
  * 三项都可缺省：families 缺省/null = 用 Rust 内置的 DEFAULT_FONT_FAMILIES。
  */
 export interface FontConfigArgs {
@@ -232,7 +232,7 @@ export async function compileToSvg(
 
 // ---------------------------------------------------------------------------
 // 写作模式的块级渲染（compile_blocks）：整篇编译一次 → 每个源块切一张 SVG
-// 契约见 src-tauri/src/block_geometry.rs 的 BlockCrop / BlocksOutput。
+// 契约见 src-tauri/src/block_geometry/crops.rs 的 BlockCrop / BlocksOutput。
 // ---------------------------------------------------------------------------
 
 /** Rust 侧的单块产物：偏移是**文档坐标的字节偏移**（已减掉编译前缀，见 block-offsets.ts） */
