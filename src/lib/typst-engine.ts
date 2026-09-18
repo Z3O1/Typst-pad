@@ -255,6 +255,12 @@ export interface BlockCrop {
   /** 切片 SVG；空串 = 没有渲染结果 */
   svg: string;
   /**
+   * **这一块被有意跳过渲图**（源码太大，Rust 侧 `MAX_CROP_SOURCE_BYTES`）。
+   * 前端必须与"缺切片"分开（见 `Block.skipped`）：否则 `found && svg === ""` 会被当成
+   * "这一轮没拿到图"而每 150ms 要求补渲一次。
+   */
+  skipped?: boolean;
+  /**
    * 切片**内部**的链接热区（阶段 3"链接可点"）：坐标相对裁剪带左上角（pt，与 SVG 同坐标系）。
    * 只有窗口内的块才有（与 svg 同步取舍）；没有链接时为空/缺省。
    */

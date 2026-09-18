@@ -113,6 +113,56 @@ fn pick_hit_chooses_the_clicked_glyph() {
     );
 }
 
+/// **超大单块只回几何、不渲图**（PR #60 审查第 7 条）：窗口化是按块的，一块自己就很大时
+/// （没有空行的长段落 / 2000 行围栏代码块）永远"在窗口内" ⇒ 每按键整块全渲（58 字节/源字符）。
+/// 现在超过 `MAX_CROP_SOURCE_BYTES` 的块 `svg` 为空且 `skipped = true`；
+/// **`found` 仍为 true**（几何照给，前端格子边界不变），但前端必须按 `skipped` 区分于"缺切片"
+/// —— 否则 `found && svg === ""` 会被 `notifyBlocksNeeded` 当成缺切片、每 150ms 重编译一次。
+#[test]
+fn oversized_block_is_skipped_not_rendered() {
+    const COLUMN_PT: f64 = 371.25;
+    // 1000 行代码 ≈ 35KB，稳稳超过 8KB 的上限；前后各留一个正常段落当对照
+    let mut code = String::new();
+    for i in 0..1000 {
+        code.push_str(&format!("let value_{i} = compute({i}, {i});\n"));
+    }
+    let doc = format!("第一段正文。\n\n```rust\n{code}```\n\n最后一段正文。\n");
+    let out = compile_blocks(
+        doc.clone(),
+        0,
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        COLUMN_PT,
+        None,
+        None,
+    );
+    assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
+    let big = out
+        .blocks
+        .iter()
+        .find(|b| b.kind == "Raw")
+        .expect("应该有那个围栏代码块");
+    assert!(
+        big.end - big.start > MAX_CROP_SOURCE_BYTES,
+        "用例前提：这一块要真的超过上限（实际 {} 字节）",
+        big.end - big.start
+    );
+    assert!(big.found, "几何照给（格子边界不变）");
+    assert!(big.skipped, "超大块必须被标成 skipped");
+    assert!(big.svg.is_empty(), "超大块不渲图");
+    assert!(big.links.is_empty(), "没有图就没有链接热区");
+
+    // 对照组：正常段落照常渲
+    let para = out
+        .blocks
+        .iter()
+        .find(|b| b.kind == "Paragraph")
+        .expect("应该有段落块");
+    assert!(!para.skipped, "正常大小的块不该被跳过");
+    assert!(!para.svg.is_empty(), "正常大小的块要渲出图");
+}
+
 /// **正文正字号要夹在合理区间里**（PR #60 审查第 7 条的附带项）。
 /// 这个值会变成编辑区正文字号（`--write-doc-px = textPt × 4/3`），不夹的话
 /// 文档写个 `#set text(size: 400pt)` 就把编辑区撑成"一行一个字"。
@@ -782,12 +832,21 @@ fn block_crop_geometry_invariants() {
                 "[{name}] 切片宽度应等于正文列宽：{} vs {COLUMN_PT}",
                 b.width_pt
             );
-            assert!(b.height_pt > 0.5, "[{name}] 切片高度应为正：{}", b.height_pt);
+            // **最小带高是 0.75pt**（见切带那段 `(band_bottom - band_top).max(0.75)`）——
+            // 别退回 `> 0.5` 那种"几乎恒真"的断言：当年脚注把带压到 ≤0.5pt 时，切片被丢弃、
+            // 正文重复渲染，而这条断言照样绿（PR #60 审查第 11 条）。
+            assert!(
+                b.height_pt >= 0.74,
+                "[{name}] 切片带高不该低于最小带（0.75pt）：{}",
+                b.height_pt
+            );
         }
 
         // ② 高度之和 = 纵向跨度（首块顶 → 末块底）
         let mut by_y: Vec<&BlockCrop> = rendered.clone();
-        by_y.sort_by(|a, b| a.y_pt.partial_cmp(&b.y_pt).unwrap());
+        // `total_cmp` 而不是 `partial_cmp().unwrap()`：NaN 会 panic 在整个编译命令里
+        // （与上面 order.sort_by 同一个理由，PR #60 审查第 10 条）
+        by_y.sort_by(|a, b| a.y_pt.total_cmp(&b.y_pt));
         let span = by_y.last().unwrap().y_pt + by_y.last().unwrap().height_pt - by_y[0].y_pt;
         let total: f64 = by_y.iter().map(|b| b.height_pt).sum();
         assert!(

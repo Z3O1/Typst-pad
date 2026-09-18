@@ -406,7 +406,12 @@ describe("livePreview 块级切片", () => {
   let view: EditorView;
 
   /** 用纯 ASCII 文档：字节偏移 == CodeMirror 位置，测试不必掺进换算噪音 */
-  function mount(doc: string, blocks: Block[] | null, sel?: number) {
+  function mount(
+    doc: string,
+    blocks: Block[] | null,
+    sel?: number,
+    onBlocksNeeded?: () => void,
+  ) {
     host = document.createElement("div");
     document.body.appendChild(host);
     const list = blocks;
@@ -423,11 +428,31 @@ describe("livePreview 块级切片", () => {
             onRequest: () => {},
             dark: () => false,
             blocks: () => list,
+            ...(onBlocksNeeded ? { onBlocksNeeded } : {}),
           }),
         ],
       }),
     });
   }
+
+  // PR #60 审查第 7 条：超大单块（没有空行的长段落 / 2000 行代码块）由 Rust 侧有意跳过渲图，
+  // 前端必须把它与"缺切片"分开 —— `found && svg === ""` 是"这一轮没拿到图，补渲一次"的判据，
+  // 不区分就会对跳过的块**每 150ms 重编译一次**。
+  it("后端有意跳过的块（skipped）不要求补渲", () => {
+    let needed = 0;
+    mount("abc\n", [crop(0, 4, { svg: "", skipped: true })], undefined, () => {
+      needed += 1;
+    });
+    expect(needed).toBe(0);
+  });
+
+  it("对照组：真的缺切片（没 skipped）仍然要求补渲一次", () => {
+    let needed = 0;
+    mount("abc\n", [crop(0, 4, { svg: "" })], undefined, () => {
+      needed += 1;
+    });
+    expect(needed).toBeGreaterThan(0);
+  });
 
   afterEach(() => {
     vi.restoreAllMocks();
