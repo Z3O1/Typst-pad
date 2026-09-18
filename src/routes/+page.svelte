@@ -62,7 +62,6 @@
   } from "$lib/context-menu-utils";
   import { clearState } from "$lib/persistence";
   import {
-    buildErrorListItems,
     formatErrorLoc,
     formatCompileFailMessage,
     hasErrorToShow,
@@ -73,6 +72,21 @@
     type ErrorListItem,
     type LocatedErrorItem,
   } from "$lib/error-list";
+  import {
+    badgePopoverStyle,
+    errorPopoverVisible,
+    nextBadgePopover,
+    warningPopoverVisible,
+    type BadgeKind,
+  } from "$lib/badge-popover";
+  import {
+    buildErrorItems,
+    buildWarningItems,
+    diagnosticCopyAllStatus,
+    diagnosticCopyStatus,
+    diagnosticListTitle,
+    truncateStatus,
+  } from "$lib/status-view";
   import { copyPlainText } from "$lib/clipboard";
   import { mark, reportStartup } from "$lib/startup-timing";
   import { dbg, setCliDebug } from "$lib/debug";
@@ -153,9 +167,6 @@
 
   /** 副窗口首屏编译落地后写在状态栏的一句说明（见 onMount 末尾） */
   const NEW_WINDOW_NOTICE = "新窗口：这里的修改不会记进「上次内容」";
-
-  /** 复制诊断信息失败时的状态栏文案（execCommand 与 navigator.clipboard 两条路都没成） */
-  const COPY_FAILED_NOTICE = "复制失败：剪贴板不可用";
 
   /** 窗口 label 前缀：新窗口的 label 必须唯一（重名会创建失败），前缀要与 capabilities 里的 `editor-*` 一致 */
   const NEW_WINDOW_LABEL_PREFIX = "editor-";
@@ -267,24 +278,21 @@
 
   /** 错误浮层是否可见（开着 + 确实有内容）。有内容才让浮层存在：空浮层（只有标题）没意义 */
   const errorPopoverOpen = $derived(
-    openBadgePopover === "errors" && hasErrorToShow(errorCount, lastNonPosError),
+    errorPopoverVisible(openBadgePopover, errorCount, lastNonPosError),
   );
   /** 警告浮层是否可见（同上） */
   const warningPopoverOpen = $derived(
-    openBadgePopover === "warnings" && compileWarnings.length > 0,
+    warningPopoverVisible(openBadgePopover, compileWarnings.length),
   );
 
   /** 点徽标/Enter：开这个、并顺手把另一个关掉（两个徽标共用一份状态 ⇒ 一次只开一个） */
-  function toggleBadgePopover(kind: "errors" | "warnings") {
-    openBadgePopover = openBadgePopover === kind ? "none" : kind;
+  function toggleBadgePopover(kind: BadgeKind) {
+    openBadgePopover = nextBadgePopover(openBadgePopover, kind);
   }
 
   /** 两个浮层共用的收边内联样式（打开瞬间由下面的 $effect 算一次） */
   function popoverStyle(): string {
-    const { translateX, translateY, maxWidth } = popoverClamp;
-    return `transform: translate(${translateX}px, ${translateY}px);${
-      maxWidth > 0 ? `max-width:${maxWidth}px` : ""
-    }`;
+    return badgePopoverStyle(popoverClamp);
   }
   let settingsPrefixTextarea = $state<HTMLTextAreaElement | undefined>(undefined); // 设置弹窗中的前缀代码 textarea（错误落前缀时定位）
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
@@ -1544,25 +1552,12 @@
     void refreshFontList(settingsFontDirs);
   }
 
-  /** 状态栏单行文案截断（警告可能很长，别把状态栏挤变形） */
-  function truncateStatus(text: string, max = 70): string {
-    return text.length > max ? `${text.slice(0, max)}…` : text;
-  }
-
-  /** 警告列表条目：有源码位置的可点击跳转（消息已翻成中文可行动提示），否则纯展示 */
+  /**
+   * 警告列表条目（组装在 status-view.ts，有单测）：有源码位置的可点击跳转（消息已翻成中文
+   * 可行动提示），否则纯展示。
+   */
   function warningItems(): ErrorListItem[] {
-    return compileWarnings.map((w) =>
-      w.line > 0
-        ? {
-            kind: "located" as const,
-            message: describeCompileWarning(w.message),
-            line: w.line,
-            col: w.column,
-            // 复制时把路径贴在行列前面（include/import 的文件给其路径；主源没有）
-            path: w.path ?? undefined,
-          }
-        : { kind: "generic" as const, message: describeCompileWarning(w.message) },
-    );
+    return buildWarningItems(compileWarnings);
   }
 
   /** 写作模式"打字期间不编译"的去抖时长（见 scheduleCompile） */
@@ -1586,9 +1581,9 @@
    *   打字期间**不需要**编译：正在编辑的那一块本来就是源码形态，其它块的切片内容也没变。
    */
 
-  /** 错误浮层当前的条目（复制/渲染共用一份来源，避免"复制的和看到的不一致"） */
+  /** 错误浮层当前的条目（组装在 status-view.ts，有单测；复制/渲染共用一份来源） */
   function errorItems(): ErrorListItem[] {
-    return buildErrorListItems(editorDiagnostics, lastNonPosError);
+    return buildErrorItems(editorDiagnostics, lastNonPosError);
   }
 
   /**
@@ -1598,21 +1593,16 @@
   async function copyDiagnostic(item: ErrorListItem, kind: "errors" | "warnings") {
     const text = formatDiagnosticForClipboard(item, filePath);
     const ok = await copyPlainText(text);
-    statusText = ok ? (kind === "errors" ? "已复制错误信息" : "已复制警告信息") : COPY_FAILED_NOTICE;
+    statusText = diagnosticCopyStatus(kind, ok);
   }
 
   /** 复制整个列表：首行是浮层标题原文（如 `编译错误（2 处）`），其后每条一行 */
   async function copyDiagnosticList(kind: "errors" | "warnings") {
     const items = kind === "errors" ? errorItems() : warningItems();
     const count = items.length;
-    const title =
-      kind === "errors" ? `编译错误（${count} 处）` : `编译警告（${count} 处）`;
+    const title = diagnosticListTitle(kind, count);
     const ok = await copyPlainText(formatDiagnosticListForClipboard(title, items, filePath));
-    statusText = ok
-      ? kind === "errors"
-        ? `已复制全部 ${count} 处错误`
-        : `已复制全部 ${count} 处警告`
-      : COPY_FAILED_NOTICE;
+    statusText = diagnosticCopyAllStatus(kind, count, ok);
   }
 
   function scheduleCompile() {
