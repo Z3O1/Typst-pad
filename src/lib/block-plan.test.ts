@@ -12,6 +12,7 @@ import {
   carryOverCrops,
   changedSpan,
   crossesCollapsedCover,
+  isSafeHref,
   planBlockCovers,
   remapBlocksThroughEdit,
   revealBlocksWithDiagnostics,
@@ -597,4 +598,51 @@ describe("编辑后的增量平移：改动不许落进旧切片里（修「块�
       expect(checked).toBeGreaterThan(30);
     });
   }
+});
+
+// PR #60 审查第 6 条的附带项：切片里的链接会变成真实的 `<a href>`，前端不该只依赖
+// Rust 侧的过滤（文档可能来自任何地方）。白名单与 Rust 同一口径：http / https / mailto，
+// 无协议的相对链接放行，`javascript:` / `data:` 这类一律丢掉。
+describe("isSafeHref（链接热区的 href 白名单）", () => {
+  it("放行 http / https / mailto 与无协议的相对链接", () => {
+    for (const href of [
+      "https://typst.app/docs",
+      "http://example.com/a",
+      "HTTPS://EXAMPLE.COM",
+      "mailto:a@b.c",
+      "#label",
+      "sub/page.typ",
+      "  https://example.com  ",
+    ]) {
+      expect(isSafeHref(href), href).toBe(true);
+    }
+  });
+
+  it("挡掉伪协议与空串", () => {
+    for (const href of [
+      "javascript:alert(1)",
+      "JavaScript:alert(1)",
+      "data:text/html,<script>x</script>",
+      "vbscript:msgbox",
+      "file:///etc/passwd",
+      "",
+      "   ",
+    ]) {
+      expect(isSafeHref(href), href).toBe(false);
+    }
+  });
+
+  it("toBlockTable 会滤掉不安全的 link", () => {
+    const doc = "正文"; // 6 字节（两个 CJK 字符）
+    const withLinks: BlockCrop = {
+      ...crop(0, 6),
+      links: [
+        { xPt: 0, yPt: 0, widthPt: 1, heightPt: 1, href: "https://ok.example" },
+        { xPt: 0, yPt: 0, widthPt: 1, heightPt: 1, href: "javascript:alert(1)" },
+        { xPt: 0, yPt: 0, widthPt: 1, heightPt: 1, href: "" },
+      ],
+    };
+    const table = toBlockTable(doc, [withLinks]);
+    expect(table.blocks[0].links?.map((l) => l.href)).toEqual(["https://ok.example"]);
+  });
 });

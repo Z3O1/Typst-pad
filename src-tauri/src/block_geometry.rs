@@ -455,6 +455,10 @@ const PAGE_MARGIN_RATIO: f64 = 70.87 / 595.28;
 /// （11pt = 14.67px，与切片里的正文完全一致）。
 pub const DEFAULT_TEXT_PT: f64 = 11.0;
 
+/// 正文正字号的可接受区间（pt）—— 见 `document_text_pt` 的夹紧
+pub const MIN_TEXT_PT: f64 = 6.0;
+pub const MAX_TEXT_PT: f64 = 48.0;
+
 /// 文档的**正文实际字号**（pt）：帧里所有文本按**字符数**投票，取票数最高的那个字号。
 ///
 /// 为什么这么算：写作模式里"光标所在块展开成源码、其余块显示引擎切片"，而源码是编辑器 CSS
@@ -463,12 +467,16 @@ pub const DEFAULT_TEXT_PT: f64 = 11.0;
 /// 所以众数就是正文字号：默认文档 11pt、`#set text(size: 12pt)` 的文档 12pt（都有单测）。
 /// 没有文本（空文档 / 只有图形）时回落到 typst 默认的 11pt。
 pub fn document_text_pt(stats: &FrameStats) -> f64 {
-    stats
+    let voted = stats
         .size_weights
         .iter()
         .max_by_key(|(_, weight)| **weight)
         .map(|(key, _)| *key as f64 / 100.0)
-        .unwrap_or(DEFAULT_TEXT_PT)
+        .unwrap_or(DEFAULT_TEXT_PT);
+    // **夹到合理区间**（PR #60 审查第 7 条的附带项）：这个值会一路变成编辑区正文字号
+    // （`--write-doc-px = textPt × 4/3`），文档写个 `#set text(size: 400pt)` 或者字号统计
+    // 被离群值带偏，就会把编辑区撑成"一行一个字"。夹紧范围取 typst 自己的合理区间。
+    voted.clamp(MIN_TEXT_PT, MAX_TEXT_PT)
 }
 
 /// 一个源块的渲染产物（前端直接消费：serde camelCase）。
@@ -1432,6 +1440,25 @@ mod tests {
             None,
             "没有这一页 → None"
         );
+    }
+
+    /// **正文正字号要夹在合理区间里**（PR #60 审查第 7 条的附带项）。
+    /// 这个值会变成编辑区正文字号（`--write-doc-px = textPt × 4/3`），不夹的话
+    /// 文档写个 `#set text(size: 400pt)` 就把编辑区撑成"一行一个字"。
+    #[test]
+    fn document_text_pt_is_clamped() {
+        let mut stats = FrameStats::default();
+        // 投票投出一个离谱的大字号
+        stats.size_weights.insert(40_000, 99);
+        assert_eq!(document_text_pt(&stats), MAX_TEXT_PT);
+        // 以及一个离谱的小字号
+        let mut tiny = FrameStats::default();
+        tiny.size_weights.insert(100, 99);
+        assert_eq!(document_text_pt(&tiny), MIN_TEXT_PT);
+        // 正常字号原样通过（11pt 是 typst 默认）
+        let mut normal = FrameStats::default();
+        normal.size_weights.insert(1_100, 99);
+        assert!((document_text_pt(&normal) - 11.0).abs() < 1e-9);
     }
 
     /// **脚注文档的裁剪带：一块都不许丢、也不许被压扁**（PR #60 审查的第 11 条：

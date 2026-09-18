@@ -57,6 +57,23 @@ export interface Block {
  * 1. 字节偏移 → UTF-16 位置（`byteOffsetsToPositions`，一次性扫全文）；
  * 2. 越界 / 反序的块直接丢弃（编译期间文档又变了时可能出现，宁可少渲染不可乱渲染）。
  */
+/**
+ * 允许落到 `<a href>` 上的协议白名单（与 Rust 侧 `block_geometry` 的链接收集同一口径）。
+ *
+ * 只放行 `http:` / `https:` / `mailto:`：切片里的链接来自文档，而文档可能来自任何地方
+ * （用户打开别人的 .typ），`javascript:` / `data:` 这类一旦成为真实 href，点击就有执行风险。
+ */
+export function isSafeHref(href: string): boolean {
+  const trimmed = href.trim();
+  if (trimmed === "") return false;
+  // 允许没有协议的相对链接（`#label` / `sub/page.typ` 这类）：它们会被解析成本页锚点，
+  // 不会执行脚本 —— 危险的是"带协议但不是 http(s)"的那些。
+  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(trimmed);
+  if (!scheme) return true;
+  const proto = scheme[1].toLowerCase();
+  return proto === "http" || proto === "https" || proto === "mailto";
+}
+
 export function toBlockTable(
   doc: string,
   raw: Pick<
@@ -101,8 +118,11 @@ export function toBlockTable(
       page: typeof b.page === "number" && b.page > 0 ? b.page : 1,
       xPt: typeof b.xPt === "number" ? b.xPt : 0,
       yPt: typeof b.yPt === "number" ? b.yPt : 0,
+      // 链接热区的 href：Rust 侧已经按白名单过滤过（见 block_geometry 的链接收集），
+      // 这里**再挡一层**（PR #60 审查第 6 条的附带项）：前端是"点一下就交给系统打开"的那一端，
+      // 不该只依赖上游的判断 —— `javascript:` / `data:` 这类伪协议落到 `<a href>` 上很危险。
       links: Array.isArray(b.links)
-        ? b.links.filter((l) => l && typeof l.href === "string" && l.href !== "")
+        ? b.links.filter((l) => l && typeof l.href === "string" && isSafeHref(l.href))
         : [],
     });
   }
