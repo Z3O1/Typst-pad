@@ -55,6 +55,8 @@
   import AboutDialog from "$lib/AboutDialog.svelte";
   import ClosePromptDialog from "$lib/ClosePromptDialog.svelte";
   import StatusBar from "$lib/StatusBar.svelte";
+  import PreviewPane from "$lib/PreviewPane.svelte";
+  import BrowserGate from "$lib/BrowserGate.svelte";
   import SettingsDialog from "$lib/SettingsDialog.svelte";
   import UpdateDialog from "$lib/UpdateDialog.svelte";
   // 弹窗共享外壳样式见 src/lib/modal.css（页面作用域命中不了子组件）
@@ -103,13 +105,15 @@
     closeUpdate,
     type AvailableUpdate,
   } from "$lib/updater";
+  import { AUTO_CHECK_DELAY_MS, type UpdateFlow } from "$lib/update-utils";
   import {
-    AUTO_CHECK_DELAY_MS,
-    UPDATE_DISMISS_NOTICE,
-    formatBytes,
-    isUpdatePromptSuppressed,
-    type UpdateFlow,
-  } from "$lib/update-utils";
+    CHECKING_STATUS,
+    planDismiss,
+    planInstallResult,
+    planInstallStart,
+    planUpdateCheck,
+    updateNoticeText,
+  } from "$lib/update-flow";
   // zoom.ts 是纯逻辑（档位换算、判据、文案）；"引擎改档 + 复核"的编排在 zoom-controller.ts，
   // 这里只留页面自己用得到的三样：默认档、收敛、档位文案。
   import { ZOOM_DEFAULT, clampZoom, zoomLabel } from "$lib/zoom";
@@ -196,10 +200,12 @@
   let previewError = $state("");
   let pageCount = $state(0);
   let charCount = $state(0); // 字符数（状态栏右侧独立显示）
-  let previewHost: HTMLElement;
-  // 预览滚动容器（ResizeObserver 观测其宽度变化）；$state 避免 bind:this 的
-  // non_reactive_update 警告（previewHost 属历史既有模式，此处新变量按新写法声明）
-  let previewBodyEl = $state<HTMLElement>();
+  /**
+   * 预览栏组件句柄：画布（paper）与滚动容器（body）两个元素都在 PreviewPane.svelte 里，
+   * 页面拿不到 bind:this ⇒ 组件用 export function 交出来（见那边文件头）。
+   * 挂载前为 null；页面对这两个元素只做四件事：写 innerHTML、设内联宽度、找 <svg>、量 clientWidth。
+   */
+  let previewPaneRef = $state<{ paper(): HTMLElement | undefined; body(): HTMLElement | undefined } | null>(null);
   let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
   let previewScaleFrame = 0; // 已排队的重算帧号（见 onMount 里的 ResizeObserver）
   /**
@@ -503,17 +509,8 @@
   let updateDismissedAt: number | null = null;
   let startupCheckTimer: ReturnType<typeof setTimeout> | undefined;
 
-  /** 状态栏的更新提示（点击重开更新弹窗）；无提示时为 null */
-  const updateNotice = $derived.by(() => {
-    const flow = updateFlow;
-    if (flow.kind === "available") return `可更新到 v${flow.version}`;
-    if (flow.kind === "downloading") {
-      return flow.progress.percent === null
-        ? `正在下载更新 v${flow.version}（已下载 ${formatBytes(flow.progress.downloaded)}）`
-        : `正在下载更新 v${flow.version}（${flow.progress.percent}%）`;
-    }
-    return null;
-  });
+  /** 状态栏的更新提示（点击重开更新弹窗）；无提示时为 null（文案在 update-flow.ts，有单测） */
+  const updateNotice = $derived(updateNoticeText(updateFlow));
 
   /**
    * 检查更新。manual = 用户点菜单：这类操作必须有明确反馈（"已是最新"也要说）；
@@ -525,7 +522,7 @@
     if (updateFlow.kind === "downloading" || updateFlow.kind === "installing") return;
     updateFlow = { kind: "checking", manual };
     if (manual) {
-      statusText = "正在检查更新…";
+      statusText = CHECKING_STATUS;
       // 手动检查 = 用户主动想知道有没有更新：清掉"别再自动弹窗"标记（"直到点了检查更新"）
       clearUpdateDismissed();
     }
@@ -535,39 +532,17 @@
     lastUpdateCheckAt = Date.now();
     schedulePersist();
 
-    if (outcome.kind === "none") {
-      updateFlow = { kind: "latest" };
-      if (manual) statusText = "已是最新版本";
-      return;
-    }
-    if (outcome.kind === "unsupported") {
-      updateFlow = { kind: "idle" };
-      if (manual) statusText = "当前环境不支持自动更新（仅桌面版可用）";
-      return;
-    }
-    if (outcome.kind === "error") {
-      updateFlow = { kind: "error", message: outcome.message };
-      if (manual) statusText = `检查更新失败：${outcome.message}`;
-      return;
-    }
-
     // 有可用新版本：释放上一个句柄，换成新的
-    await closeUpdate(updateHandle);
-    updateHandle = outcome.update;
-    updateFlow = {
-      kind: "available",
-      version: outcome.update.version,
-      currentVersion: outcome.update.currentVersion,
-      notes: outcome.update.notes,
-    };
-    // 用户点过「稍后」之后，自动检查只把入口留在状态栏（`updateNotice` 那个「可更新到 vX」按钮）：
-    // **不弹窗、也不动状态文字** —— 用户原话「不更新就再也别跳出来，直到点了检查更新」。
-    // 手动检查永远弹窗（上面的 clearUpdateDismissed 已经把标记清掉了）。
-    if (manual || !isUpdatePromptSuppressed(updateDismissedAt)) {
-      statusText = `发现新版本 v${outcome.update.version}`;
-      // 发现新版本 → 弹窗确认（不自动下载）；关掉弹窗后状态栏仍留着入口
-      showUpdateDialog = true;
+    if (outcome.kind === "available") {
+      await closeUpdate(updateHandle);
+      updateHandle = outcome.update;
     }
+    // 状态机 / 状态栏 / 弹窗怎么摆全在 update-flow.ts（有单测）：那里锁着"点过「稍后」之后
+    // 自动检查不弹窗、也不动状态文字"这条红线，以及"手动检查永远弹窗"。
+    const plan = planUpdateCheck(outcome, { manual, dismissedAt: updateDismissedAt });
+    updateFlow = plan.flow;
+    if (plan.status !== null) statusText = plan.status;
+    if (plan.openDialog) showUpdateDialog = true;
   }
 
   /** 清掉"别再自动弹更新窗"标记（显式操作：手动检查 / 点状态栏入口 / 开始下载） */
@@ -584,9 +559,10 @@
    */
   function dismissUpdatePrompt() {
     showUpdateDialog = false;
-    updateDismissedAt = Date.now();
+    const plan = planDismiss(Date.now());
+    updateDismissedAt = plan.dismissedAt;
     schedulePersist();
-    statusText = UPDATE_DISMISS_NOTICE;
+    statusText = plan.status;
   }
 
   /** 点状态栏的更新入口：与手动检查同属显式操作（清标记），然后打开弹窗 */
@@ -601,23 +577,15 @@
     if (!handle) return;
     // 用户改主意开始装了：标记没必要再留着（装完重启后又能正常自动提示下一个版本）
     clearUpdateDismissed();
-    updateFlow = {
-      kind: "downloading",
-      version: handle.version,
-      progress: { downloaded: 0, total: 0, percent: null },
-    };
+    updateFlow = planInstallStart(handle.version);
     const result = await downloadAndInstallUpdate(handle, (progress) => {
       // 用户可能已经点了「关闭」；只要还在下载阶段就继续更新进度
       if (updateFlow.kind === "downloading") updateFlow = { ...updateFlow, progress };
     });
-    if (result.ok) {
-      updateFlow = { kind: "installing", version: handle.version };
-      statusText = "更新已就绪：应用即将退出并安装新版本…";
-    } else {
-      updateFlow = { kind: "error", message: result.message };
-      statusText = `更新失败：${result.message}`;
-      showUpdateDialog = true; // 失败必须让用户看见（否则点了按钮好像什么也没发生）
-    }
+    const plan = planInstallResult(result, handle.version);
+    updateFlow = plan.flow;
+    statusText = plan.status;
+    if (plan.openDialog) showUpdateDialog = true; // 失败必须让用户看见
   }
 
   /** 关闭弹窗：保存后关闭 */
@@ -953,7 +921,7 @@
     const hasSelection =
       zone === "editor"
         ? (editorRef?.hasSelection() ?? false)
-        : previewSelectionHasContent(window.getSelection(), previewHost);
+        : previewSelectionHasContent(window.getSelection(), previewPaneRef?.paper() ?? null);
     contextMenu = {
       x: e.clientX,
       y: e.clientY,
@@ -1007,9 +975,10 @@
   /** 预览区全选：用 Selection API 选中整个预览容器（SVG 不可编辑，execCommand selectAll 不适用） */
   function selectAllPreview() {
     const sel = window.getSelection();
-    if (!sel || !previewHost) return;
+    const paper = previewPaneRef?.paper();
+    if (!sel || !paper) return;
     const range = document.createRange();
-    range.selectNodeContents(previewHost);
+    range.selectNodeContents(paper);
     sel.removeAllRanges();
     sel.addRange(range);
   }
@@ -1408,19 +1377,21 @@
    * 测量失败（无产物/容器不可测）时清空内联宽度，回退 CSS width: 100%。
    */
   function applyPreviewScale() {
-    if (!previewBodyEl || !previewHost) return;
-    const svg = previewHost.querySelector("svg");
+    const body = previewPaneRef?.body();
+    const paper = previewPaneRef?.paper();
+    if (!body || !paper) return;
+    const svg = paper.querySelector("svg");
     if (!svg) {
-      previewHost.style.width = "";
+      paper.style.width = "";
       return;
     }
-    const containerWidth = previewBodyEl.clientWidth;
+    const containerWidth = body.clientWidth;
     const actualPageWidthPt = viewBoxWidthPt(svg.getAttribute("viewBox") ?? "");
     // 重排生效（产物页宽 = 我们请求的页宽）：画布恒 ≤ 栏宽 —— 这是"预览永不横向滚动"的保证。
     // 请求被文档自己的 #set page 覆盖时落到下面的等比缩放路径（那也是用户自己的纸型）。
     if (previewPageWidthUsed > 0 && isReflowApplied(actualPageWidthPt, previewPageWidthUsed)) {
       const reflowWidth = reflowCanvasWidth(containerWidth, actualPageWidthPt);
-      previewHost.style.width = Number.isNaN(reflowWidth) ? "" : `${reflowWidth}px`;
+      paper.style.width = Number.isNaN(reflowWidth) ? "" : `${reflowWidth}px`;
       return;
     }
     const displayWidth = previewCanvasWidth({
@@ -1428,7 +1399,7 @@
       pageWidthPt: actualPageWidthPt,
       uiZoom,
     });
-    previewHost.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
+    paper.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
   }
 
   /**
@@ -1442,7 +1413,8 @@
   function schedulePreviewReflow() {
     clearTimeout(previewReflowTimer);
     previewReflowTimer = setTimeout(() => {
-      const width = previewBodyEl ? previewPageWidthPt(previewBodyEl.clientWidth) : NaN;
+      const body = previewPaneRef?.body();
+      const width = body ? previewPageWidthPt(body.clientWidth) : NaN;
       const next = Number.isNaN(width) ? 0 : width;
       const changed = next === 0 ? previewPageWidthUsed > 0 : Math.abs(next - previewPageWidthRequest) > 2;
       if (!changed) return;
@@ -1480,8 +1452,9 @@
     // documentPath 传当前文档绝对路径（未保存为 null），Rust 侧以其所在目录解析 include
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
     // 首次编译可能早于 ResizeObserver 的第一次回调：这里补算一次页宽，避免启动时多编译一遍
-    if (previewPageWidthRequest === 0 && previewBodyEl) {
-      const initialWidth = previewPageWidthPt(previewBodyEl.clientWidth);
+    const previewBody = previewPaneRef?.body();
+    if (previewPageWidthRequest === 0 && previewBody) {
+      const initialWidth = previewPageWidthPt(previewBody.clientWidth);
       if (!Number.isNaN(initialWidth)) previewPageWidthRequest = initialWidth;
     }
     // 预览重排的页宽是**编译期输入**（Rust 侧据此注入 #set page），所以随本次编译一起发出；
@@ -1547,8 +1520,8 @@
     }
     if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
     if (result.ok) {
-      if (!previewHost) return; // 预览栏未挂载（理论上隐藏时仍在 DOM，这里兜底）
-      previewHost.innerHTML = result.svg;
+      if (!previewPaneRef) return; // 预览栏未挂载（理论上隐藏时仍在 DOM，这里兜底）
+      previewPaneRef.paper()!.innerHTML = result.svg;
       previewPageWidthUsed = requestedPreviewWidthPt; // 本次产物的请求页宽（0 = 没请求重排）
       applyPreviewScale(); // 新产物注入后按当前容器宽度重算画布宽度
       applyCompileStatus(result, doc.length);
@@ -1979,7 +1952,8 @@
         schedulePreviewReflow();
       });
     });
-    if (previewBodyEl) previewResizeObserver.observe(previewBodyEl); // bind:this 已在 onMount 前赋值
+    const previewBody = previewPaneRef?.body();
+    if (previewBody) previewResizeObserver.observe(previewBody); // 组件在 onMount 前已挂载
     // 写作模式的版心宽要等编辑器挂载后才能量到：量到就重排一次（首帧编译用的是兜底值）
     scheduleWritingReflow();
 
@@ -2117,29 +2091,12 @@
         />
       </div>
     </section>
-    <section class="pane preview-pane" class:hidden={!showPreview}>
-      <!-- data-context-zone：右键区域判定标记（覆盖占位/错误/预览纸张全部子区域） -->
-      <div
-        class="pane-body preview-body"
-        data-context-zone="preview"
-        bind:this={previewBodyEl}
-      >
-        {#if previewStatus === "error"}
-          <div class="preview-error">
-            <div class="preview-error-title">编译错误</div>
-            <pre class="preview-error-text">{previewError}</pre>
-          </div>
-        {:else if previewStatus === "idle"}
-          <div class="preview-placeholder">等待编译…</div>
-        {/if}
-        <div
-          id="preview-host"
-          bind:this={previewHost}
-          class="preview-paper"
-          hidden={previewStatus !== "ready"}
-        ></div>
-      </div>
-    </section>
+    <PreviewPane
+      bind:this={previewPaneRef}
+      hidden={!showPreview}
+      status={previewStatus}
+      error={previewError}
+    />
   </main>
 
   <StatusBar
@@ -2219,29 +2176,7 @@
   {/if}
 </div>
 {:else}
-  <!-- 非 Tauri（浏览器直开）时的提示页。开发模式下额外给一键入口：
-       浏览器开发模式（?browserdev=1）会装假的 Tauri 环境 + 假编译，能完整调试编辑器交互
-       （所见即所得、快捷键、菜单、分栏），只是没有真实 typst 排版与文件功能。
-       不加这个入口时，裸开 http://localhost:1420/ 只会看到"请使用桌面应用版本"，
-       很容易误判成"用不了了"（实测踩过）。生产构建（非 DEV）不显示该入口。 -->
-  <div class="browser-gate">
-    <p class="browser-gate-title">请使用桌面应用版本</p>
-    <p class="browser-gate-text">Typst-pad 已移除浏览器支持，请下载桌面应用后使用。</p>
-    {#if import.meta.env.DEV}
-      <p class="browser-gate-text browser-gate-dev">
-        开发调试可改用<strong>浏览器开发模式</strong>：带 <code>?browserdev=1</code> 打开本页
-        （假 Tauri 环境 + 假编译，可调试编辑器交互与所见即所得）。
-      </p>
-      <button
-        class="modal-btn primary"
-        onclick={() => {
-          const url = new URL(location.href);
-          url.searchParams.set("browserdev", "1");
-          location.href = url.toString();
-        }}
-      >打开浏览器开发模式</button>
-    {/if}
-  </div>
+  <BrowserGate />
 {/if}
 
 <style>
@@ -2335,21 +2270,14 @@
     box-shadow: 0 0 12px rgba(0, 0, 0, 0.12);
   }
 
-  /* 单栏（所见即所得）：编辑区占满整宽，预览栏整体不参与布局 */
-  .panes.single .preview-pane {
-    display: none;
-  }
-
-  .preview-pane.hidden {
-    display: none;
-  }
-
   /* 单栏（写作模式）：编辑区不再与预览栏分界；纸张限宽居中由上面的 .pane-body 负责 */
   .panes.single .editor-pane {
     border-right: none;
   }
 
-  .pane {
+  /* 两栏共用的骨架。**必须是 :global** —— 预览栏已经搬进 PreviewPane.svelte，
+     页面 `<style>` 的作用域命中不了子组件里的元素（编辑栏那一半仍在页面里，一起用这两条）。 */
+  :global(.pane) {
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -2362,29 +2290,10 @@
     background: var(--bg-pane);
   }
 
-  .pane-body {
+  :global(.pane-body) {
     flex: 1;
     min-height: 0;
     overflow: auto;
-  }
-
-  .preview-body {
-    display: flex;
-    flex-direction: column;
-    /* 交叉轴（水平）居中只作用于"装得下"的元素（错误框/占位符）；
-       画布自己用 margin-inline: auto，溢出时退化成左对齐（见 .preview-paper） */
-    align-items: center;
-    background: var(--bg-pane);
-    overflow: auto;
-    /* 常驻滚动条槽位：修复"窄窗口下预览画布持续闪烁"（实测 2026-09-10）。
-       成因是滚动条反馈环——画布宽度写为"容器可用宽度"时：
-         画布略宽 → 出现竖滚动条 → clientWidth 少 15px → 重算变窄 → 滚动条消失 → 变宽 …
-       无限循环，DOM 里 host 内联宽度在两个值之间反复翻转，视觉上就是来回闪。
-       窗口够宽（≥ 自然缩放 840px，缩放被 natural 夹住）或全屏时不再随容器变化，
-       所以此前只在中等窗口宽度复现（实测 1040~1060px 视口下 flips=7/秒）。
-       stable 让槽位常驻，clientWidth 不再随滚动条变化，反馈环断裂。
-       实测：修复前取值 ['512px','527px'] flips=22；修复后 ['512px'] flips=0。 */
-    scrollbar-gutter: stable;
   }
 
   .drop-overlay {
@@ -2406,97 +2315,4 @@
     background: rgba(255, 255, 255, 0.6);
   }
 
-  .preview-paper {
-    width: 100%;
-    /* 宽度默认铺满容器；applyPreviewScale 按容器宽度与页物理尺寸（pt）计算后
-       以内联样式覆盖为画布显示宽度（字号恒定等宽缩放），测量失败时回退本规则 */
-    /* 居中用**自身的 auto 外边距**，不用容器上的 align-items: center：
-       界面缩放放大后画布会比栏宽宽，此时 auto 外边距退化为 0（负剩余空间）→ 页面左对齐、
-       横向滚动条能真正滚到左缘；若靠容器居中，溢出的左半部分会被顶到滚动区之外，
-       scrollLeft 又不能为负 → 那部分永远看不到（实测踩过）。 */
-    margin-inline: auto;
-  }
-
-  /* 每页 SVG 顶层文档（compileToSvg 按页序拼接入预览容器）：铺满预览容器宽度
-     （容器宽度由缩放逻辑控制）、高度按比例——等宽缩放，文本不拉伸变形 */
-  .preview-paper > :global(svg) {
-    display: block;
-    width: 100%;
-    height: auto;
-  }
-
-  /* 页间分隔线（typst-engine composePages 注入的 <div class="page-separator">），随主题自适应 */
-  .preview-paper > :global(.page-separator) {
-    height: 1px;
-    background: var(--border);
-  }
-
-  .preview-placeholder {
-    color: var(--fg-dim);
-    font-size: 13px;
-    padding: 40px 0;
-  }
-
-  .preview-error {
-    width: 100%;
-    max-width: 820px;
-    background: #3c1f1f;
-    border: 1px solid #7a3a3a;
-    border-radius: 6px;
-    padding: 12px 16px;
-  }
-
-  .preview-error-title {
-    color: #ff8a8a;
-    font-weight: 600;
-    margin-bottom: 6px;
-  }
-
-  .preview-error-text {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: #ffc9c9;
-    font-size: 12px;
-  }
-
-  /* 浏览器提示页（非 Tauri 环境；已移除浏览器支持） */
-  .browser-gate {
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    background: var(--bg);
-    color: var(--fg);
-    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-  }
-
-  .browser-gate-title {
-    margin: 0;
-    font-size: 18px;
-    color: var(--accent);
-  }
-
-  .browser-gate-dev {
-    max-width: 520px;
-    line-height: 1.7;
-  }
-
-  .browser-gate-dev code {
-    padding: 1px 5px;
-    border-radius: 3px;
-    background: rgba(128, 128, 128, 0.25);
-  }
-
-  .browser-gate-text {
-    margin: 0;
-    font-size: 13px;
-    color: var(--fg-dim);
-  }
-
-  /* 状态栏的更新提示：只作文字强调（无底色块，保持状态栏干净），点击重开更新弹窗 */
-  /* 更新弹窗：说明可能很长，限宽 + 内部滚动，不把弹窗撑到屏幕外。
-     内容是 update-notes.ts 渲染的受控 HTML（标题/列表/粗体/行内代码），不是 <pre> 原文 */
 </style>
