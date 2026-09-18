@@ -121,3 +121,34 @@ export function selectionTouchesRange(
     return s.from >= range.from && s.from <= range.to;
   });
 }
+
+/** 某个**非空**选区是否**完整盖住**了这个范围（两端都在范围之外或正好贴边）。 */
+export function selectionCoversRange(
+  range: { from: number; to: number },
+  selections: readonly { from: number; to: number }[],
+): boolean {
+  return selections.some((s) => s.from !== s.to && s.from <= range.from && s.to >= range.to);
+}
+
+/**
+ * 公式"要不要展开成源码"的决策（用户要求「选中整个公式请不要展开」）。
+ *
+ * 与块级渲染**同一套规则**（见 block-plan.applyBlockSelection 的 selected）：选区**完整盖住**
+ * 公式时不展开 —— 保持渲染出来的样子、挂一层淡色底表示"它被选中了"，Ctrl+C 复制的仍是源码。
+ * 只盖住一部分时照旧展开（那样选中高亮才精确、能选到半个公式里的字符）。光标在公式里时也照旧展开。
+ *
+ * `inlinePresentation`：这个公式是不是**行内呈现**（装饰落在 `.cm-line` 里）。只有行内呈现才敢
+ * 不展开 —— 行间公式若用"整行 block 替换"，那个 widget 是 `contenteditable=false` 的顶层元素，
+ * 被选区完整盖住之后打字会把字符插到**下一行**（实测：doc 纹丝不动、下一行多出一个 z），
+ * 所以那种形态必须照旧展开（见 live-preview 的 buildMathDecorations）。
+ */
+export function mathRevealDecision(
+  range: { from: number; to: number },
+  selections: readonly { from: number; to: number }[],
+  opts: { inlinePresentation?: boolean } = {},
+): { reveal: boolean; selected: boolean } {
+  if ((opts.inlinePresentation ?? true) && selectionCoversRange(range, selections)) {
+    return { reveal: false, selected: true };
+  }
+  return { reveal: selectionTouchesRange(range, selections), selected: false };
+}

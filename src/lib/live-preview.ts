@@ -7,17 +7,28 @@
 //
 // 装饰（Decoration）机制与既有的诊断波浪线同源（见 Editor.svelte 的 diagnosticsCompartment），
 // 只是装饰类型由 `mark` 换成 `replace({ widget })`。
-import { Decoration, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
+import { Decoration, EditorView, ViewPlugin, WidgetType, keymap } from "@codemirror/view";
 import type { DecorationSet, ViewUpdate } from "@codemirror/view";
-import { StateEffect, StateField } from "@codemirror/state";
+import { EditorSelection, Prec, StateEffect, StateField } from "@codemirror/state";
 import type { EditorState, Extension, Range, Text } from "@codemirror/state";
-import { mathCacheKey, scanMathRanges, selectionTouchesRange } from "./math-ranges";
+import { mathCacheKey, mathRevealDecision, scanMathRanges, selectionTouchesRange } from "./math-ranges";
 import type { MathRange } from "./math-ranges";
 import { scanMarkupDecorations } from "./markup-ranges";
 import type { MarkupKind } from "./markup-ranges";
 import { scanNonMarkupRegions } from "./typst-lex";
 import type { Region } from "./typst-lex";
 import { buildMathContext } from "./math-context";
+import {
+  applyBlockSelection,
+  crossesCollapsedCover,
+  planBlockCovers,
+  revealBlocksWithDiagnostics,
+  sourceVerticalTarget,
+} from "./block-plan";
+import type { Block, BlockCover } from "./block-plan";
+import { cropPagePoint } from "./block-hit";
+import { anchorPosEffect } from "./scroll-anchor";
+import { dbg } from "./debug";
 import { MATH_SIZE_PT } from "./typst-engine";
 import type { MathRender } from "./typst-engine";
 
@@ -52,6 +63,46 @@ export interface LivePreviewOptions {
   onRequest: (requests: MathRequest[]) => void;
   /** 是否暗色主题（typst 产物是黑字透明底，暗色下需反色；见 mathWidgetTheme） */
   dark: () => boolean;
+  /**
+   * 写作模式的**块级渲染**：整篇编译出的"每块一张切片"（父组件每次 compile_blocks 后更新）。
+   * 返回 null / 空数时整体关闭 —— 那时的行为与加这个功能之前**逐字节一致**
+   * （源码模式、浏览器开发桩、后端没有该命令时都走这条路）。
+   * 见 docs/文档模式渲染保真-调研.md。
+   */
+  blocks?: () => Block[] | null;
+  /**
+   * 视口内出现了"**能渲染但还没有切片**"的块（窗口化渲染的正常中间态）：
+   * 父组件去抖后按新的视口窗口重编译一次。不传则永远等着下一次按键 —— 长文档里
+   * 滚动到没渲过的区域会一直显示源码。
+   */
+  onBlocksNeeded?: () => void;
+  /**
+   * **点击定位**（阶段 2）：点在某张切片上的 `(xPt, yPt)`（页面坐标）→ 返回光标的
+   * CodeMirror 位置；返回 null = 定不了位，调用方退回"光标落到块首"。
+   *
+   * 真实实现在父组件（→ Rust 侧 `block_hit_test`，见 block-hit.ts / +page.svelte），
+   * 这里只负责"量出点击点在切片里的相对位置"并把结果落在事务里。
+   */
+  onCropClick?: (req: {
+    page: number;
+    xPt: number;
+    yPt: number;
+    /** 被点那块的源码范围（CodeMirror 位置） */
+    from: number;
+    to: number;
+  }) => Promise<number | null>;
+  /**
+   * **点切片里的链接**（阶段 3）：typst 的 `#link("…")[文字]` 在切片上是画出来的文字，
+   * 点击时把 URL 交给父组件（→ opener 插件用系统浏览器打开）。不传则链接只是不可点的热区。
+   */
+  onOpenLink?: (href: string) => void;
+  /**
+   * 当前编译错误的区间（CodeMirror 位置）：**与诊断相交的块不许被切片盖住** ——
+   * 波浪线画在源码上，被图片盖住的块里看不见（用户会看到"状态栏说有错，正文里找不到"）。
+   * 入参是**正在算装饰的那个 state 的 doc**（不能取 `view.state`：StateField 计算时
+   * view 上的 state 还是旧的）。
+   */
+  diagnosticRanges?: (doc: Text) => readonly { from: number; to: number }[];
 }
 
 /** 渲染结果更新后刷新装饰（父组件收齐一批渲染结果时 dispatch 一次） */
@@ -99,6 +150,11 @@ class MathWidget extends WidgetType {
     private readonly render: MathRender,
     private readonly range: MathRange,
     private readonly dark: boolean,
+    /**
+     * 选区**完整盖住**了这个公式（用户要求「选中整个公式请不要展开」）：保持渲染外观，
+     * 用一层淡色底表示"它被选中了"（与块切片的 .cm-block-crop-selected 同一套做法）。
+     */
+    private readonly selected = false,
   ) {
     super();
   }
@@ -109,14 +165,18 @@ class MathWidget extends WidgetType {
       other.range.from === this.range.from &&
       other.range.to === this.range.to &&
       other.render.svg === this.render.svg &&
-      other.dark === this.dark
+      other.dark === this.dark &&
+      other.selected === this.selected
     );
   }
 
   toDOM(view: EditorView): HTMLElement {
     try {
       const wrap = document.createElement("span");
-      wrap.className = this.dark ? "cm-math-widget cm-math-dark" : "cm-math-widget";
+      const classes = ["cm-math-widget"];
+      if (this.dark) classes.push("cm-math-dark");
+      if (this.selected) classes.push("cm-math-selected");
+      wrap.className = classes.join(" ");
       // 尺寸直接用 pt：Rust 侧按编辑器字号（14px = 10.5pt）编译，故 pt 与编辑器 CSS pt 1:1
       wrap.style.width = `${this.render.widthPt}pt`;
       wrap.style.height = `${this.render.heightPt}pt`;
@@ -194,6 +254,197 @@ class CodeBlockWidget extends WidgetType {
   }
 }
 
+/**
+ * 块切片 widget（阶段 1 的"渲染表面"）：整格源码被替换成**引擎自己画的那一块**。
+ *
+ * 尺寸不给死值：切片 SVG 的 viewBox/尺寸就是版心的尺寸，CSS 让 svg 宽度铺满正文列、
+ * 高度按固有比例自动算（见 livePreviewTheme 的 .cm-block-crop svg）—— 这样窗口宽度
+ * 变化到下一次重编译之间也不会变形错位。
+ *
+ * 点击 = 光标落到**点到的那个字符**（阶段 2 起按页面坐标做命中测试），
+ * 拖选 = 从切片里拖出去选出一段（阶段 3）——两条都走 CodeMirror 的 `mouseSelectionStyle`
+ * 接管（见 `cropMouseSelection`：自己挂 mousedown 会与它抢同一次事件）。
+ * 选区进入这一格 → 装饰撤掉、源码展开（与公式 widget 同款）。
+ */
+class BlockCropWidget extends WidgetType {
+  constructor(
+    private readonly cover: BlockCover,
+    private readonly raw: string,
+    private readonly dark: boolean,
+    private readonly onOpenLink?: (href: string) => void,
+  ) {
+    super();
+  }
+
+  eq(other: BlockCropWidget): boolean {
+    return (
+      other.cover.coverFrom === this.cover.coverFrom &&
+      other.cover.coverTo === this.cover.coverTo &&
+      other.cover.block.from === this.cover.block.from &&
+      other.cover.block.svg === this.cover.block.svg &&
+      other.cover.selected === this.cover.selected &&
+      other.dark === this.dark
+    );
+  }
+
+  toDOM(_view: EditorView): HTMLElement {
+    try {
+      const wrap = document.createElement("div");
+      const classes = ["cm-block-crop"];
+      if (this.dark) classes.push("cm-block-crop-dark");
+      // 整块被选中时保持切片外观，用一层淡色表示"选中了"（见 block-plan 的 selected 说明）
+      if (this.cover.selected) classes.push("cm-block-crop-selected");
+      wrap.className = classes.join(" ");
+      wrap.title = `${this.cover.block.kind}（点击编辑源码）`;
+      // 块起点写在 DOM 上：浏览器验收要靠它把"夹具里的第几块"与"页面里的哪张切片"对上
+      // （按位置取最可靠，不依赖切片顺序；调试时也比数第几个 div 直观）
+      wrap.dataset.blockFrom = String(this.cover.block.from);
+      wrap.dataset.blockKind = this.cover.block.kind;
+      wrap.innerHTML = this.cover.block.svg;
+      const svg = wrap.querySelector("svg");
+      if (svg) {
+        svg.setAttribute("width", "100%");
+        svg.setAttribute("height", "auto");
+        svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      }
+      // 选中色**必须铺在 SVG 之上**（见 .cm-block-crop-selected 的注释）：切片的 SVG 自带
+      // 不透明的白纸底，只给容器加背景色是**看不见**的 —— 只在相邻切片的缝隙里漏出一两条细蓝线，
+      // 看起来像整页被画上了网格（用户截图「太丑了」就是这么来的）。
+      if (this.cover.selected) {
+        const tint = document.createElement("div");
+        tint.className = "cm-block-crop-tint";
+        wrap.appendChild(tint);
+      }
+      // **不挂 mousedown**：切片的点击与拖选统一由 CodeMirror 的 mouseSelectionStyle 接管
+      // （见 cropMouseSelection）。自己再挂一个会与它抢同一次事件。
+      this.addLinkHotspots(wrap);
+      return wrap;
+    } catch (e) {
+      // 兜底：任何异常都退回**源码文本**（绝不把异常抛回渲染流程，见 fallbackTextDom 的说明）
+      return fallbackTextDom(this.raw, e);
+    }
+  }
+
+  /**
+   * 切片内部的**链接热区**（阶段 3）：按"带内相对 pt"换算成百分比，铺一层透明可点的方块。
+   *
+   * 百分比而不是像素：切片 SVG 是 `width:100%; height:auto`，整块按列宽等比缩放，
+   * 所以带内相对坐标 → 百分比这一层换算与显示尺寸无关（界面缩放、窗口宽度都不用管）。
+   *
+   * 命中区**必须是真正的 DOM 元素**：SVG 里的链接是画出来的字形，点不到的。
+   * 热区上按下时 `stopPropagation`，免得被切片的"点击/拖选"接管（点链接是"打开"语义，
+   * 不是"把光标放到这里"）。
+   */
+  private addLinkHotspots(wrap: HTMLElement): void {
+    const block = this.cover.block;
+    const links = block.links ?? [];
+    if (links.length === 0 || block.widthPt <= 0 || block.heightPt <= 0) return;
+    for (const link of links) {
+      const a = document.createElement("a");
+      a.className = "cm-block-crop-link";
+      a.href = link.href; // 真 href：验收与"复制链接地址"这类浏览器行为都靠它
+      a.title = link.href;
+      a.draggable = false;
+      a.style.left = `${(link.xPt / block.widthPt) * 100}%`;
+      a.style.top = `${(link.yPt / block.heightPt) * 100}%`;
+      a.style.width = `${(link.widthPt / block.widthPt) * 100}%`;
+      a.style.height = `${(link.heightPt / block.heightPt) * 100}%`;
+      a.addEventListener("mousedown", (e) => e.stopPropagation());
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        try {
+          this.onOpenLink?.(link.href);
+        } catch (err) {
+          console.error("[live-preview] 打开链接失败：", err);
+        }
+      });
+      wrap.appendChild(a);
+    }
+  }
+
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
+/**
+ * 把块表算成"当前文档下要覆盖哪些区间"（块表已是 CodeMirror 位置，见 block-plan.toBlockTable）。
+ * 越界 / 反序的格子直接丢掉（文档在编译期间被大改时可能出现）——宁可少渲染，不可乱渲染。
+ *
+ * 注意：这里**特意不做"文档变了就退回源码"**。块表在编译结果回来之前是旧的，而编辑只发生在
+ * 已展开的那一格；其它格的边界都落在空白处（上一块的源码终点），偏一两个字符既不会露出来
+ * 也不会吃掉正文。反过来"一变就退回"会让每敲一个字都闪一次源码（见 block-plan 的说明）。
+ */
+function buildBlockCovers(
+  state: EditorState,
+  opts: LivePreviewOptions,
+  _doc: string,
+): BlockCover[] {
+  const blocks = opts.blocks?.() ?? null;
+  if (!blocks || blocks.length === 0) return [];
+  const docLength = state.doc.length;
+  const covers = planBlockCovers(blocks, state.doc).filter(
+    (c) =>
+      c.coverFrom >= 0 && c.coverTo <= docLength && c.coverTo > c.coverFrom && c.block.from < docLength,
+  );
+  applyBlockSelection(
+    covers,
+    state.selection.ranges.map((r) => ({ from: r.from, to: r.to, head: r.head })),
+    docLength,
+  );
+  return covers;
+}
+
+/**
+ * 视口附近有没有"能渲染却没有切片"的块 —— 有的话通知父组件按新窗口重编译。
+ *
+ * 窗口化渲染（见 block-plan.carryOverCrops 的说明）下这是常态：滚动到没渲过的区域时，
+ * 那几块先是源码，等这一轮窗口编译回来就变成切片。
+ */
+function notifyBlocksNeeded(
+  state: EditorState,
+  opts: LivePreviewOptions,
+  visible: readonly { from: number; to: number }[],
+  _doc: string,
+): void {
+  if (!opts.enabled() || !opts.onBlocksNeeded) return;
+  // **直接看块表，不要走 buildBlockCovers**：那条路会把"能渲染但还没有切片"的块标成
+  // `revealed`（它们当下确实显示源码），于是"要不要补渲"的判据 `!cover.revealed` 永远为假 ——
+  // 滚动到没渲过的区域时**一次重编译都不会触发**（这段代码曾经就是这样：要么等着用户敲一个字，
+  // 要么永远显示源码）。判据只该是"这个块能渲染（found）但这一轮没拿到 svg"。
+  const blocks = opts.blocks?.() ?? null;
+  if (!blocks || blocks.length === 0) return;
+  for (const block of blocks) {
+    if (!block.found || block.svg !== "") continue;
+    const near = visible.some(
+      (v) => block.to >= v.from - PREFETCH_MARGIN && block.from <= v.to + PREFETCH_MARGIN,
+    );
+    if (near) {
+      opts.onBlocksNeeded();
+      return;
+    }
+  }
+}
+
+/** 区间是否落在某个"已被块 widget 盖住"的格子里（covered 已按 from 递增且不重叠） */
+function insideCovered(
+  from: number,
+  to: number,
+  covered: readonly { from: number; to: number }[],
+): boolean {
+  let lo = 0;
+  let hi = covered.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const c = covered[mid];
+    if (to <= c.from) hi = mid - 1;
+    else if (from >= c.to) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+
 /** markup 装饰对应的 CSS 类（样式见 livePreviewTheme） */
 const MARKUP_CLASS: Record<MarkupKind, string> = {
   heading: "cm-markup-heading",
@@ -214,6 +465,7 @@ const MARKUP_CLASS: Record<MarkupKind, string> = {
 function buildMarkupDecorations(
   state: EditorState,
   scan: { opaque: Region[]; math: MathRange[] },
+  covered: readonly { from: number; to: number }[] = [],
 ): Range<Decoration>[] {
   const doc = state.doc.toString();
   const marks = scanMarkupDecorations(doc, scan);
@@ -222,6 +474,7 @@ function buildMarkupDecorations(
   for (const item of marks) {
     // 块级结构（代码块）：整段替换为 widget；光标/选区进入即整段回到源码
     if (item.block) {
+      if (insideCovered(item.block.from, item.block.to, covered)) continue;
       const reveal = selectionTouchesRange(item.block, selections);
       if (!reveal) {
         decorations.push(
@@ -238,6 +491,7 @@ function buildMarkupDecorations(
     // 粗体/斜体/行内代码的标记分列两侧，取并集同样正确。
     const from = Math.min(item.content.from, ...item.markers.map((m) => m.from));
     const to = Math.max(item.content.to, ...item.markers.map((m) => m.to));
+    if (insideCovered(from, to, covered)) continue; // 整块已由切片呈现，别再叠标记隐藏
     // 选区进入整个构造（含标记）→ 露出标记符号，便于编辑源码
     const reveal = selectionTouchesRange({ from, to }, selections);
     // 标题额外带级别类（字号按级别递增，见 livePreviewTheme）
@@ -281,6 +535,14 @@ class MathBlockWidget extends WidgetType {
     private readonly render: MathRender,
     private readonly range: MathRange,
     private readonly dark: boolean,
+    /** 整行公式被选区完整盖住（见 MathWidget 的说明） */
+    private readonly selected = false,
+    /**
+     * **行内呈现**（单行行间公式用）：widget 落在 `.cm-line` 里、由所在行居中，
+     * 而不是做"整行 block 替换"。理由见 buildMathDecorations 里的那段说明
+     * （block widget 是 contenteditable=false 的顶层元素，被选区盖住时打字会插到下一行）。
+     */
+    private readonly inline = false,
   ) {
     super();
   }
@@ -290,14 +552,20 @@ class MathBlockWidget extends WidgetType {
       other.range.from === this.range.from &&
       other.range.to === this.range.to &&
       other.render.svg === this.render.svg &&
-      other.dark === this.dark
+      other.dark === this.dark &&
+      other.selected === this.selected &&
+      other.inline === this.inline
     );
   }
 
   toDOM(view: EditorView): HTMLElement {
     try {
-      const block = document.createElement("div");
-      block.className = this.dark ? "cm-math-block cm-math-dark" : "cm-math-block";
+      const block = document.createElement(this.inline ? "span" : "div");
+      const classes = ["cm-math-block"];
+      if (this.inline) classes.push("cm-math-block-inline");
+      if (this.dark) classes.push("cm-math-dark");
+      if (this.selected) classes.push("cm-math-selected");
+      block.className = classes.join(" ");
       block.title = `$${this.range.body}$（点击编辑源码）`;
       const box = document.createElement("span");
       box.className = "cm-math-block-box";
@@ -341,29 +609,156 @@ function blockRangeFor(doc: Text, range: MathRange): { from: number; to: number 
   return { from: first.from, to: last.to };
 }
 
+/**
+ * 块切片装饰集：**未展开且可渲染**的格子整格替换成块 widget。
+ *
+ * 边界都取自"已铺满全文、彼此首尾相接"的格子（见 block-plan.planBlockCovers），所以
+ * 这些 replace 区间互不重叠 —— CodeMirror 拒绝重叠的替换装饰（会抛
+ * "Overlapping replacement decorations"），这条是硬约束。
+ */
+function buildBlockCropDecorations(
+  state: EditorState,
+  doc: string,
+  covers: BlockCover[],
+  opts: LivePreviewOptions,
+): Range<Decoration>[] {
+  const out: Range<Decoration>[] = [];
+  for (const cover of covers) {
+    if (cover.revealed || !cover.renderable) continue;
+    const from = Math.max(0, cover.coverFrom);
+    const to = Math.min(cover.coverTo, state.doc.length);
+    if (to <= from) continue;
+    out.push(
+      Decoration.replace({
+        widget: new BlockCropWidget(cover, doc.slice(from, to), opts.dark(), opts.onOpenLink),
+        block: true,
+      }).range(from, to),
+    );
+  }
+  return out;
+}
+
+/**
+ * **没有输出的块整格隐藏**（用户 2026-09-16 选定「完全隐藏，和 PDF 一样什么都看不到」）。
+ *
+ * 哪些块算"没有输出"：`#set` / `#show` / `#let` / 纯注释行 —— 引擎对它们**什么都不画**
+ * （实测：用户真实文档首行 `#show math.equation: set text(...)` 的块 `found=false`、
+ * 高度 `0.0pt`、SVG 0KB），所以真排版里那一行本来就不存在。以前它照旧显示源码，
+ * 用户问「为什么 `#` 的代码还是会显示出来」。
+ *
+ * 实现要点：
+ *  - 只在 `cover.noOutput && !cover.revealed` 时隐藏 —— `revealed` 由选区判定（光标/选区进去就展开，
+ *    照旧可编辑）；**"块表过期 / 编译失败"那种不可渲染的块绝不能走这里**（见 block-plan 的注释）。
+ *  - 用**整行**的 `Decoration.replace({ block: true })`（不带 widget）= 把这几行藏掉、高度归零；
+ *    连**块尾空行**也一起藏（格子本来就含它，留着会凭空多一行空行）。
+ *  - 区间取格子（`coverFrom..coverTo`）而不是块本身，保证与切片装饰**不重叠**（同一格只有一个装饰）。
+ */
+function buildHiddenBlockDecorations(state: EditorState, covers: BlockCover[]): Range<Decoration>[] {
+  const out: Range<Decoration>[] = [];
+  for (const cover of covers) {
+    if (cover.revealed || !cover.noOutput) continue;
+    const from = Math.max(0, Math.min(cover.coverFrom, state.doc.length));
+    const to = Math.max(from, Math.min(cover.coverTo, state.doc.length));
+    if (to <= from) continue;
+    out.push(Decoration.replace({ block: true }).range(from, to));
+  }
+  return out;
+}
+
+/**
+ * **整块被选中的围栏代码块：把两行围栏藏起来**（用户要求「选中整个代码块请不要展开」）。
+ *
+ * 背景：整块被选中时那一块本来就不展开（保持切片外观，见 block-plan 的 selected）。但**光标
+ * 所在的那一块必须展开成源码**（DOM 里得有真实文本，浏览器的输入事件才落得下去 —— 否则
+ * Ctrl+A 之后打字一个字都进不去，实测踩过）。于是"选中整个代码块"最常见的那个手势
+ * （在代码块里拖一整块）会走到这一条路：展开是必须的，但**围栏没必要露出来**。
+ *
+ * 做法与写作模式隐藏 `= ` / `**` 一致：把围栏那两行**整行**替换掉（连行尾换行一起，
+ * 免得留两条空行），代码正文仍是可编辑、可选中的真实文本。
+ */
+function buildFenceHidingDecorations(state: EditorState, covers: BlockCover[]): Range<Decoration>[] {
+  const out: Range<Decoration>[] = [];
+  const isFenceLine = (text: string) => /^\s*(```|~~~)/.test(text);
+  /** 整行（含行尾换行）的范围；末行没有换行时到行尾为止 */
+  const wholeLine = (lineNo: number) => {
+    const line = state.doc.line(lineNo);
+    const to = lineNo < state.doc.lines ? state.doc.line(lineNo + 1).from : line.to;
+    return { from: line.from, to };
+  };
+  for (const cover of covers) {
+    if (!cover.selected || !cover.revealed || cover.block.kind !== "Raw") continue;
+    const from = Math.max(0, Math.min(cover.block.from, state.doc.length));
+    const to = Math.max(from, Math.min(cover.block.to, state.doc.length));
+    if (to <= from) continue;
+    const first = state.doc.lineAt(from);
+    const last = state.doc.lineAt(to - 1);
+    if (isFenceLine(first.text)) out.push(Decoration.replace({ block: true }).range(wholeLine(first.number).from, wholeLine(first.number).to));
+    if (last.number !== first.number && isFenceLine(last.text)) {
+      out.push(Decoration.replace({ block: true }).range(wholeLine(last.number).from, wholeLine(last.number).to));
+    }
+  }
+  return out;
+}
+
 /** 依据「文档 + 选区 + 渲染缓存」算出公式 widget 装饰集 */
 function buildMathDecorations(
   state: EditorState,
   opts: LivePreviewOptions,
   ranges: MathRange[],
   context: string,
+  covered: readonly { from: number; to: number }[] = [],
 ): Range<Decoration>[] {
   if (!opts.enabled()) return [];
   const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
   const decorations: Range<Decoration>[] = [];
   for (const range of ranges) {
-    // 光标 / 选区进入 → 展开源码（含块级：光标落在公式内即整行回到源码）
-    if (selectionTouchesRange(range, selections)) continue;
+    const block = blockRangeFor(state.doc, range);
+    // 呈现方式决定"整块被选中时能不能不展开"（见 mathRevealDecision 的说明）：
+    // 跨行的行间公式只能整行 block 替换，那种 widget 里没有可编辑的行容器。
+    const asBlockWidget = block !== null && range.multiline;
+    // 光标 / 部分选区进入 → 展开源码；**选区完整盖住公式**时不展开（保持渲染 + 淡色底，
+    // 用户要求「选中整个公式请不要展开」，判定与理由见 math-ranges.mathRevealDecision）
+    //
+    // 判据用的是**装饰实际盖住的区间**（`decorated`），不是只看公式本身：单行行间公式会把
+    // 行首行尾的空白一起盖掉（`  $ x $  ` 也居中），只按公式范围判"完整盖住"就会出现
+    // "选区盖住公式、但只盖住 widget 的一部分" —— DOM 里 widget 是原子节点，浏览器只能在它
+    // 边缘插入，实测结果是**字符被插到行尾**（`  $ x^2 $  ` 选中 `$ x^2 $` 打字 →
+    // `  $ x^2 $  z`）。这种"部分盖住 widget"必须展开源码。
+    const decorated = block ?? { from: range.from, to: range.to };
+    const decision = mathRevealDecision(decorated, selections, {
+      inlinePresentation: !asBlockWidget,
+    });
+    if (decision.reveal) continue;
+    // 落在"已被块切片盖住"的区间里：整块已经由块 widget 呈现，这里不能再叠一层 replace
+    if (insideCovered(range.from, range.to, covered)) continue;
     const render = opts.lookup(mathCacheKey(range.body, range.display, context, MATH_SIZE_PT));
     // 未渲染 / 渲染失败 → 保持源码显示
     if (!render?.ok) continue;
-    const block = blockRangeFor(state.doc, range);
-    if (block) {
-      // 独占整行的行间公式（含跨行）：整行 → 居中块级 widget
+    if (block && range.multiline) {
+      // 跨行行间公式：整行（多行）→ 块级 widget（inline 装饰不允许跨行）
       decorations.push(
         Decoration.replace({
-          widget: new MathBlockWidget(render, range, opts.dark()),
+          widget: new MathBlockWidget(render, range, opts.dark(), decision.selected),
           block: true,
+        }).range(block.from, block.to),
+      );
+      continue;
+    }
+    if (block) {
+      // **单行**行间公式（独占整行）：整行居中，但装饰是**行内** replace、widget 落在 `.cm-line` 里。
+      // 别退回"整行 block 替换"（实测踩过）：那样 widget 是 contenteditable=false 的顶层元素，
+      // 被选区完整盖住时打字会把字符插到**下一行**（浏览器找不到可编辑的行容器），
+      // 于是"选中整个公式不展开"就不能成立；落在 .cm-line 里的 inline widget 没有这个问题
+      // （浏览器删掉它、在同一位置插入文本，CodeMirror 能正常读到改动）。
+      // 替换区间用**整行**（block.from..block.to）而不是只盖公式：行内可能有前后空白
+      // （`  $ x $  ` 这种写法），一起盖掉才真的居中——widget 是 inline-box，留着空白会被推到一边。
+      decorations.push(
+        Decoration.line({ class: "cm-math-line" }).range(state.doc.lineAt(block.from).from),
+      );
+      decorations.push(
+        Decoration.replace({
+          widget: new MathBlockWidget(render, range, opts.dark(), decision.selected, true),
+          inclusive: false,
         }).range(block.from, block.to),
       );
       continue;
@@ -372,7 +767,7 @@ function buildMathDecorations(
     if (range.multiline) continue;
     decorations.push(
       Decoration.replace({
-        widget: new MathWidget(render, range, opts.dark()),
+        widget: new MathWidget(render, range, opts.dark(), decision.selected),
         inclusive: false,
       }).range(range.from, range.to),
     );
@@ -394,9 +789,9 @@ export function livePreview(opts: LivePreviewOptions): Extension {
    * 任何装饰计算出的意外都必须退化成"不挂装饰"（源码照常显示、编辑照常可用），
    * 并把原因写进控制台，绝不冒泡到 CodeMirror 的事务里。
    */
-  const collect = (state: EditorState): DecorationSet => {
+  const collect = (state: EditorState): { deco: DecorationSet; covers: BlockCover[] } => {
     try {
-        if (!opts.enabled()) return Decoration.none;
+        if (!opts.enabled()) return { deco: Decoration.none, covers: [] };
         // 一次重建里 lexer 只跑一遍：区域扫描结果同时喂给公式与标记两条扫描
         // （此前两条路径各自再扫一遍，40k 字符文档实测每次按键 ~14ms，合并后约 1/3）
         const doc = state.doc.toString();
@@ -404,40 +799,549 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         const math = scanMathRanges(doc, opaque);
         // 编译上下文与缓存键必须来自**同一次**文档快照（扩展内算，见 prefix 选项的说明）
         const context = buildMathContext(opts.prefix(), doc);
+        // 块级切片（写作模式）：先算"哪些格子要被切片盖住"，再让公式/标记装饰避开它们
+        const covers = buildBlockCovers(state, opts, doc);
+        // 有编译错误的格子强制展开源码：波浪线画在源码上，被图片盖住就"哪儿也找不到错误"
+        // （必须在 applyBlockSelection **之后**跑，否则会被选区判定覆盖回去）
+        if (covers.length > 0) {
+          const revealed = revealBlocksWithDiagnostics(
+            covers,
+            opts.diagnosticRanges?.(state.doc) ?? [],
+          );
+          if (revealed > 0) {
+            dbg.log("blocks", `诊断所在块退回源码：${revealed} 块`);
+          }
+        }
+        const covered = covers
+          .filter((c) => !c.revealed)
+          .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
         const all = [
-          ...buildMathDecorations(state, opts, math, context),
-          ...buildMarkupDecorations(state, { opaque, math }),
+          ...buildBlockCropDecorations(state, doc, covers, opts),
+          ...buildHiddenBlockDecorations(state, covers),
+          ...buildFenceHidingDecorations(state, covers),
+          ...buildMathDecorations(state, opts, math, context, covered),
+          ...buildMarkupDecorations(state, { opaque, math }, covered),
         ];
-        if (all.length === 0) return Decoration.none;
-        // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）
-        return Decoration.set(all, true);
+        return {
+          // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）
+          deco: all.length === 0 ? Decoration.none : Decoration.set(all, true),
+          // 格子表交给"跨块竖直移动"用（见 blockVerticalMoves）：它要按格子找相邻块
+          covers,
+        };
     } catch (e) {
       console.error("[live-preview] 装饰重建失败，已退化为源码显示：", e);
-      return Decoration.none;
+      return { deco: Decoration.none, covers: [] };
     }
   };
 
-  const decoField = StateField.define<DecorationSet>({
+  const decoField = StateField.define<{ deco: DecorationSet; covers: BlockCover[] }>({
     create: (state) => collect(state),
-    update(deco, tr) {
+    update(value, tr) {
       const refreshed = tr.effects.some((e) => e.is(refreshLivePreview));
       if (tr.docChanged || tr.selection || refreshed) {
         return collect(tr.state);
       }
-      return deco.map(tr.changes);
+      return { ...value, deco: value.deco.map(tr.changes) };
     },
-    provide: (f) => EditorView.decorations.from(f),
+    provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
   });
 
-  /** 收集「视口附近 + 尚未拿到结果」的公式渲染请求（父组件另有去重，重复调用无副作用） */
+  /**
+   * **切片上的点击与拖选**（阶段 3）：由 CodeMirror 的 `mouseSelectionStyle` 接管鼠标选择。
+   *
+   * 为什么不铺"文字层"（按字形位置放绝对定位的 span、交给浏览器原生选择，pdf.js 那套）：
+   * 它要①把整块字符搬进 DOM（窗口内 8000 字符 ≈ 8000 个 span，而切片本身就是一张图），
+   * ②在 CodeMirror 的内容元素里造出**第二套选区**（复制走浏览器、剪切/改写走 CM，两套会打架）。
+   * 这里换成"**把指针位置翻译成源码位置、再由 CM 落选区**"：选区只有一套，Ctrl+C/X、方向键、
+   * 输入替换、Shift+方向键全都照旧；代价是**复制出来的是源码**（`= 标题` 而不是"标题"）——
+   * 与 Typora 一致（Typora 复制出来也是 markdown 源码）。仍然拿不到的：浏览器 Ctrl+F 查找、
+   * 拼写检查、无障碍，那三样确实要真正的文字层（见 docs/文档模式渲染保真-调研.md 3.4）。
+   *
+   * 位置解析分两种落点（都是"这一点的源码位置"）：
+   *  - 落在**切片**上 → 页面坐标（pt）→ Rust 侧命中测试（图片里没有字符位置）；
+   *  - 落在**源码行**上（拖过已展开的块、或本来就显示源码的块）→ 直接问 CodeMirror 的坐标映射。
+   * 命中是异步的（一次 IPC），所以 `get()` 同步返回"上一次已知"的范围，异步结果回来后再补一次
+   * dispatch —— 一次拖动里最多晚一帧，落点始终收敛到真实几何。
+   */
+  const DRAG_THRESHOLD_PX = 3;
+
+  /** 指针位置 → 源码位置（切片走命中测试、源码行走 CM 坐标映射） */
+  async function positionAtPointer(view: EditorView, x: number, y: number): Promise<number | null> {
+    let crop: HTMLElement | null = null;
+    try {
+      // **用 Element 而不是 HTMLElement**：指针多半落在切片内部那个 `<svg>` 上，而它是 SVGElement
+      // （`instanceof HTMLElement` 为 false）→ 之前会误判成"落在源码上"。实测踩过：拖选时锚点跑到
+      // 下一块的边界上（走 CM 的坐标映射，而它只能给出 widget 的 from/to）。
+      const el = document.elementFromPoint(x, y);
+      crop = (el?.closest?.(".cm-block-crop") as HTMLElement | null) ?? null;
+    } catch {
+      crop = null; // jsdom 等环境没有 elementFromPoint：按"落在源码上"处理
+    }
+    const covers = decoFieldCovers(view);
+    if (crop) {
+      const cover = covers.find((c) => c.block.from === Number(crop!.dataset.blockFrom));
+      const point = cover ? cropPagePoint(crop.getBoundingClientRect(), { x, y }, cover.block) : null;
+      if (cover && point && opts.onCropClick) {
+        try {
+          const hit = await opts.onCropClick({
+            page: point.page,
+            xPt: point.xPt,
+            yPt: point.yPt,
+            from: cover.block.from,
+            to: cover.block.to,
+          });
+          if (hit !== null && Number.isFinite(hit)) return hit;
+        } catch (e) {
+          console.error("[live-preview] 拖选定位失败，落回块首：", e);
+        }
+      }
+      return cover ? cover.block.from : null;
+    }
+    try {
+      return view.posAtCoords({ x, y });
+    } catch {
+      return null;
+    }
+  }
+
+  class CropSelection {
+    private anchor: number | null = null;
+    private head: number | null = null;
+    private moved = false;
+    private busy = false;
+    /** 松手那次解析可能撞上"上一次解析还没回来" —— 记下"要收尾"，等这一轮跑完照样收尾 */
+    private wantsFinal = false;
+    private sweep: HTMLElement | null = null;
+    private last: { x: number; y: number };
+    private readonly start: { x: number; y: number };
+
+    constructor(
+      private readonly view: EditorView,
+      private readonly cover: BlockCover,
+      event: MouseEvent,
+    ) {
+      this.start = { x: event.clientX, y: event.clientY };
+      this.last = { ...this.start };
+      /**
+       * 松手要自己听：CM 的 `MouseSelection.up()` 只在 `dragging == null` 时才重新问 style，
+       * 而且问的是**上一次 move 事件**（不是 mouseup）—— 靠 `get()` 是拿不到"松手了"这个信号的。
+       * 捕获阶段挂，早于 CM 的冒泡处理。
+       */
+      document.addEventListener("mouseup", this.onUp, true);
+    }
+
+    private readonly onUp = (event: MouseEvent): void => {
+      document.removeEventListener("mouseup", this.onUp, true);
+      /**
+       * **单击（没拖动过）时什么都不做**：按下的那次解析已经把光标放好了，而松手这一瞬间
+       * 版面已经变了（那一块展开了源码）—— 再按松手处的坐标解析一遍就会落到**另一个位置**
+       * （实测：点标题里的字，按下的解析是"位置 10"，松手时同一屏幕点已经对着别的块 → 位置 51）。
+       * 拖到过才需要收尾。
+       */
+      if (!this.moved) return;
+      this.last = { x: event.clientX, y: event.clientY };
+      void this.track(true);
+    };
+
+    /** 文档变了就别再自己接管（与 CM 的 MouseSelection.update 约定一致） */
+    update(update: ViewUpdate): boolean {
+      if (update.docChanged) {
+        document.removeEventListener("mouseup", this.onUp, true);
+        this.clearSweep();
+      }
+      return update.docChanged;
+    }
+
+    /**
+     * CM 在按下 / 每次拖动 / 松开时都会问"现在该选哪儿"。
+     *
+     * **拖动期间一律返回锚点光标**（常量）：一旦返回真正的选区，那块就会被展开成源码、
+     * 版式跟着变，而版式一变，指针底下的内容就换了 —— 实测拖到一半位置会**倒着走**
+     * （19 → 15），因为指针从"正文行"落到了刚露出来的空行上。所以拖动期间**不动布局**，
+     * 只用一个半透明的"扫过"色块给出反馈，松手时才把真选区交出去（那一下版式变一次是应有的）。
+     */
+    get(event: MouseEvent, extend: boolean): EditorSelection {
+      this.last = { x: event.clientX, y: event.clientY };
+      if (!this.moved && Math.hypot(event.clientX - this.start.x, event.clientY - this.start.y) > DRAG_THRESHOLD_PX) {
+        this.moved = true;
+      }
+      void this.track(event.type === "mouseup");
+      const current = this.view.state.selection.main;
+      const anchor =
+        extend && !current.empty ? current.anchor : this.anchor ?? this.cover.block.from;
+      /**
+       * 拖动中：**保持不动**（等松手再落真选区，见 onUp / commit）。
+       * 这里返回"当前选区"而不是锚点光标：返回光标会让 CM 立刻把光标放到这一块里 →
+       * 那一块当场展开成源码 → 版式变 → 指针底下的内容跟着变（拖选会"倒着走"，
+       * 见 CLAUDE.md 那条红线）。返回当前选区时 CM 的比较会判定"没变化"，一次事务都不发。
+       */
+      if (this.moved) return this.view.state.selection;
+      // 注意用 `single` 而不是 `range`：`EditorSelection.range()` 返回的是 **SelectionRange**
+      // （没有 ranges/main，CM 的 MouseSelection 会拿它当 EditorSelection 用 → 读 undefined 崩掉）
+      return extend && !current.empty
+        ? EditorSelection.create([current.extend(this.head ?? anchor)])
+        : EditorSelection.single(anchor, this.head ?? anchor);
+    }
+
+    /** 解析当前指针位置（同一时刻只跑一次；期间指针又动了就再跑一轮） */
+    private async track(final: boolean): Promise<void> {
+      if (final) this.wantsFinal = true;
+      if (this.busy) return;
+      this.busy = true;
+      try {
+        for (;;) {
+          const point = this.last;
+          const pos = await positionAtPointer(this.view, point.x, point.y);
+          if (pos !== null) {
+            const clamped = Math.max(0, Math.min(this.view.state.doc.length, pos));
+            if (this.anchor === null) this.anchor = clamped;
+            this.head = clamped;
+            if (final || this.wantsFinal || !this.moved) this.commit(point);
+            else this.paintSweep(point);
+          }
+          if (this.last === point) return;
+        }
+      } finally {
+        this.busy = false;
+        this.wantsFinal = false;
+      }
+    }
+
+    /** 松手（或还没拖动时的单击）：把选区真正落下去 —— 版面这一步会变（相关块展开成源码） */
+    private commit(point: { x: number; y: number }): void {
+      if (this.anchor === null || this.head === null) return;
+      this.clearSweep();
+      const selection = this.moved
+        ? EditorSelection.single(this.anchor, this.head)
+        : EditorSelection.single(this.head, this.head);
+      // 只点不动时把被点的字钉在指针那一带（与阶段 2 的单击行为完全一致）
+      const pin = this.moved ? null : anchorPosEffect(this.view, this.head, point.y, "center");
+      try {
+        this.view.dispatch({ selection, effects: pin ?? undefined });
+      } catch (e) {
+        console.error("[live-preview] 拖选落选区失败：", e);
+      }
+    }
+
+    /**
+     * 拖动中的反馈：一个半透明的"扫过"色块（固定定位在视口里，从按下的高度扫到指针高度）。
+     * 它只是视觉提示 —— 这段期间真正的选区还没落下（见 get 的说明）。
+     */
+    private paintSweep(point: { x: number; y: number }): void {
+      try {
+        if (!this.sweep) {
+          const el = document.createElement("div");
+          el.className = "cm-block-drag-sweep";
+          el.setAttribute("aria-hidden", "true");
+          el.style.position = "fixed";
+          el.style.pointerEvents = "none";
+          el.style.zIndex = "6";
+          el.style.background = "rgba(128, 128, 128, 0.28)";
+          document.body.appendChild(el);
+          this.sweep = el;
+        }
+        const box = this.view.contentDOM.getBoundingClientRect();
+        const top = Math.min(this.start.y, point.y);
+        const height = Math.max(2, Math.abs(point.y - this.start.y));
+        Object.assign(this.sweep.style, {
+          left: `${box.left}px`,
+          width: `${box.width}px`,
+          top: `${top}px`,
+          height: `${height}px`,
+        });
+      } catch {
+        // 反馈画不出来不影响拖选本身
+      }
+    }
+
+    private clearSweep(): void {
+      this.sweep?.remove();
+      this.sweep = null;
+    }
+  }
+
+  /** 从当前状态里取"格子表"（拖选过程中指针可能落到别的切片上，要按位置查它那一格） */
+  function decoFieldCovers(view: EditorView): BlockCover[] {
+    try {
+      return view.state.field(decoField)?.covers ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 把"按在切片上"的鼠标按下交给 `CropSelection`（见上面的长注释）。
+   * 返回 null = 不是切片上的按下（或找不到那一格）→ CodeMirror 用默认的鼠标选择。
+   */
+  const cropMouseSelection = EditorView.mouseSelectionStyle.of((view, event) => {
+    try {
+      // 同上：target 可能是切片里的 `<svg>`（SVGElement），别用 instanceof HTMLElement 判
+      const crop = (event.target as Element | null)?.closest?.(".cm-block-crop") as HTMLElement | null;
+      if (!crop) return null;
+      const cover = decoFieldCovers(view).find((c) => c.block.from === Number(crop.dataset.blockFrom));
+      return cover ? new CropSelection(view, cover, event) : null;
+    } catch (e) {
+      console.error("[live-preview] 切片鼠标选择接管失败，交回默认：", e);
+      return null;
+    }
+  });
+
+  /**
+   * **写作模式的竖直移动 = 代码模式的语义**（用户 2026-09-16：「我希望光标移动和代码模式的光标移动一样」）。
+   *
+   * 规则只有两条（判定全是纯函数，可单测）：
+   *  1. `crossesCollapsedCover` 说"默认走法**没有**跨过未展开的切片" → 一律**交回 CodeMirror 默认**：
+   *     `moveVertically` 逐可见行扫、保留目标列、空行也停 —— 那就是代码模式的行为（写作模式与
+   *     源码模式的差别只剩"没展开的块显示成图片"，移动规则本身不该有差别）；
+   *  2. 跨过了 → 默认把 widget 当空气跳过去了（可能跳一整块，也可能一路扫回文档开头），
+   *     改按**源码行**走：一次一行、列保留；落点在切片里就把那一块展开（"光标进入即展开"）。
+   *
+   * 别退回"一次跨一整块"（0.7.x 那版 `verticalBlockTarget`）：它跳过段落之间那条空行、也丢掉
+   * 目标列 —— 从第二段行首按 ↑ 会落到第一段的**行尾**、从第一段行尾按 ↓ 会直接进第二段，
+   * 都与代码模式不一样（用户就是这么发现的）。
+   *
+   * Shift 变体（扩选）过去**没接管**，于是走到 CM 默认的 `selectLineDown` —— 那个同样会跳过所有
+   * 切片（选中范围会突然跨过一整块）。现在与不带 Shift 的走法完全同源。
+   */
+  const blockVerticalMoves = Prec.high(
+    keymap.of([
+      {
+        key: "ArrowUp",
+        run: (view) => verticalMove(view, false, false),
+        shift: (view) => verticalMove(view, false, true),
+      },
+      {
+        key: "ArrowDown",
+        run: (view) => verticalMove(view, true, false),
+        shift: (view) => verticalMove(view, true, true),
+      },
+      // PageUp/PageDown 另有语义（走一屏、光标留在原来的屏幕高度），见 pageMove
+      {
+        key: "PageUp",
+        run: (view) => pageMove(view, false, false),
+        shift: (view) => pageMove(view, false, true),
+      },
+      {
+        key: "PageDown",
+        run: (view) => pageMove(view, true, false),
+        shift: (view) => pageMove(view, true, true),
+      },
+    ]),
+  );
+
+  /**
+   * 一次翻页的距离：与 CodeMirror 自己的 `pageInfo` 同源（`clientHeight - 5`，且不小于一行高）。
+   * 别再回到"视口高度 × 0.85"那种留重叠的经验值 —— 那与代码模式差一截（同样的道理：翻页距离
+   * 也是光标移动的一部分，用户要的是"和代码模式一样"）。
+   */
+  const PAGE_HEIGHT_MARGIN = 5;
+
+  /**
+   * **翻页**（PageUp / PageDown）：光标连着视口一起走一屏，落到新位置最近的那个字符上。
+   *
+   * 为什么不能交给 CodeMirror 默认：它的翻页是 `moveVertically(distance = 一屏高)`，而
+   * `moveVertically` 的扫描**跳过所有 widget**（见 `posAtCoords`）—— 写作模式的切片全是
+   * widget，于是"翻一页"会直接落到内容顶部（位置 0）或文档末尾，看起来像"跳回开头"。
+   * 阶段 1 的临时处置是"一次跨一块"，但那样翻页就不存在了。
+   *
+   * 这里的做法与 CodeMirror 的 `cursorByPage` 是同一件事：把光标当前的屏幕 y 平移一屏得到目标 y，
+   * 用**非精确**的 `posAtCoords` 取那个点的位置（对 widget 它会返回该 widget 的 `from`/`to`，
+   * 也就是那一格的边界，正好是"翻到这一块的开头"），再把光标放过去、并**按目标 y 做滚动锚定**
+   * ——光标因此停在原来的屏幕高度（CM 的 `cursorByPage` 用 `scrollIntoView(…, {yMargin})` 干同一件事）。
+   *
+   * 边界情况：到文档顶/底时目标位置不变，直接交回默认（不吞按键）。
+   */
+  function pageMove(view: EditorView, forward: boolean, extend: boolean): boolean {
+    try {
+      const covers = view.state.field(decoField).covers;
+      // 没有块级渲染（源码模式 / 没编译过）→ 默认翻页是对的，别接管
+      if (covers.length === 0) return false;
+      const sel = view.state.selection;
+      if (sel.ranges.length !== 1) return false;
+      const scroller = view.scrollDOM;
+      const box = scroller.getBoundingClientRect();
+      if (box.height <= 0) return false;
+      /**
+       * 位移**不按"还剩多少滚动余量"去夹**：那样在"已经滚到底但光标还在上面"时会把位移夹成 0，
+       * 于是把按键交回默认 —— 而默认的翻页同样跳过所有切片（又回到"一下跳到文档末尾"那个问题）。
+       * 正确地照代码模式做：光标朝那个方向走一屏（走过头由 `posAtCoords` 夹到文档首尾），
+       * 滚动交给下面的锚定去跟（CM 的 `cursorByPage` 也是"先移一屏、再 scrollIntoView 钉回原位"）。
+       */
+      const dist = Math.max(view.defaultLineHeight, scroller.clientHeight - PAGE_HEIGHT_MARGIN);
+      const head = sel.main.head;
+      const caret = view.coordsAtPos(head, 1);
+      // 光标在视口里的屏幕高度：翻页后要让光标回到**同一个高度**（内容走一屏，光标不动）
+      const restY = caret ? caret.top : box.top + box.height / 2;
+      const x = caret ? caret.left + 1 : view.contentDOM.getBoundingClientRect().left + 2;
+      // 目标 = "滚过一屏之后会出现在光标那个屏幕高度"的内容 → 现在是屏幕上的 restY ± 一屏
+      const pos = view.posAtCoords({ x, y: restY + (forward ? dist : -dist) }, false);
+      if (pos === null) return false;
+      if (!extend && pos === head) return false; // 位置没动（到头了）：交回默认
+      // 把"一屏位移"表达成滚动目标：光标回到原来的屏幕高度 = 内容正好走了一屏
+      const anchor = anchorPosEffect(view, pos, restY, "center");
+      view.dispatch({
+        selection: extend ? EditorSelection.range(sel.main.anchor, pos) : EditorSelection.cursor(pos),
+        effects: anchor ?? undefined,
+      });
+      return true;
+    } catch (e) {
+      console.error("[live-preview] 翻页失败，交回默认：", e);
+      return false;
+    }
+  }
+
+  /**
+   * 光标当前的**横向目标列**（px，相对内容左缘）。
+   *
+   * `goalColumn` 优先：CodeMirror 自己会把它挂在 `moveVertically` 的返回值上（跨行走时列不会丢），
+   * 我们接管的那一步也要照抄它，否则"空了行的列"会退回 0 —— 实测场景：光标在第一段行尾（第 4 列）
+   * → ↓ 停在空行（列 0）→ 再 ↓ 应该仍在**第 4 列**（代码模式如此），只看当前行的话会落到第 0 列。
+   */
+  function goalColumnX(
+    view: EditorView,
+    head: number,
+    goalColumn: number | null | undefined,
+  ): number | null {
+    if (goalColumn != null) return goalColumn;
+    try {
+      const coords = view.coordsAtPos(head);
+      if (!coords) return null;
+      return coords.left - view.contentDOM.getBoundingClientRect().left;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * **按几何校正目标列**（`verticalMove` 的第 2 步）：在**目标行**上按横向目标列取一个位置。
+   *
+   * 为什么这里量得到：切片里量不到字符位置（图片里没有文本），所以第一步只能按**字符列**估；
+   * 但落点那一块在**同一次事务**里已经从切片变回源码，CodeMirror 的 DOM 也是同步更新的
+   * （实测：dispatch 之后立刻 `coordsAtPos` 已经是展开后的行），所以紧接着做一次布局读取就能
+   * 拿到真实几何 —— "目标行的中线 + 光标原本的横向列"取到的位置，就是代码模式会落到的那一列。
+   * 一次同步布局读取换来"列与代码模式完全一致"，比"先估、下一帧再修"（会看到光标跳一下）划算。
+   *
+   * 返回 null = 量不到（目标行不在视口 / 环境没有布局，如 jsdom）或几何过期（取到的位置在别的行上）
+   * —— 调用方保留字符列的估算值，绝不乱挪。
+   */
+  function measureColumn(view: EditorView, pos: number, goalX: number): number | null {
+    try {
+      const row = view.state.doc.lineAt(pos);
+      const coords = view.coordsAtPos(row.from);
+      if (!coords) return null;
+      const x = view.contentDOM.getBoundingClientRect().left + goalX;
+      const hit = view.posAtCoords({ x, y: (coords.top + coords.bottom) / 2 });
+      if (hit === null || view.state.doc.lineAt(hit).number !== row.number) return null;
+      return hit;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * ↑/↓（含 Shift 扩选）：**默认没跨切片就交回默认**，跨了才按源码行走一步（见 `blockVerticalMoves`）。
+   * 返回 false = 交给 CodeMirror 的默认绑定（永远安全：默认至少不会"什么都不做"）。
+   */
+  function verticalMove(view: EditorView, forward: boolean, extend: boolean): boolean {
+    try {
+      const covers = view.state.field(decoField).covers;
+      // 没有块级渲染（源码模式 / 还没编译过）→ 默认绑定本来就是代码模式的行为
+      if (covers.length === 0) return false;
+      const sel = view.state.selection;
+      if (sel.ranges.length !== 1) return false; // 多光标：交回默认
+      const range = sel.main;
+      // 非空选区（不带 Shift）在代码模式里是"收起到选区的一端"，交回默认即可（那一步不依赖几何）
+      if (!range.empty && !extend) return false;
+      const doc = view.state.doc;
+      const head = range.head;
+      const fallback = view.moveVertically(range, forward);
+      // 默认走法没跨过任何未展开的切片 → 它本身就是代码模式的行为，一个字节都别改
+      if (!crossesCollapsedCover(covers, head, fallback.head)) return false;
+      // 跨过了切片：按源码行走**一行**（空行也停、列保留、落点所在块会因此展开）
+      const line = doc.lineAt(head);
+      const pos = sourceVerticalTarget(doc, head, forward ? 1 : -1, 1, head - line.from);
+      if (pos === null || pos === head) return false;
+      const goalX = goalColumnX(view, head, range.goalColumn);
+      // 落在行尾（非空行）时 assoc 取 -1，否则光标会被画到下一行行首
+      const row = doc.lineAt(pos);
+      const assoc = row.length > 0 && pos === row.to ? -1 : 1;
+      view.dispatch({
+        selection: extend
+          ? EditorSelection.range(range.anchor, pos, goalX ?? undefined)
+          : EditorSelection.cursor(pos, assoc, undefined, goalX ?? undefined),
+        scrollIntoView: true,
+      });
+      /**
+       * 列：先用**字符列**估着落下去（切片里量不到像素位置），紧接着按真实几何校正一次 ——
+       * 目标那一块在上一条 dispatch 里已经展开成源码，所以这里量得到（见 measureColumn）。
+       * 量不到就保留字符列估算值。
+       */
+      if (goalX !== null) {
+        const hit = measureColumn(view, pos, goalX);
+        if (hit !== null && hit !== pos) {
+          const target = doc.lineAt(hit);
+          const hitAssoc = target.length > 0 && hit === target.to ? -1 : 1;
+          view.dispatch({
+            selection: extend
+              ? EditorSelection.range(range.anchor, hit, goalX)
+              : EditorSelection.cursor(hit, hitAssoc, undefined, goalX),
+          });
+        }
+      }
+      return true;
+    } catch (e) {
+      // 兜底：任何意外都交回默认行为（绝不吞按键、也不抛进事务）
+      console.error("[live-preview] 竖直移动失败，交回默认：", e);
+      return false;
+    }
+  }
+
+  /**
+   * 收集「视口附近 + 尚未拿到结果」的公式渲染请求（父组件另有去重，重复调用无副作用）。
+   *
+   * **整体 try/catch**（与 StateField 的 collect 同级）：这个函数跑在 CodeMirror 的
+   * ViewPlugin.update 里，抛异常会被 CM 记成 "CodeMirror plugin crashed" 并让这次插件更新作废。
+   * 实测踩过：块表还是旧文档坐标时（文档刚缩短）`planBlockCovers` 内的 `lineAt` 抛 RangeError
+   * —— 现在那条路径已经加了越界过滤，这里再兜一道，绝不让异常冒进 CM 的更新流程。
+   */
   const collectRequests = (
     state: EditorState,
     visible: readonly { from: number; to: number }[],
     context: string,
   ) => {
+    try {
+      collectRequestsInner(state, visible, context);
+    } catch (e) {
+      console.error("[live-preview] 渲染请求收集失败（已跳过这一轮）：", e);
+    }
+  };
+
+  const collectRequestsInner = (
+    state: EditorState,
+    visible: readonly { from: number; to: number }[],
+    context: string,
+  ) => {
     const doc = state.doc.toString();
+    // 被块切片盖住的公式不用渲染（整块已经由切片呈现）：每个公式都是一次 IPC 往返，
+    // 一篇有几十个公式的文档能省掉几十次。展开源码时（选区进入）才需要。
+    const covered = buildBlockCovers(state, opts, doc)
+      .filter((c) => !c.revealed)
+      .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
     const requests: MathRequest[] = [];
+    // 光标/选区所在的公式**不请求渲染**：它此刻是源码形态（装饰里也跳过了），
+    // 请求它等于"每敲一个字编译一次公式"——实测在公式里打 12 个字符就是 12 次 compile_math，
+    // 而它和整篇编译共用一把锁（用户反馈「输入手感很差（公式）」）。光标离开后
+    // selectionSet 会再跑一遍收集，那时才真正去渲。
+    const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
     for (const range of scanMathRanges(doc)) {
+      // 展开成源码的那些不请求（见上）。**选区完整盖住公式时不展开**，所以那时照样要渲 ——
+      // 否则"选中一个还没渲过的公式"会一直停在源码（与 buildMathDecorations 的判定同源，
+      // 连"装饰实际盖住的区间"这个细节也必须一致，见那边的注释）。
+      const block = blockRangeFor(state.doc, range);
+      const asBlockWidget = block !== null && range.multiline;
+      const decorated = block ?? { from: range.from, to: range.to };
+      if (mathRevealDecision(decorated, selections, { inlinePresentation: !asBlockWidget }).reveal) continue;
+      if (insideCovered(range.from, range.to, covered)) continue;
       // 跨行公式：只有行间（display）会整行渲染成块级 widget，行内跨行保持源码不请求
       if (range.multiline && !range.display) continue;
       const near = visible.some(
@@ -467,6 +1371,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
           if (visible.length === 0) visible = [{ from: 0, to: view.state.doc.length }];
           const doc = view.state.doc.toString();
           collectRequests(view.state, visible, buildMathContext(opts.prefix(), doc));
+          notifyBlocksNeeded(view.state, opts, visible, doc);
         }
 
         update(update: ViewUpdate) {
@@ -485,15 +1390,66 @@ export function livePreview(opts: LivePreviewOptions): Extension {
             update.view.visibleRanges,
             buildMathContext(opts.prefix(), doc),
           );
+          notifyBlocksNeeded(update.state, opts, update.view.visibleRanges, doc);
         }
       },
   );
 
-  return [decoField, requester, mathWidgetTheme];
+  return [decoField, cropMouseSelection, blockVerticalMoves, requester, mathWidgetTheme];
 }
 
 /** 所见即所得相关样式（公式 widget + 常用标记） */
 const mathWidgetTheme = EditorView.theme({
+  // 块切片（写作模式的"渲染表面"）：正文列满宽、高度由 SVG 的固有比例决定 ——
+  // 不写死高度，窗口宽度变化到下一次重编译之间也不会变形。line-height 归零避免
+  // 行盒在 SVG 下方多出一截（与 .cm-math-block 同一个理由）。
+  ".cm-block-crop": {
+      display: "block",
+      lineHeight: "0",
+      cursor: "text",
+      // 链接热区用百分比定位，需要它当定位参照
+      position: "relative",
+  },
+  // 切片内部的链接热区（透明，悬停时给一条下划线做提示）
+  ".cm-block-crop-link": {
+      position: "absolute",
+      cursor: "pointer",
+      borderRadius: "2px",
+  },
+  ".cm-block-crop-link:hover": {
+      backgroundColor: "rgba(128, 128, 128, 0.18)",
+      textDecoration: "underline",
+  },
+  ".cm-block-crop:hover": {
+      backgroundColor: "rgba(128, 128, 128, 0.06)",
+  },
+  // 整块被选中（没展开）：整张切片罩一层淡色，表示"这块在选区里"。
+  // 两条硬约束（都踩过，用户直接发来截图说「太丑了」）：
+  // ① **不能只给容器加背景色**：切片 SVG 自带不透明的白纸底，容器背景只在相邻切片的缝里漏出来，
+  //    整页看上去是一张细蓝线网格。所以选中色由 .cm-block-crop-tint 铺在 **SVG 之上**（见 toDOM）。
+  // ② **不要 outline**：切片上下相邻、描边首尾相接，全选时同样变成网格。
+  // 颜色取编辑器自己的选区底色（CodeMirror 默认 #d7d4f0）→ "被选中的切片"与"被选中的源码"
+  // 看上去是同一件事，相邻切片连成一片浅紫，像一段正常选区。
+  // （容器本身已经是 position: relative，见 .cm-block-crop —— 链接热区也靠它定位。）
+  ".cm-block-crop-tint": {
+      position: "absolute",
+      inset: "0",
+      backgroundColor: "rgba(122, 112, 205, 0.3)",
+      // 只负责"染色"，不拦事件：切片的点击/拖选由 mouseSelectionStyle 处理，
+      // 链接热区也是绝对定位铺在上面的（pointer-events: none 才不会挡住它们）。
+      pointerEvents: "none",
+  },
+  ".cm-block-crop svg": {
+      display: "block",
+      width: "100%",
+      height: "auto",
+  },
+  // 暗色：typst 产物是白底黑字（页面自带白底），整体反色后即"深色纸 + 浅色字"，
+  // 与既有公式 widget 的反色策略一致（文档自带颜色会被反掉，见调研文档第三节）
+  ".cm-block-crop-dark svg": {
+      filter: "invert(1)",
+  },
+
   ".cm-math-widget": {
       display: "inline-block",
       lineHeight: "0",
@@ -503,6 +1459,12 @@ const mathWidgetTheme = EditorView.theme({
   },
   ".cm-math-widget:hover": {
       backgroundColor: "rgba(128, 128, 128, 0.18)",
+  },
+  // 选区**完整盖住**这个公式时保持渲染外观（用户要求「选中整个公式请不要展开」）：
+  // 用一层淡色底表示"它在选区里" —— 与块切片的 .cm-block-crop-selected 同一套视觉
+  //（= 编辑器选区底色 #d7d4f0）；只给底色、不加 outline，行内公式描边在整行文字里显得碎。
+  ".cm-math-selected": {
+      backgroundColor: "rgba(122, 112, 205, 0.3)",
   },
   ".cm-math-widget svg": {
       display: "block",
@@ -521,6 +1483,14 @@ const mathWidgetTheme = EditorView.theme({
       padding: "4px 0",
       cursor: "text",
       lineHeight: "0",
+  },
+  // 单行行间公式：widget 落在行内（不是整行 block 替换），由所在行居中。
+  // 这样它在被选区完整盖住时可以保持渲染而不影响打字（见 buildMathDecorations 的说明）。
+  ".cm-math-block-inline": {
+      display: "inline-block",
+  },
+  ".cm-math-line": {
+      textAlign: "center",
   },
   ".cm-math-block:hover": {
       backgroundColor: "rgba(128, 128, 128, 0.12)",
@@ -568,11 +1538,13 @@ const mathWidgetTheme = EditorView.theme({
       backgroundColor: "rgba(128, 128, 128, 0.18)",
       borderRadius: "2px",
   },
-  // 标题字号：级别越高越大（1.6em → 1.06em），行高随之变化是预期内的
-  ".cm-markup-heading-1": { fontSize: "1.6em", lineHeight: "1.5" },
-  ".cm-markup-heading-2": { fontSize: "1.4em", lineHeight: "1.45" },
-  ".cm-markup-heading-3": { fontSize: "1.25em", lineHeight: "1.4" },
-  ".cm-markup-heading-4": { fontSize: "1.15em" },
-  ".cm-markup-heading-5": { fontSize: "1.08em" },
+  // 标题字号梯度**必须跟 typst 一致**（heading.rs 的 ShowSet：1.4 / 1.2 / 1.0em，level 3 起只加粗），
+  // 否则块级切片与"光标进入后展开的源码"字号对不上（用户报「在标题所在块，标题就会变的很大」）。
+  // 写作模式下 Editor.svelte 的同名规则（带 .editor-host.write 前缀，优先级更高）会覆盖这里。
+  ".cm-markup-heading-1": { fontSize: "1.4em", lineHeight: "1.5" },
+  ".cm-markup-heading-2": { fontSize: "1.2em", lineHeight: "1.45" },
+  ".cm-markup-heading-3": { fontSize: "1em", lineHeight: "1.4" },
+  ".cm-markup-heading-4": { fontSize: "1em" },
+  ".cm-markup-heading-5": { fontSize: "1em" },
   ".cm-markup-heading-6": { fontSize: "1em" },
 });

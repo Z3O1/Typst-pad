@@ -12,12 +12,46 @@
 // 明确不提供的能力：真实 Typst 编译、include/包解析、字体度量、PDF 导出落盘。
 // 这些必须回到桌面版（Windows WebView2）验证 —— 见 CLAUDE.md 与 README。
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { byteOffsetsToPositions } from "./block-offsets";
 import type { Diagnostic } from "./typst-engine";
 
 /** 是否以"浏览器开发模式"启动（?browserdev=1） */
 export function isBrowserDev(): boolean {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).has("browserdev");
+}
+
+/**
+ * 假块级渲染（compile_blocks）的开关：`?browserdev=1&blocks=1` —— **只给验收脚本用**。
+ *
+ * 为什么默认关：块切片会把"非光标块"整块换成图片，于是写作模式下那一块里的
+ * `.cm-markup-heading` / 公式 widget 等**都不再存在于 DOM**（设计如此）。既有的
+ * `wysiwyg.mjs`（209 项）断言的是"标记装饰"世界，默认开着它就会整片变红、把回归信号淹掉。
+ * 所以：默认关 = 走原来的公式/标记路径（既有验收的回归网原样有效），
+ * 专门验块级渲染的用例走 `scripts/browser-check/writing-blocks.mjs`（带 &blocks=1）。
+ */
+function blocksStubEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("blocks");
+}
+
+/**
+ * 注入的**真实**块级切片夹具（`npm run fixtures:blocks` 产出，验收脚本用
+ * `Page.addScriptToEvaluateOnNewDocument` 放进来）——命中时桩返回真实产物，
+ * 于是"切片摞起来 == 原版式"这条能在浏览器里按真实几何验（见 writing-blocks-visual.mjs）。
+ */
+interface BlockFixture {
+  name: string;
+  doc: string;
+  contentWidthPt: number;
+  pageWidthPt: number;
+  blocks: unknown[];
+}
+
+function injectedBlockFixtures(): BlockFixture[] | null {
+  if (typeof window === "undefined") return null;
+  const injected = (window as unknown as Record<string, unknown>).__DEV_BLOCK_FIXTURES;
+  return Array.isArray(injected) ? (injected as BlockFixture[]) : null;
 }
 
 /** 是否额外开启"假的可更新版本"（?browserdev=1&fakeupdate=1）——只给验收脚本用 */
@@ -300,6 +334,18 @@ function realMath(body: string, display: boolean, sizePt: number): RealMathFixtu
  * 假公式渲染：结构模仿 typst 的 compile_math 产物（贴边 viewBox + 透明底 + 文本），
  * 尺寸/基线给合理量级，用于在浏览器里验证「公式内联渲染」的布局与对齐（非真实排版）。
  */
+/**
+ * 桩的「文档正文实际字号」（pt）：真实现是 Rust 侧按字符数投票取众数
+ * （`block_geometry::document_text_pt`）。桩只要认得 `#set text(size: Npt)` 就够了 ——
+ * 有了它，浏览器验收才能覆盖"源码透镜跟随文档字号"（默认 11pt → 14.67px、
+ * `#set text(size: 12pt)` → 16px，见 writing-mode-scenes.mjs 的检查）。
+ */
+function fakeDocumentTextPt(doc: string): number {
+  const m = /#set\s+text\(\s*size:\s*([0-9.]+)pt/.exec(doc);
+  const pt = m ? Number(m[1]) : NaN;
+  return Number.isFinite(pt) && pt > 0 ? pt : 11;
+}
+
 function fakeMath(body: string, display: boolean) {
   const widthPt = Math.max(4, body.length * 5.2);
   const heightPt = display ? 16 : 7.2;
@@ -365,6 +411,188 @@ function notify(command: string): void {
 }
 
 /**
+ * 假块级渲染产物（`compile_blocks` 的桩）：**不是 typst 排版**，只用来在真实浏览器里
+ * 验证"块级切片"这条链路的交互（非光标块被替换、光标进入展开、点击回到源码、源码模式不受影响）。
+ *
+ * 切块规则与 Rust 侧 block_geometry 的"块"大致对应（空行分段、`=` 标题、`-`/`+` 列表项、
+ * 围栏代码块各自成块），足以让验收脚本构造出想要的结构。真实几何由 Rust 侧负责。
+ */
+export function fakeBlocks(doc: string): {
+  ok: true;
+  blocks: {
+    start: number;
+    end: number;
+    kind: string;
+    found: boolean;
+    pages: number;
+    page: number;
+    xPt: number;
+    yPt: number;
+    widthPt: number;
+    heightPt: number;
+    bands: number;
+    svg: string;
+  }[];
+  pages: number;
+  pageWidthPt: number;
+} {
+  const encoder = new TextEncoder();
+  const lines = doc.split("\n");
+  /** 行号 → 该行起始字节偏移 */
+  const lineStart: number[] = [];
+  let bytes = 0;
+  for (const line of lines) {
+    lineStart.push(bytes);
+    bytes += encoder.encode(line).length + 1; // +1 = 换行
+  }
+  const lineEnd = (i: number) => lineStart[i] + encoder.encode(lines[i]).length;
+
+  const out: ReturnType<typeof fakeBlocks>["blocks"] = [];
+  let i = 0;
+  let y = MARGIN;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      i++;
+      continue;
+    }
+    const isHeading = /^=+\s/.test(line);
+    const isList = /^\s*[-+]\s/.test(line);
+    const isFence = line.trimStart().startsWith("```");
+    let j = i;
+    if (isFence) {
+      j = i + 1;
+      while (j < lines.length && !lines[j].trimStart().startsWith("```")) j++;
+      if (j < lines.length) j++; // 收尾围栏
+    } else if (isHeading || isList) {
+      j = i + 1; // 标题/列表项：一行一块（列表不合并，便于验收精确断言）
+    } else {
+      // 段落：吃到空行为止
+      while (j + 1 < lines.length && lines[j + 1].trim() !== "" && !/^=+\s/.test(lines[j + 1])) j++;
+      j++;
+    }
+    const rows = j - i;
+    const heightPt = rows * LINE_HEIGHT + 6;
+    const kind = isHeading ? "Heading" : isList ? "ListItem" : isFence ? "Raw" : "Paragraph";
+    // 假切片：与整页 SVG 同构（svg 根 + 若干 text），尺寸按块自身高度。
+    // **标记要抹掉**（`= ` 标题、`- ` 列表符号、围栏、行间公式的 `$`）：真实 typst 渲染
+    // 出来的就是"没有标记"的样子；验收也正是靠这一点断言"被切片盖住的块不再是源码形态"
+    // （留着标记的话，切片内文本与源码文本无法区分）。
+    const texts = lines
+      .slice(i, j)
+      .filter((t) => !t.trimStart().startsWith("```"))
+      .map((raw, k) => {
+        const t = raw
+          .replace(/^\s*=+\s*/, "")
+          .replace(/^\s*[-+]\s+/, "• ")
+          .replace(/^\s*\$\s*/, "")
+          .replace(/\s*\$\s*$/, "");
+        const esc = t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return `<text x="${MARGIN}" y="${MARGIN + (k + 1) * LINE_HEIGHT - 6}" font-size="14">${esc}</text>`;
+      })
+      .join("");
+    const svg =
+      `<svg viewBox="0 0 ${PAGE_WIDTH} ${heightPt}" width="${PAGE_WIDTH}pt" height="${heightPt}pt" ` +
+      `xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="white"/>` +
+      `<g data-block="${kind}">${texts}</g></svg>`;
+    out.push({
+      start: lineStart[i],
+      end: lineEnd(j - 1),
+      kind,
+      found: true,
+      pages: 1,
+      page: 1,
+      xPt: MARGIN,
+      yPt: y,
+      widthPt: PAGE_WIDTH,
+      heightPt,
+      bands: rows,
+      svg,
+    });
+    y += heightPt;
+    i = j;
+  }
+  return { ok: true, blocks: out, pages: 1, pageWidthPt: PAGE_WIDTH };
+}
+
+// ---------------------------------------------------------------------------
+// 假"点击定位"（block_hit_test 的桩）
+//
+// 真实实现（src-tauri/src/block_geometry.rs 的 pick_hit）在**排版引擎的帧**里找最近的字形，
+// 浏览器里没有帧，所以分两条路：
+//
+// ① **注入了真实夹具**（writing-blocks-hit.mjs / writing-blocks-visual.mjs 那种）：夹具里带着
+//    `hitProbes` —— 每个探针点 (x, y) 的答案都是 Rust 侧**真实几何**上算出来的字节偏移。
+//    这里返回离点击点最近的探针的答案。**只有探针点上的答案是真实的**，验收脚本就照探针点
+//    原样点下去（这正是"端到端验真实几何"的做法：期望值来自 Rust，链路在浏览器里跑）。
+// ② 假切片（&blocks=1 的交互验收）：按"等宽字符 + 均分行高"的粗略模型算 —— 足够验
+//    "点左边 → 靠前、点下面 → 靠后、结果钳在块内"这些**交互性质**，精度不作数。
+// ---------------------------------------------------------------------------
+interface FakeBlockRecord {
+  start: number;
+  end: number;
+  xPt: number;
+  yPt: number;
+  widthPt: number;
+  heightPt: number;
+}
+
+/** 最近一次假编译的文档与块（假命中测试要用它做坐标 ↔ 字符的换算） */
+let lastFake: { doc: string; blocks: FakeBlockRecord[] } | null = null;
+
+/** 真实夹具里的探针：返回 null = 夹具里没有这个块/这些点 */
+function fixtureHit(args: Record<string, unknown>): number | null {
+  const fixtures = injectedBlockFixtures();
+  if (!fixtures || !lastFake) return null;
+  const fx = fixtures.find((f) => f.doc === lastFake!.doc) as
+    | (BlockFixture & { hitProbes?: { b: number; x: number; y: number; o: number }[] })
+    | undefined;
+  const probes = fx?.hitProbes;
+  if (!probes || probes.length === 0) return null;
+  const index = (fx!.blocks as FakeBlockRecord[]).findIndex(
+    (b) => b.start === args.start && b.end === args.end,
+  );
+  if (index < 0) return null;
+  const x = Number(args.xPt);
+  const y = Number(args.yPt);
+  let best: { o: number } | null = null;
+  let bestDist = Infinity;
+  for (const p of probes) {
+    if (p.b !== index) continue;
+    const d = (p.x - x) ** 2 + (p.y - y) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      best = p;
+    }
+  }
+  return best ? best.o : null;
+}
+
+/** 假切片上的粗略定位：等宽字符 + 均分行高（只保证"方向对、钳在块内"） */
+function syntheticHit(args: Record<string, unknown>): number | null {
+  if (!lastFake) return null;
+  const block = lastFake.blocks.find(
+    (b) => b.start === args.start && b.end === args.end,
+  );
+  if (!block) return null;
+  const bytes = new TextEncoder().encode(lastFake.doc);
+  const src = new TextDecoder().decode(bytes.slice(block.start, block.end));
+  const lines = src.split("\n");
+  const rows = Math.max(1, lines.length);
+  const rowH = block.heightPt / rows;
+  const row = Math.min(rows - 1, Math.max(0, Math.floor((Number(args.yPt) - block.yPt) / rowH)));
+  const line = Array.from(lines[row] ?? "");
+  const maxChars = Math.max(1, ...lines.map((l) => Array.from(l).length));
+  const charW = block.widthPt / maxChars;
+  const col = Math.min(line.length, Math.max(0, Math.round((Number(args.xPt) - block.xPt) / charW)));
+  const before = new TextEncoder();
+  const inLine = before.encode(line.slice(0, col).join("")).length;
+  const rowStart = before.encode(lines.slice(0, row).join("\n")).length + (row > 0 ? 1 : 0);
+  const offset = block.start + rowStart + inLine;
+  return Math.min(block.end, Math.max(block.start, offset));
+}
+
+/**
  * 浏览器开发模式下的假字体列表（设置 → 正文字体 的下拉数据源）。
  * 真实字体集由 Rust 侧 FontBook 提供（打包字体 + 系统字体 + 额外目录），浏览器里没有；
  * 这里给出与真实形状一致的数据，让验收脚本能覆盖"下拉/额外字体目录"这条 UI 链路。
@@ -390,11 +618,29 @@ const FAKE_FONT_FAMILIES_DEFAULT = [
   "Microsoft YaHei",
 ];
 
+/**
+ * 模拟"编译不是瞬时完成"的那段窗口（`?browserdev=1&blockslow=1`）——**只给验收脚本用**。
+ *
+ * 真实的 typst 编译要几十到几百毫秒（debug 构建的长文档更久），而块表是**上一次编译的产物**：
+ * 这中间的"旧表 + 新文档"窗口里最容易出毛病（刚打的字被旧切片盖住、同一段文字重复显示）。
+ * 桩默认瞬时返回，这些毛病在浏览器里根本复现不出来，所以给一个显式的慢编译开关。
+ */
+function blockslowEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("blockslow");
+}
+
+/** 假编译的耗时（ms）：只在 blockslow 打开时生效 */
+const SLOW_COMPILE_MS = 350;
+
 async function handleCommand(
   command: string,
   args: Record<string, unknown> | undefined
 ): Promise<unknown> {
   const a = args ?? {};
+  if (blockslowEnabled() && (command === "compile_blocks" || command === "compile_doc")) {
+    await new Promise((r) => setTimeout(r, SLOW_COMPILE_MS));
+  }
   switch (command) {
     case "compile_doc": {
       const src = typeof a.src === "string" ? a.src : "";
@@ -456,6 +702,72 @@ async function handleCommand(
       // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
       return { ok: true, pages: fakePages(src, honored), warnings };
     }
+    case "compile_blocks": {
+      if (!blocksStubEnabled()) return null; // 默认关：见 blocksStubEnabled 的说明
+      // 写作模式的块级渲染（阶段 1）：桩只做"结构正确"的假切片，见 fakeBlocks 的说明。
+      const src = typeof a.src === "string" ? a.src : "";
+      const docOffset = typeof a.docOffset === "number" ? a.docOffset : 0;
+      // 只取用户文档那一段（前缀不属于编辑器内容）——真实后端返回的块偏移也是文档坐标
+      const docStart = byteOffsetsToPositions(src, [docOffset])[0];
+      const doc = src.slice(docStart);
+      // **假编译错误**（`@err` 标记）：写作模式"编译失败时保留没被改到的切片 + 错误块退回源码"
+      // 这条链路没法用真引擎在浏览器里触发（桩的编译永远成功），所以留一个显式开关：
+      // 文档里出现 `@err` 就按"这一行有错"返回失败（见 writing-blocks.mjs 第 11 组）。
+      const errAt = doc.indexOf("@err");
+      if (errAt >= 0) {
+        lastFake = null;
+        notify(command);
+        const before = doc.slice(0, errAt);
+        const line = before.split("\n").length;
+        const column = errAt - (before.lastIndexOf("\n") + 1) + 1;
+        return {
+          ok: false,
+          // **必须带 blocks:[]**：前端的 compileBlocks 用"blocks 是不是数组"判断后端有没有
+          // 这个命令（形状不对 = 旧版本/桩 → 退回整页预览路径）。少了它，这条失败会被
+          // 当成"后端不支持"而**走不到**失败分支（实测踩过）。
+          blocks: [],
+          diagnostics: [
+            {
+              message: "假编译错误（@err 标记）：验证「错误所在块必须看得见」",
+              severity: "error",
+              line,
+              column,
+              endLine: line,
+              endColumn: column + 4,
+            },
+          ],
+        };
+      }
+      // 注入了**真实产物**夹具且文档与夹具一致 → 返回真实切片（见 writing-blocks-visual.mjs）
+      const fixtures = injectedBlockFixtures();
+      if (fixtures) {
+        const hit = fixtures.find((f) => f.doc === doc);
+        if (hit) {
+          notify(command);
+          // 记下来：假命中测试要按这份产物回答（见 fixtureHit）
+          lastFake = { doc, blocks: hit.blocks as FakeBlockRecord[] };
+          return {
+            ok: true,
+            blocks: hit.blocks,
+            pages: 1,
+            pageWidthPt: hit.pageWidthPt,
+            textPt: fakeDocumentTextPt(doc),
+          };
+        }
+      }
+      const out = fakeBlocks(doc);
+      lastFake = { doc, blocks: out.blocks as FakeBlockRecord[] };
+      // 窗口化：桩也要遵守（否则验收会以为"窗口过滤"没生效）
+      const wantFrom = typeof a.wantFrom === "number" ? a.wantFrom : null;
+      const wantTo = typeof a.wantTo === "number" ? a.wantTo : null;
+      if (wantFrom !== null && wantTo !== null) {
+        for (const b of out.blocks) {
+          if (b.start >= wantTo || b.end < wantFrom) b.svg = "";
+        }
+      }
+      notify(command);
+      return { ...out, textPt: fakeDocumentTextPt(doc) };
+    }
     case "compile_math": {
       notify(command);
       const body = typeof a.body === "string" ? a.body : "";
@@ -472,6 +784,13 @@ async function handleCommand(
       const sizePt = typeof a.sizePt === "number" ? a.sizePt : 12;
       const real = realMath(body, a.display === true, sizePt);
       return real ? { ok: true, ...real } : fakeMath(body, a.display === true);
+    }
+    // 点击定位（阶段 2）：真实实现在 Rust 侧（帧里找最近字形），这里按上面两条路模拟
+    case "block_hit_test": {
+      if (!blocksStubEnabled()) return null;
+      notify(command);
+      const fromFixture = fixtureHit(a);
+      return fromFixture !== null ? fromFixture : syntheticHit(a);
     }
     case "write_file": {
       const path = typeof a.path === "string" ? a.path : FAKE_PATH;
@@ -510,6 +829,20 @@ async function handleCommand(
     case "default_font_families":
       notify(command);
       return [...FAKE_FONT_FAMILIES_DEFAULT];
+    /**
+     * **打包字体**（写作模式的源码透镜要装上同一套字，见 editor-font.ts）。
+     * 真机走 Rust 的 raw IPC 读 `resources/fonts/`；浏览器开发模式没有那一步，就从 dev server
+     * 取**同一份文件**（`/__bundled-fonts/...`，见 vite.config.js 的 bundledFontsDev 插件：
+     * vite 的允许清单里没有 src-tauri，所以那里开了一个只读的小口子）。
+     * 这样验收能真断言"字体装上了、写作模式真的用上了它"，而不是只看代码路径对不对。
+     */
+    case "bundled_font": {
+      notify(command);
+      const name = typeof a.name === "string" ? a.name : "";
+      const res = await fetch(`/__bundled-fonts/${encodeURIComponent(name)}`);
+      if (!res.ok) throw new Error(`取字体失败：${name}（HTTP ${res.status}）`);
+      return await res.arrayBuffer();
+    }
     case "take_pending_files":
       return [];
     case "get_debug_flag":

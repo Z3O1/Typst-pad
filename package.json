@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",
+    "fixtures:blocks": "mkdir -p .browser-check && cargo test --manifest-path src-tauri/Cargo.toml dump_block_fixtures -- --ignored --nocapture 2>/dev/null | grep '^BLOCKFIXTURE:' | sed 's/^BLOCKFIXTURE://' | node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>require('fs').writeFileSync('.browser-check/block-fixtures.json',JSON.stringify(s.split('\\n').filter(Boolean).map(JSON.parse),null,1)))\"",
     "fixtures:math": "mkdir -p .browser-check && cargo test --manifest-path src-tauri/Cargo.toml dump_math_fixtures -- --ignored --nocapture 2>/dev/null | grep '^FIXTURE:' | sed 's/^FIXTURE://' | node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>require('fs').writeFileSync('.browser-check/math-fixtures.json',JSON.stringify(s.split('\\n').filter(Boolean).map(JSON.parse),null,1)))\""
   },
   "license": "MIT",

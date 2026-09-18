@@ -90,17 +90,30 @@ export async function connect() {
     close: () => ws.close(),
 
     /**
-     * 导航到目标地址。先跳 about:blank 再跳目标：同 URL 的 Page.navigate 不会重新加载，
-     * 若上一次加载停在了错误页（如 dev server 正在改写文件时的 500），会一直复现旧页面。
+     * 导航到目标地址并**等应用挂载出来**（`.cm-content` 出现为止）。两处讲究：
+     *
+     * 1. 先跳 about:blank 再跳目标：同 URL 的 Page.navigate 不会重新加载，若上一次加载停在了
+     *    错误页（如 dev server 正在改写文件时的 500），会一直复现旧页面；
+     * 2. **最多重试 3 次**：验收脚本会反复换 URL / 反复重载（每次换 `&blockslow=1` 这类参数都算
+     *    一次导航），实测偶发被上一次导航打断、页面停在 about:blank —— 那一轮就白跑了。
+     *    只等"URL 对了"不够，必须等到页面真的挂载出来。
      */
     async goto(url) {
       await send("Page.enable");
-      await send("Page.navigate", { url: "about:blank" });
-      await new Promise((r) => setTimeout(r, 200));
-      await send("Page.navigate", { url });
-      await this.waitFor(`location.href.startsWith(${JSON.stringify(url.split("?")[0])})`, {
-        timeout: 15000,
-      });
+      for (let attempt = 1; ; attempt++) {
+        await send("Page.navigate", { url: "about:blank" });
+        await new Promise((r) => setTimeout(r, 200));
+        await send("Page.navigate", { url });
+        try {
+          await this.waitFor(`location.href.startsWith(${JSON.stringify(url.split("?")[0])})`, {
+            timeout: 15000,
+          });
+          await this.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 15000 });
+          return;
+        } catch (e) {
+          if (attempt >= 3) throw e;
+        }
+      }
     },
 
     /** 轮询直到表达式为真；超时抛错（失败信息里带表达式，便于定位） */
@@ -142,6 +155,31 @@ export async function connect() {
         button: "left",
         clickCount: 1,
         buttons: 0,
+      });
+    },
+
+    /**
+     * 从 (x1,y1) 拖到 (x2,y2)（真实鼠标事件路径：mousePressed → 若干 mouseMoved → mouseReleased）。
+     * 中间那几步不能省：CodeMirror 的 MouseSelection 要看到"按着键移动了 10px 以上"才开始拖选。
+     */
+    async drag(x1, y1, x2, y2, { steps = 6 } = {}) {
+      const base = { button: "left", buttons: 1, clickCount: 1 };
+      await send("Input.dispatchMouseEvent", { type: "mousePressed", x: x1, y: y1, ...base });
+      for (let i = 1; i <= steps; i++) {
+        await send("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: x1 + ((x2 - x1) * i) / steps,
+          y: y1 + ((y2 - y1) * i) / steps,
+          ...base,
+        });
+      }
+      await send("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: x2,
+        y: y2,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
       });
     },
 

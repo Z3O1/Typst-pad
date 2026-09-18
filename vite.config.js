@@ -4,6 +4,45 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 // @ts-expect-error 仓库未装 @types/node（与下方 process 的既有处理一致）
 import { readFileSync } from "node:fs";
+// @ts-expect-error 仓库未装 @types/node（同上）
+import { existsSync, readFileSync as readFileSyncNode } from "node:fs";
+
+/**
+ * **只给开发/验收用**：把 `src-tauri/fonts/` 里的打包字体借 dev server 暴露出来。
+ *
+ * 为什么需要：写作模式的源码透镜要装上**打包字体**（与引擎切片同一套字，见 src/lib/editor-font.ts）。
+ * 真机走 Rust 的 `bundled_font` 命令（读 `resources/fonts/`，raw IPC）；浏览器开发模式没有 Rust，
+ * 由桩去同一份文件取字节 —— 而 vite 的 dev server 只肯服务 `src/`、`src-tauri/` 在允许清单之外
+ * （实测直接请求 `/src-tauri/fonts/x.otf` 是 403），所以这里开一个只读的小口子。
+ *
+ * 安全边界：只服务这一个目录、只认 `fonts/` 直接子文件、文件名限定 `[A-Za-z0-9._-]`（挡掉 `..`），
+ * 且 `apply: "serve"` —— 生产构建完全不经过它（安装包里的字体仍走 `bundle.resources`）。
+ */
+/** @type {import("vite").Plugin} */
+const bundledFontsDev = {
+  name: "typst-pad:bundled-fonts",
+  apply: "serve",
+  configureServer(server) {
+    server.middlewares.use("/__bundled-fonts", (req, res) => {
+      // 仓库未装 @types/node：`IncomingMessage` 上取不到 `url`（类型里没有这个属性），
+      // 只能从这个形状里拿 —— dev-only 的静态小口子，不值得为它引一套 node 类型。
+      const url = /** @type {any} */ (req).url ?? "/";
+      const name = decodeURIComponent(String(url).replace(/^\//, "").split("?")[0]);
+      if (!/^[A-Za-z0-9._-]+\.(otf|ttf|ttc)$/.test(name) || name.includes("..")) {
+        res.statusCode = 400;
+        return res.end("bad font name");
+      }
+      // @ts-expect-error process 是 nodejs 全局（与前文一致）
+      const path = `${process.cwd()}/src-tauri/fonts/${name}`;
+      if (!existsSync(path)) {
+        res.statusCode = 404;
+        return res.end("not found");
+      }
+      res.setHeader("Content-Type", "font/otf");
+      res.end(readFileSyncNode(path));
+    });
+  },
+};
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -73,7 +112,7 @@ export default defineConfig(async () => ({
   // 必须由 vite-plugin-wasm 处理（实测：删掉插件后 build 报
   // "ESM integration proposal for Wasm is not supported"，勿误删）。
   // syncWasmInit（见上）把 wasm 胶水从顶层 await 改为同步实例化，两台引擎都能启动。
-  plugins: [sveltekit(), wasm(), topLevelAwait(), syncWasmInit],
+  plugins: [sveltekit(), wasm(), topLevelAwait(), syncWasmInit, bundledFontsDev],
   optimizeDeps: {
     // 不预构建 codemirror-lang-typst：dev 下走源码 + transform 管线，
     // 让 syncWasmInit 能在被 serving 前改写 wasm 胶水模块（预构建阶段只调 load 不调 transform）。

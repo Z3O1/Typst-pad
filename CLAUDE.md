@@ -36,8 +36,8 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（30 个文件 / 498 项）
-cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（44 passed / 1 ignored）
+npm test                 # 前端 + 脚本单测（38 个文件 / 700 项）
+cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（56 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 本地打包需要更新签名私钥（配置里已有 pubkey → 缺私钥打包会直接失败）：
@@ -45,10 +45,17 @@ node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 无显示器环境下的「浏览器验收」（本仓库的主力验收手段）：**换端口跑，别跟 tauri dev 抢 1420**
 npm run dev -- --port 1425
-BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 270 项交互验收 + 截图
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs        # 279 项交互验收 + 截图
 npm run fixtures:math
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg-visual.mjs # 15 项真实排版视觉验收
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面坏了先用它看
+
+# 写作模式「块级渲染」三套（需要 headless Chromium，见「环境备忘」；CDP_PORT 默认 9333）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs        # 交互（桩产物，115 项）
+npm run fixtures:blocks                                                                   # 导出真实切片 + 点击探针
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs # 几何等价 + 链接热区（75 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击→精确字符（27 项 / 136 次点击）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs   # 场景截图（64 项，9 篇场景）
 ```
 
 **改动前的红线（都是踩过的，勿回退）**
@@ -70,10 +77,10 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 
 **已知未决 / 可做**（都不是 bug，是留给接手人的选择）
 
-- `scripts/` 里 5 个 wasm 时代的死脚本（`debug-math*.mjs`、`debug-svg.mjs`、`debug-fontinfo.mjs`、`verify-sanitize.mjs`）依赖已移除的 `@myriaddreamin/typst.ts`，跑不起来也没人引用 —— 可以删。
+- ~~`scripts/` 里 6 个 wasm 时代的死脚本~~（`debug-math{,2,3}.mjs` / `debug-svg.mjs` / `debug-fontinfo.mjs` / `verify-sanitize.mjs`）：**2026-09-16 已删**（依赖已移除的 `@myriaddreamin/typst.ts`，跑不起来也无人引用）。
 - 浏览器开发模式（`?browserdev=1`）的编译是**假实现**（内存里的假文件系统 + 假 SVG）。想在浏览器里看真实排版走 `fixtures:math` 夹具链路；**真保存 / 导出 PDF / 系统对话框必须桌面版**。
-- 编辑器界面字体走系统字体栈（无 `@font-face`），所以写作模式正文与 PDF 用的思源宋体**并不完全一致**（打包字体只喂给 typst 编译）。要一致就加 `@font-face`。
-- `保存失败` / `打开失败` 的状态栏提示没带上 Rust 侧的具体原因（如 `仅支持 .typ 文件`、`目录无效`），可补。
+- ~~编辑器界面字体走系统字体栈~~：**2026-09-16 写作模式的正文已经装上打包字体**（`editor-font.ts` + Rust `bundled_font`，见下方「源码透镜」那条红线）—— 源码形态与切片现在是同一套字。**源代码模式**仍是等宽系统栈（那本来就该是代码字体，不必对齐）。
+- ~~`保存失败` / `打开失败` 没带 Rust 侧原因~~：**2026-09-16 已补**（`failure-text.ts` 的 `failureStatus`，把「仅支持 .typ 文件」「目录无效」这类原因接在冒号后面；打开/保存/重新读取/导出四处都接了，8 条单测）。
 - 设置弹窗的「启动时恢复上次内容」默认开（用户当时的选择）；若不想让新用户被上次内容打扰，可改默认或加提示。
 - 没有 git tag 之外的发布脚本；发版本流程见「CI / 发布约定」末尾。
 - **自动更新只覆盖 Windows**：CI 只构建 Windows 安装包，`latest.json` 里也只有 `windows-x86_64`。要上 macOS/Linux 得先补构建 job，并给 `+page.svelte` 的安装成功分支接 `tauri-plugin-process` 的 `relaunch()`（Windows 上 NSIS 装完会自己把应用拉起来，无需 relaunch，所以现在没引这个插件）。
@@ -126,6 +133,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/probe.mjs          # 页面�
 | 整体架构与模块清单 | 架构（含配置与辅助目录） |
 | 编译链路 / 诊断 / 导出 PDF | 编译数据流（核心链路） |
 | 所见即所得怎么实现、有哪些坑 | 所见即所得（编辑器内联渲染）数据流 |
+| 写作模式的"真实 typst 排版"是怎么回事、为什么必须窗口化 | `docs/文档模式渲染保真-调研.md` + 下方「写作模式的块级渲染」 |
 | 自动更新怎么工作、密钥怎么管、发版要注意什么 | 自动更新（tauri-plugin-updater）数据流、CI / 发布约定 |
 | 字体从哪来、为什么不放 static | 字体、原生编译后端 |
 | 文件操作与路径安全 | 文件操作与路径安全 |
@@ -150,8 +158,13 @@ cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（typst_world/p
 node scripts/check-fonts.mjs    # 校验 src-tauri/fonts 字体有效性
 node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json   # 生成更新清单（发版用，CI 里自动跑）
 npm run fixtures:math           # 导出真实公式产物到 .browser-check/（浏览器视觉验证用）
+npm run fixtures:blocks         # 导出真实块切片 + 几何 + 点击探针到 .browser-check/（块级渲染验收用）
 node scripts/verify-release.mjs 0.8.0   # 发版后的匿名验收（清单可达性 + 版本号 + 安装包 + minisign 验签）
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交互验收（另起 `npm run dev -- --port 1425`）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs  # 块级渲染交互验收（桩产物，115 项：切片/展开/窗口化/竖直移动（代码模式语义）/点击锚定/翻页/编译失败/块内 Enter/各种输入/拖选复制/整块选中/打包字体）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs  # 块级切片几何等价 + 链接热区（真实产物，75 项）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs    # 点击 → 精确字符（真实探针，27 项 / 136 次点击全中）
+npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs  # 写作模式场景验收 + 截图（真实产物，64 项 / 9 篇）
 ```
 
 ## 架构
@@ -160,7 +173,7 @@ BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs   # 浏览器交�
 src/routes/+page.svelte     # 唯一页面：全部状态与调度中枢（菜单/文件/编译/持久化/快捷键）
 src/lib/Editor.svelte       # CodeMirror 6 封装：受控 doc、主题 Compartment、诊断波浪线、所见即所得接线
 src/lib/typst-lex.ts        # 源码区域扫描：markup / code / raw / comment / string（标记识别的前提，纯函数）
-src/lib/math-ranges.ts      # 公式范围扫描（$...$ / $ ... $）+ 缓存键 + 选区相交判定（纯函数）
+src/lib/math-ranges.ts      # 公式范围扫描（$...$ / $ ... $）+ 缓存键 + 选区判定（相交 / 完整盖住 → mathRevealDecision「选中整个公式不展开」，纯函数）
 src/lib/math-context.ts     # 公式编译上下文：前缀 + 文档内单行顶层 #let 定义（纯函数）
 src/lib/markup-ranges.ts    # 常用标记拆解（标题/粗体/斜体/行内代码/围栏代码块/列表符号/链接 → 标记 + 正文/块级范围，纯函数）
 src/lib/live-preview.ts     # 所见即所得 CM6 扩展：公式 replace widget + 标记隐藏 + 选区进出展开 + 渲染请求
@@ -188,10 +201,17 @@ src/lib/menu-keys.ts        # 菜单栏按键决策纯函数（Alt / accessKey /
 src/lib/updater.ts          # 自动更新包装层：check → 可判别结果、下载进度事件流、句柄释放（只包 Tauri）
 src/lib/update-utils.ts     # 自动更新纯逻辑：启动检查延迟 / 进度换算 / 字节格式化 / 错误文案（可单测；**没有检查节流**，见「自动更新数据流」）
 src/lib/update-notes.ts     # 更新说明的 Markdown 渲染（受控子集 → 安全 HTML，先整体转义再生成标签；可单测）
+src/lib/editor-font.ts      # 写作模式的**打包字体**：与 typst 用同一套字（Rust `bundled_font` 取字节 → FontFace 注册），字体栈 `WRITE_FONT_STACK` 与 typst 默认族同序（可单测）
+src/lib/failure-text.ts     # 失败文案：from invoke 抛出的东西里抠一句原因，「保存失败：仅支持 .typ 文件」（可单测）
+src/lib/block-offsets.ts    # 字节偏移 ↔ CodeMirror 位置（UTF-16）换算：CJK 一个字 3 字节 / emoji 4 字节，直接当位置用会整篇错位（可单测）
+src/lib/block-plan.ts       # 写作模式块级渲染的**规划**纯逻辑：块表 → "哪些格子被切片覆盖 / 哪一块展开源码 / 窗口外沿用上一轮切片 / 竖直移动的接管判定（crossesCollapsedCover）与逐源码行落点（sourceVerticalTarget）/ 编译失败保留哪些切片 / 诊断块展开"（可单测）
+src/lib/block-hit.ts        # 点击定位的坐标纯逻辑：切片内的点 → 页面坐标（pt，只依赖 DOM 实测矩形）+ 命中结果钳回块内（可单测）
+src/lib/scroll-anchor.ts    # 滚动锚定：把"光标该落在屏幕哪个高度"变成 CodeMirror 自己的 scrollIntoView 目标（**别自己写 scrollTop**，见「写作模式的块级渲染」）（可单测）
 src/lib/debug.ts            # 调试日志通道 dbg（dev 默认开；--debug / ?debug=1 / localStorage 可开）
 src/lib/browser-dev-stub.ts # 浏览器开发桩：假 __TAURI_INTERNALS__ + 假编译，供 ?browserdev=1 用（仅开发）
 src/routes/+layout.ts       # SPA 模式（ssr = false），配合 adapter-static 的 index.html fallback
-src-tauri/src/lib.rs        # Rust 壳：read/write/write_binary/list_dir_typ/take_pending_files/compile_doc/compile_math/export_pdf 命令 + opener/dialog 插件
+src-tauri/src/lib.rs        # Rust 壳：read/write/write_binary/list_dir_typ/take_pending_files/compile_doc/compile_blocks/block_hit_test/compile_math/export_pdf 命令 + opener/dialog 插件
+src-tauri/src/block_geometry.rs # **写作模式的块级渲染**：源块划分（语法树顶层）+ 帧遍历（字形 Span → 源字节区间）+ 按 y 序中点切带 + 切一块渲成 SVG + **点击命中测试**（pick_hit / HIT_CACHE）+ 文档正文字号（document_text_pt → textPt，源码透镜按它渲染）（见「写作模式的块级渲染」那节）
 src-tauri/src/packages.rs   # 包系统：@local 本地包读取 / @preview 自动下载缓存（目录规范与 CLI 一致 + 安全解压）
 src-tauri/src/typst_world.rs # 内嵌编译世界：字体加载（FontBook）/ 相对 include 磁盘解析 / 包解析接线 / 诊断转换（SVG/PDF）
 src-tauri/src/main.rs       # 桌面入口（调用 lib.rs 的 run）
@@ -199,14 +219,15 @@ src-tauri/fonts/            # 打包字体（见"字体"：**不放 static/**）
 ```
 
 配置与辅助目录：
-- `vite.config.js`：SvelteKit + wasm 插件 + **dev 白屏修复三件套**（见"原生编译后端"末尾，勿动）；Tauri 开发用 `TAURI_DEV_HOST`。**2026-09-18 起前端已经没有 wasm 了**（语法高亮换到 `codemirror-lang-typst/lezer`，见 CHANGELOG），这两个插件目前**没有服务对象**；但先按红线 7 留着 —— 真要删得在 WSL/WebKit 上验一遍启动（当年那三件套就是为那个坑写的）。
+- `vite.config.js`：SvelteKit + wasm 插件 + **dev 白屏修复三件套**（见"原生编译后端"末尾，勿动）+ `bundledFontsDev`（**只作用于 dev**：把 `src-tauri/fonts/` 借 `/__bundled-fonts/*` 暴露给浏览器验收用，真机走 Rust 的 `bundled_font`；白名单挡路径穿越）；Tauri 开发用 `TAURI_DEV_HOST`。**2026-09-18 起前端已经没有 wasm 了**（语法高亮换到 `codemirror-lang-typst/lezer`，见 CHANGELOG），那两个 wasm 插件目前**没有服务对象**；但先按红线 7 留着 —— 真要删得在 WSL/WebKit 上验一遍启动（当年那三件套就是为那个坑写的）。
 - `vitest.config.ts`：jsdom + `include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"]` + `server.fs.allow: [".."]`（scripts 那条是发布脚本的测试：脚本是普通 JS + node 内置模块，不参与 svelte-check，见"测试"）。
 - `svelte.config.js`：`@sveltejs/adapter-static`（SPA，`fallback: index.html`）。
 - `src-tauri/app-icon.svg`：**应用图标的源文件**（矢量、1024×1024，「叠纸 + T」造型：深墨蓝底 + 三张错落纸页 + 墨色 T + 三条正文线 + 品牌青光标本）。改图标只改它，然后 `npm run tauri icon src-tauri/app-icon.svg` 重新生成 `src-tauri/icons/` 全套（`.ico`/`.icns`/各尺寸 PNG/Store 那一串），网站 favicon（`static/favicon.png`，256px）同源导出。**两个坑**：① `tauri icon` 会顺带产出 `android/`、`ios/` 两个目录，本项目只做桌面端，**生成后删掉**；② 图标是**打包时嵌进 exe** 的，装了的用户要重装（或等下一个版本）才看得到，任务栏可能还留着旧缩略图缓存。生成用的 SVG 里有 `feDropShadow`，tauri 内置的 resvg 渲染正常（已核对 `.ico` 里 16/24/32/48/64/256 六档）。
 - `.github/workflows/`：`ci.yml`（test + build-bundles）、`release.yml`（tag 发草稿 Release），约定见"CI / 发布约定"。
 - `scripts/`：`check-fonts.mjs`（字体魔数校验）、`download-fonts.mjs`（重新下载字体）、`browser-check/`（CDP 验收）、`install-vs-buildtools.bat`/`verify-app.bat`（Windows 辅助）。
   `scripts/capabilities.test.mjs`：**Tauri capability 静态体检**（前端用到的插件命令 → 必须在 `src-tauri/capabilities/default.json` 里有对应权限；ACL 拒绝只在真机运行时才出现，浏览器验收碰不到，见「多窗口与页面级按键路由」）。
-  **历史遗留（wasm 时代，依赖已移除的 `@myriaddreamin/typst.ts`，跑不起来、也无人引用）**：`debug-math*.mjs`、`debug-svg.mjs`、`debug-fontinfo.mjs`、`verify-sanitize.mjs`。
+  `scripts/editor-fonts.test.mjs`：**写作模式打包字体的静态体检**（Rust `EDITOR_FONT_FILES` ↔ 前端 `EDITOR_FONT_FACES` ↔ `WRITE_FONT_STACK` 的族名顺序 ↔ `src-tauri/fonts/` 里真有这些文件 ↔ `bundle.resources` 会分发它们）。
+  **历史遗留（wasm 时代）那 6 个脚本已于 2026-09-16 删除**（`debug-math{,2,3}.mjs` / `debug-svg.mjs` / `debug-fontinfo.mjs` / `verify-sanitize.mjs`）。
 - `docs/`：`WYSIWYG-调研.md`（所见即所得的方案调研）；`CHANGELOG.md` 按 Keep a Changelog 维护；`.browser-check/` 为验收产物（已 gitignore）。
 
 ### 编译数据流（核心链路）
@@ -220,6 +241,242 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 **诊断为 Rust 侧结构化对象**（`{ message, severity, line, column, endLine, endColumn, path }`，1-based 行列，`end` 为独占终点；**主文档的 `path` 键整个不发**，include/import 文件给出其路径）——**不再有前端 range 字符串解析**（旧 `parseDiagnosticRange` 已随 wasm 编译移除）。`diagnostics-utils.ts` 现在的职责：编译源（前缀+文档）位置 → 用户文档位置映射（`mapCompiledPosToDoc`，前缀区错误跳过）与波浪线区间计算（`squiggleRanges`）。
 - **`path` 的"主文档"表示只许有一种（2026-09-18 修，勿回退）**：Rust 侧 `Diagnostic::path` 带 `skip_serializing_if = "Option::is_none"`（主源**不带该键**），前端 `squiggleRanges` 用 `d.path != null && d.path !== "" && d.path !== mainPath` 判定，`diagnosticToLocation` 再把 `null` 归一成 `undefined`。**踩过的坑**：0.4.0 起 Rust 发的是 `"path":null`，而判据只认 `undefined`/`""` ⇒ `null` 被判成"非主源文件"跳过，**桌面版编译错误一条红波浪线都不画**（错误计数、错误列表 Popover 都正常，所以看着像"能定位"）；浏览器验收用的桩当时干脆不发 `path` 字段，于是**一直**没抓住。现在桩按真实形状发 `path: null`（`DIAG-ERROR-MARKER` 标记触发一条假 error），验收第 42 组（4 项）锁死这条链路；Rust 侧另有序列化单测（`diagnostic_path_key_omitted_for_main_source`）。**判据退回旧写法，第 42 组立刻红（已做过对照实验）。**
 
+### 写作模式的块级渲染（"渲染表面 + 源码透镜"，**尚未发布**）
+
+写作模式下，**非光标所在块显示成 typst 引擎自己画的那一块切片**，光标所在块展开成源码 ——
+即 Typora 形态，但排版来自真引擎（断词/字距/`#set`/宏/包全都在切片里）。调研与实测见
+`docs/文档模式渲染保真-调研.md`（含生态、许可证、API 逐条出处、阶段 0/1/2 的实测数据）。
+阶段 1 = 能看（切片 + 源码透镜），阶段 2 = 能用（点击精确字符、滚动锚定、翻页、出错不整篇退回），
+阶段 3 = 好选好用（切片上拖选跨块 + Ctrl+C 复制、`#link` 可点、整块选中保持切片外观）。
+另外：**打字期间不去抖编译**（见下方红线，用户报「输入手感很差」）。**没有铺"每字形 span 的文字层"**——
+浏览器查找 / 拼写检查 / 无障碍仍拿不到，取舍见调研文档第十二节。
+（**版本口径**：0.8.0~0.8.4 都是 **main 上另一条线**的主题 —— 缩放只归用户 + 两道丢内容防护 + 新图标
++ `#import` 项目根 + 诊断浮层可复制；这条块级渲染线**还没进过任何发行版**，2026-09-18 已把
+main（`947f784`，0.8.4）合进本分支并走 PR，进的是**下一版**。）
+
+- **链路**：`+page.svelte` 的 `runCompile` 在写作模式走 `compile_blocks`（Rust 侧
+  `block_geometry::compile_blocks`：整篇编译一次 → 每个源块切一块 SVG），
+  源码模式仍走 `compile_doc`（整页 SVG，不受影响）。后端没有这个命令（浏览器开发桩 /
+  旧安装包）时 `compile_blocks` 返回 `unavailable`，**自动退回原路径**。
+- **装饰**在 `live-preview.ts` 的同一个 StateField 里生成（块切片 + 公式 + 标记），
+  因为**CodeMirror 不允许重叠的 replace 装饰** —— 被切片盖住的公式/标记装饰必须跳过
+  （`insideCovered`）。块区间铺满全文、首尾相接（`block-plan.planBlockCovers`），
+  这样"永远恰好有一块是源码形态"，光标不会无处可去。
+- **窗口化不可省（红线，实测数据）**：逐块 SVG 各自复制字形轮廓，约 **58 字节/源字符**
+  —— 2 万字符文档全渲一次 **11.5MB / 3.7s（debug）**，而这是每按键一次的代价。
+  所以只渲**视口窗口**内的块（视口 ± 4000 字符；短文档 ≤ 8000 字符全渲），窗口外的块
+  按"块类型 + 源码文本相同"沿用上一轮切片（`carryOverCrops`），滚动到没渲过的区域先显示
+  源码、去抖 150ms 后按新窗口重编译。**别把它改回"每次都全渲"。**
+  - **"有没有块缺切片"要直接看块表，不能看 `buildBlockCovers` 的结果（红线，实际踩过）**：
+    那条路会把"能渲染但这一轮没拿到 svg"的块标成 `revealed`（它当下确实显示源码），于是
+    `notifyBlocksNeeded` 里的 `!cover.revealed` 永远为假 —— **滚动到没渲过的区域一次都不会补渲**，
+    要等用户敲一个字。判据只该是 `found && svg === ""`。另配"同一个窗口不重复编译"的防抖
+    （`lastBlocksWindow`），否则后端渲染不出来时会每 150ms 编译一次。
+- **编辑期间必须让块表"跟着走"（红线，用户报过「在一块内 Enter 插入块的时候会有问题」）**：
+  块表与切片是上一次编译的产物（**旧文档坐标**），而格子边界是按"块的最后一行之后"算的
+  —— 插入换行会改变行结构，旧坐标放在新文档上会落到**错误的行**，于是：
+  ① 旁边那张**内容对不上的旧切片**会盖住这段时期里被移动的正文（实测：在文档开头插入一个新块后，
+  `第二段。` 整行凭空消失 —— 被"第三段"的旧切片吞了；真机编译有几十~几百毫秒延迟，看得见；
+  编译失败时更不会自愈）；② 同一块只被盖住一部分时，那截文字既在旧切片里又露成源码（重复显示）。
+  修法：**每次编辑都跑 `remapBlocksThroughEdit`**（前后缀差分：没被碰到的块原样/平移、被碰到的
+  退回源码、改动落在块与块之间时归给"格子里放着它的那一块"），跑完 `blocksVersion++` 让编辑器
+  按新表重建装饰（不重建的话这一帧渲染的还是旧表的格子）。代价是每次编辑算一次前后缀差分
+  （O(n) 双指针比较，微秒级）—— **别退回"编译失败时才平移"**。
+  - **`planBlockCovers` 必须容忍越界**（表比文档旧是必然存在的中间态）：过滤掉落在当前文档之外的块，
+    **绝不抛异常**。实测踩过：文档大幅缩短（全选重打 / 删一大段 / 撤销）时旧块起点 116 落在 17 字符的
+    新文档上 → `doc.lineAt(116)` 抛 `RangeError: Invalid position 116 in document of length 17`
+    → 装饰整篇退化成源码，而且**在 ViewPlugin 里抛出会被 CM 记成 "CodeMirror plugin crashed"**
+    （`collectRequests` 因此也整体包了 try/catch）。
+  - 阶段 3 的验收：`writing-blocks.mjs` **第 14 组**（拖选跨块 + Ctrl+C 复制 + 拖选后打字替换选区）、
+    `writing-blocks-visual.mjs` 的**链接热区**三条（位置与真实几何一致 ≤2%、点热区 → opener 收到 URL、
+    点热区不动光标）、`live-preview.test.ts` 的 jsdom 用例（拖选把选区落到源码区间、链接热区按百分比定位）、
+    `block_geometry.rs` 的 `block_crops_carry_link_hotspots`。
+  - 验收（**别删**）：
+    - `writing-blocks.mjs` **第 12 组**（`&blockslow=1` 用 350ms 假延迟模拟真机编译窗口）：插入新块后
+      **正文一行都不许丢**、不许重复显示、控制台不许出现 RangeError / 插件崩了 / 装饰重建失败；
+      外加"文档大幅缩短"（旧坐标越界那条）。
+    - `writing-blocks.mjs` **第 13 组**（**各种输入**，12 个动作：段中打字 / 段尾回车 / 段首回车 /
+      段中拆行 / 连按两次回车 / 退格合并两段 / 删掉一整段 / 打字后 Ctrl+Z / 粘贴多段 / Tab 缩进 /
+      输入 `$` 起行间公式 / 全选重打）：每个动作之后都要「标记词看得见 + 一行都没丢 + 不重复 +
+      编译回来后切片还在 + 控制台干净」。**去掉修复时这组有 9/12 会红**（"第二段。"整行消失）。
+    - `block-plan-edits.test.ts`（**68 项**）：4 篇真实形状文档 × **每个位置** × 17 种编辑动作
+      （打字 / 回车 1~3 次 / `$` / 围栏 / 粘贴 / Tab / 退格 / Delete / 删整行 / 选区替换 /
+      全选换短文档换长文档 / 撤销）→ 四条不变量（旧表不抛异常、改动落在已展开的格子里、
+      格子边界落在行首、未展开的格子必须把那一块正文完整盖住且格子首尾相接铺满全文）。
+- **源码透镜的字号/行距/字体都必须跟随文档（红线，用户：「不要光标在哪里哪里就变大了」）**：
+  非光标块是引擎切片、光标所在块是源码，两者字号不一致时**光标一进某一块，那一块的字就变大**
+  （旧值：编辑区固定 16px / 行高 1.9，而切片是 typst 默认 11pt = 14.6667px / 行高 1.65 →
+  字大 9%、行盒高 26%）。现在：Rust 侧 `block_geometry::document_text_pt` 按**字符数取众数**
+  算出文档正文实际字号，随 `compile_blocks` 的 `textPt` 返回；前端挂成 `--write-doc-px`
+  （`pt × 4/3`）给 `.editor-host`，写作模式 `.cm-editor` 的字号取它、`.cm-content` 行高取
+  typst 的 `par.leading`（0.65em → **1.65**）。缺省 14.6667px（旧后端 / 桩也对得上）。
+  实测（600px 视口 + 真实夹具，比例 1.32 ≈ 真机 1.333）：光标进出块的**页面高度差**从
+  22/19/45px 降到 **0 / +3 / +8px**（中文长段落 / 标题层级 / 代码与表格）。**别把字号写死回去**：
+  写死就退回"点哪哪变大"。验收：`writing-mode-scenes.mjs` 的「光标进出块时页面不许变高」四条
+  （两条高度差 ≤12px + 默认文档 14.6667px + `#set text(size: 12pt)` 的文档 16px）**别删**。
+  **字体是最后补上的一条腿**（2026-09-16）：切片是 typst 用**打包字体**（Libertinus Serif +
+  思源宋体子集）排的，而 webview 里的源码此前只能用系统字体栈 → 同一段文字在两种形态里字宽、
+  断行都不一样，光标进出块时像"换了一套字"。现在启动时把这三份打包字体装上
+  （Rust `bundled_font` 读 `resources/fonts/`，raw IPC → `FontFace`；**字体本来就随应用分发，
+  不增加安装包体积**），写作模式的字体栈（`--write-font-stack`）与 typst 的默认族**同序**：
+  `Libertinus Serif → Noto Serif CJK SC → 系统宋体兜底`。装不上（老后端 / 文件缺失）就什么都不做，
+  自动退回系统族。验收：`writing-blocks.mjs` **第 17 组**（`document.fonts.check` 两份都装上 /
+  字体栈真的用上 / 拉丁与中文的实测字宽真来自它们 / 取到的是那份真文件 / 没有脚本错误）+
+  `editor-font.test.ts`（7 条）+ `scripts/editor-fonts.test.mjs`（**静态对齐** Rust 白名单 ↔
+  前端名单 ↔ `src-tauri/fonts` 里的文件 ↔ `bundle.resources`，改一边忘另一边时会红）。
+- **文档切换（打开/新建/重读）必须 `resetBlocks()`**：旧块区间套在新文档上会**盖住正文**
+  （比公式缓存过期的危害大得多），见 `resetBlocks` 的注释。
+- **版心宽是编译期输入**：`page(width: 列宽/(1-2×页边距比例), height: auto)`，所以窗口尺寸 /
+  界面缩放 / 模式切换引起的列宽变化要重编译（`scheduleWritingReflow`，去抖 250ms）；
+  写作模式的 `.cm-scroller` 加了 `scrollbar-gutter: stable`，避免"重编译 → 高度变 →
+  滚动条变 → 列宽再变"的反馈环（预览区当年就是这么闪的）。
+- **暗色**：切片是白底黑字（页面自带白底），整体 `invert(1)` → 深色纸浅色字；文档自带颜色
+  会被反掉，与公式 widget 同一策略。
+- **坑（实测）**：块切片的 `Decoration.replace({block: true})` 区间**必须落在整行边界上** ——
+  只给"块最后一个字符"当终点时，Chromium 里 CM **既插入 widget 又保留原文**（jsdom 的用例
+  恰好都落在整行上，所以单测全绿、只有真浏览器验收抓到了它）。格子因此按"整行"计算
+  （`block-plan.planBlockCovers`），相邻格子共享行首边界，光标落在边界上时**只展开后面那一格**。
+- **块与块之间的空行归「上一块」的格子（红线，用户报「用 enter 拆分块的时候，光标会有问题」）**：
+  每格 =「自己的第一行行首 → **下一块的第一行行首**」（末格到文档末尾）。**别改回"空行归下一块"**：
+  那样在行尾按 Enter 之后（光标正好落在新空行的行首 = **上一块切片的结尾**），CM 会把光标定位到
+  widget 自己身上、画到正文列最右边，且 `domAtPos` 退化成 `.cm-content`；实测同一场景两种算法：
+  `coordsAtPos(head).left` = **1087（列右缘）→ 304（行首）**、`domAtPos` = `.cm-content` →
+  `.cm-line`。下游三处必须一起跟着改：`remapBlocksThroughEdit` 的"空行上打字"落点改成
+  **末尾在改动点之前的最后一块**（原来是"之后的下一块"）、以及"接管结果与默认一致时返回 null"
+  （省一次多余的滚动锚定）。验收：`writing-blocks.mjs` **第 16 组**（删除修复时实测会红：`x=1087`）。
+- **分块判据必须跟 typst 语义走，不能看"是否独占整行"（红线，被真实文档咬过）**：
+  `$x$`（定界符内侧无空白）是**行内**公式 —— 哪怕独占整行也**不**打断段落，几个连续的 `$x$`
+  会被 typst 连排成一行；只有 `$ x $`（内侧有空白）才是行间公式、才打断段落。
+  同理 `` `code` `` 是行内 raw，只有 ```` ``` ```` 围栏才是块。按"独占整行"分块会让这些块的带
+  **互相重叠**（实测：5 个 `$x$` 的帧项全在同一个 y 带里交错 → 编辑器里"公式挤成一团"）。
+  回归测试 `block_partition_matches_typst_semantics`。
+- **块的纵向区间必须"夹紧到 y 序下一个块的顶"（红线，实测踩过）**：typst 允许把内容排到远处
+  （脚注正文在页底、`#place` 在别处），而块的墨迹包围盒是**并集** —— 带脚注的段落会得到一个
+  一直伸到页底的高盒子（实测 88pt），把后面几块的中点切带压扁：代码块被压到 ≤0.5pt → 切片被
+  丢弃 → 回退成源码/旧代码块 widget，而它的内容又被那张超长切片又画了一遍（**代码块和表格各
+  出现两次 + 76px 空隙**，截图与夹具都留过证）。现在 `compile_blocks` 的第 2b 步把每块的
+  bottom 夹到下一个块的 top，带高退化时留最小带而**不是丢块**（丢块会让前端当成"不可渲染"）。
+- **竖直移动 = 代码模式的语义（红线，2026-09-16 用户：「我希望光标移动和代码模式的光标移动一样」）**：
+  CodeMirror 的 `moveVertically` 是逐像素扫到**文本行**才停，而 `posAtCoords` 对 widget（非文本块）
+  **直接跳过** —— 写作模式的切片全是 widget，于是"往上"会一路跳过所有切片、扫到内容顶部返回
+  **位置 0**（用户报过「在 `== 6` 前面按上跳回开头」）。现在的规则只有两条（判定是纯函数：
+  `block-plan.crossesCollapsedCover` + `sourceVerticalTarget`）：
+  ① 默认走法**没跨过未展开的切片** → 一律**交回 CodeMirror 默认**（逐可见行、保留目标列、空行也停）；
+  ② 跨过了（默认把切片当空气跳过去了）→ 按**源码行**走一行：空行照样停一拍、列保留，
+  落点在切片里就把那一块展开（"光标进入即展开"）。列先用字符列估、紧接着用真实几何校正
+  （`live-preview.measureColumn`：目标那块在同一次事务里已经展开成源码，所以量得到）。
+  **Shift+↑/↓ 也一并接管**（以前没管 → 走到 CM 的 `selectLineDown`，同样跳过所有切片）。
+  **别退回"一次跨一整块"**（0.7.x 的 `verticalBlockTarget`）：它跳过段落之间那条空行、也丢掉目标列，
+  从第二段行首按 ↑ 会落到第一段的**行尾**，与代码模式不一致。验收：`writing-blocks.mjs` **第 8 组**
+  （14 项：逐行走 / 空行停一拍 / 列保留（光标 x 差 ≤16px）/ 连续 ↑ 每次只退一行且不跳回开头 /
+  Shift+↓ 逐行扩选）——**别删**。
+- **翻页（PageUp/PageDown，含 Shift 扩选）自己实现**（`live-preview.ts` 的 `pageMove`）：
+  CM 默认翻页 = `moveVertically(一屏高)`，同样会跳过所有 widget → 直接跳文档首/尾。做法与 CM 的
+  `cursorByPage` 同源：位移取 CM 的 `clientHeight - 5`（**别用 0.85 视口高那种经验值**），
+  把光标当前的屏幕高度平移一屏作为查询点取位置，再**用滚动目标把光标钉回原来的屏幕高度**
+  （内容走一屏、光标不动）。位移**不按"还剩多少滚动余量"夹**（夹成 0 会把按键交回默认，又回到
+  "一下跳到文档末尾"）；到头时由 `posAtCoords` 夹到文档首尾。没有块级渲染（源码模式）时交回默认。
+  验收：`writing-blocks.mjs` 第 10 组（含"文档开头按 PageUp 不跳末尾 / 末尾按 PageDown 不绕回开头 /
+  滚到底再按 PageDown 仍走一屏"三条）。
+- **打字期间不编译（红线，用户报「输入手感很差」）**：写作模式下**每一次按键**都会走一遍
+  `scheduleCompile` → 整篇编译 + 窗口内每块渲一张切片（debug 构建几十~几百毫秒），而三个编译命令
+  （`compile_doc` / `compile_blocks` / `compile_math`）**共用一把互斥锁** —— 实测在公式里打 12 个字符
+  会发出 **12 次 `compile_blocks` + 12 次 `compile_math`**，队列一直满着，"公式半天不显示"就是这么来的。
+  现在：写作模式的编译**去抖 150ms**（`WRITE_COMPILE_DEBOUNCE_MS`；源代码模式仍立即编译），
+  并且**有公式要渲时把挂着的块编译再往后推**（`MATH_COMPILE_HEADSTART_MS = 240`，让几毫秒的公式
+  先拿到锁）。改完实测同一场景：**12 个字符 → 1 次 `compile_blocks` + 1 次 `compile_math`**，
+  打字期间帧间隔最大 26ms（无 50ms 以上的掉帧）。**别把去抖去掉**：打字时正在编辑的那一块本来就是
+  源码形态，其它块的切片内容也没变，编译纯属浪费。
+- **光标所在的公式不请求渲染（同上）**：`collectRequests` 里先 `selectionTouchesRange` 跳过光标/选区
+  里的公式 —— 那一刻它是源码形态，请求渲染等于"每敲一个字编译一次公式"（实测 12 次）。
+  光标离开后 selectionSet 会再跑一遍收集，那时才渲。
+- **点击定位（阶段 2）**：点切片 → 光标落到**点到的那个字符**。链路 =
+  切片内相对位置 → 页面坐标（pt，`block-hit.ts`，只依赖 DOM 实测矩形）→ Rust 侧
+  `block_hit_test` 在排版帧里找最近的字形（`block_geometry::pick_hit`，几何来自上一次编译的
+  `HIT_CACHE`，**不进编译互斥锁**）→ 字节偏移 → CodeMirror 位置。任何一步失败都退回"落到块首"，
+  **绝不吞掉点击**。两道闸门：块表必须与当前文档一致（`writingBlocksDoc === doc`）、且是
+  **精确**的（`writingBlocksExact`，编译失败后沿用旧切片时区间是估算的）。
+- **滚动锚定不要自己写 `scrollDOM.scrollTop`（红线，实测被 CM 覆盖）**：CodeMirror 的 measure
+  循环里**自己也有锚定**（anchor diff），我们在 mousedown 里算完 `scrollTop += Δ` 之后它还会再改一次
+  —— 实测我们设 1771、它拉回 1680，点击落点偏了 **91px**；改成把 CM 自己的
+  `EditorView.scrollIntoView(pos, { y: "start", yMargin })`（`scroll-anchor.ts`）放进**同一个事务**
+  后偏差 **4px**（行高 30px）。装饰重整（窗口补渲 / 公式到货）引起的高度变化交给 CM 自己的锚定，
+  我们**不**再加一层（加了就是两次修正叠加）。
+- **编译失败不整篇作废（阶段 2）**：`block-plan.remapBlocksThroughEdit` 用前后缀差分
+  （`changedSpan`）判定哪些块没被碰到 —— 之前原样保留、之后整体平移、相交的退回源码
+  （区间**放宽**到并集：只多显示源码，绝不盖住新打的字）。以前一编译失败就整篇退回源码，
+  敲错一个字符整篇闪一下。**输出必须仍然铺满全文**（块数不变，相交的块只是变成不可渲染）。
+- **诊断所在块不许被切片盖住**：波浪线画在源码上，被图片盖住的块里看不见。
+  `block-plan.revealBlocksWithDiagnostics` 按**格子**区间判相交（格子含块前后的空行），
+  在 `applyBlockSelection` **之后**跑（否则会被选区判定覆盖回去）。
+- **切片上的鼠标行为统一由 `mouseSelectionStyle` 接管（阶段 3，红线）**：点击 → 光标落到点到的
+  字符、拖选 → 跨块选区，都走 `live-preview.ts` 的 `CropSelection`（`EditorView.mouseSelectionStyle`
+  这个 facet：`view`/`event` 里不是切片就返回 null，交回 CodeMirror 默认行为）。
+  - **别在 widget 上自己挂 `mousedown`**：那会与 CM 的鼠标选择抢同一次事件（阶段 2 就是那么写的，
+    加了拖选之后必须合并成一处）。也别用 `instanceof HTMLElement` 判"指针在不在切片上"——
+    指针多半落在切片内部那个 `<svg>` 上，它是 **SVGElement**（实测：整条拖选的锚点因此跑到下一块的
+    边界上）。用 `Element.closest(".cm-block-crop")`。
+  - **拖动期间必须"冻结版式"**：拖动中一旦真的落选区，被选中的块会展开成源码、版式跟着变，
+    而版式一变，指针底下的内容就换了 —— 实测拖到一半位置会**倒着走**（19 → 15，因为指针从正文行
+    落到了刚露出来的空行上）。所以拖动期间只更新内部落点 + 画一个半透明"扫过"色块
+    （`document.body` 上的 `position: fixed` div），**松手那一次**才把真选区交出去。
+  - **单击不要听松手**：`MouseSelection.up()` 只在 `dragging == null` 时才重新问 style，
+    而且问的是**上一次 move 事件**，所以松手要自己听（捕获阶段的 document `mouseup`）。
+    但**单击（没拖动过）时松手什么都不做** —— 按下的那次解析已经把光标放好了，松手时版式已经变了，
+    再按松手坐标解析一遍会落到别处（实测：点标题里的字，按下解析=位置 10，松手重解析=位置 51）。
+  - **`EditorSelection.single()` ≠ `EditorSelection.range()`（踩过）**：给 CM 的
+    `MouseSelectionStyle.get()` 返回值必须是 **EditorSelection**（要有 `.ranges`/`.main`），
+    而 `EditorSelection.range()` / `.cursor()` 返回的是 **SelectionRange** —— 交了后者，
+    CM 内部读 `undefined.length` 直接抛（"Cannot read properties of undefined"），
+    拖选无声失效。`dispatch({selection})` 两种都能收，所以只有这里会踩。
+- **整块被选中时"不展开"（用户要求「选中整个代码块不要展开」）**：`applyBlockSelection` 里，
+  选区**完整盖住**某一块（`sel.from ≤ block.from && sel.to ≥ block.to`）时它**不展开**，
+  改用 `cover.selected` 让切片挂一层淡色底（`.cm-block-crop-selected`）；只盖住一部分才展开源码
+  （那样选中高亮才精确）。**两条硬约束**（都实测踩过）：
+  - **光标（选区 head）所在的那一块必须展开**，哪怕它被整块选中：整块不展开时那一格是一张图片，
+    图片里没有真实文本，浏览器把输入事件发给 DOM、CodeMirror 收不到 → **Ctrl+A 全选之后打字
+    一个字都进不去**（文档纹丝不动）。所以"整块选中不展开"只对**光标不在里面**的块成立。
+  - 因此"在代码块里拖选整块"（光标必然在里面）还是得展开 —— 那就**把两行围栏藏起来**
+    （`buildFenceHidingDecorations`：整行替换掉，含行尾换行），代码正文仍是真实文本，
+    看起来就像代码块而不像 markdown 源码。
+  - 非空选区时**不做**"兜底展开第一格"（那会把不相干的一块变成源码，凭空多一次版式变化）；
+    兜底只在"都是空选区（光标）"时生效。
+  - **"被选中"的视觉：染色层必须铺在切片 SVG 之上，而且不许有描边（红线，用户截了张图说「太丑了」）**。
+    切片的 SVG 自带**不透明的白纸底**，所以给容器加 `background-color` 是**看不见**的 ——
+    只在相邻切片的缝隙里漏出一两条细线；当时还配了 `1px outline`，两者叠起来就是"整页被画上蓝色网格"
+    （Ctrl+A 全选的截图就是这个样子）。现在：`toDOM` 里额外插一个 `.cm-block-crop-tint`
+    （`position: absolute; inset: 0; pointer-events: none`，**排在 SVG 之后**才能盖住它），
+    颜色取 CodeMirror 自己的选区底色（`#d7d4f0` ≈ `rgba(122,112,205,0.3)`），
+    于是"被选中的切片"与"被选中的源码"看起来是同一件事、相邻切片连成一片，**不要 outline**。
+    `.cm-math-selected`（公式）同理 —— 公式 SVG 是透明的，用底色就够，不必再加一层。
+    验收：`writing-blocks.mjs` 第 15 组的「淡色底真的看得见」「没有描边」两条 + jsdom 用例里的
+    染色层顺序断言（**别删**）。
+- **链接可点（阶段 3）**：typst 的 `#link("https://…")[文字]` 会画成 `FrameItem::Link(目标, 方框)` ——
+  它**不带源位置**但带目标与方框，Rust 侧（`collect_geometry_with_links` → `BlockCrop.links`）
+  把它收成"带内相对 pt"的热区（**夹到带内**：链接方框有时比墨迹包围盒略高，不夹会溢出切片一两像素），
+  前端在切片上铺一层透明 `<a>`（百分比定位，与 SVG 的等比缩放天然一致），点击 `stopPropagation`
+  后交给 opener 插件（`onOpenLink` → `+page.svelte` 的 `handleOpenLink`）。
+  只收 `http/https/mailto`（页内 `#link(<label>)` 要映射回源码位置，属后续工作）；没有链接时 `links` 为空。
+- **块粒度**：列表已经**每项一块**（`ListItem` / `EnumItem` 各自成块，嵌套列表留在父项那一块里）——
+  计划里的"列表项级细粒度"阶段 1 就已满足；**表格仍是整块**（按行切会把表格线切开、视觉上更碎，
+  而点击定位本来就精确到字符，所以是有意不做）。
+- **切片 DOM 上有 `data-block-from` / `data-block-kind`**：浏览器验收靠它把"夹具里的第几块"
+  与"页面里的哪张切片"对上（按位置取，不依赖切片顺序）。别删（`writing-blocks-hit.mjs` 依赖它）。
+- **没有输出的块整格隐藏（用户 2026-09-16 选定「完全隐藏，和 PDF 一样什么都看不到」）**：
+  `#set` / `#show` / `#let` / 纯注释行这类"规则"在真排版里没有输出 —— 实测用户真实文档首行
+  `#show math.equation: set text(...)` 的块 `found=false`、`heightPt=0.0`、SVG 0KB（引擎一个字形都没画），
+  所以写作模式下**整格隐藏**（`buildHiddenBlockDecorations`：整行 `Decoration.replace({block: true})`
+  不带 widget，连块尾空行一起藏），光标/选区进去才展开成源码。
+  **关键区分（别写错，会藏掉用户刚打的字）**：`Block.noOutput` 只在"这一次成功编译、引擎确实
+  什么都没给这一块"时为 true；**"块表过期 / 编译失败"那种不可渲染**（`remapBlocksThroughEdit`
+  把块标成 `found:false`）必须在 remap 里把 `noOutput` **清成 false** —— 那种块照旧永远展开源码。
+  验收：`writing-mode-scenes.mjs` 的「没有输出的块（#set / #show）」四条（隐藏 / 其余照常渲染 /
+  光标进去展开 / 离开又藏起来）+ `block-plan.test.ts` 的两条 + `live-preview.test.ts` 的两条。
+- **已知不足**：**脚注正文（页底装饰）在写作模式里不显示**（夹紧后它落在所有带之外；要显示得
+  单独切一块"页底装饰"贴在文档末尾 —— 它没有源区间，得跳出"格子"模型，尚未做）；
+  **表格是整块**（按行切会把表格线切开，有意不做）；
+  浏览器查找 / 拼写检查 / 无障碍拿不到（要真正的文字层）；**真机（tauri dev）手感与性能尚未验证**。
+
 ### 所见即所得（编辑器内联渲染）数据流
 
 形态 = Typora / Obsidian Live Preview：**源码仍是唯一真相**，编辑器在非选区处把可渲染范围换成渲染结果，光标/选区进入即展开源码。
@@ -231,6 +488,8 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
 - **字号**：`MATH_TEXT_PT = 10.5`（Rust）/ 编辑器正文 14px = 10.5pt，故 SVG 的 pt 与编辑器 CSS 的 pt **1:1**，前端直接写 `width/height: Npt` + `vertical-align: -(height-baseline)pt`。改字号要两侧同步。
 - **暗色主题**：typst 产物是黑字透明底，暗色下看不见 → widget 带 `cm-math-dark` 类整体 `filter: invert(1)`。**不要用 `&dark` 选择器**：`EditorView.theme` 不支持该前缀（实测抛 `RangeError: Unsupported selector: &dark`，SvelteKit 会整页渲染成 500 错误页，表现为"应用没渲染"）。
 - **展开规则**：`selectionTouchesRange`（光标落在区间内含两端即展开，非空选区相交即展开）。标记类构造的展开范围必须是**标记 + 正文的并集**——标题/列表只有前导标记，只取标记范围会导致光标落在正文里时 `= ` 不露出（实测踩过）。
+- **标题字号梯度必须跟 typst 一致：1.4 / 1.2 / 1.0em、行高 1.65（红线，用户报「在标题所在块，标题就会变的很大」）**。typst 的 heading（`heading.rs` 的 ShowSet）是 level 1 = 1.4em、level 2 = 1.2em、level 3 及以下 = 1.0em（**只加粗，不再变大**），并且用和正文同一个 leading（0.65em ⇒ 行高 1.65）。以前这里仿 Typora 写的是 1.8 / 1.5 / 1.25 / 1.08em（`Editor.svelte` 写作模式那几条 + `live-preview.ts` 主题里同名的那几条）+ 行高 1.45/1.5/1.55，块级渲染落地后就变成 bug：光标一进标题块，那一块展开成源码、由我们的 CSS 画，**标题比切片大 36%~40%**（详见调研文档第十三节之 4 的对照表）。**标题行的上下 padding 一律不加**（三种取值实测：0 → 光标进块页面只差 +3px、旧的 0.6em/0.2em → +19px、typst 的 1.8em/0.75em → +40px）：标题周围的空白已经分散在**相邻块的切片带**里（带在相邻墨迹的中点处切），源码形态再补一份就翻倍。验收：`writing-mode-scenes.mjs` 的「标题字号梯度对齐 typst」（h1/h3 = 1.4、h2/h3 = 1.2、与切片字号之比 1.0 ± 0.02）**别删**。
+- **选中整个公式不展开（用户要求「选中整个公式请写不展开」）**：与块级同一套规则（`math-ranges.mathRevealDecision` + `selectionCoversRange`）——选区**完整盖住**公式 → 保持渲染 + 淡色底 `.cm-math-selected`；只盖住一部分、或光标在公式里 → 照旧展开。**别把它套到跨行行间公式上**（`inlinePresentation: false`）：那种公式只能整行 `block: true` 替换，widget 是 `contenteditable=false` 的顶层 `div`，被选区完整盖住后打字**会把字符插到下一行**（实测 `$ x^2 $\n后文` → `$ x^2 $\nz后文`，文档本身没变）。所以**单行**行间公式已改成"装饰只盖公式本身 + widget 落在行内 + 行级居中"（`MathBlockWidget` 的 `inline` 形态 → `span.cm-math-block-inline` + `Decoration.line({class: "cm-math-line"})`），落在 `.cm-line` 里就没有这个问题（实测打字正确替换选区）。**别把单行行间公式改回整行 block 替换**（理由同上，实测数据在调研文档第十三节之 3）。**判据是"装饰实际盖住的区间"**（`decorated = block ?? 公式区间`），不是只看公式本身：单行行间公式连行首行尾空白一起盖（`  $ x $  ` 才居中），若只按公式范围判"完整盖住"，就会出现"选区盖住公式、widget 只被盖住一部分"——DOM 里 widget 是原子节点，浏览器只能在边缘插入，**实测字符被插到行尾**（`  $ x^2 $  ` 选中 `$ x^2 $` 打字 → `  $ x^2 $  z`），所以那种情况照旧展开。`buildMathDecorations` 与 `collectRequestsInner` 两处的判据必须用同一个 `decorated`。
 - **输入 `$` 自动配对**（用户要求「加入功能：自动补全 $$」，2026-09-14）：敲一个 `$` 就把定界符补成一对、光标落在中间，判定全在 `auto-pair.ts`（纯函数可单测），落事务在 `Editor.svelte` 的 `EditorView.inputHandler`（只在"空选区 + 输入内容恰好是 `$`"时介入，不碰粘贴 / IME / 选中替换；任何抛错都 `return false` 退回默认输入，绝不吞按键）。
   - **独占一行 → 补 `$  $`（行间公式脚手架）**：typst 的行间公式是**定界符内侧两侧留白**的 `$ x $`，所以脚手架是"两个空格 + 光标在中间"——敲一个字直接得到 `$ x $`，光标移开后由块级 widget 居中渲染（验收里断言桩收到 `display: true`）。行内（同行还有别的字）→ 补 `$$`，敲字得到 `$x$`。
   - **右侧已有闭合 `$` → 只把光标移过去**（跳过同行空白）：没有这条的话，`$  $` 里再按一次 `$` 会插出 `$ $|$  $` 这种垃圾（实测过），而连按两下 `$` 是很容易发生的手势。
@@ -405,7 +664,7 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 ### 字体
 
-**两条管线**：① **typst 渲染**（预览/公式/PDF）用 Rust `FontBook`，产物 SVG 是字形轮廓；② **编辑器界面文字**用纯 CSS 字体栈（无 `@font-face`，即系统字体）——所以界面的中文与预览/PDF 的思源宋体**不保证一致**（想一致得把打包字体经 Tauri asset 协议喂给 webview，未做）。
+**两条管线**：① **typst 渲染**（预览/公式/PDF）用 Rust `FontBook`，产物 SVG 是字形轮廓；② **编辑器界面文字**用 CSS 字体栈 —— **写作模式**（`--write-font-stack`）现在把打包字体也装进了 webview（Rust `bundled_font` → FontFace，见 `editor-font.ts`），与 typst 用同一套字；**源代码模式**仍是等宽系统栈。
 
 - **打包字体**：`src-tauri/fonts/`（7 个：思源宋体 / NewCMMath×3 / LibertinusSerif×2 / DejaVuSansMono）。**不放 `static/`**（会被拷进前端产物，安装包白胖 5.7MB）。新增字体同步 `download-fonts.mjs`、Rust 单测 `fonts_all_registered`、README 清单。
 - **字体集 = 打包目录 + 系统目录 + 用户额外目录**（`FontConfig.dirs`，设置 → 额外字体目录，对齐 typst CLI 的 `--font-path`）。缓存**按目录列表做 key**（`Mutex<HashMap<..>>`）——增删目录必须重新加载，别退回 `OnceLock` 单值缓存。
@@ -482,15 +741,47 @@ typst crate（0.15.x）内嵌进 Rust 壳，`TypstWorld` 实现 `typst::World`�
 
 - 前端 vitest + jsdom，`include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"]`（第二条是发布脚本的测试：脚本是普通 JS + node 内置模块，进了 TS program 就得给每个参数写 JSDoc 或装 `@types/node`——仓库刻意没装，见 `vite.config.js` 里的 `@ts-expect-error`，所以让它们留在类型检查之外）；vite 的 `server.fs.allow: [".."]` 覆盖仓库上级目录（junction 场景下 node_modules 解析被拒的教训，见 #33，配置仍保留）。现有覆盖：`typst-engine`（invoke 契约映射 + 诊断转换纯函数，invoke/dialog 以 vi.mock 断言入参与消费）、`diagnostics-utils`、`error-list`、`context-menu-utils`、`doc-utils`、`editor-keymap`、`menu-keys`、`popover-utils`（#46 Popover 视口溢出的回归守卫）、`persistence`、`svg-paginate`、`pdf-export`、`preview-scale`、`write-commands`、`zoom`（滚轮档距/方向/上下限收敛/浮点圆整/横向位移退回）、`update-utils`（进度换算 / 字节格式化 / 错误文案翻译 / 启动检查延迟；**检查节流那条已删除**，见「自动更新数据流」）、`update-notes`（更新说明的 Markdown 渲染：转义/XSS、标题/嵌套列表/粗体/行内代码、不闭合成对符号时保持原文、链接不做成 `<a>`），脚本侧 `scripts/generate-latest-json.test.mjs`（平台键映射、semver 校验、NSIS 优先挑选、清单结构、CHANGELOG 提取、CLI 端到端）。
   **已删除的低价值测试（勿凭"补覆盖"再加回来）**：`file-ops.test.ts`（只测 `.typ` 后缀匹配这种一眼可见的判断，真路径安全在 Rust `validate_typ_path`，留着会造成"文件安全已测"的错觉）、`debug.test.ts`（调试日志通道，坏掉无用户可见后果）、`context-menu-utils.test.ts` 的 `computeMenuPosition` 收边 5 项（3 行 clamp，失败肉眼可见；更复杂的限宽分支由 popover-utils 覆盖）。
+- **Rust 单测里有一条"全局缓存"的坑（2026-09-16 修）**：`block_geometry` 的命中几何是**进程级全局**
+  （`HIT_CACHE` 只留"最近一次 `compile_blocks`"的字形几何）。生产路径没事（前端只对刚编译过的同一篇
+  文档命中，前面还有"块表必须与当前文档一致"的闸门），但 **cargo test 是并行跑的** —— 两个用例同时
+  编译不同文档时后者会覆盖前者，命中断言就读到了别人的排版。症状：`hit_test_on_real_layout_maps_edges_to_block_bounds`
+  **单独跑绿、跑全集红**（期望 `Some(0)` 拿到 `Some(2)`，正好差一个前缀的长度）。现在凡是写/读这块
+  缓存的用例都先拿一把测试锁（`HIT_CACHE_TEST_LOCK`）串行；`pick_hit` 那种纯函数用例不受影响。
+- **本机跑 `npm run fixtures:blocks` 要让 cargo 在 PATH 上**：脚本里是裸 `cargo`，而本机 cargo 在
+  `~/.cargo/bin`（默认不在 PATH）—— 不补就会静默产出空的 `.browser-check/block-fixtures.json`（`[]`），
+  后面三套真实产物验收全变成"没有夹具"。补法：`PATH="$HOME/.cargo/bin:$PATH" npm run fixtures:blocks`。
 - Rust 单测（`typst_world.rs`/`packages.rs` 内 `cargo test`，用 `CARGO_MANIFEST_DIR` 定位 `src-tauri/fonts`）：中文+数学文档端到端编译（每页含 `<svg>`，PDF 字节非空）、字体注册（7 个文件 + 族名断言）、语法错误诊断（1-based 行列 + endLine）、相对 include（成功 / 缺失文件诊断带 path / 未保存文档提示）、JSON 序列化契约（camelCase 键名 `endLine`/`endColumn`）、@local/@preview 包（缓存命中不下载 / miss 下载与 URL 格式 / 404 与网络失败诊断区分 / 数据目录优先 / 路径穿越与损坏归档防御 / 端到端导入编译，均用临时目录注入环境变量，不触真实用户目录与网络）。
 - 所见即所得链路测试：`typst-lex.test.ts`（区域扫描：注释/raw/字符串/代码/`[...]` 内容块）、`markup-ranges.test.ts`（标记拆解，含"代码与公式里的 `*` `_` 不算标记"、有序列表编号、围栏代码块）、`typst-scan-fuzz.test.ts`（**鲁棒性网**：120 份固定种子随机文档 + 15 组病态输入，断言不抛异常、区间有序不越界不重叠、区域无缝覆盖全文）、`math-context.test.ts`（`#let` 提取的保守规则）、`live-preview.test.ts`（jsdom 里真挂 EditorView，断言 widget 替换 / 块级 vs 行内 / 光标进出展开 / 失败回退 / 开关关闭 / 样式类）。**坑**：jsdom 下挂视图时光标默认在 offset 0，会落在构造内部而触发"展开"，测隐藏效果必须把光标放到构造之外。
 - 前端测试不接触真实编译——依赖引擎的逻辑保持"核心逻辑独立可测"（纯函数 + mock invoke）。
 - **浏览器端交互验证（无显示器环境下的验收手段）**：`scripts/browser-check/`（零依赖 CDP 驱动）
   - **端口**：验收脚本默认打 `http://localhost:1420/?browserdev=1`，而 **1420 也是 `npm run tauri dev` 的 Vite 端口**——用户自己开着桌面应用时，验收脚本会被 "Port 1420 is already in use" 挡住（实测被反馈过）。换端口跑即可：`npm run dev -- --port 1425` 起服务 + `BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs`（1420 是 `vite.config.js` 里写死的 `server.port` + `strictPort: true`，CLI `--port` 可覆盖，不覆盖时宁可报错也不自动换端口；脚本侧由 `cdp.mjs` 导出的 `DEV_URL` 读取 `BROWSER_CHECK_PORT` / `BROWSER_CHECK_URL`，`probe.mjs` 仍可传 URL 参数）。
-  - `cdp.mjs`：连接 Windows headless Chrome 的 CDP（WSL 里直接跑 `/mnt/c/Program Files/Google/Chrome/Application/chrome.exe --headless=new --remote-debugging-port=9333 --remote-debugging-address=0.0.0.0 --user-data-dir=... 'http://localhost:1420/?browserdev=1'`；镜像网络下 WSL 可直连 localhost:9333）；提供 evaluate / 真实点击 / 真实输入（`Input.insertText`）/ 截图。
+  - `cdp.mjs`：连接 headless Chromium 的 CDP。两种起法：
+    ① Windows Chrome（原路径）：`/mnt/c/Program Files/Google/Chrome/Application/chrome.exe --headless=new --no-proxy-server --remote-debugging-port=9333 --remote-debugging-address=0.0.0.0 --user-data-dir=... 'http://localhost:1420/?browserdev=1'`（**镜像网络**下 WSL 才能直连 localhost:9333；不是镜像网络时 Windows 侧连 WSL 的 dev server 会 `ERR_CONNECTION_TIMED_OUT`）。
+    ② **本机 WSL 里的 Linux Chromium（2026-09-15 实测可用，不依赖 Windows 网络）**：Playwright 的浏览器缓存里就有，直接起即可：
+    ```bash
+    ~/.cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell \
+      --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=.browser-check/cdp-profile \
+      --remote-debugging-port=9335 --window-size=1400,900 'http://localhost:1425/?browserdev=1' &
+    CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs
+    ```
+    （`chromium-1234/chrome-linux64/chrome` 在本机会 `Trace/breakpoint trap` 崩掉，用 `chromium_headless_shell-*` 那个。）**进程要用托管后台任务起**（前台 shell 里 `nohup … &` 在本次会话里活不过一次工具调用），收尾时按自己记的 job/端口关掉。
   - `probe.mjs`：排障小工具（导航到页面 → 打印渲染结果/页面内错误），"页面是不是坏了"先用它看。
-  - `wysiwyg.mjs`：所见即所得 + 自动更新入口 + 界面缩放 + 字体设置 + 更新说明渲染 + 缩放死区 + 窄视口状态栏 + 源码模式自动换行 + 预览跟随缩放 + `$` 自动配对 + 状态栏计数徽标 + 切换模式保持光标 + 启动自动检查与「稍后」抑制 + 预览重排 + 缩放复核 + Esc/新建窗口 + 关于弹窗的 **270 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换/标题正文无下划线（先等依赖那条规则真生效再断言） → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大 → 启动恢复会话 → Alt 不夺焦 → **第 23 组自动更新入口**：帮助菜单有「检查更新…」、点它后状态栏显示"已是最新版本"（桩返回无更新）、没更新时不弹窗不留状态栏提示、检查不抢焦点、设置里有「启动时自动检查更新」且默认勾选 → **第 24 组界面缩放**：启动即把恢复的缩放交给 webview（桩把 `setZoom` 的入参记在 `window.__browserDevLastZoom`）、默认不显示缩放徽标、Ctrl+滚轮向上 5 档 → 请求 150%、状态栏实时反馈 + 常驻徽标、写进存档、**重载后恢复并重新应用**、不带 Ctrl 的滚轮不响应、**在状态栏上滚也能缩放**（监听挂在 window）、**调档后会再确认一次**（防 WebView2 手势结束时还原系数）、正常路径不误报「缩放未生效」、**横向位移（deltaY=0 + deltaX）也能缩放**、向下滚到底收敛在 50%、菜单三项齐全 + 提示、重置回 100% 且徽标消失（16 项） → **第 25 组正文字体设置**（12 项）：字体下拉（首项「默认」）+ 额外字体目录 UI；保存后**立即重编译**且字体族/目录透传（桩记 `__browserDevCompileCount`/`__browserDevLastCompile`）；写错的中文族名以警告徽标出现并给中文提示） → **第 26 组更新说明渲染**（6 项，用 `&fakeupdate=1` 让桩返回假的可用更新把弹窗打开）：小标题渲染成 `h4` 元素、文本里不再有 `###`/`**` 原文、行内代码是 `code` 元素、列表是 `li` 且两空格缩进形成嵌套、说明里的 `<img onerror=…>` 只当文本（断言页面里没有 `img` 元素）。 → **第 27 组缩放死区**（14 项，桩用 `&zoomsim=1` / `&zoomcap=1` / `&zoommax=2.1` / `&zoomdelay=300` 模拟真机引擎）：引擎接受时不误伤也不误报、引擎拒绝放大时档位被拉回它给的 100%、状态栏说明是引擎限制、**「未生效」文案带上实测数据（量了几次 / 布局宽度 / dpr）**、被拒之后立刻往下滚就能缩小、**引擎上限 210% 时档位被拉回 210%（不冲 250%）**、状态栏写明限制在 210%、**被上限挡住后往下滚一档立刻见效**、**引擎晚 300ms 才生效时档位仍落在请求值且不误报**（复核的多等几次就是为这种引擎准备的）。 → **第 28 组窄视口状态栏**（4 项，用 `Emulation.setDeviceMetricsOverride` 把 CSS 视口压到 660×460，等价于 1258px 窗口里缩放到 ~190%）：引擎的 ResizeObserver 提示不再报成「脚本错误」、真正的脚本错误仍然显示、长状态文字不把状态栏顶高（≤30px，一行）、右侧徽标/标签/计数在窄视口下也不折行（每项 ≤20px）。 → **第 29 组源码模式自动换行**（9 项）：默认不折行且长行确实横向溢出、Alt+Z 打开后 `cm-lineWrapping` 生效且横向溢出消失（行高变大 = 真的折了）、状态栏反馈、写进存档、**重载后仍折行**、**Ctrl+Z 仍然是撤销**（不许被 Alt+Z 抢）、再按一次关闭、写作模式默认就折行（不靠 Alt+Z）、写作模式下 Alt+Z 不改状态、切回源码模式仍是不折行。 → **第 30 组预览按栏宽重新排版**（13 项，用 `Emulation.setDeviceMetricsOverride` 压视口造 100%/150%/250%）：页宽按「栏宽 × 11/14」传给后端、产物页宽 = 请求页宽、画布铺满栏宽但**不超出**、预览字号恒 ≈ 14/11、**三档缩放下横向溢出都是 0（永不横滚）**、预览里的字物理上逐档变大（纸张宽度恒等于栏宽是重排的必然）、250% 下页数变多（真重排了）、栏宽变化会重编译、`&reflowfail=1` 时退回等比缩放；**宽度判据瞎了、只有 dpr 跟随的机器**（`&zoomwidthstuck=1`）档位仍落在请求值且不误报（修前会红）、同一台机器上引擎**真拒绝**时仍必须报「未生效」并拉回 100%（双重判据不许把死区保护放跑）。 → **第 32 组状态栏左侧计数**（9 项）：最左是错误+警告计数组（排在状态文字前）、两者常驻显示 0、**错误在警告左边**且贴着左缘、警告图标是 SVG 三角形感叹号（无文字内容）、两个图标同尺寸 14×14、状态栏仍是一行、出现警告后计数 > 0、浮层向右展开不越出窗口。 → **第 33 组切换模式保持光标**（5 项）：滚动中段点击造锚点后，切到源码模式光标仍在视口内且屏幕高度 ±40px、切回写作模式同样、来回一趟逻辑行号（状态栏「行」）一致。 → **第 34 组启动自动检查 + 「稍后」抑制**（13 项，`&fakeupdate=1` + 把 `lastUpdateCheckAt` 种成「几十秒前」）：存档里确实写着「刚检查过」、**什么都不点**弹窗也会自己出现（修前被 6 小时节流拦掉，永远不出现）、结果与手动检查一样落到状态栏、自动弹出的窗不抢编辑区焦点；点「稍后」→ 关窗 + 状态栏写明以后不再自动提示 + 写进存档；**重开应用弹窗不再出现、但桩确实收到 check、状态栏仍留「可更新到 vX」入口**；手动点「检查更新…」→ 弹窗回来 + 标记被清掉；标记清掉后再开应用自动弹窗恢复；关掉设置开关后启动**一次都不查**（桩把调用次数记在 `window.__browserDevUpdaterChecks`）。 → **第 35 组 Esc 退出设置 + `Ctrl+Shift+N` 新建窗口**（11 项）：Esc 关设置弹窗且**放弃草稿**（勾掉的开关没生效、重开弹窗那一勾回到原状）、`Ctrl+Shift+N` 确实走到创建窗口（桩记 `window.__browserDevWindowRequests`，label `editor-*` + url `/`）、文档内容一字未改（没被格式表吃掉）、`Ctrl+N` 仍是菜单「新建」（不多开窗口）、`Ctrl+Shift+M` 仍插公式块、Esc 关更新弹窗但**不写 `updateDismissedAt`**（不替你点「稍后」） → **第 36 组回车继承缩进 + Tab 四格缩进**（11 项，真实按键路径）：两空格行尾回车后新行缩进一致、四空格同样照抄（CM 默认那条抄不到）、行中间回车下半行对齐整行缩进、带缩进的空行上再回车**残留空白被清掉**、无缩进行就是普通换行、`\t` 也照抄、围栏代码块内部继续同层、**Tab 一档 = 4 个空格（不是 CM 默认的 2 格）**、Tab 后回车照抄同一宽度、Shift+Tab 反缩进一层、**回车+缩进能被一次 Ctrl+Z 撤销**。 → **第 37 组「帮助 → 关于」**（6 项）：菜单能打开关于弹窗、**版本号来自运行时**（桩把 `plugin:app|version` 固定成 `0.0.0-browserdev`，页面里没有硬编码版本）、描述覆盖**默认的写作模式**与源代码模式（旧的「左编辑 / 右实时预览」已删——那只描述了源代码模式）、两个动作按钮都在（项目主页 / 关闭）、点「项目主页」→ **opener 收到项目地址**（桩记 `window.__browserDevOpenUrls`）且弹窗收起、Esc 能关掉关于弹窗。 → **第 31 组新增 2 项**（用户报的 `$ 1 $` → `$1$$`）：行内公式里按第三个 `$` 跨过已有闭合符（`前文 $1$`，不是 `前文 $1$$`）、行间公式同理（`$ 1 $`，不是 `$ 1$ $`）。**2026-09-16 已在本机跑通**（`npm run dev -- --port 1425` + Windows headless Chrome，**239 项全绿**）：新增**第 38 组「编辑器会清空文件吗」**（6 项：空文档上 Ctrl+N 不弹确认照常新建、编辑全程 `write_file` 调用次数为 0、会话存档照常更新、有未保存内容时 Ctrl+N 先确认且取消后内容+存档一字未丢、切模式+缩放后仍无写盘）与**第 39 组 `Ctrl+Shift+=`/`Ctrl+Shift+-` 缩放**（7 项：档位/状态栏/存档/徽标同步、再按一次再涨一格、不带 Shift 的 `Ctrl+=` 不抢、连按 14 次收敛在 50% 并提示到边界、菜单「重置缩放」回 100% 且徽标消失）；顺带修掉了两个卡点：桩读 dialog 参数时漏了 `options` 那层包装（「添加字体目录」点了没反应）、以及保存设置后的状态栏确认被重编译的「就绪」顶掉。 **2026-09-17 又补第 40 组「位移不足一档的滚轮」**（8 项：40px 一格不动且**不谎报**「到边界了」而是提示「攒到 40%」、40px 两格走一档、反方向同理、真到边界时往上滚才提示「到边界了」、**上限处用 40px 滚轮往下两格 250%→240%**、重置后余量不残留）。 **2026-09-18 再补第 41 组「文档自带 #set page(...) 时也不许横滚」**（5 项：真机几何 150% / 250% 下预览栏一条横条都没有且画布铺满栏宽、宽栏 + 100% 观感不变（仍停在 568px 自然尺寸）、干净文档走重排路不受影响）；同时把第 30 组那条「退回等比缩放」的判据从「画布不等于栏宽」换成「**产物页宽仍是 A4**」（新规则下画布也铺满栏宽，旧指纹失效）。 **2026-09-18 再补第 42 组「编译错误的红波浪线」**（4 项：桩按 Rust 的真实形状发一条 `path: null` 的主源 error 诊断 → 编辑器必须画出 `.cm-diag-wavy`、波浪线落在出错的那段文本上、错误徽标 = 1、清掉标记后两者一起归零）；同一轮还改了项目根策略（见「编译数据流 / 文件语义」）。 **2026-09-18 再补第 43 组「状态栏两个徽标的 Popover 交互一致」**（14 项，用户反馈「点击警告 / 关闭警告的行为应该和错误是一样的」）：警告侧 9 条 —— 可点时 `cursor: pointer`、点徽标开、再点合、**Esc 收起**、点浮层内部不关（外部判定按 wrap 包含关系）、**点定位条目跳到「行 1, 列 1」且浮层收起**、**点浮层外部收起**、警告消失后浮层不残留、**警告再次出现时浮层不会自己弹回来**；错误侧 4 条对照 —— 可点光标、Esc 收起、点条目跳转即关、**错误消失后不留空浮层**；外加 400px 窄视口下警告浮层被收进视口（不修时实测 `left 46 / right 406 / win 400`）。修前这一组**红 6 条**（Esc、点条目、点外部、自己弹回来、空浮层、窄视口），修后全绿。 **2026-09-18 再补第 44 组「复制诊断信息」**（9 项，用户要求「需要功能：复制错误信息」）：两个浮层每条都有「复制」、标题行都有「复制全部」；点条目「复制」→ 假剪贴板收到的字符串 = `行 2, 列 1：模拟编译错误：…`（浏览器开发模式文档未保存 ⇒ 正好锁住"省略路径前缀"那一支）；复制后浮层仍开着；状态栏出现「已复制」；**点「复制」不会顺带跳转**（光标仍在 行 2, 列 18 —— 复制按钮与条目按钮是兄弟，点击不该冒泡）；「复制全部」= 首行 `编译错误（1 处）` + 每条一行；警告侧同款且复制到的是**中文提示**（`未知字体族「微软雅黑」…额外字体目录`）；浮层 `user-select: text`。带路径的两种情形（诊断自带路径 / 回退当前文档路径）由 `error-list.test.ts` 的 7 条单测覆盖。 **2026-09-18 再补第 16 组的 4 项「展开菜单白底」**（浅色/深色主题下各两条计算样式断言，见「菜单不夺焦」那条）。同一轮还修了验收脚本自身的**状态泄漏**：`gotoSim`（第 27/30 组的"模拟引擎"页）原来写成"在旧页面上 `localStorage.clear()` 后立刻导航"，而存档是 300ms 防抖写的、旧页面在销毁前仍可能把迟到的存档写回去 ⇒ 新页带着上一段的缩放起步（实测：该从 100% 滚 3 格到 130% 的 E 段偶发从 130% 起步滚出 **160%**，两条断言同时红）。现在 `gotoSim` 先把旧页导航掉（页面连同定时器一起没了）、再用 CDP `Storage.clearDataForOrigin` 按 origin 清 localStorage，最后才加载目标页 —— **别再写成"清完立刻导航"**。
+  - `wysiwyg.mjs`：所见即所得 + 自动更新入口 + 界面缩放 + 字体设置 + 更新说明渲染 + 缩放死区 + 窄视口状态栏 + 源码模式自动换行 + 预览跟随缩放 + `$` 自动配对 + 状态栏计数徽标 + 切换模式保持光标 + 启动自动检查与「稍后」抑制 + 预览重排 + 缩放复核 + Esc/新建窗口 + 关于弹窗的 **279 项验收**（输入公式 → widget 出现 → 光标进入展开 → 移出恢复 → 视图菜单开关 → 标记隐藏/标题字号/字重/圆点替换/标题正文无下划线（先等依赖那条规则真生效再断言） → 光标进标题露标记 → 链接只留文字 → 跨行行间公式块级居中 → 光标进入整行展开 → 文档内 `#let` 确实进了编译上下文（桩把最近一次 `compile_math` 入参记在 `window.__browserDevLastMath`）→ 有序列表编号 → 围栏代码块渲染与光标展开 → 写作模式单栏形态 → 菜单调出预览栏 → 源代码模式自动回双栏 → 仿 Typora 写作界面（write 类、无行号槽、衬线/16px/行高 1.9、纸张限宽、状态栏「写作」无行列）→ Ctrl+B 加粗 / Ctrl+1 标题的插入与字号放大 → 启动恢复会话 → Alt 不夺焦 → **第 23 组自动更新入口**：帮助菜单有「检查更新…」、点它后状态栏显示"已是最新版本"（桩返回无更新）、没更新时不弹窗不留状态栏提示、检查不抢焦点、设置里有「启动时自动检查更新」且默认勾选 → **第 24 组界面缩放**：启动即把恢复的缩放交给 webview（桩把 `setZoom` 的入参记在 `window.__browserDevLastZoom`）、默认不显示缩放徽标、Ctrl+滚轮向上 5 档 → 请求 150%、状态栏实时反馈 + 常驻徽标、写进存档、**重载后恢复并重新应用**、不带 Ctrl 的滚轮不响应、**在状态栏上滚也能缩放**（监听挂在 window）、**调档后会再确认一次**（防 WebView2 手势结束时还原系数）、正常路径不误报「缩放未生效」、**横向位移（deltaY=0 + deltaX）也能缩放**、向下滚到底收敛在 50%、菜单三项齐全 + 提示、重置回 100% 且徽标消失（16 项） → **第 25 组正文字体设置**（12 项）：字体下拉（首项「默认」）+ 额外字体目录 UI；保存后**立即重编译**且字体族/目录透传（桩记 `__browserDevCompileCount`/`__browserDevLastCompile`）；写错的中文族名以警告徽标出现并给中文提示） → **第 26 组更新说明渲染**（6 项，用 `&fakeupdate=1` 让桩返回假的可用更新把弹窗打开）：小标题渲染成 `h4` 元素、文本里不再有 `###`/`**` 原文、行内代码是 `code` 元素、列表是 `li` 且两空格缩进形成嵌套、说明里的 `<img onerror=…>` 只当文本（断言页面里没有 `img` 元素）。 → **第 27 组缩放死区**（14 项，桩用 `&zoomsim=1` / `&zoomcap=1` / `&zoommax=2.1` / `&zoomdelay=300` 模拟真机引擎）：引擎接受时不误伤也不误报、引擎拒绝放大时档位被拉回它给的 100%、状态栏说明是引擎限制、**「未生效」文案带上实测数据（量了几次 / 布局宽度 / dpr）**、被拒之后立刻往下滚就能缩小、**引擎上限 210% 时档位被拉回 210%（不冲 250%）**、状态栏写明限制在 210%、**被上限挡住后往下滚一档立刻见效**、**引擎晚 300ms 才生效时档位仍落在请求值且不误报**（复核的多等几次就是为这种引擎准备的）。 → **第 28 组窄视口状态栏**（4 项，用 `Emulation.setDeviceMetricsOverride` 把 CSS 视口压到 660×460，等价于 1258px 窗口里缩放到 ~190%）：引擎的 ResizeObserver 提示不再报成「脚本错误」、真正的脚本错误仍然显示、长状态文字不把状态栏顶高（≤30px，一行）、右侧徽标/标签/计数在窄视口下也不折行（每项 ≤20px）。 → **第 29 组源码模式自动换行**（9 项）：默认不折行且长行确实横向溢出、Alt+Z 打开后 `cm-lineWrapping` 生效且横向溢出消失（行高变大 = 真的折了）、状态栏反馈、写进存档、**重载后仍折行**、**Ctrl+Z 仍然是撤销**（不许被 Alt+Z 抢）、再按一次关闭、写作模式默认就折行（不靠 Alt+Z）、写作模式下 Alt+Z 不改状态、切回源码模式仍是不折行。 → **第 30 组预览按栏宽重新排版**（13 项，用 `Emulation.setDeviceMetricsOverride` 压视口造 100%/150%/250%）：页宽按「栏宽 × 11/14」传给后端、产物页宽 = 请求页宽、画布铺满栏宽但**不超出**、预览字号恒 ≈ 14/11、**三档缩放下横向溢出都是 0（永不横滚）**、预览里的字物理上逐档变大（纸张宽度恒等于栏宽是重排的必然）、250% 下页数变多（真重排了）、栏宽变化会重编译、`&reflowfail=1` 时退回等比缩放；**宽度判据瞎了、只有 dpr 跟随的机器**（`&zoomwidthstuck=1`）档位仍落在请求值且不误报（修前会红）、同一台机器上引擎**真拒绝**时仍必须报「未生效」并拉回 100%（双重判据不许把死区保护放跑）。 → **第 32 组状态栏左侧计数**（9 项）：最左是错误+警告计数组（排在状态文字前）、两者常驻显示 0、**错误在警告左边**且贴着左缘、警告图标是 SVG 三角形感叹号（无文字内容）、两个图标同尺寸 14×14、状态栏仍是一行、出现警告后计数 > 0、浮层向右展开不越出窗口。 → **第 33 组切换模式保持光标**（5 项）：滚动中段点击造锚点后，切到源码模式光标仍在视口内且屏幕高度 ±40px、切回写作模式同样、来回一趟逻辑行号（状态栏「行」）一致。 → **第 34 组启动自动检查 + 「稍后」抑制**（13 项，`&fakeupdate=1` + 把 `lastUpdateCheckAt` 种成「几十秒前」）：存档里确实写着「刚检查过」、**什么都不点**弹窗也会自己出现（修前被 6 小时节流拦掉，永远不出现）、结果与手动检查一样落到状态栏、自动弹出的窗不抢编辑区焦点；点「稍后」→ 关窗 + 状态栏写明以后不再自动提示 + 写进存档；**重开应用弹窗不再出现、但桩确实收到 check、状态栏仍留「可更新到 vX」入口**；手动点「检查更新…」→ 弹窗回来 + 标记被清掉；标记清掉后再开应用自动弹窗恢复；关掉设置开关后启动**一次都不查**（桩把调用次数记在 `window.__browserDevUpdaterChecks`）。 → **第 35 组 Esc 退出设置 + `Ctrl+Shift+N` 新建窗口**（11 项）：Esc 关设置弹窗且**放弃草稿**（勾掉的开关没生效、重开弹窗那一勾回到原状）、`Ctrl+Shift+N` 确实走到创建窗口（桩记 `window.__browserDevWindowRequests`，label `editor-*` + url `/`）、文档内容一字未改（没被格式表吃掉）、`Ctrl+N` 仍是菜单「新建」（不多开窗口）、`Ctrl+Shift+M` 仍插公式块、Esc 关更新弹窗但**不写 `updateDismissedAt`**（不替你点「稍后」） → **第 36 组回车继承缩进 + Tab 四格缩进**（11 项，真实按键路径）：两空格行尾回车后新行缩进一致、四空格同样照抄（CM 默认那条抄不到）、行中间回车下半行对齐整行缩进、带缩进的空行上再回车**残留空白被清掉**、无缩进行就是普通换行、`\t` 也照抄、围栏代码块内部继续同层、**Tab 一档 = 4 个空格（不是 CM 默认的 2 格）**、Tab 后回车照抄同一宽度、Shift+Tab 反缩进一层、**回车+缩进能被一次 Ctrl+Z 撤销**。 → **第 37 组「帮助 → 关于」**（6 项）：菜单能打开关于弹窗、**版本号来自运行时**（桩把 `plugin:app|version` 固定成 `0.0.0-browserdev`，页面里没有硬编码版本）、描述覆盖**默认的写作模式**与源代码模式（旧的「左编辑 / 右实时预览」已删——那只描述了源代码模式）、两个动作按钮都在（项目主页 / 关闭）、点「项目主页」→ **opener 收到项目地址**（桩记 `window.__browserDevOpenUrls`）且弹窗收起、Esc 能关掉关于弹窗。 → **第 31 组新增 2 项**（用户报的 `$ 1 $` → `$1$$`）：行内公式里按第三个 `$` 跨过已有闭合符（`前文 $1$`，不是 `前文 $1$$`）、行间公式同理（`$ 1 $`，不是 `$ 1$ $`）。**2026-09-16 已在本机跑通**（`npm run dev -- --port 1425` + Windows headless Chrome，**239 项全绿**）：新增**第 38 组「编辑器会清空文件吗」**（6 项：空文档上 Ctrl+N 不弹确认照常新建、编辑全程 `write_file` 调用次数为 0、会话存档照常更新、有未保存内容时 Ctrl+N 先确认且取消后内容+存档一字未丢、切模式+缩放后仍无写盘）与**第 39 组 `Ctrl+Shift+=`/`Ctrl+Shift+-` 缩放**（7 项：档位/状态栏/存档/徽标同步、再按一次再涨一格、不带 Shift 的 `Ctrl+=` 不抢、连按 14 次收敛在 50% 并提示到边界、菜单「重置缩放」回 100% 且徽标消失）；顺带修掉了两个卡点：桩读 dialog 参数时漏了 `options` 那层包装（「添加字体目录」点了没反应）、以及保存设置后的状态栏确认被重编译的「就绪」顶掉。 **2026-09-17 又补第 40 组「位移不足一档的滚轮」**（8 项：40px 一格不动且**不谎报**「到边界了」而是提示「攒到 40%」、40px 两格走一档、反方向同理、真到边界时往上滚才提示「到边界了」、**上限处用 40px 滚轮往下两格 250%→240%**、重置后余量不残留）。 **2026-09-18 再补第 41 组「文档自带 #set page(...) 时也不许横滚」**（5 项：真机几何 150% / 250% 下预览栏一条横条都没有且画布铺满栏宽、宽栏 + 100% 观感不变（仍停在 568px 自然尺寸）、干净文档走重排路不受影响）；同时把第 30 组那条「退回等比缩放」的判据从「画布不等于栏宽」换成「**产物页宽仍是 A4**」（新规则下画布也铺满栏宽，旧指纹失效）。 **2026-09-18 再补第 42 组「编译错误的红波浪线」**（4 项：桩按 Rust 的真实形状发一条 `path: null` 的主源 error 诊断 → 编辑器必须画出 `.cm-diag-wavy`、波浪线落在出错的那段文本上、错误徽标 = 1、清掉标记后两者一起归零）；同一轮还改了项目根策略（见「编译数据流 / 文件语义」）。 **2026-09-18 再补第 43 组「状态栏两个徽标的 Popover 交互一致」**（14 项，用户反馈「点击警告 / 关闭警告的行为应该和错误是一样的」）：警告侧 9 条 —— 可点时 `cursor: pointer`、点徽标开、再点合、**Esc 收起**、点浮层内部不关（外部判定按 wrap 包含关系）、**点定位条目跳到「行 1, 列 1」且浮层收起**、**点浮层外部收起**、警告消失后浮层不残留、**警告再次出现时浮层不会自己弹回来**；错误侧 4 条对照 —— 可点光标、Esc 收起、点条目跳转即关、**错误消失后不留空浮层**；外加 400px 窄视口下警告浮层被收进视口（不修时实测 `left 46 / right 406 / win 400`）。修前这一组**红 6 条**（Esc、点条目、点外部、自己弹回来、空浮层、窄视口），修后全绿。 **2026-09-18 再补第 44 组「复制诊断信息」**（9 项，用户要求「需要功能：复制错误信息」）：两个浮层每条都有「复制」、标题行都有「复制全部」；点条目「复制」→ 假剪贴板收到的字符串 = `行 2, 列 1：模拟编译错误：…`（浏览器开发模式文档未保存 ⇒ 正好锁住"省略路径前缀"那一支）；复制后浮层仍开着；状态栏出现「已复制」；**点「复制」不会顺带跳转**（光标仍在 行 2, 列 18 —— 复制按钮与条目按钮是兄弟，点击不该冒泡）；「复制全部」= 首行 `编译错误（1 处）` + 每条一行；警告侧同款且复制到的是**中文提示**（`未知字体族「微软雅黑」…额外字体目录`）；浮层 `user-select: text`。带路径的两种情形（诊断自带路径 / 回退当前文档路径）由 `error-list.test.ts` 的 7 条单测覆盖。 **2026-09-18 再补第 16 组的 4 项「展开菜单白底」**（浅色/深色主题下各两条计算样式断言，见「菜单不夺焦」那条）。同一轮还修了验收脚本自身的**状态泄漏**：`gotoSim`（第 27/30 组的"模拟引擎"页）原来写成"在旧页面上 `localStorage.clear()` 后立刻导航"，而存档是 300ms 防抖写的、旧页面在销毁前仍可能把迟到的存档写回去 ⇒ 新页带着上一段的缩放起步（实测：该从 100% 滚 3 格到 130% 的 E 段偶发从 130% 起步滚出 **160%**，两条断言同时红）。现在 `gotoSim` 先把旧页导航掉（页面连同定时器一起没了）、再用 CDP `Storage.clearDataForOrigin` 按 origin 清 localStorage，最后才加载目标页 —— **别再写成"清完立刻导航"**。
   - **实测坑（都踩过）**：① `Page.navigate` 对**相同 URL** 不重新加载，上一次停在 500 错误页时会一直复现 → `goto()` 先跳 `about:blank`；② 截图必须由 Node 写进**工作区**（写 `/mnt/c/...` 会被文件沙箱拒绝，报 EROFS），别交给 Chrome 写；③ **Windows 的 headless Chrome 必须加 `--no-proxy-server`**，否则 localhost 会被系统代理吞掉、页面报"无法访问此网站"，看起来像"WSL 端口转发坏了"（判断连通性更干净的判据是 Windows 自带 `curl.exe`：`/mnt/c/Windows/System32/curl.exe -s -o NUL -w '%{http_code}' http://localhost:1420/`）；④ 验收脚本开始前**必须清 localStorage 再重新加载**，否则上一轮遗留的「源代码模式」会让页面不渲染公式，第一条断言莫名超时；⑤ 找菜单项要限定在 `.menu-dropdown .menu-item` 里，别在全页找同名文字（状态栏会显示"源代码模式"这类同名状态文字）。
   - ⑥ **收尾绝不要跑 `taskkill /IM chrome.exe /F` 这种全量杀进程**（2026-09-14 犯过：把用户自己开着的 Chrome 窗口全部杀掉，用户直接炸了）。只杀**我启动的那一个 headless 实例**：启动时用 PowerShell 拿到 PID 并存到 `.browser-check/chrome.pid`（`powershell.exe -Command "Start-Process -FilePath 'C:\Program Files\Google\Chrome\Application\chrome.exe' -ArgumentList '--headless=new','--remote-debugging-port=9333',... -PassThru | Select-Object -ExpandProperty Id"`），收尾时**按 user-data-dir 精确挑出自己那几个 PID**（实测可行的写法，`powershell.exe` 不在 PATH 上，必须用绝对路径）：`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object { $_.CommandLine -like '*dsh-chrome-typstpad*' } | Select-Object -ExpandProperty ProcessId"` → 再逐个 `taskkill /PID <pid> /T /F`。（`Start-Process -PassThru` 那条路在本机没跑通：拿不到 PID。CDP 的 `/json/version` 也不暴露 PID，所以按 user-data-dir 反查最稳。）**同理适用于任何"清理现场"的动作：只动自己创建的东西**（进程、文件、端口、git 暂存）。
+  - `writing-blocks.mjs`：**写作模式块级渲染的验收**（115 项，带 `&blocks=1`）。为什么单独一套：块切片会把非光标块整块换成图片，那块里的 `.cm-markup-heading`、公式 widget 等**在 DOM 里不复存在**（设计如此），`wysiwyg.mjs` 那 279 项断言的是"标记装饰"世界，默认开着块渲染会整片变红、把回归信号淹掉 —— 所以桩里 `compile_blocks` **默认返回"没有这个命令"**（页面自动退回整页预览路径），只有 `&blocks=1` 时才给假切片（见 `browser-dev-stub.ts` 的 `blocksStubEnabled`）。这套验的是：非光标块被切片取代（**按 `.cm-line` 判"还是不是源码形态"** —— 不能用 `.cm-content.textContent`，切片的 SVG 里也有文字，实测踩过）、切片铺满正文列宽、点击切片→光标落到该块起点且原活动块变切片、活动块内可正常输入、`Ctrl+E` 切源码模式无切片且切回恢复（0.8.2 起模式切换从 `Ctrl+/` 改成 `Ctrl+E`，`Ctrl+/` 归注释）、暗色挂 `cm-block-crop-dark`、长文档窗口化后滚动仍补渲出切片。
+  - `writing-blocks-visual.mjs`：**块级切片的几何等价验收（真实产物，75 项）**。先 `npm run fixtures:blocks`（Rust `dump_block_fixtures`）导出每块的真实区间/几何/SVG，导航前注入 `window.__DEV_BLOCK_FIXTURES`，桩命中同文档夹具时给真实产物；然后断言"切片摞起来 == 原版式"：每块高度与真实排版一致（实测偏差 **0.01px**）、相邻切片首尾相接（**0.00px**）、总跨度等于真实纵向跨度、铺满正文列宽、高宽比未被拉伸、被盖住的块不在源码形态里。**这条是"和真实 typst 一样"的唯一数字证据**，改块级渲染后必须跑。
+  - **真实文档体检（任何真实 .typ 都能跑，不改源码）**：把文档存到 `.browser-check/real-scene.typ`
+    （该目录已 gitignore），然后
+    `cargo test --manifest-path src-tauri/Cargo.toml dump_real_doc_fixture -- --ignored --nocapture`
+    —— 打印 ok / 页数 / 块数 / 逐条诊断 / 逐块几何（y、高、found、SVG 大小），末行输出一条
+    `BLOCKFIXTURE`；把它写进 `.browser-check/block-fixtures.json` 就能用浏览器验收渲染截图。
+    2026-09-15 用它测过一份真实数学作业，抓到并修掉了"`$x$` 被当成块 → 公式挤成一团"的分块 bug。
+  - `writing-mode-scenes.mjs`：**写作模式的场景验收（真实产物，64 项）**。按文档形态逐场景过一遍
+    （标题层级 / 中文长段落 / 列表与嵌套 / 公式 / 代码与表格脚注 / 文档级 `#set` 对照），
+    每场景断言切片数、列宽、逐块高度、相邻缝，并存一张截图 `.browser-check/scene-<场景名>.png`
+    —— **这几张图就是"文档模式现在长什么样"的直接证据**（无需真机就能看）；最后一个场景还走
+    "编辑 → 重编译 → `Ctrl+E` 往返"。它抓到的第一个真 bug 就是脚注场景的重复渲染（见
+    「写作模式的块级渲染」那节的红线）。
   - `wysiwyg-visual.mjs`：**真实排版的视觉验证**。先用 `npm run fixtures:math`（Rust 侧 `dump_math_fixtures`，`#[ignore]` 的按需测试）把真实 `compile_math` 产物导出到 `.browser-check/math-fixtures.json`（**两种字号各一份**：12pt 写作模式 / 10.5pt 源码模式，桩按 body+display+**sizePt** 匹配，字号对不上宁可退回假 SVG），再用 `Page.addScriptToEvaluateOnNewDocument` 注入页面；桩的 `compile_math` 命中夹具时返回**真实产物**。实测四件只有浏览器/桌面端才看得出来、单测覆盖不到的事：行内公式基线与同行文字基线齐平（零宽 inline-block 探针量基线，误差 < 1px）、渲染尺寸 = 真实 pt × 4/3、块级公式居中且独占整行、暗色主题反色后可见（12 项检查）。**坑**：夹具 json 里没有 `ok` 字段，桩返回时必须补 `{ ok: true, ...fixture }`，否则前端按"渲染失败"处理，页面里公式一直停在源码（实测踩过）。
   - 浏览器开发模式（`?browserdev=1`，见 `src/lib/browser-dev-stub.ts`）里的 `compile_doc` 是假实现（假分页 SVG），`compile_math` 在没有注入夹具时也是假 SVG；文件/PDF 等 Tauri 命令同样是假的。**真实 typst 排版可用夹具链路上浏览器验证**，只有 Tauri IPC / WebView2 那一层必须桌面端（Windows）确认。

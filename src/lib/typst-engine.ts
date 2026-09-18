@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { savePdfDialog } from "./file-ops";
 import { pdfFileName } from "./pdf-export";
 import { dbg } from "./debug";
+import { TYPST_DEFAULT_TEXT_PT } from "./preview-scale";
 
 // ---------------------------------------------------------------------------
 // 接口契约（Rust 侧实现，见 T1 任务契约）：
@@ -226,6 +227,189 @@ export async function compileToSvg(
       error: e instanceof Error ? e.message : String(e),
       errors: [],
     };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 写作模式的块级渲染（compile_blocks）：整篇编译一次 → 每个源块切一张 SVG
+// 契约见 src-tauri/src/block_geometry.rs 的 BlockCrop / BlocksOutput。
+// ---------------------------------------------------------------------------
+
+/** Rust 侧的单块产物：偏移是**文档坐标的字节偏移**（已减掉编译前缀，见 block-offsets.ts） */
+export interface BlockCrop {
+  start: number;
+  end: number;
+  kind: string;
+  /** 是否有渲染结果（`#let` / `#show` / 纯注释行没有） */
+  found: boolean;
+  /** 内容分布在几页（单张长页为 1） */
+  pages: number;
+  /** 切片所在页（1-based）—— 点击定位要在同一页里找字形 */
+  page: number;
+  /** 裁剪带在页面上的左缘 / 上缘（pt）：切片 SVG 的坐标系原点就是带的左上角 */
+  xPt: number;
+  yPt: number;
+  widthPt: number;
+  heightPt: number;
+  bands: number;
+  /** 切片 SVG；空串 = 没有渲染结果 */
+  svg: string;
+  /**
+   * 切片**内部**的链接热区（阶段 3"链接可点"）：坐标相对裁剪带左上角（pt，与 SVG 同坐标系）。
+   * 只有窗口内的块才有（与 svg 同步取舍）；没有链接时为空/缺省。
+   */
+  links?: CropLink[];
+}
+
+/** 切片上的一个链接热区（相对裁剪带左上角，pt） */
+export interface CropLink {
+  xPt: number;
+  yPt: number;
+  widthPt: number;
+  heightPt: number;
+  href: string;
+}
+
+interface RawBlocksOutput {
+  ok: boolean;
+  blocks?: BlockCrop[];
+  pages?: number;
+  pageWidthPt?: number;
+  /** 文档正文实际字号（pt）：源码透镜的字号基准，见 block_geometry::document_text_pt */
+  textPt?: number;
+  diagnostics?: Diagnostic[];
+  warnings?: Diagnostic[];
+}
+
+export interface BlocksOk {
+  ok: true;
+  /** 判别用：与 BlocksUnavailable / BlocksFail 组成可判别联合 */
+  unavailable: false;
+  blocks: BlockCrop[];
+  pageCount: number;
+  /** 实际用于排版的页宽（pt），= 正文列宽 / (1 - 2×页边距比例) */
+  pageWidthPt: number;
+  /**
+   * **文档正文实际字号**（pt，Rust 侧按字符数投票取众数）——写作模式"源码透镜"的字号基准：
+   * 编辑器正文按它渲染，光标进出块时字号/行高才不会跳（用户：「不要光标在哪里哪里就变大了」）。
+   * 后端没给（旧版本 / 浏览器桩）时回落到 typst 默认 11pt。
+   */
+  textPt: number;
+  warnings?: Diagnostic[];
+}
+
+/** 后端没有这个命令（旧版本 / 浏览器开发桩）：调用方退回整页 SVG 预览路径 */
+export interface BlocksUnavailable {
+  ok: false;
+  unavailable: true;
+}
+
+export interface BlocksFail {
+  ok: false;
+  unavailable: false;
+  error: string;
+  errors: CompileErrorLocation[];
+}
+
+export type BlocksResult = BlocksOk | BlocksUnavailable | BlocksFail;
+
+/**
+ * 写作模式的块级编译：整篇编译一次，Rust 侧把每个源块在版面上的那一块（含与相邻块的
+ * 半个间距）切出来单独渲成 SVG —— 编辑器据此把"非光标所在块"显示成**真实 typst 排版**。
+ *
+ * `docOffsetBytes` = 编译前缀的 UTF-8 字节长度（用户文档在 `src` 里的起点），
+ * `contentWidthPt` = 写作模式正文列宽（pt）—— 版心宽随编辑器列宽走。
+ *
+ * 诊断/警告的结构与 `compileToSvg` 完全一致（同一套状态栏/波浪线逻辑）。
+ * 命令不存在（浏览器开发桩、旧后端）时返回 `unavailable`，由调用方退回整页预览。
+ */
+export async function compileBlocks(
+  source: string,
+  docOffsetBytes: number,
+  documentPath: string | null,
+  contentWidthPt: number,
+  fonts?: FontConfigArgs,
+  want?: { from: number; to: number } | null,
+): Promise<BlocksResult> {
+  let out: RawBlocksOutput | null;
+  try {
+    out = await invoke<RawBlocksOutput>("compile_blocks", {
+      src: source,
+      docOffset: docOffsetBytes,
+      documentPath,
+      contentWidthPt,
+      // 窗口 = 只给这一段（文档坐标字节偏移）内的块渲切片；逐块 SVG 会各自复制字形轮廓
+      // （实测约 58 字节/源字符），全渲在长文档下是每按键 10MB 级的开销。
+      // 窗口外的块由前端按"块文本相同"沿用上一轮切片（见 block-plan.carryOverCrops）。
+      wantFrom: want?.from ?? null,
+      wantTo: want?.to ?? null,
+      ...fontArgs(fonts),
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    // 桩 / 旧版本后端的"没有这个命令"是**预期**情形（浏览器开发模式、老安装包），
+    // 不是错误：交给调用方退回整页预览路径，不要显示成编译失败。
+    if (/not found|unknown command|compile_blocks/i.test(message)) {
+      return { ok: false, unavailable: true };
+    }
+    return { ok: false, unavailable: false, error: message, errors: [] };
+  }
+  if (!out || typeof out !== "object" || typeof out.ok !== "boolean" || !Array.isArray(out.blocks)) {
+    return { ok: false, unavailable: true }; // 形状不对 = 后端没实现（桩返回 null 等）
+  }
+  if (out.ok) {
+    return {
+      ok: true,
+      unavailable: false,
+      blocks: out.blocks,
+      pageCount: out.pages ?? 1,
+      pageWidthPt: out.pageWidthPt ?? contentWidthPt,
+      textPt: typeof out.textPt === "number" && out.textPt > 0 ? out.textPt : TYPST_DEFAULT_TEXT_PT,
+      warnings: out.warnings,
+    };
+  }
+  const errors = errorLocations(out.diagnostics ?? []);
+  const first = (out.diagnostics ?? [])[0];
+  dbg.log("compile-diagnostics", "blocks raw", out.diagnostics);
+  return {
+    ok: false,
+    unavailable: false,
+    error: first ? formatDiagnostic(first) : "编译失败：未生成产物",
+    errors,
+  };
+}
+
+/**
+ * **点击定位**（阶段 2）：把一个页面坐标点映射回"这个块里的哪个字节偏移"。
+ *
+ * 几何来自 Rust 侧上一次成功编译的缓存（`block_geometry::HIT_CACHE`），不重新编译，
+ * 也不占编译通道 —— 一次调用是微秒级的线性扫描。
+ *
+ * * `fromByte` / `toByte` = 被点那个块的**文档字节区间**（`block_hit_test` 的钳制范围）；
+ * * 返回值同样是**文档字节偏移**，由调用方换算成 CodeMirror 位置（见 block-offsets.ts）。
+ *
+ * 失败 / 后端没有这个命令（浏览器开发桩、旧安装包）/ 还没编译过 → null，
+ * 调用方退回"光标落到块首"的老行为，绝不因为定位失败而吞掉这次点击。
+ */
+export async function hitTestBlock(
+  fromByte: number,
+  toByte: number,
+  page: number,
+  xPt: number,
+  yPt: number,
+): Promise<number | null> {
+  try {
+    const out = await invoke<number | null>("block_hit_test", {
+      start: fromByte,
+      end: toByte,
+      page,
+      xPt,
+      yPt,
+    });
+    return typeof out === "number" && Number.isFinite(out) ? out : null;
+  } catch (e) {
+    dbg.log("hit-test", "block_hit_test 不可用，退回块首", e);
+    return null;
   }
 }
 

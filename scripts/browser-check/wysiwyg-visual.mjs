@@ -167,6 +167,57 @@ check(
 check("块级公式独占整行", block.lineText === "", JSON.stringify(block.lineText));
 await c.screenshot(SHOT("visual-2-block-math"));
 
+// 2b) **单行**行间公式：现在走"行内 widget + 行级居中"（见 live-preview 的 buildMathDecorations），
+//     几何必须与原来"整行 block 替换"时一样（居中 + 真实高度），不能被这层改动弄歪。
+console.log("2b) 单行行间公式（`$ x $` 独占一行）：居中 + 真尺寸 + 仍在自己的行里");
+await c.selectAll();
+await c.type("前文\n\n$ sum_(i=1)^n i $\n\n后文\n");
+await c.waitFor(`document.querySelectorAll(".cm-math-block").length === 1`, { timeout: 15000 });
+const single = await c.evaluate(`(() => {
+  const PX_PER_PT = 96 / 72;
+  const b = document.querySelector(".cm-math-block");
+  const svg = b.querySelector("svg");
+  const r = svg.getBoundingClientRect();
+  const host = document.querySelector(".cm-content").getBoundingClientRect();
+  const line = b.closest(".cm-line");
+  const fixtures = window.__DEV_MATH_FIXTURES;
+  const f = fixtures.find(x => x.display && Math.abs(x.widthPt * PX_PER_PT - r.width) < 0.6);
+  return {
+    body: f ? f.body : "(未知)",
+    inline: b.classList.contains("cm-math-block-inline"),
+    tag: b.tagName,
+    heightPx: r.height,
+    expectedHeightPx: f ? f.heightPt * PX_PER_PT : null,
+    leftGap: Math.round(r.left - host.left),
+    rightGap: Math.round(host.right - r.right),
+    lineText: line ? line.innerText.trim() : null,
+    lineTextAlign: line ? getComputedStyle(line).textAlign : null,
+    inner: document.querySelector(".cm-content").innerText,
+  };
+})()`);
+check("单行行间公式用真实夹具渲染", single.body !== "(未知)", JSON.stringify(single.body));
+check(
+  "它现在是行内 widget（span.cm-math-block-inline，落在 .cm-line 里、由行居中）",
+  single.inline && single.tag === "SPAN" && single.lineTextAlign === "center",
+  JSON.stringify(single),
+);
+check(
+  "单行行间公式高度 = 真实 pt 高度 × 4/3",
+  Math.abs(single.heightPx - single.expectedHeightPx) < 0.6,
+  JSON.stringify(single),
+);
+check(
+  "单行行间公式居中（左右留白接近）",
+  Math.abs(single.leftGap - single.rightGap) < 40,
+  JSON.stringify({ l: single.leftGap, r: single.rightGap }),
+);
+check(
+  "整行只剩这张公式（源码定界符不出现、前后正文保留）",
+  single.lineText === "" && !single.inner.includes("$") && single.inner.includes("前文"),
+  JSON.stringify(single.lineText),
+);
+await c.screenshot(SHOT("visual-2b-single-line-block-math"));
+
 console.log("3) 暗色主题：公式可见（反色）");
 await c.send("Emulation.setEmulatedMedia", {
   features: [{ name: "prefers-color-scheme", value: "dark" }],

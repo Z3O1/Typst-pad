@@ -3,12 +3,25 @@
   import Editor from "$lib/Editor.svelte";
   import {
     compileToSvg,
+    compileBlocks,
     compileToPdf,
     compileMath,
+    hitTestBlock,
     listFontFamilies,
     defaultFontFamilies,
   } from "$lib/typst-engine";
-  import type { CompileErrorLocation, Diagnostic, MathRender } from "$lib/typst-engine";
+  import type {
+    BlockCrop,
+    BlocksFail,
+    BlocksOk,
+    CompileErrorLocation,
+    Diagnostic,
+    MathRender,
+  } from "$lib/typst-engine";
+  import { byteOffsetsToPositions, positionRangeToByteRange, utf8Length } from "$lib/block-offsets";
+  import { carryOverCrops, remapBlocksThroughEdit, toBlockTable } from "$lib/block-plan";
+  import { clampHitOffset } from "$lib/block-hit";
+  import type { Block } from "$lib/block-plan";
   import { buildFontFamilies, FONT_CHOICE_DEFAULT, normalizeFontDirs } from "$lib/font-settings";
   import { describeCompileWarning } from "$lib/font-warnings";
   import type { MathRequest } from "$lib/live-preview";
@@ -33,6 +46,8 @@
   import { decideAppKey, topModal } from "$lib/app-keys";
   import type { AppModal } from "$lib/app-keys";
   import { isEffectiveDirty, ensureTrailingNewline, needsBlankOverwriteConfirm } from "$lib/doc-utils";
+  import { failureStatus } from "$lib/failure-text";
+  import { installEditorFonts, loadBundledFont } from "$lib/editor-font";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
   import ContextMenu from "$lib/ContextMenu.svelte";
@@ -62,6 +77,7 @@
   import { dbg, setCliDebug } from "$lib/debug";
   import { clampPopoverRect } from "$lib/popover-utils";
   import {
+    TYPST_DEFAULT_TEXT_PT,
     isReflowApplied,
     previewCanvasWidth,
     previewPageWidthPt,
@@ -158,6 +174,10 @@
     runWriteCommand(command: WriteCommand): void;
     /** 切换模式前记下光标在视口里的高度（用户要求：切换模式不改变光标位置，见 Editor.svelte） */
     captureCaretAnchor(): void;
+    /** 写作模式正文列宽（CSS px）：块级渲染的版心宽据此换算（见 scheduleWritingReflow） */
+    contentWidthPx(): number;
+    /** 当前视口覆盖的文档范围（块级渲染窗口据此计算，见 compile_blocks 的窗口说明） */
+    visibleRange(): { from: number; to: number } | null;
   }
 
   /** MenuBar 组件实例方法（右键菜单弹出前联动收起） */
@@ -347,6 +367,125 @@
   let mathVersion = $state(0); // 渲染结果代次（自增即触发编辑器重整装饰）
   /** 公式渲染缓存条数上限（超出按插入顺序淘汰最早的） */
   const MATH_CACHE_LIMIT = 500;
+  // ---------------------------------------------------------------------------
+  // 写作模式的块级渲染（阶段 1）：整篇编译一次 → 每个源块切一张真实排版切片
+  // 见 docs/文档模式渲染保真-调研.md。后端没有 compile_blocks（浏览器开发桩 / 旧版本）
+  // 时自动退回"只渲染公式 + 整页预览"的老路径（compile_blocks 返回 unavailable）。
+  // ---------------------------------------------------------------------------
+  /** 最近一次编译产出的块切片（null = 未启用 / 后端不支持 → 编辑器保持源码显示） */
+  let writingBlocks = $state<Block[] | null>(null);
+  /** 块切片代次（自增即通知编辑器重整块装饰） */
+  let blocksVersion = $state(0);
+  /**
+   * 块表对应的**文档原文**（= 生成这批切片时编译的那一份）与"能否精确定位"标记。
+   *
+   * `writingBlocksExact` 为 false 时说明区间是**估算**的（最近一次编译失败了，见
+   * applyBlocksResult 的失败分支：区间靠前后缀差分平移过来），这时不做点击精确定位 ——
+   * Rust 侧几何缓存里的字节区间还是失败前那一版的，混着用会点错地方（宁可退回块首）。
+   */
+  let writingBlocksDoc = $state("");
+  let writingBlocksExact = $state(false);
+  /**
+   * 写作模式正文列宽（pt）：块级渲染的**版心宽**，随编辑器列宽走。
+   * 0 = 还没量到（编辑器未挂载）→ 编译时用默认值兜底，量到之后 scheduleWritingReflow 会重编一次。
+   */
+  let writingWidthPt = $state(0);
+  /**
+   * **文档正文实际字号**（pt，Rust 侧按字符数投票取众数）—— 写作模式"源码透镜"的字号基准：
+   * 编辑器正文按它渲染（`Editor.svelte` 的 `--write-doc-px`），于是光标进出块时**字号不跳**
+   * （用户：「不要光标在哪里哪里就变大了」）。后端没给（旧版本/桩/源码模式）时用 typst 默认 11pt。
+   */
+  let writingTextPt = $state(TYPST_DEFAULT_TEXT_PT);
+  let writingReflowTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 量不到列宽时的兜底版心宽（495px = 371.25pt，写作模式常见列宽） */
+  const DEFAULT_WRITING_WIDTH_PT = 371.25;
+  /** "视口内出现没切片的块"的重编译定时器（去抖：滚动过程中会连着触发） */
+  let blocksTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 上一次**已经渲过**的窗口（`from:to` 或 `all`）：同一个窗口不重复编译，防抖成环 */
+  let lastBlocksWindow = $state("");
+
+  /**
+   * **点切片里的链接**（阶段 3）：交给系统默认浏览器打开（opener 插件，与「关于 → 项目主页」
+   * 同一条链路）。URL 是 typst 文档里写的，所以只开 http/https/mailto（Rust 侧已过滤过一次）。
+   */
+  function handleOpenLink(href: string): void {
+    dbg.log("link", `打开切片里的链接：${href}`);
+    void openUrl(href).catch((e) => {
+      console.error("[link] 打开链接失败：", e);
+      statusText = truncateStatus(`打开链接失败：${e instanceof Error ? e.message : String(e)}`);
+    });
+  }
+
+  /**
+   * 视口内出现了"能渲染但还没有切片"的块 → 去抖 150ms 后按**新的视口窗口**重编译一次。
+   *
+   * 窗口化渲染的正常中间态：滚动到没渲过的区域，那几块先是源码，这一轮回来后变成切片。
+   * 与公式渲染请求（handleMathRequest）同一套思路，只是这里整篇编译一次即含所有可见块。
+   */
+  function handleBlocksNeeded() {
+    if (viewMode !== "write") return;
+    // 同一个窗口不重复编译：补渲后仍有块没拿到 svg（后端渲染不出来）时，
+    // 不去抖反复重编译（否则就是每 150ms 一次的编译循环）
+    const window = writingWindowBytes();
+    const key = window === null ? "all" : `${window.from}:${window.to}`;
+    if (key === lastBlocksWindow) return;
+    clearTimeout(blocksTimer);
+    blocksTimer = setTimeout(() => void runCompile(), 150);
+  }
+
+  /**
+   * **点击定位**（阶段 2）：切片上点到的那一点 → 源码位置。
+   *
+   * 链路（见 block-hit.ts 的说明）：编辑器量出点击点的页面坐标（pt）→ 这里把块的
+   * CodeMirror 位置换算成**文档字节偏移** → `block_hit_test` 在 Rust 侧的排版帧里找最近的
+   * 字形 → 返回的字节偏移再换算回位置。
+   *
+   * 两道"别乱点"的闸门：
+   *  ① 块表必须**与当前文档一致**（`writingBlocksDoc === doc`）：编译是异步的，刚敲完字
+   *     就点下去时旧区间可能已经偏移了几十字节，硬按旧区间定位会落到别的段落里；
+   *  ② 块表必须是**精确**的（见 writingBlocksExact）：编译失败后沿用旧切片时区间是估算的。
+   * 任一不满足 → 返回 null，编辑器退回"光标落到块首"。
+   */
+  async function handleCropClick(req: {
+    page: number;
+    xPt: number;
+    yPt: number;
+    from: number;
+    to: number;
+  }): Promise<number | null> {
+    if (!writingBlocksExact || writingBlocksDoc !== doc) return null;
+    const range = positionRangeToByteRange(doc, req.from, req.to);
+    if (range.to <= range.from) return null;
+    const bounds = { fromByte: range.from, toByte: range.to };
+    const hit = clampHitOffset(
+      await hitTestBlock(bounds.fromByte, bounds.toByte, req.page, req.xPt, req.yPt),
+      bounds,
+    );
+    if (hit === null) return null;
+    const pos = byteOffsetsToPositions(doc, [hit])[0];
+    if (!Number.isFinite(pos)) return null;
+    dbg.log(
+      "hit-test",
+      `点击 (${req.xPt.toFixed(1)}, ${req.yPt.toFixed(1)})pt → 字节 ${hit} → 位置 ${pos}（块 ${req.from}..${req.to}）`,
+    );
+    return pos;
+  }
+
+  /**
+   * 块级渲染窗口（**文档坐标的字节偏移**）：视口范围 → 字节 + 前后各留一段预取。
+   * 取不到视口（编辑器未挂载）或文档很短（≤ 2×预取）时返回 null = 整篇都渲。
+   */
+  const BLOCK_WINDOW_MARGIN = 4000; // 字符
+  function writingWindowBytes(): { from: number; to: number } | null {
+    if (doc.length <= BLOCK_WINDOW_MARGIN * 2) return null; // 短文档：全渲，省一次换算
+    // 编辑器还没挂载（首帧编译）→ 从文档开头起一段：光标在启动时本来就在开头，
+    // 而"取不到视口就整篇渲"在长文档下会一次性渲出十几 MB（实测 58 字节/字符）。
+    const visible = editorRef?.visibleRange() ?? { from: 0, to: 0 };
+    const from = Math.max(0, visible.from - BLOCK_WINDOW_MARGIN);
+    const to = Math.min(doc.length, visible.to + BLOCK_WINDOW_MARGIN);
+    return positionRangeToByteRange(doc, from, to);
+  }
+
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
   let settingsPrefixEnabled = $state(false);
   let settingsPrefixCode = $state("");
@@ -886,6 +1025,10 @@
     showPreview = viewMode === "source";
     schedulePersist();
     statusText = viewMode === "write" ? "写作模式" : "源代码模式";
+    // 两种模式的产物不通用（写作模式 = 每块切片，源码模式 = 整页 SVG），切换后立刻重编一次；
+    // 写作模式还要按新的列宽重量版心宽（换布局了，列宽也会变）
+    if (viewMode === "write") scheduleWritingReflow();
+    else scheduleCompile();
   }
 
   /**
@@ -916,8 +1059,35 @@
     doc = newDoc;
     editorDoc = newDoc; // 镜像同步（见 editorDoc 声明处）：陈旧镜像 = 切模式/重挂载时丢内容
     dirty = true;
+    remapBlocksForEdit(newDoc);
     scheduleCompile();
     schedulePersist();
+  }
+
+  /**
+   * **每次编辑都让块表跟上**（阶段 2 补的，修"在块内按 Enter 之后会出问题"）：
+   *
+   * 块表与切片是上一次编译的产物，位置是**旧文档的坐标**。此前只有在编译失败时才用前后缀差分
+   * 平移一次，编辑期间则原样沿用（"偏一两个字符无害"）。但**插入换行会改变行结构**，
+   * 而格子的边界是按"块的最后一行之后"算的 —— 旧坐标放在新文档上会算到错误的行，
+   * 于是出现两类可见毛病：① 用户刚打的那一行落进**旁边那张旧切片**里（被图片盖住 = 字看不见，
+   * 编译失败时更不会自愈）；② 同一段文字既出现在旧切片里、又有一部分露成源码（看起来像重复）。
+   *
+   * 做法与"编译失败保留切片"完全相同（`remapBlocksThroughEdit`：前后缀差分 → 没被碰到的块
+   * 原样平移、被碰到的块退回源码），只是**每次编辑都跑**（O(n) 一次双指针比较，微秒级）。
+   * 跑完自增 `blocksVersion` 让编辑器按新表重建装饰（不然这一帧渲染出来的还是旧表的格子）。
+   *
+   * 注意：平移**不**等于"精确"——几何（y/高度）与 Rust 侧的命中测试缓存都还是上一次编译的，
+   * 所以点击精确定位的闸门（`writingBlocksExact`）在这里置回 false，等编译回来再打开。
+   */
+  function remapBlocksForEdit(newDoc: string) {
+    if (!writingBlocks || writingBlocks.length === 0) return;
+    if (writingBlocksDoc === newDoc) return;
+    const remap = remapBlocksThroughEdit(writingBlocks, writingBlocksDoc, newDoc);
+    writingBlocks = remap.blocks;
+    writingBlocksDoc = newDoc;
+    writingBlocksExact = false;
+    blocksVersion++;
   }
 
   /** 有未保存修改时请求确认（打开/拖放/关联打开/重新读取/新建前） */
@@ -956,12 +1126,14 @@
       dirty = false;
       editorDoc = opened.content; // 触发编辑器替换全文
       resetMathCache();
+      resetBlocks();
       scheduleCompile();
       schedulePersist();
       statusText = "已打开";
       return true;
     } catch (e) {
-      statusText = "打开失败";
+      // 带上 Rust 侧的原因（`仅支持 .typ 文件` / `目录无效` …）：光写「打开失败」用户不知道能改什么
+      statusText = failureStatus("打开失败", e);
       return false;
     }
   }
@@ -992,7 +1164,7 @@
       schedulePersist();
       return saved;
     } catch (e) {
-      statusText = "保存失败";
+      statusText = failureStatus("保存失败", e);
       return null;
     }
   }
@@ -1014,11 +1186,12 @@
       dirty = false;
       editorDoc = opened.content; // 触发编辑器替换全文
       resetMathCache();
+      resetBlocks();
       scheduleCompile();
       schedulePersist();
       statusText = "已重新读取";
-    } catch {
-      statusText = "重新读取失败";
+    } catch (e) {
+      statusText = failureStatus("重新读取失败", e);
     }
   }
 
@@ -1129,6 +1302,7 @@
     // 从存档里抹掉（副窗口自己的内容是空的，后面 schedulePersist 也只写设置）
     if (!isSecondaryWindow) clearState();
     resetMathCache();
+    resetBlocks();
     scheduleCompile();
     statusText = "已新建";
   }
@@ -1277,12 +1451,12 @@
       } else if (result.cancelled) {
         statusText = "已取消导出";
       } else {
-        statusText = "导出失败";
+        statusText = failureStatus("导出失败", result.error);
         previewStatus = "error";
         previewError = result.error;
       }
     } catch (e) {
-      statusText = "导出失败";
+      statusText = failureStatus("导出失败", e);
       previewStatus = "error";
       previewError = e instanceof Error ? e.message : String(e);
     }
@@ -1303,8 +1477,18 @@
     }
     if (!added) return;
     clearTimeout(mathTimer);
+    // 公式是小活（几毫秒），而写作模式的整篇编译是几十~几百毫秒，两者共用一把编译锁
+    // （见 Rust 侧命令层互斥锁）。所以**有公式要渲时，把挂着的块编译往后推**：
+    // 让公式先拿到锁 —— 否则"打完公式半天不显示"（实测慢编译桩下，版面对齐要等 338ms）。
+    if (viewMode === "write" && writeCompileTimer !== undefined) {
+      clearTimeout(writeCompileTimer);
+      writeCompileTimer = setTimeout(() => void runCompile(), MATH_COMPILE_HEADSTART_MS);
+    }
     mathTimer = setTimeout(drainMathQueue, 120);
   }
+
+  /** 公式渲染先跑：把挂着的块编译推到这个时刻（比公式自身的 120ms 去抖稍晚一点） */
+  const MATH_COMPILE_HEADSTART_MS = 240;
 
   /** 逐个渲染队列中的公式（Rust 侧编译本身串行），每完成一个就刷新装饰 */
   async function drainMathQueue() {
@@ -1360,6 +1544,19 @@
     mathQueue = [];
     clearTimeout(mathTimer);
     mathVersion++;
+  }
+
+  /**
+   * 文档切换时**块切片必须立刻清空**：块区间是上一个文档的坐标，套在新文档上会盖住正文
+   * （比公式缓存的危害大得多 —— 那是"渲染错内容"，这是"看不到内容"）。
+   * 新文档的编译结果（数十毫秒后）会填回来。
+   */
+  function resetBlocks() {
+    clearTimeout(blocksTimer);
+    writingBlocks = null;
+    writingBlocksDoc = "";
+    writingBlocksExact = false;
+    blocksVersion++;
   }
 
   /**
@@ -1423,6 +1620,21 @@
     );
   }
 
+  /** 写作模式"打字期间不编译"的去抖时长（见 scheduleCompile） */
+  const WRITE_COMPILE_DEBOUNCE_MS = 150;
+  let writeCompileTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * 内容变化后的编译调度。**两种模式走两条路**（用户反馈「输入手感很差（公式）」后改的）：
+   *
+   * - **源代码模式**：立即编译（原有行为）。右侧预览是另一块区域，晚一点没关系但要跟手。
+   * - **写作模式**：**去抖 150ms**。写作模式下的编译是"整篇编译一次 + 窗口内每个块渲一张切片"，
+   *   实测一次几十到几百毫秒（debug 构建更久），而且**每敲一个字都触发一次**：实测打 12 个字符
+   *   → 12 次 `compile_blocks`（外加公式那边 12 次 `compile_math`），三个编译命令共用一把互斥锁
+   *   → 打字时队列一直是满的，最直接的后果是"公式半天不出来"（公式渲染排在整篇编译后面）。
+   *   打字期间**不需要**编译：正在编辑的那一块本来就是源码形态，其它块的切片内容也没变。
+   */
+
   /** 错误浮层当前的条目（复制/渲染共用一份来源，避免"复制的和看到的不一致"） */
   function errorItems(): ErrorListItem[] {
     return buildErrorListItems(editorDiagnostics, lastNonPosError);
@@ -1453,7 +1665,12 @@
   }
 
   function scheduleCompile() {
-    runCompile(); // 立即编译：内容变化后直接编译，编译完即显示（无防抖延迟）
+    if (viewMode === "write") {
+      clearTimeout(writeCompileTimer);
+      writeCompileTimer = setTimeout(() => void runCompile(), WRITE_COMPILE_DEBOUNCE_MS);
+      return;
+    }
+    runCompile();
   }
 
   /** 打开设置弹窗：载入当前前缀配置副本，点“保存”才生效 */
@@ -1585,6 +1802,38 @@
     // 预览重排的页宽是**编译期输入**（Rust 侧据此注入 #set page），所以随本次编译一起发出；
     // 请求值只在结果落地时记进 previewPageWidthUsed（与产物一一对应，见 applyPreviewScale）
     const requestedPreviewWidthPt = previewPageWidthRequest;
+
+    // 写作模式：走块级编译（每个源块一张真实排版切片），不渲染整页预览 —— 整页 SVG 在写作
+    // 模式下是看不见的（预览栏隐藏），省下的是同一量级的工作，换来的是"编辑区里就是真排版"。
+    if (viewMode === "write") {
+      const window = writingWindowBytes();
+      // 记下这一轮渲的窗口：视口内仍有"没拿到切片"的块时，同一个窗口不重复编译（见 handleBlocksNeeded）
+      lastBlocksWindow = window === null ? "all" : `${window.from}:${window.to}`;
+      const blocksResult = await compileBlocks(
+        source,
+        utf8Length(prefixEnabled ? ensureTrailingNewline(prefixCode) : ""),
+        filePath,
+        writingWidthPt > 0 ? writingWidthPt : DEFAULT_WRITING_WIDTH_PT,
+        fontArgs(),
+        window,
+      );
+      if (mySeq === 1) {
+        // 首次编译完成 = 应用「可正常编辑/预览」就绪点（与整页预览路径同一打点）
+        mark("first-compile-result");
+        reportStartup();
+      }
+      if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
+      if (!blocksResult.unavailable) {
+        applyBlocksResult(blocksResult, t0);
+        // 预览栏被手动打开时（视图菜单可以单独开），整页预览也要跟上：接着走下面的
+        // compile_doc 路径把预览填上。只在写作模式额外付一次编译 —— 那是用户显式要的。
+        if (!showPreview) return;
+      }
+      // 后端没有这个命令（浏览器开发桩 / 旧版本）→ 落到下面的整页预览路径，
+      // 行为与加这个功能之前完全一致（块切片保持 null，编辑器只做公式内联渲染）。
+      dbg.log("compile", "compile_blocks 不可用，退回整页预览路径");
+    }
+
     const result = await compileToSvg(
       source,
       filePath,
@@ -1634,6 +1883,103 @@
       // 调试日志：编译失败摘要（错误数/耗时），错误详情见 compile-diagnostics
       dbg.log("compile", `fail errors:${result.errors.length} t:${(performance.now() - t0).toFixed(1)}ms`);
     }
+  }
+
+  /**
+   * 写作模式块级编译的结果落地：成功 → 换上新切片；失败 → **块切片作废**（旧表的区间
+   * 已经对不上新文档），编辑器退回源码 + 波浪线，状态栏照旧显示错误数。
+   *
+   * 与整页预览路径的差别只有一处：整页预览在编译失败时**保留上一次成功产物**，而块切片
+   * 必须立刻撤掉 —— 位置对不上的 widget 会盖住错的正文。
+   */
+  function applyBlocksResult(result: BlocksOk | BlocksFail, t0: number) {
+    if (result.ok) {
+      // 字节偏移 → CodeMirror 位置（只在这里做一次，编辑器侧直接用位置）
+      const table = toBlockTable(doc, result.blocks);
+      // 窗口化渲染：窗口外的块这轮没有 SVG，按"块类型 + 源码文本相同"沿用上一轮结果
+      const carried = carryOverCrops(writingBlocks, table.blocks, doc);
+      writingBlocks = carried.blocks;
+      // 这一批切片与这份文档、这份几何（Rust 侧 HIT_CACHE 也是同一次编译）严格对应
+      writingBlocksDoc = doc;
+      writingBlocksExact = true;
+      blocksVersion++;
+      // 文档正文实际字号（源码透镜的字号基准，见 writingTextPt 的说明）
+      if (result.textPt > 0 && Math.abs(result.textPt - writingTextPt) > 0.01) {
+        writingTextPt = result.textPt;
+      }
+      if (carried.carried > 0 || carried.missing > 0) {
+        dbg.log(
+          "compile",
+          `切片窗口：新渲 ${result.blocks.filter((b) => b.svg).length} / 沿用 ${carried.carried} / 待渲 ${carried.missing}`,
+        );
+      }
+      pageCount = result.pageCount;
+      previewStatus = "ready";
+      editorDiagnostics = [];
+      errorCount = 0;
+      lastNonPosError = null;
+      charCount = doc.length;
+      compileWarnings = result.warnings ?? [];
+      statusText =
+        compileWarnings.length > 0
+          ? truncateStatus(`警告：${describeCompileWarning(compileWarnings[0].message)}`)
+          : "就绪";
+      dbg.log(
+        "compile",
+        `blocks ok blocks:${result.blocks.length} 页宽:${result.pageWidthPt.toFixed(1)}pt t:${(
+          performance.now() - t0
+        ).toFixed(1)}ms`,
+      );
+      return;
+    }
+    // 失败：**不整篇作废**，只把"被改动到的那一块"退回源码（阶段 2）。
+    // 旧表是上一次成功编译的产物（区间 + 切片成套），而块切片一旦丢掉，写作模式会整篇退回
+    // 源码 —— 敲错一个字符就看到整篇源码闪一下，改好才回来。用前后缀差分把没被碰到的块
+    // 原样留下/整体平移（见 block-plan.remapBlocksThroughEdit，含两条"别盖住正文"的约束）。
+    const remap = writingBlocks
+      ? remapBlocksThroughEdit(writingBlocks, writingBlocksDoc, doc)
+      : { blocks: [] as Block[], kept: 0 };
+    // 区间是**估算**的（平移过的），点击精确定位据此退出（见 writingBlocksExact 的说明）
+    writingBlocks = remap.blocks.length > 0 ? remap.blocks : null;
+    writingBlocksDoc = doc;
+    writingBlocksExact = false;
+    blocksVersion++;
+    editorDiagnostics = result.errors;
+    errorCount = result.errors.length;
+    compileWarnings = [];
+    lastNonPosError = result.errors.length === 0 ? result.error : null;
+    statusText =
+      result.errors.length === 0 && result.error
+        ? formatCompileFailMessage(0, result.error)
+        : `编译错误：${result.errors.length} 处`;
+    dbg.log(
+      "compile",
+      `blocks fail errors:${result.errors.length} 保留切片:${remap.kept}/${remap.blocks.length} t:${(
+        performance.now() - t0
+      ).toFixed(1)}ms`,
+    );
+  }
+
+  /**
+   * 写作模式正文列宽（pt）的测量 + **重编译**（去抖 250ms）。
+   *
+   * 版心宽是**编译期输入**（Rust 侧按列宽注入 `#set page(width: …)`），所以窗口尺寸、
+   * 界面缩放、模式切换引起的列宽变化都要重排一次 —— 与源码模式预览的
+   * schedulePreviewReflow 同一套思路。阈值 1.5pt：避免像素级抖动引起的无意义重编译。
+   * （滚动条槽位在写作模式下常驻，见 Editor.svelte 的 scrollbar-gutter，所以不会出现
+   * "重编译 → 高度变 → 滚动条变 → 列宽再变"的反馈环。）
+   */
+  function scheduleWritingReflow() {
+    clearTimeout(writingReflowTimer);
+    writingReflowTimer = setTimeout(() => {
+      const px = editorRef?.contentWidthPx() ?? 0;
+      if (!(px > 0)) return;
+      const next = px * 0.75; // CSS px → pt（1pt = 4/3 px）
+      if (Math.abs(next - writingWidthPt) <= 1.5) return;
+      writingWidthPt = next;
+      dbg.log("writing-reflow", `版心宽 ${next.toFixed(1)}pt（列宽 ${px}px）`);
+      void runCompile();
+    }, 250);
   }
 
   /** 窗口标题同步为“文件名 - Typst-pad”；未保存修改时文件名后加圆点（Tauri） */
@@ -1994,6 +2340,17 @@
     void defaultFontFamilies().then((v) => {
       if (v.length > 0) defaultFonts = v;
     });
+    /**
+     * **写作模式的源码透镜装上打包字体**（Libertinus Serif + 思源宋体子集，见 editor-font.ts）：
+     * 字号（--write-doc-px）与行高早就跟着文档走了，字体是最后一条腿 —— 装上之后源码形态与
+     * 引擎切片才是同一套排版（字宽、断行都对得上）。字体本来就随应用分发，这一步不增加体积；
+     * 装不上（老后端没这个命令 / 文件缺失）就什么都不做，字体栈自己退回系统族。
+     */
+    void installEditorFonts({ load: loadBundledFont })
+      .then((families) => {
+        if (families.length > 0) dbg.log("font", `写作模式已装上打包字体：${families.join(" / ")}`);
+      })
+      .catch((e) => dbg.log("font", "打包字体没装上（保持系统字体栈）：", e));
 
     const firstCompile = runCompile();
     if (isSecondaryWindow) {
@@ -2026,6 +2383,8 @@
     // 复核就会把"引擎接受了"读成"引擎没动"（用户第五次反馈的「界面缩放未生效」就是这个）。
     // 所以判据交给纯函数 shouldRebaselineZoom：复核在跑、或还在沉降窗口内 → 不校。
     const onWindowResize = () => {
+      // 写作模式的版心宽跟着编辑器列宽走：窗口/分栏变化后复核一次（去抖在函数里）
+      scheduleWritingReflow();
       const allowed = shouldRebaselineZoom({
         now: Date.now(),
         settlingUntil: zoomSettlingUntil,
@@ -2064,6 +2423,8 @@
       });
     });
     if (previewBodyEl) previewResizeObserver.observe(previewBodyEl); // bind:this 已在 onMount 前赋值
+    // 写作模式的版心宽要等编辑器挂载后才能量到：量到就重排一次（首帧编译用的是兜底值）
+    scheduleWritingReflow();
 
     // Tauri 内：支持拖放打开 / 关联双击打开 / 跨实例转发打开
     const unlisteners: Array<() => void> = [];
@@ -2190,6 +2551,12 @@
           lookupMath={(key) => mathCache.get(key)}
           onMathRequest={handleMathRequest}
           mathVersion={mathVersion}
+          blocks={writingBlocks}
+          blocksVersion={blocksVersion}
+          docTextPt={writingTextPt}
+          onBlocksNeeded={handleBlocksNeeded}
+          onCropClick={handleCropClick}
+          onOpenLink={handleOpenLink}
         />
       </div>
     </section>

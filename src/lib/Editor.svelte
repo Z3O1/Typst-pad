@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { EditorView, Decoration, hoverTooltip } from "@codemirror/view";
   import { EditorState, Compartment, StateField } from "@codemirror/state";
+  import type { Text } from "@codemirror/state";
   import { indentUnit } from "@codemirror/language";
   import type { DecorationSet } from "@codemirror/view";
   import { basicSetup } from "codemirror";
@@ -18,12 +19,15 @@
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation, MathRender } from "./typst-engine";
+  import type { Block } from "./block-plan";
   import { squiggleRanges, offsetAt } from "./diagnostics-utils";
   import { livePreview, refreshLivePreview } from "./live-preview";
   import type { MathRequest } from "./live-preview";
   import { planForCommand } from "./write-commands";
   import type { WriteCommand } from "./write-commands";
   import { mark } from "./startup-timing";
+  import { anchorPosEffect } from "./scroll-anchor";
+  import { WRITE_FONT_STACK } from "./editor-font";
   import { dbg } from "./debug";
 
   interface Props {
@@ -51,6 +55,37 @@
     /** 渲染结果代次：变化时重整装饰（父组件收到新渲染结果后自增） */
     mathVersion?: number;
     /**
+     * 写作模式的**块级切片**（父组件每次 compile_blocks 后更新）：
+     * 非光标所在块显示成引擎自己画的那一块，光标所在块保持源码。
+     * null / 空 = 关闭（源码模式、后端不支持该命令时都走这条路，行为与加此功能前一致）。
+     * 见 docs/文档模式渲染保真-调研.md。
+     */
+    blocks?: Block[] | null;
+    /**
+     * **文档正文实际字号**（pt，来自 Rust 侧 compile_blocks 的 `textPt`）：写作模式的源码透镜
+     * 按它渲染（`--write-doc-px = textPt × 4/3`），于是光标进出块时字号、行高都不跳
+     * （用户：「不要光标在哪里哪里就变大了」）。缺省用 typst 默认 11pt。
+     */
+    docTextPt?: number;
+    /** 块切片代次：变化时重整块装饰（父组件收到新编译结果后自增） */
+    blocksVersion?: number;
+    /** 视口内出现"能渲染但还没有切片"的块：父组件去抖后按新窗口重编译 */
+    onBlocksNeeded?: () => void;
+    /**
+     * **点击定位**（阶段 2）：点在某张切片上的 `(xPt, yPt)`（页面坐标，pt）→ 光标位置。
+     * 父组件负责换算（字节 ↔ 位置）与 IPC（Rust 侧 `block_hit_test`）；返回 null =
+     * 定不了位，编辑器退回"光标落到块首"。见 block-hit.ts 与 live-preview 的说明。
+     */
+    onCropClick?: (req: {
+      page: number;
+      xPt: number;
+      yPt: number;
+      from: number;
+      to: number;
+    }) => Promise<number | null>;
+    /** **切片里的链接被点**（阶段 3）：父组件交给 opener 插件打开（不移动光标、不吞点击） */
+    onOpenLink?: (href: string) => void;
+    /**
      * 自动换行（源码模式 Alt+Z 切换，状态与持久化由父组件持有）。
      * 打开时给内容加 CodeMirror 的 `cm-lineWrapping`（`white-space: break-spaces` + 断词），
      * 长行折行显示、不再需要横向滚动。
@@ -71,6 +106,12 @@
     lookupMath,
     onMathRequest,
     mathVersion = 0,
+    blocks = null,
+    blocksVersion = 0,
+    docTextPt = 11,
+    onBlocksNeeded,
+    onCropClick,
+    onOpenLink,
     wrap = false,
   }: Props = $props();
 
@@ -95,6 +136,22 @@
     lookup: (key: string) => lookupMath?.(key),
     onRequest: (requests: MathRequest[]) => onMathRequest?.(requests),
     dark: () => theme === "dark",
+    // 块级切片：只在写作模式交给渲染层，源码模式一律 null（要看到真正的源码）
+    blocks: () => (mode === "write" ? (blocks ?? null) : null),
+    onBlocksNeeded: () => onBlocksNeeded?.(),
+    // 点击定位（阶段 2）：父组件换算成字节偏移后问 Rust，编辑器只负责落光标
+    onCropClick: (req: { page: number; xPt: number; yPt: number; from: number; to: number }) =>
+      onCropClick?.(req) ?? Promise.resolve(null),
+    onOpenLink: (href: string) => onOpenLink?.(href),
+    // 编译错误所在的块不许被切片盖住（波浪线画在源码上，见 live-preview 的说明）。
+    // 用参数里的 doc：StateField 计算时 view 上的 state 还是旧的
+    diagnosticRanges: (doc: Text) =>
+      diagState.list.length === 0
+        ? []
+        : squiggleRanges(doc, diagState.list, diagState.prefix).map((r) => ({
+            from: r.from,
+            to: r.to,
+          })),
   };
 
   /**
@@ -303,11 +360,16 @@
   /**
    * 所见即所得：开关切换、渲染结果到货（mathVersion 自增）、前缀变化（缓存键变化）
    * 时重整公式装饰。读这三个响应式值即建立依赖。
+   *
+   * 滚动锚定交给 CodeMirror 自己（它的 measure 循环里就有 anchor diff，装饰换掉 widget 导致的
+   * 高度变化会被它补偿）—— 第一版在这里又加了一层自己的锚定，结果与它叠加（见 scroll-anchor.ts
+   * 的说明）。只有"把光标钉在某个屏幕高度"（点击定位 / 翻页）才需要我们显式给滚动目标。
    */
   $effect(() => {
     if (!view) return;
     void mode;
     void mathVersion;
+    void blocksVersion; // 新的块切片到货 → 重整块装饰
     void prefixCode; // 前缀变化 → 编译上下文与缓存键变化，重新请求与渲染
     view.dispatch({ effects: refreshLivePreview.of(null) });
   });
@@ -326,6 +388,42 @@
       scrollIntoView: true,
     });
     view.focus();
+  }
+
+  /**
+   * 写作模式**正文列宽**（CSS px）：CodeMirror 内容列的实际宽度。
+   *
+   * 用于给写作模式的块级渲染定版心宽（pt = px × 3/4）—— 版心宽是**编译期输入**
+   * （Rust 侧注入 `#set page(width: …)`），所以列宽变了要重新编译（见 +page.svelte 的
+   * scheduleWritingReflow）。写作模式下左右各 48px 留白挂在 `.cm-scroller` 上，
+   * 因此 contentDOM 的宽度就是文字列宽度；源码模式另有用途，不在此处区分。
+   */
+  /**
+   * 当前视口覆盖的文档范围（CodeMirror 位置）：父组件用它算块级渲染的**窗口**
+   * （只渲视口附近的块，见 compile_blocks 的 wantFrom/wantTo）。
+   * 取不到（视图未建）时返回 null，调用方退化成"整篇都渲"（短文档无所谓）。
+   */
+  export function visibleRange(): { from: number; to: number } | null {
+    if (!view) return null;
+    try {
+      const ranges = view.visibleRanges;
+      if (ranges.length === 0) return null;
+      return {
+        from: ranges[0].from,
+        to: ranges[ranges.length - 1].to,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  export function contentWidthPx(): number {
+    if (!view) return 0;
+    try {
+      return view.contentDOM.clientWidth;
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -425,7 +523,17 @@
   });
 </script>
 
-<div class="editor-host" class:write={mode === "write"} bind:this={host}></div>
+<!-- style:--write-doc-px = 文档正文字号（pt → px，1pt = 4/3px）：写作模式的正文与行高按它渲染，
+     与引擎切片完全一致，光标进出块时字号不跳（见样式里 .editor-host.write 的说明）。
+     style:--write-font-stack = 写作模式的字体栈（与 typst 默认族顺序一致）：字号/行高/字体
+     三条腿齐了，源码形态与切片形态才是同一套排版（见 editor-font.ts） -->
+<div
+  class="editor-host"
+  class:write={mode === "write"}
+  style:--write-doc-px={`${(docTextPt * 4) / 3}px`}
+  style:--write-font-stack={WRITE_FONT_STACK}
+  bind:this={host}
+></div>
 
 <style>
   .editor-host {
@@ -438,8 +546,19 @@
   }
 
   /* ---------- 写作模式（仿 Typora）：衬线正文 + 无行号 + 宽行距 ---------- */
+  /*
+   * 写作模式的正文字号 = **文档实际字号**（Rust 侧 compile_blocks 的 `textPt`，前端换算成 px
+   * 挂在 `--write-doc-px` 上），行高 = typst 的 leading（`par.leading` 默认 0.65em → 1.65）。
+   *
+   * 为什么必须这样：写作模式是"非光标块显示引擎切片 + 光标所在块展开成源码"，两者字号不一致时
+   * 光标一进某一块，那一块的字和行高就会**变大**（用户：「不要光标在哪里哪里就变大了」）。
+   * 实测旧行为：编辑区固定 16px、行高 1.9，而切片是 typst 默认 11pt（14.67px）、行高 1.65
+   * → 光标一进去，字大 9%、行盒高 26%。现在字体与行高都跟着文档走：
+   * 默认文档 14.67px / 1.65，`#set text(size: 12pt)` 的文档 16px / 1.65。
+   * 兜底 14.6667px = typst 默认 11pt（旧后端没给 textPt 时，与切片仍然对得上）。
+   */
   .editor-host.write :global(.cm-editor) {
-    font-size: 16px;
+    font-size: var(--write-doc-px, 14.6667px);
   }
 
   /*
@@ -448,7 +567,16 @@
    * 字体与预览/PDF 输出一致（思源宋体），所见即所得才对得上。
    */
   .editor-host.write :global(.cm-content) {
-    font-family: "Noto Serif CJK SC", "Songti SC", "Source Han Serif SC", Georgia, serif;
+    /* 字体栈由 editor-font.ts 的 WRITE_FONT_STACK 提供（拉丁 Libertinus → 中文思源宋体 → 系统宋体）；
+       打包字体装上之前/装不上时，那两族名自然落空、退回后面的系统族，行为与从前一致。 */
+    font-family: var(
+      --write-font-stack,
+      "Noto Serif CJK SC",
+      "Songti SC",
+      "Source Han Serif SC",
+      Georgia,
+      serif
+    );
   }
 
   /* 写作模式下编辑器底色/文字跟随主题变量（暗色时与纸张底色一致，不漏白底） */
@@ -481,42 +609,60 @@
   .editor-host.write :global(.cm-scroller) {
     padding-left: 48px;
     padding-right: 48px;
+    /* 滚动条槽位常驻：写作模式的**版心宽是编译期输入**（Rust 侧按列宽注入 #set page），
+       如果滚动条出现/消失会让列宽来回变，就形成"重编译 → 内容高度变 → 滚动条变 → 再重编译"
+       的反馈环（预览区当年就是这么闪的，见 docs/WYSIWYG-调研.md 4.3）。 */
+    scrollbar-gutter: stable;
   }
   .editor-host.write :global(.cm-content) {
     /* 只留竖直方向：顶部呼吸感 + 底部留白（末行不贴底边） */
     padding: 40px 0 160px;
-    line-height: 1.9;
+    /* typst 的 `par.leading` 默认 0.65em ⇒ 行高 1.65em（与切片里的行距一致，见上） */
+    line-height: 1.65;
     caret-color: var(--typora-caret, currentColor);
   }
 
-  /* 标题：Typora 式的字号梯度与上下留白 */
-  .editor-host.write :global(.cm-line:has(.cm-markup-heading)) {
-    padding-top: 0.6em;
-    padding-bottom: 0.2em;
-  }
+  /* 标题：字号梯度**必须跟 typst 一致**（`typst-library/src/model/heading.rs` 的 ShowSet：
+     level 1 = 1.4em、level 2 = 1.2em、level 3 及以下 = 1.0em，只加粗、不再变大），
+     行高用 typst 的 leading（1.65em，见上）—— 这样光标进标题块时，那一行的高度与切片对得上。
+     以前这里是仿 Typora 的 1.8 / 1.5 / 1.25 / 1.08em：块级渲染落地后就成了 bug，
+     光标一进标题块那一行就比切片大 36%~40%（用户报「在标题所在块，标题就会变的很大」）。
+     上下留白也用 typst 的块间距（heading.rs 的 above / below，单位是**正文字号**的 em，
+     而 padding 正好挂在字号 = 正文的行上，所以直接写数值即可）：
+     level 1 → above 1.8em / below 0.75em；level 2 及以下 → above 1.44em / below 0.75em。 */
+  /*
+   * 标题行**不加上下 padding**（实测取舍，别再加回去）：切片是"按 y 序把页面切成的带"，
+   * 标题周围的空白**已经分散在相邻块的带里**（带在相邻墨迹的中点处切），所以源码形态不需要
+   * 再补一份 —— 补了反而跳：
+   *   padding 0        → 光标进标题块，页面高度 +3px
+   *   0.6em / 0.2em    → +19px（旧值）
+   *   typst 的 1.8em / 0.75em → +40px
+   * 三种都实测过（`.browser-check/probe-pagejump.mjs` 那套量法，600px 视口 + 真实夹具）。
+   */
 
   .editor-host.write :global(.cm-markup-heading-1) {
-    font-size: 1.8em;
-    line-height: 1.45;
+    font-size: 1.4em;
+    line-height: 1.65;
     font-weight: 700;
   }
 
   .editor-host.write :global(.cm-markup-heading-2) {
-    font-size: 1.5em;
-    line-height: 1.5;
+    font-size: 1.2em;
+    line-height: 1.65;
     font-weight: 700;
   }
 
   .editor-host.write :global(.cm-markup-heading-3) {
-    font-size: 1.25em;
-    line-height: 1.55;
+    font-size: 1em;
+    line-height: 1.65;
     font-weight: 600;
   }
 
   .editor-host.write :global(.cm-markup-heading-4),
   .editor-host.write :global(.cm-markup-heading-5),
   .editor-host.write :global(.cm-markup-heading-6) {
-    font-size: 1.08em;
+    font-size: 1em;
+    line-height: 1.65;
     font-weight: 600;
   }
 

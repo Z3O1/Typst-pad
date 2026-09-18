@@ -8,6 +8,11 @@ use tauri::{Emitter, Manager};
 mod packages;
 mod typst_world;
 
+// 源块 ↔ 版面区域的几何映射 + 写作模式的块级渲染（见 docs/文档模式渲染保真-调研.md）。
+// 阶段 0 的探针函数只有测试在用，故整体允许"未使用"告警。
+#[allow(dead_code)]
+mod block_geometry;
+
 /// 待打开的 .typ 文件队列：首次启动参数 + 跨实例转发 + macOS 打开事件，
 /// 前端就绪后一次性取走（避免事件早于前端监听而丢失）
 struct PendingFiles(Mutex<Vec<String>>);
@@ -106,6 +111,71 @@ async fn compile_doc(
     .unwrap_or_else(|_| typst_world::CompileOutput::internal_error("编译任务异常终止")))
 }
 
+/// 写作模式的块级编译（compile_blocks）：整篇编译一次，把每个源块在版面上的那一块切出来，
+/// 供编辑器把"非光标所在块"显示成**真实 typst 排版**（见 docs/文档模式渲染保真-调研.md）。
+///
+/// 与 compile_doc 的关系：同一条编译链路（同一把命令层互斥锁 + spawn_blocking），只是产物
+/// 从"每页 SVG"换成"每块 SVG + 几何"；诊断/警告结构与 compile_doc 完全一致，前端可以共用
+/// 状态栏、错误计数与波浪线逻辑。
+///
+/// * `docOffset` = 用户文档在 `src` 里的起始字节偏移（= 前缀代码的 UTF-8 字节长度）
+/// * `contentWidthPt` = 写作模式正文列宽（pt）：版心宽随编辑器列宽走
+/// * `wantFrom` / `wantTo` = 只给这个字节窗口内的块渲切片（**文档坐标的字节偏移**，与返回的
+///   块区间同一坐标系；null = 全渲）。
+///   逐块 SVG 会各自复制字形轮廓（实测约 58 字节/源字符），所以编辑器按视口请求窗口
+/// * Err 仅用于任务异常终止（正常编译失败仍走 Ok(ok:false)）
+#[tauri::command]
+async fn compile_blocks(
+    state: tauri::State<'_, CompileState>,
+    src: String,
+    doc_offset: usize,
+    document_path: Option<String>,
+    content_width_pt: f64,
+    want_from: Option<usize>,
+    want_to: Option<usize>,
+    font_families: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
+) -> Result<block_geometry::BlocksOutput, String> {
+    let lock = std::sync::Arc::clone(&state.lock);
+    let fonts_dir = state.fonts_dir.clone();
+    let fonts = typst_world::FontConfig::new(font_families, font_dirs);
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        block_geometry::compile_blocks(
+            src,
+            doc_offset,
+            document_path,
+            &fonts_dir,
+            &fonts,
+            content_width_pt,
+            want_from,
+            want_to,
+        )
+    })
+    .await
+    .map_err(|_| "块级编译任务异常终止".to_string())?)
+}
+
+/// 点击定位（阶段 2）：把写作模式切片上的一个点映射回**源码字节偏移**。
+///
+/// 输入是页面坐标（pt）：切片自己的坐标系原点是裁剪带左上角，前端用 `BlockCrop` 的
+/// `x_pt` / `y_pt` / `width_pt` / `height_pt` 把 CSS 像素换算过来（见 block-hit.ts）。
+/// `start` / `end` 是**用户文档字节区间**（那个块），返回值也钳在这个区间里。
+///
+/// 几何来自上一次成功编译的缓存（见 block_geometry 的 HIT_CACHE）：点击不需要重新编译，
+/// 一次命中测试是微秒级，所以这里**不加编译互斥锁**（不占编译通道）。
+/// 没有缓存 / 参数非法 → None，前端退回"光标落到块首"的老行为。
+#[tauri::command]
+fn block_hit_test(
+    start: usize,
+    end: usize,
+    page: usize,
+    x_pt: f64,
+    y_pt: f64,
+) -> Option<usize> {
+    block_geometry::hit_test(start, end, page, x_pt, y_pt)
+}
+
 /// 渲染单个公式为紧致 SVG（compile_math）：编辑器内联渲染（所见即所得）用。
 /// body = 公式源码（不含定界 `$`），display = 是否行间（display 风格），
 /// context = 编译前缀（设置里的前缀代码，与整篇编译同源，宏与字体设置生效），
@@ -202,6 +272,18 @@ fn default_font_families() -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect()
+}
+
+/// 打包字体的原始字节（**写作模式的源码透镜要装上同一套字**，见 `typst_world::EDITOR_FONT_FILES`）。
+///
+/// 为什么不让前端直接读资源目录：没有 fs 插件；而且这份字体本来就随应用分发（`fonts/` 是
+/// `bundle.resources` 的一项），从 Rust 读出来交给 webview **不增加安装包体积**。
+/// 参数只认白名单里的文件名（防路径穿越）；返回 `tauri::ipc::Response` = raw IPC，
+/// 前端拿到的是 ArrayBuffer，不必把 1.3MB 的字体摊成 JSON 数组（那样慢一个数量级）。
+#[tauri::command]
+fn bundled_font(app: tauri::AppHandle, name: String) -> Result<tauri::ipc::Response, String> {
+    let dir = typst_world::resolve_fonts_dir(&app);
+    typst_world::read_editor_font(&dir, &name).map(tauri::ipc::Response::new)
 }
 
 /// 列出可用字体族（设置里「中文字体」下拉的数据源）：打包字体 + 系统字体 + 额外目录。
@@ -472,10 +554,13 @@ pub fn run() {
             list_dir_typ,
             get_debug_flag,
             compile_doc,
+            compile_blocks,
+            block_hit_test,
             compile_math,
             export_pdf,
             list_font_families,
-            default_font_families
+            default_font_families,
+            bundled_font
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
