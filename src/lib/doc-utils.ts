@@ -23,20 +23,6 @@ export function isEffectiveDirty(dirty: boolean, doc: string): boolean {
 }
 
 /**
- * 保存前是否需要"空文档覆盖"二次确认。
- *
- * 判定的是**最危险的那个组合**：`filePath` 非空（= 会写在已有文件上）且文档为空（含仅空白）。
- * 2026-09-16 用户问「编辑器会清空文件吗」时问到的就是这个场景 —— 正常路径下应用**从不自己写盘**
- * （全工程只有 `saveTypFile` 一个 `.typ` 写入口，只挂在显式保存上），能在磁盘上留下空文件的
- * 只有"内容为空 + 目标是已有文件 + 用户按了保存"这一条，所以给它补一道确认。
- *
- * `filePath` 为 null（另存为对话框还没选目标）时**不需要**确认：那是新建一个文件，覆盖不到任何东西。
- */
-export function needsBlankOverwriteConfirm(filePath: string | null, doc: string): boolean {
-  return filePath !== null && isBlankDoc(doc);
-}
-
-/**
  * 规范化编译前缀：非空前缀且未以 `\n` 结尾时在末尾补一个换行，其余情况原样返回。
  *
  * 动机：编译/导出时拼接 `prefixCode + doc`，若前缀末行与用户文档首行直接相连

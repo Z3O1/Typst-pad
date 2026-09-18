@@ -2693,7 +2693,7 @@ await new Promise((r) => setTimeout(r, 400));
 const afterEscAbout = await c.evaluate(aboutProbe);
 check("Esc 关掉关于弹窗", !afterEscAbout.open, JSON.stringify(afterEscAbout));
 
-// 第 38 组：**「编辑器会不会自己清空文件」的两道防护**
+// 第 38 组：**「编辑器会不会自己清空文件」的防护**
 // （用户 2026-09-16 问「编辑器会清空文件吗？？」）
 //
 // 审计结论：全工程只有 `saveTypFile` 一个 `.typ` 写入口，它只挂在显式保存上（菜单/右键「保存」、
@@ -2701,11 +2701,13 @@ check("Esc 关掉关于弹窗", !afterEscAbout.open, JSON.stringify(afterEscAbou
 // 分别管预览重排、缩放复核、公式队列、更新检查与会话存档的 300ms 防抖——最后那个写的是
 // localStorage，不是文件）。所以"应用自己把文件清空"这条路是堵住的，这一组把它钉死。
 //
-// 真正会丢内容/写空的只有两条，各补一道确认（本轮新加）：
-// ① 「新建」——它清空编辑器 + 置空 filePath + 清掉会话存档，此前**一句都不问**；
-// ② 「空文档 + 已有文件 + 按保存」——唯一能把磁盘文件写成空的组合。
-// ② 在本组只能断言"不写盘"（浏览器开发模式没有 filePath：`plugin:dialog|open` 对文件对话框
-// 返回 null，拿不到路径），它的判定函数 `needsBlankOverwriteConfirm` 由单测覆盖。
+// 会丢内容/写空的只有两条，各配一道防护：
+// ① 「新建」——它清空编辑器 + 置空 filePath + 清掉会话存档，所以先 `confirmDiscard`（本组钉住）；
+// ② 「空文档 + 已有文件 + 按保存」——唯一能把磁盘文件写成空的组合。**这道确认窗 2026-09-18 被
+//    用户要求删掉了**（就是标题为「保存空文档」的那个原生对话框：「…的内容是空的（只有空白字符），
+//    保存会把磁盘上的文件也清空。仍要保存吗？」），现在是**直接写空、不再问**，别再"顺手加回来"。
+//    ②在本组里也只能断言"不写盘"（浏览器开发模式没有 filePath：`plugin:dialog|open` 对文件对话框
+//    返回 null，拿不到路径）——判定函数与确认一起删了，**没有单测可挂**。
 console.log("38) 「编辑器会清空文件吗」——新建要先确认 + 全程不自动写盘");
 
 const writesProbe = `(window.__browserDevWrites || []).map((w) => ({

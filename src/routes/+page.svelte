@@ -45,7 +45,7 @@
   import { loadState, saveState } from "$lib/persistence";
   import { decideAppKey, topModal } from "$lib/app-keys";
   import type { AppModal } from "$lib/app-keys";
-  import { isEffectiveDirty, ensureTrailingNewline, needsBlankOverwriteConfirm } from "$lib/doc-utils";
+  import { isEffectiveDirty, ensureTrailingNewline } from "$lib/doc-utils";
   import { failureStatus } from "$lib/failure-text";
   import { installEditorFonts, loadBundledFont } from "$lib/editor-font";
   import MenuBar from "$lib/MenuBar.svelte";
@@ -1145,16 +1145,11 @@
   }
 
   async function handleSave(): Promise<string | null> {
-    // 空文档写进**已有文件**会把它清空 —— 唯一的"能把磁盘文件变空"的路径，
-    // 所以多问一句（判定在 doc-utils.needsBlankOverwriteConfirm，可单测）。
-    // filePath 为 null 时不问：那是另存为，覆盖不到任何东西。
-    if (needsBlankOverwriteConfirm(filePath, doc)) {
-      const ok = await confirmDiscard(
-        `「${fileTitle}」的内容是空的（只有空白字符），保存会把磁盘上的文件也清空。仍要保存吗？`,
-        "保存空文档",
-      );
-      if (!ok) return null;
-    }
+    // 2026-09-18 用户要求删掉「保存空文档」那个确认窗（截图见 PR 记录）：
+    // 空文档保存进已有文件时**直接写**，不再问。原先那道确认是 0.8.0 为「唯一能把磁盘
+    // 文件变空」的路径补的（判定函数 `needsBlankOverwriteConfirm` 已随之删除）。
+    // 前提没变：全工程只有 `saveTypFile` 一个 `.typ` 写入口，只挂在显式保存上 ——
+    // 不按保存，磁盘上的文件一个字节也不会动。
     try {
       const saved = await saveTypFile(filePath, doc);
       if (!saved) return null;
