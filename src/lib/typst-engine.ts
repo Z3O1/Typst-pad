@@ -277,6 +277,7 @@ interface RawBlocksOutput {
   pageWidthPt?: number;
   /** 文档正文实际字号（pt）：源码透镜的字号基准，见 block_geometry::document_text_pt */
   textPt?: number;
+  geometryId?: number;
   diagnostics?: Diagnostic[];
   warnings?: Diagnostic[];
 }
@@ -295,6 +296,13 @@ export interface BlocksOk {
    * 后端没给（旧版本 / 浏览器桩）时回落到 typst 默认 11pt。
    */
   textPt: number;
+  /**
+   * **这一轮编译写进 Rust 侧 `HIT_CACHE` 的几何编号**（0 = 没有几何）。
+   * 点切片时原样带回去（见 `hitTestBlock`）：几何是**进程级**的，多窗口下另一个窗口
+   * 编译一次就会把它换掉，编号对不上时后端拒绝命中、前端退回"光标落到块首"
+   * （PR #60 审查的第 4 条）。旧后端不给这个字段 → 0 → 不校验（老行为）。
+   */
+  geometryId: number;
   warnings?: Diagnostic[];
 }
 
@@ -349,15 +357,27 @@ export async function compileBlocks(
     const message = e instanceof Error ? e.message : String(e);
     // 桩 / 旧版本后端的"没有这个命令"是**预期**情形（浏览器开发模式、老安装包），
     // 不是错误：交给调用方退回整页预览路径，不要显示成编译失败。
-    if (/not found|unknown command|compile_blocks/i.test(message)) {
+    // **判据只认"命令不存在"**：早先这里还带一个裸 `compile_blocks`，于是参数校验失败
+    // （`invalid args ... for command compile_blocks`）、命令内 panic 之类也一并被吞成
+    // "后端不支持"，用户看不到任何提示（PR #60 审查指出）。
+    if (/not found|unknown command/i.test(message)) {
       return { ok: false, unavailable: true };
     }
     return { ok: false, unavailable: false, error: message, errors: [] };
   }
-  if (!out || typeof out !== "object" || typeof out.ok !== "boolean" || !Array.isArray(out.blocks)) {
-    return { ok: false, unavailable: true }; // 形状不对 = 后端没实现（桩返回 null 等）
+  // 形状不对 = 后端没实现这个命令（桩返回 null / 旧安装包）。
+  // **失败结果必须有 `ok`，但不能要求 `blocks` 存在**：Rust 侧早先给 `blocks` 加了
+  // `skip_serializing_if`，编译失败时那个键整个不发，于是"真机上任何 typst 错误"都被这里
+  // 判成"后端不支持" ⇒ 退回整页预览、切片不撤、错误块不展开（PR #60 审查抓到）。
+  // 现在 Rust 侧失败也发 `blocks: []`（见 `failure_output_always_carries_blocks_key`），
+  // 这里再放宽一层：**判"后端有没有实现"只看 `ok` 这个键**，失败结果一律当编译失败处理。
+  if (!out || typeof out !== "object" || typeof out.ok !== "boolean") {
+    return { ok: false, unavailable: true };
   }
   if (out.ok) {
+    if (!Array.isArray(out.blocks)) {
+      return { ok: false, unavailable: true }; // 自称成功却没有块表 = 后端没实现
+    }
     return {
       ok: true,
       unavailable: false,
@@ -365,6 +385,7 @@ export async function compileBlocks(
       pageCount: out.pages ?? 1,
       pageWidthPt: out.pageWidthPt ?? contentWidthPt,
       textPt: typeof out.textPt === "number" && out.textPt > 0 ? out.textPt : TYPST_DEFAULT_TEXT_PT,
+      geometryId: typeof out.geometryId === "number" ? out.geometryId : 0,
       warnings: out.warnings,
     };
   }
@@ -397,6 +418,8 @@ export async function hitTestBlock(
   page: number,
   xPt: number,
   yPt: number,
+  /** 上一次 `compileBlocks` 给的几何编号（0 = 没有/旧后端 → 不校验） */
+  geometryId = 0,
 ): Promise<number | null> {
   try {
     const out = await invoke<number | null>("block_hit_test", {
@@ -405,6 +428,7 @@ export async function hitTestBlock(
       page,
       xPt,
       yPt,
+      geometryId: geometryId > 0 ? geometryId : null,
     });
     return typeof out === "number" && Number.isFinite(out) ? out : null;
   } catch (e) {
@@ -428,11 +452,18 @@ export interface MathRender {
 }
 
 /**
- * 公式编译字号（pt）：**必须等于编辑器正文字号**，否则公式与正文大小不匹配
- * （曾经的 bug：写作模式正文改成 16px 后公式仍按 10.5pt 编译，公式比正文小一圈）。
- * 16px = 16 * 72 / 96 = 12pt。
+ * 公式渲染的**缺省**字号（pt）= 源码模式的正文字号：`.cm-content` 在源码模式是 14px，
+ * 14 × 72 / 96 = **10.5pt**（与 Rust 侧 `typst_world::MATH_TEXT_PT` 同一口径，
+ * SVG 的 pt 与编辑器 CSS 的 pt 1:1，所以两侧必须一起改）。
+ *
+ * **公式字号必须等于正文字号**，而写作模式的正文字号是**跟着文档走**的
+ * （`compile_blocks` 的 `textPt` → `--write-doc-px`），所以写作模式下不能再用这个常数：
+ * 父组件按当前文档字号传 `MathRequest.sizePt`（见 `live-preview` 的 `mathSizePt`）。
+ * 曾经这里写死 12pt（= 写作模式正文 16px 那个年代的值），写作模式正文字号改成跟随文档
+ * （默认 11pt）之后，光标所在块里的公式就比周围正文大 9%、也比同一公式在切片里的样子大
+ * （PR #60 审查抓到）。
  */
-export const MATH_SIZE_PT = 12;
+export const MATH_TEXT_PT = 10.5;
 
 /**
  * 渲染单个公式（编辑器内联渲染用）。失败收敛为 `{ ok: false, error }`，不抛异常
@@ -443,7 +474,7 @@ export async function compileMath(
   display: boolean,
   context: string,
   documentPath: string | null,
-  sizePt: number = MATH_SIZE_PT,
+  sizePt: number = MATH_TEXT_PT,
   fonts?: FontConfigArgs,
 ): Promise<MathRender> {
   try {

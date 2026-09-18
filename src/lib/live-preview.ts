@@ -29,7 +29,7 @@ import type { Block, BlockCover } from "./block-plan";
 import { cropPagePoint } from "./block-hit";
 import { anchorPosEffect } from "./scroll-anchor";
 import { dbg } from "./debug";
-import { MATH_SIZE_PT } from "./typst-engine";
+import { MATH_TEXT_PT } from "./typst-engine";
 import type { MathRender } from "./typst-engine";
 
 /** 待渲染的公式（父组件据此调用 Rust 侧 compile_math） */
@@ -45,6 +45,12 @@ export interface MathRequest {
    * （表现为公式短暂显示旧宏的排版）。
    */
   context: string;
+  /**
+   * 生成该 key 时用的**公式字号**（pt）。同样必须随请求一起传 —— 理由与 `context` 一致：
+   * 父组件是异步批处理，写作模式下的字号跟着文档走（`textPt` 会随编译结果变），
+   * 那时再取当前字号就会「用新字号编出的结果存进旧 key」。
+   */
+  sizePt: number;
 }
 
 export interface LivePreviewOptions {
@@ -61,6 +67,13 @@ export interface LivePreviewOptions {
   lookup: (key: string) => MathRender | undefined;
   /** 需要渲染的公式（父组件负责去重 / 防抖 / 批量 invoke） */
   onRequest: (requests: MathRequest[]) => void;
+  /**
+   * 公式渲染字号（pt）。**必须等于正文字号**：写作模式的正文跟着文档走
+   * （`--write-doc-px` = `textPt × 4/3`），所以公式也得用同一份 `textPt`，
+   * 否则光标所在块里的公式比周围正文大一圈、也与同一公式在切片里的样子不一致
+   * （PR #60 审查抓到写死 12pt 时大 9%）。缺省 = 源码模式的 10.5pt（`MATH_TEXT_PT`）。
+   */
+  mathSizePt?: () => number;
   /** 是否暗色主题（typst 产物是黑字透明底，暗色下需反色；见 mathWidgetTheme） */
   dark: () => boolean;
   /**
@@ -731,7 +744,8 @@ function buildMathDecorations(
     if (decision.reveal) continue;
     // 落在"已被块切片盖住"的区间里：整块已经由块 widget 呈现，这里不能再叠一层 replace
     if (insideCovered(range.from, range.to, covered)) continue;
-    const render = opts.lookup(mathCacheKey(range.body, range.display, context, MATH_SIZE_PT));
+    const sizePt = opts.mathSizePt?.() ?? MATH_TEXT_PT;
+    const render = opts.lookup(mathCacheKey(range.body, range.display, context, sizePt));
     // 未渲染 / 渲染失败 → 保持源码显示
     if (!render?.ok) continue;
     if (block && range.multiline) {
@@ -1348,9 +1362,10 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         (v) => range.to >= v.from - PREFETCH_MARGIN && range.from <= v.to + PREFETCH_MARGIN,
       );
       if (!near) continue;
-      const key = mathCacheKey(range.body, range.display, context, MATH_SIZE_PT);
+      const sizePt = opts.mathSizePt?.() ?? MATH_TEXT_PT;
+      const key = mathCacheKey(range.body, range.display, context, sizePt);
       if (opts.lookup(key)) continue;
-      requests.push({ key, body: range.body, display: range.display, context });
+      requests.push({ key, body: range.body, display: range.display, context, sizePt });
     }
     if (requests.length > 0) opts.onRequest(requests);
   };

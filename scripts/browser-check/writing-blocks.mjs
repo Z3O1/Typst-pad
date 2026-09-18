@@ -1151,5 +1151,69 @@ check(
 );
 await c.screenshot(SHOT("writing-blocks-fonts"));
 
+// ---------------------------------------------------------------------------
+// 18) 公式字号 = 正文字号（写作模式跟着文档走，源码模式 10.5pt）
+// ---------------------------------------------------------------------------
+// PR #60 审查的第 2 条：`MATH_SIZE_PT = 12`（= 正文 16px 那个年代的值）写死在公式渲染里，
+// 而本线让写作模式的正文字号**跟着文档走**（`--write-doc-px = textPt × 4/3`，默认 11pt）——
+// 于是光标所在块里的公式比周围正文大 9%、也比同一公式在切片里的样子大。修法是字号由父组件
+// 按模式给（写作模式 = 文档 textPt，源码模式 = 10.5pt = 14px 正文）。
+// 这里验的是**真的传下去了**（真机上 Rust 侧按 size_pt 排版；桩把入参记在
+// `window.__browserDevLastMath`，与"文档内 #let 进上下文"那条链路的验法同源）。
+console.log("18) 公式字号 = 正文字号（写作模式跟文档，源码模式 10.5pt）");
+await c.evaluate(`localStorage.clear()`);
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await new Promise((r) => setTimeout(r, 800));
+
+// 光标停在**有公式那一行**：写作模式下这一块展开成源码，而同一块里没被光标碰到的公式
+// 仍然是 widget（"光标进入即展开"只作用于光标所在的公式/标记），所以它会走 compile_math。
+await c.click(400, 300);
+await c.selectAll();
+await c.type("第一段带公式 $a_0 + b_1$ 的正文。\n\n第二段正文。\n");
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home → 第一块
+await c.key("End", { code: "End", keyCode: 35 }); // 行尾（同一块内，公式不受光标影响）
+await new Promise((r) => setTimeout(r, 900));
+
+const writeMath = await c.evaluate(`(() => {
+  const m = window.__browserDevLastMath || null;
+  const host = document.querySelector(".editor-host");
+  const px = host ? getComputedStyle(host).getPropertyValue("--write-doc-px").trim() : "";
+  const ed = document.querySelector(".cm-editor");
+  return { sizePt: m && typeof m.sizePt === "number" ? m.sizePt : null, body: m ? m.body : null,
+           docPx: px, editorPx: ed ? getComputedStyle(ed).fontSize : null };
+})()`);
+check(
+  `写作模式的公式按文档字号渲染（sizePt=${writeMath.sizePt} = 正文 ${writeMath.editorPx}）`,
+  writeMath.sizePt !== null && Math.abs(writeMath.sizePt - parseFloat(writeMath.editorPx) * 0.75) < 0.01,
+  JSON.stringify(writeMath),
+);
+check(
+  "公式渲染字号不是写死的 12pt（= 16px 那个年代的值）",
+  writeMath.sizePt !== null && Math.abs(writeMath.sizePt - 12) > 0.01,
+  JSON.stringify(writeMath),
+);
+
+// 源码模式**根本没有公式 widget**（`enabled: () => mode === "write"`：源码模式要看到真正的
+// Typst 源码），所以"源码模式的公式字号"这条路径今天走不到 —— 那是给"内联渲染哪天在源码模式
+// 也开"留的兜底（10.5pt = 14px 正文）。这里把"看不到 widget"这条设计决定钉住：
+// 顺带说明为什么这一组只验写作模式的字号。
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 }); // Ctrl+E
+await new Promise((r) => setTimeout(r, 900));
+const sourceMath = await c.evaluate(`(() => {
+  return { widgets: document.querySelectorAll(".cm-math-widget").length,
+           hasSource: document.body.innerText.includes("$a_0 + b_1$") };
+})()`);
+check(
+  "源码模式不渲染公式 widget（内联渲染只在写作模式，源码要看得见真源码）",
+  sourceMath.widgets === 0 && sourceMath.hasSource === true,
+  JSON.stringify(sourceMath),
+);
+check(
+  "状态栏没有脚本错误（改字号这条路径不许弄坏编辑区）",
+  !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"),
+);
+await c.screenshot(SHOT("writing-blocks-math-size"));
+
 console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
 process.exit(process.exitCode ?? 0);

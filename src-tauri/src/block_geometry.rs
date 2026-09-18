@@ -22,6 +22,7 @@
 
 use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -517,7 +518,12 @@ pub struct CropLink {
 #[serde(rename_all = "camelCase")]
 pub struct BlocksOutput {
     pub ok: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// **这个键永远要发**（编译失败时是空数组）—— 别给它加 `skip_serializing_if`：
+    /// 前端用"`blocks` 是不是数组"来区分「后端没实现这个命令」（旧安装包 / 浏览器桩）
+    /// 与「这一次编译失败」，键缺了就会把**真机上任何 typst 错误**读成"后端不支持"，
+    /// 于是退回整页预览路径，前端那条"撤掉切片 + 展开错误块"的失败分支永远走不到。
+    /// （PR #60 审查抓到；与 `Diagnostic::path` 那个 `path:null` 同一类陷阱 ——
+    /// **桩按契约写、真后端不这么发**，所以 115 项验收全绿也没抓住。）
     pub blocks: Vec<BlockCrop>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pages: Option<usize>,
@@ -525,6 +531,14 @@ pub struct BlocksOutput {
     /// **文档的正文实际字号**（pt）—— 前端拿它当写作模式"源码透镜"的字号基准，
     /// 这样光标进出块时字号不跳（见 `document_text_pt`）。
     pub text_pt: f64,
+    /// **这一轮编译写进 `HIT_CACHE` 的几何编号**（失败 = 0）。前端把它原样带回
+    /// `block_hit_test`：编号对不上就拒绝命中（返回 None，前端退回"光标落到块首"）。
+    ///
+    /// 为什么需要它：命中几何是**进程级全局**的，而应用支持多窗口（`Ctrl+Shift+N`）——
+    /// 窗口 A 编译完、窗口 B 又编译了一次之后，A 再点击就会用 B 的排版几何，
+    /// 结果被钳进 A 的块区间 ⇒ **点错字但不会崩**（PR #60 审查抓到）。前端那两道闸门
+    /// （块表与当前文档一致、块表精确）都是**每窗口**的，看不见另一个窗口。
+    pub geometry_id: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<crate::typst_world::Diagnostic>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -542,6 +556,7 @@ impl BlocksOutput {
             pages: None,
             page_width_pt,
             text_pt: DEFAULT_TEXT_PT,
+            geometry_id: 0, // 失败 = 没有可用的几何
             diagnostics,
             warnings: Vec::new(),
         }
@@ -774,7 +789,7 @@ pub fn compile_blocks(
 
     // 字形几何进缓存，供"点击 → 精确字符"的命中测试用（见 HIT_CACHE）。
     // 放在最后：前面的几何计算都借用了 items，这里把所有权交出去，不再多一份拷贝。
-    store_hit_geometry(items, doc_start);
+    let geometry_id = store_hit_geometry(items, doc_start);
 
     BlocksOutput {
         ok: true,
@@ -782,6 +797,7 @@ pub fn compile_blocks(
         pages: Some(document.pages().len()),
         page_width_pt,
         text_pt,
+        geometry_id,
         diagnostics: Vec::new(),
         warnings,
     }
@@ -1145,13 +1161,21 @@ fn rects_intersect(a: Rect, b: Rect) -> bool {
 /// 再让每个按键的载荷多三成代价太大；而点击只在用户真的点下去那一刻发生一次。
 /// 缓存里只有"字形 → 源字节区间 + 版面矩形"，一次命中测试是线性扫一遍（微秒级）。
 ///
-/// **陈旧是可接受的**：前端只在"块表与当前文档一致"时才发命中测试（见 +page.svelte 的
-/// `handleCropClick`），而块表的区间正是这份几何的来源；编译失败时前端沿用旧块表，
-/// 缓存里也还是上一次成功编译的几何 —— 两者同源。
-static HIT_CACHE: Mutex<Option<Vec<PlacedItem>>> = Mutex::new(None);
+/// **陈旧是可以接受的，但"张冠李戴"不行**：前端只在"块表与当前文档一致"时才发命中测试
+/// （见 +page.svelte 的 `handleCropClick`），而块表的区间正是这份几何的来源；编译失败时
+/// 前端沿用旧块表，缓存里也还是上一次成功编译的几何 —— 两者同源。
+/// 但**几何是进程级的，而应用支持多窗口**：另一个窗口编译一次就会把这份缓存换掉，本窗口
+/// 再点击就会拿别人的排版去找最近字形（结果被钳进自己的块区间 ⇒ 点错字）。
+/// 所以缓存带一个**自增编号**，随 `compile_blocks` 返回给前端、由 `block_hit_test` 带回来比对，
+/// 对不上就拒绝命中（前端退回"光标落到块首"）。
+static HIT_CACHE: Mutex<Option<(u64, Vec<PlacedItem>)>> = Mutex::new(None);
 
-/// 把编译源坐标的字形几何换成**用户文档坐标**并缓存（丢弃注入行 / 前缀里的项）。
-pub fn store_hit_geometry(items: Vec<PlacedItem>, doc_start: usize) {
+/// 几何编号的自增计数器（从 1 开始；0 保留给"没有几何"）
+static HIT_GEOMETRY_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 把编译源坐标的字形几何换成**用户文档坐标**并缓存（丢弃注入行 / 前缀里的项），
+/// 返回这一份几何的编号（前端拿它做后续命中测试的凭据）。
+pub fn store_hit_geometry(items: Vec<PlacedItem>, doc_start: usize) -> u64 {
     let converted: Vec<PlacedItem> = items
         .into_iter()
         .filter(|i| i.range.start >= doc_start && i.range.end > doc_start)
@@ -1161,9 +1185,11 @@ pub fn store_hit_geometry(items: Vec<PlacedItem>, doc_start: usize) {
             i
         })
         .collect();
+    let id = HIT_GEOMETRY_SEQ.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut guard) = HIT_CACHE.lock() {
-        *guard = Some(converted);
+        *guard = Some((id, converted));
     }
+    id
 }
 
 /// 点到区间的距离（落在区间内为 0）—— 用来挑"最近的一行 / 行里最近的一个字"
@@ -1225,12 +1251,26 @@ pub fn pick_hit(
 
 /// Tauri 命令的入口：`(x_pt, y_pt)` 是**页面坐标**（与 `BlockCrop` 的 x_pt/y_pt 同一坐标系）。
 /// 没有缓存（还没编译过）或参数非法时返回 None，前端退回"落到块首"的老行为。
-pub fn hit_test(start: usize, end: usize, page: usize, x_pt: f64, y_pt: f64) -> Option<usize> {
+pub fn hit_test(
+    start: usize,
+    end: usize,
+    page: usize,
+    x_pt: f64,
+    y_pt: f64,
+    geometry_id: Option<u64>,
+) -> Option<usize> {
     if !x_pt.is_finite() || !y_pt.is_finite() {
         return None;
     }
     let guard = HIT_CACHE.lock().ok()?;
-    let items = guard.as_ref()?;
+    let (id, items) = guard.as_ref()?;
+    // 前端给了编号就必须对上（多窗口 / 换文档后缓存被别人覆盖时拒绝命中）；
+    // 没给编号（旧前端、内部探针）按老行为直接用 —— 兼容，不引入新的失败模式。
+    if let Some(expected) = geometry_id {
+        if expected != *id {
+            return None;
+        }
+    }
     pick_hit(items, start, end, page, Abs::pt(x_pt), Abs::pt(y_pt))
 }
 
@@ -1288,6 +1328,45 @@ mod tests {
     /// 拿测试锁（用 `into_inner` 兜住中毒：某个用例 panic 了也要放别人过去）
     fn hit_cache_guard() -> std::sync::MutexGuard<'static, ()> {
         HIT_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// **编译失败时 `blocks` 键也必须在**（PR #60 审查抓到的真机 bug 的锁）。
+    ///
+    /// 前端用"`blocks` 是不是数组"区分「后端没实现这个命令」与「这次编译失败」；
+    /// 早先 `blocks` 带 `skip_serializing_if = "Vec::is_empty"`，而 `fail()` 正是把它置空 ⇒
+    /// 失败 JSON 里根本没有这个键 ⇒ 真机上**任何 typst 错误**都被读成"后端不支持"、
+    /// 退回整页预览路径（切片不撤、错误块不展开）。浏览器验收抓不到，因为**桩自己补了
+    /// `blocks: []`**；所以这条断言要钉在 Rust 侧的序列化形状上。
+    #[test]
+    fn failure_output_always_carries_blocks_key() {
+        let diag = crate::typst_world::Diagnostic {
+            message: "boom".into(),
+            severity: "error".into(),
+            line: 1,
+            column: 1,
+            end_line: Some(1),
+            end_column: Some(2),
+            path: None,
+        };
+        let json = serde_json::to_string(&BlocksOutput::fail(vec![diag], 420.0)).unwrap();
+        assert!(
+            json.contains(r#""blocks":[]"#),
+            "编译失败也要发 blocks 键（空数组），否则前端会当成「后端不支持」: {json}"
+        );
+        assert!(json.contains(r#""ok":false"#), "失败标志要在: {json}");
+        // 成功路径同理（空文档 / 全是无输出块的文档 → 块表就是空的）
+        let empty_ok = BlocksOutput {
+            ok: true,
+            blocks: Vec::new(),
+            pages: Some(1),
+            page_width_pt: 420.0,
+            text_pt: DEFAULT_TEXT_PT,
+            geometry_id: 7,
+            diagnostics: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let json = serde_json::to_string(&empty_ok).unwrap();
+        assert!(json.contains(r#""blocks":[]"#), "空块表也要发键: {json}");
     }
     use std::path::PathBuf;
 
@@ -1348,6 +1427,65 @@ mod tests {
         );
     }
 
+    /// **几何编号对不上就拒绝命中**（PR #60 审查的第 4 条：多窗口串味）。
+    ///
+    /// `HIT_CACHE` 是**进程级**的，而应用支持多窗口：窗口 A 编译完、窗口 B 又编译一次之后，
+    /// A 再点击就会拿 B 的排版几何去找最近字形 —— 结果被钳进 A 的块区间，**点错字而不报错**。
+    /// 所以 `compile_blocks` 返回几何编号、`block_hit_test` 带回来比对：对不上 → None
+    /// （前端退回"光标落到块首"）。不带编号（旧前端 / 内部探针）仍按老行为直接用。
+    #[test]
+    fn hit_test_refuses_geometry_owned_by_another_compile() {
+        let _hit_cache = hit_cache_guard();
+        const COLUMN_PT: f64 = 371.25;
+        // 另一个"窗口"的字体目录/配置与主用例一致，只有文档不同
+        let other = compile_blocks(
+            "另一篇文档。\n".to_string(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(other.ok, "编译应成功：{:?}", other.diagnostics);
+        assert!(other.geometry_id > 0, "成功编译要发一个非零几何编号");
+
+        let doc = "甲乙丙丁戊己庚辛\n";
+        let out = compile_blocks(
+            doc.to_string(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
+        let b = &out.blocks[0];
+        let (x, y) = (b.x_pt + 0.5, b.y_pt + b.height_pt * 0.5);
+
+        // 自己的编号 → 命中（几何确实是这一轮的）
+        assert_eq!(
+            hit_test(b.start, b.end, b.page, x, y, Some(out.geometry_id)),
+            Some(b.start),
+            "编号对得上就该命中"
+        );
+        // 别人的编号 → 拒绝（这一时期缓存里是"另一篇文档"的排版）
+        assert_eq!(
+            hit_test(b.start, b.end, b.page, x, y, Some(other.geometry_id)),
+            None,
+            "编号对不上必须拒绝命中（多窗口下会点错字）"
+        );
+        // 旧前端不带编号：兼容旧行为
+        assert_eq!(
+            hit_test(b.start, b.end, b.page, x, y, None),
+            Some(b.start),
+            "不带编号时不校验（旧前端 / 探针）"
+        );
+    }
+
     /// **真实引擎几何 + 真实字节偏移**：单行块的左缘 → 块首，右缘 → 块尾（含 CJK 3 字节）。
     #[test]
     fn hit_test_on_real_layout_maps_edges_to_block_bounds() {
@@ -1372,13 +1510,14 @@ mod tests {
 
         // 单行块：横向两端必定落在块首 / 块尾（y 取带里任意高度都行 —— 同一行的字形纵向距离相同）
         let y = single.y_pt + single.height_pt * 0.5;
-        let left = hit_test(single.start, single.end, single.page, single.x_pt + 0.5, y);
+        let left = hit_test(single.start, single.end, single.page, single.x_pt + 0.5, y, None);
         let right = hit_test(
             single.start,
             single.end,
             single.page,
             single.x_pt + single.width_pt - 0.5,
             y,
+            None,
         );
         assert_eq!(left, Some(single.start), "左缘 → 块首");
         assert_eq!(right, Some(single.end), "右缘 → 块尾（= 该行行尾）");
@@ -1391,6 +1530,7 @@ mod tests {
             para.page,
             x,
             para.y_pt + para.height_pt * 0.12,
+            None,
         )
         .expect("上部的点应该命中");
         let bottom = hit_test(
@@ -1399,6 +1539,7 @@ mod tests {
             para.page,
             x,
             para.y_pt + para.height_pt * 0.88,
+            None,
         )
         .expect("下部的点应该命中");
         assert!(
@@ -1436,6 +1577,7 @@ mod tests {
             out2.blocks[0].page,
             out2.blocks[0].x_pt + 0.5,
             y2,
+            None,
         );
         assert_eq!(hit2, Some(0), "带前缀时命中结果仍是文档坐标");
     }
@@ -2075,7 +2217,7 @@ mod tests {
                 for &xf in XF {
                     let x = b.x_pt + b.width_pt * xf;
                     let y = b.y_pt + b.height_pt * yf;
-                    if let Some(offset) = hit_test(b.start, b.end, b.page, x, y) {
+                    if let Some(offset) = hit_test(b.start, b.end, b.page, x, y, None) {
                         // 保留两位小数：浏览器侧按这个值算视口坐标，误差 < 0.01pt 不会改变命中结果
                         probes.push(serde_json::json!({
                             "b": idx,

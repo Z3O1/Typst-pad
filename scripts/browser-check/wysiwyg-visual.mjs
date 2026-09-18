@@ -303,10 +303,12 @@ check(
 );
 // 下标用例必须真的"有下沉空间"：画布要明显高过基线（否则说明产物退化了）
 const sub = inkAudit.filter((m) => m.body === "a_0");
-// 下标基线实测 ≈0.93em（12pt 字号下 11.16pt）：画布必须高过它，下标才有落脚处
+// 下标基线实测 ≈0.93em（12pt 字号下 11.16pt）：画布必须高过它，下标才有落脚处。
+// **别把份数写死**：`dump_math_fixtures` 每加一档字号这里就多一条（PR #60 之后是
+// 11 / 12 / 10.5 三档），断言只要求"≥2 档都满足比例"。
 check(
   "下标公式的画布高过下标基线（≈0.93em）",
-  sub.length === 2 && sub.every((m) => m.vbH / (m.sizePt ?? 12) >= 0.93),
+  sub.length >= 2 && sub.every((m) => m.vbH / (m.sizePt ?? 12) >= 0.93),
   JSON.stringify(sub),
 );
 await c.screenshot(SHOT("visual-4-ink-audit"));

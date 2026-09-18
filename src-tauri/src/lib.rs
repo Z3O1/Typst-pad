@@ -165,6 +165,11 @@ async fn compile_blocks(
 /// 几何来自上一次成功编译的缓存（见 block_geometry 的 HIT_CACHE）：点击不需要重新编译，
 /// 一次命中测试是微秒级，所以这里**不加编译互斥锁**（不占编译通道）。
 /// 没有缓存 / 参数非法 → None，前端退回"光标落到块首"的老行为。
+///
+/// * `geometryId` = 该窗口上一次 `compile_blocks` 返回的几何编号（`BlocksOutput.geometryId`）。
+///   缓存是**进程级**的，另一个窗口编译一次就会把它换掉；对不上编号就返回 None，
+///   免得拿别人的排版去找最近字形（多窗口下会点错字，见 HIT_CACHE 的说明）。缺省 None =
+///   不校验（旧前端 / 内部探针）。
 #[tauri::command]
 fn block_hit_test(
     start: usize,
@@ -172,8 +177,9 @@ fn block_hit_test(
     page: usize,
     x_pt: f64,
     y_pt: f64,
+    geometry_id: Option<u64>,
 ) -> Option<usize> {
-    block_geometry::hit_test(start, end, page, x_pt, y_pt)
+    block_geometry::hit_test(start, end, page, x_pt, y_pt, geometry_id)
 }
 
 /// 渲染单个公式为紧致 SVG（compile_math）：编辑器内联渲染（所见即所得）用。

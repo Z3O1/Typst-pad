@@ -19,6 +19,7 @@
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation, MathRender } from "./typst-engine";
+  import { MATH_TEXT_PT } from "./typst-engine";
   import type { Block } from "./block-plan";
   import { squiggleRanges, offsetAt } from "./diagnostics-utils";
   import { livePreview, refreshLivePreview } from "./live-preview";
@@ -135,6 +136,12 @@
     prefix: () => prefixCode ?? "",
     lookup: (key: string) => lookupMath?.(key),
     onRequest: (requests: MathRequest[]) => onMathRequest?.(requests),
+    // 公式字号 = 正文字号：写作模式跟着文档走（`--write-doc-px` 就是 `docTextPt × 4/3`）。
+    // 写死 12pt（= 正文 16px 那个年代的值）时，写作模式的公式比周围正文大 9%、
+    // 也比同一公式在切片里的样子大（PR #60 审查抓到）。
+    // 源码模式那条分支是**兜底**：内联渲染今天只在写作模式开（见 enabled），
+    // 源码模式根本不会有公式 widget；真要开，10.5pt 才是与 14px 正文对齐的值。
+    mathSizePt: () => (mode === "write" ? docTextPt : MATH_TEXT_PT),
     dark: () => theme === "dark",
     // 块级切片：只在写作模式交给渲染层，源码模式一律 null（要看到真正的源码）
     blocks: () => (mode === "write" ? (blocks ?? null) : null),

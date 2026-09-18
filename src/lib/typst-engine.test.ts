@@ -10,6 +10,7 @@ import {
   composePages,
   compileToSvg,
   compileToPdf,
+  compileBlocks,
   compileMath,
   listFontFamilies,
   defaultFontFamilies,
@@ -317,5 +318,79 @@ describe("compileToSvg：预览重排的页宽透传", () => {
       "compile_doc",
       expect.objectContaining({ previewWidthPt: null }),
     );
+  });
+});
+
+// 块级渲染的 IPC 契约（PR #60 审查抓到的那条真机 bug 的锁）：
+// 「后端没实现这个命令」与「这次编译失败」必须分得开 —— 早先前者的判据是
+// "`blocks` 是不是数组"，而真 Rust 侧失败时那个键被 serde 省略 ⇒ 真机上任何 typst 错误
+// 都被读成"后端不支持"、退回整页预览（切片不撤、错误块不展开），而桩自己补了 `blocks: []`
+// 所以验收全绿。契约现在只看 `ok`：失败结果**有没有 `blocks` 都算失败**。
+describe("compileBlocks：区分「后端不支持」与「编译失败」", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("失败且**没有** blocks 键（真 Rust 侧早先的形状）→ 编译失败，不是 unavailable", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ok: false,
+      pageWidthPt: 420,
+      textPt: 11,
+      diagnostics: [
+        {
+          message: "unknown variable: foo",
+          severity: "error",
+          line: 2,
+          column: 3,
+          endLine: 2,
+          endColumn: 6,
+        },
+      ],
+    });
+    const res = await compileBlocks("= t\n#foo\n", 0, null, 420);
+    expect(res.ok).toBe(false);
+    expect(res.unavailable).toBe(false);
+    if (res.ok || res.unavailable) throw new Error("期望「编译失败」");
+    expect(res.errors.length).toBe(1);
+    expect(res.error).toContain("unknown variable");
+  });
+
+  it("失败且**带** blocks: []（Rust 侧现在的形状）→ 同样是编译失败", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ok: false, blocks: [], pageWidthPt: 420, textPt: 11 });
+    const res = await compileBlocks("= t\n", 0, null, 420);
+    expect(res.ok).toBe(false);
+    expect(res.unavailable).toBe(false);
+  });
+
+  it("ok:true 但没有块表 → 才算「后端没实现」（退回整页预览）", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ok: true, pageWidthPt: 420, textPt: 11 });
+    const res = await compileBlocks("= t\n", 0, null, 420);
+    expect(res.ok).toBe(false);
+    expect(res.unavailable).toBe(true);
+  });
+
+  it("桩返回 null（&blocks=1 没开）→ unavailable", async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+    const res = await compileBlocks("= t\n", 0, null, 420);
+    expect(res.unavailable).toBe(true);
+  });
+
+  it("命令不存在 → unavailable（旧安装包走这条路）", async () => {
+    vi.mocked(invoke).mockRejectedValue(
+      new Error("Command compile_blocks not found"),
+    );
+    const res = await compileBlocks("= t\n", 0, null, 420);
+    expect(res.unavailable).toBe(true);
+  });
+
+  it("**参数校验失败 / 命令内 panic 不算「不支持」**（别再退化成静默回退）", async () => {
+    // 真实的 Tauri 报错长这样：invalid args `wantFrom` for command `compile_blocks`: ...
+    vi.mocked(invoke).mockRejectedValue(
+      new Error("invalid args `wantFrom` for command `compile_blocks`: invalid type: string"),
+    );
+    const res = await compileBlocks("= t\n", 0, null, 420);
+    expect(res.unavailable).toBe(false);
+    if (res.ok || res.unavailable) throw new Error("期望「错误结果」");
+    expect(res.error).toContain("invalid args");
   });
 });

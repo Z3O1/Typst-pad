@@ -1656,9 +1656,12 @@ mod tests {
     /// 每行输出 `FIXTURE:{json}`，由 scripts/browser-check 收集后注入浏览器开发模式页面，
     /// 于是浏览器里渲染的是**真实 typst 产物**（真尺寸/真基线），而不是桩的假 SVG。
     ///
-    /// **两种字号各导一份**：前端写作模式正文 16px → 12pt（MATH_SIZE_PT），
-    /// 源码模式正文 14px → 10.5pt（MATH_TEXT_PT）；桩按 (body, display, sizePt) 匹配，
-    /// 字号对不上就会退回假 SVG（实测踩过：只导 10.5 时写作模式下全对不上）。
+    /// **三种字号各导一份**：写作模式正文默认 11pt（`DEFAULT_TEXT_PT`，文档没写
+    /// `#set text(size:)` 时就是这个）、写作模式文档写了 12pt、源码模式正文 14px → 10.5pt
+    /// （`MATH_TEXT_PT`）。桩按 (body, display, sizePt) 匹配，字号对不上就退回假 SVG
+    /// （实测踩过：只导 10.5 时写作模式下全对不上）。
+    /// **11pt 那份是 PR #60 审查之后补的**：写作模式的公式字号改成跟随文档（原来是写死的
+    /// 12pt），默认文档请求的就是 11pt。
     #[test]
     #[ignore = "按需运行：导出浏览器视觉验证用的真实公式产物"]
     fn dump_math_fixtures() {
@@ -1679,7 +1682,7 @@ mod tests {
             ("a + b \\ = c", true),
         ];
         for (body, display) in cases {
-            for size_pt in [12.0, MATH_TEXT_PT] {
+            for size_pt in [crate::block_geometry::DEFAULT_TEXT_PT, 12.0, MATH_TEXT_PT] {
                 let out = compile_math(body, display, "", None, &fonts_dir(), &FontConfig::default(), size_pt);
                 assert!(out.ok, "夹具公式应渲染成功: {body} / {:?}", out.error);
                 let json = serde_json::json!({

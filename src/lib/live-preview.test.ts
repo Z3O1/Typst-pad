@@ -11,7 +11,8 @@ import { basicSetup } from "codemirror";
 import { livePreview } from "./live-preview";
 import type { Block } from "./block-plan";
 import { mathCacheKey } from "./math-ranges";
-import { MATH_SIZE_PT } from "./typst-engine";
+import type { MathRequest } from "./live-preview";
+import { MATH_TEXT_PT } from "./typst-engine";
 import type { MathRender } from "./typst-engine";
 
 /** 假渲染结果：真实契约里 svg 是 Rust 侧产物，这里只需区分不同公式 */
@@ -28,17 +29,24 @@ function render(body: string): MathRender {
 describe("livePreview 扩展", () => {
   let host: HTMLElement;
   let view: EditorView;
-  const requests: { key: string; body: string; display: boolean; context: string }[] = [];
+  const requests: MathRequest[] = [];
   const cache = new Map<string, MathRender>();
 
   /** 建视图：enabled / dark 可切换，缓存与请求回调用闭包读当前状态 */
   function mount(
     doc: string,
-    opts: { enabled?: boolean; dark?: boolean; cache?: boolean; cursor?: number } = {},
+    opts: {
+      enabled?: boolean;
+      dark?: boolean;
+      cache?: boolean;
+      cursor?: number;
+      /** 公式字号（pt）：不给 = 缺省 10.5pt（源码模式）；写作模式由父组件传文档字号 */
+      mathSizePt?: number;
+    } = {},
   ) {
     const enabled = opts.enabled ?? true;
     const dark = opts.dark ?? false;
-    if (opts.cache) cache.set(mathCacheKey("x^2", false, "", MATH_SIZE_PT), render("x^2"));
+    if (opts.cache) cache.set(mathCacheKey("x^2", false, "", MATH_TEXT_PT), render("x^2"));
     view = new EditorView({
       parent: host,
       state: EditorState.create({
@@ -54,6 +62,7 @@ describe("livePreview 扩展", () => {
             lookup: (key) => cache.get(key),
             onRequest: (reqs) => requests.push(...reqs),
             dark: () => dark,
+            ...(opts.mathSizePt === undefined ? {} : { mathSizePt: () => opts.mathSizePt! }),
           }),
         ],
       }),
@@ -121,8 +130,26 @@ describe("livePreview 扩展", () => {
     expect(text()).toContain("$y^2$");
   });
 
+  // PR #60 审查的第 2 条：写作模式的正文跟着文档走（--write-doc-px = textPt × 4/3），
+  // 公式却一直按写死的 12pt（= 正文 16px 那个年代的值）编译 ⇒ 光标所在块里的公式比周围
+  // 正文大 9%、也与同一公式在切片里的样子不一致。现在字号由父组件按模式给：
+  // 写作模式 = 文档 textPt，源码模式 = 10.5pt（14px 正文）。
+  it("公式字号跟着模式走：请求与缓存键都用 mathSizePt（不再写死）", () => {
+    mount("$x^2$\n", { mathSizePt: 11 }); // 写作模式默认文档 = 11pt
+    expect(requests.length).toBe(1);
+    expect(requests[0].sizePt).toBe(11);
+    expect(requests[0].key).toBe(mathCacheKey("x^2", false, "", 11));
+  });
+
+  it("缺省公式字号 = 源码模式的 10.5pt（14px 正文）", () => {
+    mount("$x^2$\n");
+    expect(requests.length).toBe(1);
+    expect(requests[0].sizePt).toBe(10.5);
+    expect(requests[0].key).toBe(mathCacheKey("x^2", false, "", 10.5));
+  });
+
   it("渲染失败（ok:false）不显示 widget，保持源码", () => {
-    cache.set(mathCacheKey("bad", false, "", MATH_SIZE_PT), { ...render("bad"), ok: false, error: "boom" });
+    cache.set(mathCacheKey("bad", false, "", MATH_TEXT_PT), { ...render("bad"), ok: false, error: "boom" });
     mount("$bad$");
     expect(widgetCount()).toBe(0);
     expect(text()).toContain("$bad$");
@@ -160,7 +187,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("整行公式被完整盖住 → 块级 widget 也保持渲染 + 淡色底", () => {
-    cache.set(mathCacheKey("x^2", true, "", MATH_SIZE_PT), render("x^2"));
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
     mount("$ x^2 $\n正文");
     const block = () => host.querySelector(".cm-math-block");
     expect(block()).not.toBeNull();
@@ -175,7 +202,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("跨行的行间公式（整行 block widget）被完整盖住时**仍然展开**：那种形态里打字会插到下一行", () => {
-    cache.set(mathCacheKey("a + b", true, "", MATH_SIZE_PT), render("a + b"));
+    cache.set(mathCacheKey("a + b", true, "", MATH_TEXT_PT), render("a + b"));
     mount("$\n  a + b\n$\n后文\n");
     const block = () => host.querySelector(".cm-math-block");
     expect(block()).not.toBeNull();
@@ -188,7 +215,7 @@ describe("livePreview 扩展", () => {
     // 装饰盖的是**整行**（连空白一起，才真的居中），而选区只盖公式本身 → widget 只被盖住一部分。
     // DOM 里 widget 是原子节点，浏览器只能在它边缘插入 —— 实测那种情况打字会把字符插到行尾
     //（`  $ x^2 $  ` → `  $ x^2 $  z`），所以必须展开源码。
-    cache.set(mathCacheKey("x^2", true, "", MATH_SIZE_PT), render("x^2"));
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
     mount("前文\n\n  $ x^2 $  \n\n后文\n");
     const block = () => host.querySelector(".cm-math-block");
     expect(block()).not.toBeNull();
@@ -209,7 +236,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("独占整行的行间公式 → 块级 widget（居中显示）", () => {
-    cache.set(mathCacheKey("x^2", true, "", MATH_SIZE_PT), render("x^2"));
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
     mount("$ x^2 $\n正文");
     // 块级：DOM 里是 .cm-math-block（不是行内 .cm-math-widget）
     expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
@@ -218,7 +245,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("跨行书写的行间公式也能整行渲染成块级 widget", () => {
-    cache.set(mathCacheKey("a + b", true, "", MATH_SIZE_PT), render("a + b"));
+    cache.set(mathCacheKey("a + b", true, "", MATH_TEXT_PT), render("a + b"));
     mount("$\n  a + b\n$\n正文");
     expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
     expect(text()).toContain("正文");
@@ -227,7 +254,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("与文字同行的 `$ x $` 不整行替换（避免吃掉旁边正文）", () => {
-    cache.set(mathCacheKey("x", true, "", MATH_SIZE_PT), render("x"));
+    cache.set(mathCacheKey("x", true, "", MATH_TEXT_PT), render("x"));
     mount("前 $ x $ 后\n");
     expect(host.querySelectorAll(".cm-math-block").length).toBe(0);
     expect(widgetCount()).toBe(1);
@@ -236,7 +263,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("行内跨行公式保持源码（不请求、不渲染）", () => {
-    cache.set(mathCacheKey("a\nb", false, "", MATH_SIZE_PT), render("a\nb"));
+    cache.set(mathCacheKey("a\nb", false, "", MATH_TEXT_PT), render("a\nb"));
     mount("$a\nb$\n");
     expect(widgetCount()).toBe(0);
     expect(host.querySelectorAll(".cm-math-block").length).toBe(0);
@@ -244,7 +271,7 @@ describe("livePreview 扩展", () => {
   });
 
   it("块级 widget 随光标进入展开为源码", () => {
-    cache.set(mathCacheKey("x^2", true, "", MATH_SIZE_PT), render("x^2"));
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
     mount("$ x^2 $\n正文");
     expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
     view.dispatch({ selection: { anchor: 3 } }); // 落在公式内部
@@ -746,7 +773,7 @@ describe("livePreview 块级切片", () => {
       heightPt: 7,
       baselinePt: 5,
     };
-    const cache = new Map([[mathCacheKey("x^2", true, "", MATH_SIZE_PT), mathRender]]);
+    const cache = new Map([[mathCacheKey("x^2", true, "", MATH_TEXT_PT), mathRender]]);
     host = document.createElement("div");
     document.body.appendChild(host);
     const blocks: Block[] = [crop(0, 3), crop(5, 12), crop(14, 17)];

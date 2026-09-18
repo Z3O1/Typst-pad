@@ -13,6 +13,7 @@
 // 这些必须回到桌面版（Windows WebView2）验证 —— 见 CLAUDE.md 与 README。
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { byteOffsetsToPositions } from "./block-offsets";
+import { MATH_TEXT_PT } from "./typst-engine";
 import type { Diagnostic } from "./typst-engine";
 
 /** 是否以"浏览器开发模式"启动（?browserdev=1） */
@@ -540,6 +541,19 @@ interface FakeBlockRecord {
 /** 最近一次假编译的文档与块（假命中测试要用它做坐标 ↔ 字符的换算） */
 let lastFake: { doc: string; blocks: FakeBlockRecord[] } | null = null;
 
+/**
+ * 假 `compile_blocks` 写下的**几何编号**（对应真 Rust 侧的 `HIT_CACHE` 编号）：
+ * 每次编译自增，`block_hit_test` 带回来的编号对不上就拒绝命中 —— 多窗口 / 过期几何那条路径
+ * 在浏览器里也能验（见 writing-blocks-hit.mjs）。
+ */
+let stubGeometryId = 0;
+
+/** 新几何编号（模拟真后端"每次编译覆盖缓存并换一个编号"） */
+function nextStubGeometryId(): number {
+  stubGeometryId += 1;
+  return stubGeometryId;
+}
+
 /** 真实夹具里的探针：返回 null = 夹具里没有这个块/这些点 */
 function fixtureHit(args: Record<string, unknown>): number | null {
   const fixtures = injectedBlockFixtures();
@@ -722,10 +736,11 @@ async function handleCommand(
         const column = errAt - (before.lastIndexOf("\n") + 1) + 1;
         return {
           ok: false,
-          // **必须带 blocks:[]**：前端的 compileBlocks 用"blocks 是不是数组"判断后端有没有
-          // 这个命令（形状不对 = 旧版本/桩 → 退回整页预览路径）。少了它，这条失败会被
-          // 当成"后端不支持"而**走不到**失败分支（实测踩过）。
-          blocks: [],
+          // **这里故意不发 `blocks` 键** —— 与真 Rust 侧早先的形状一致（`blocks` 带
+          // `skip_serializing_if`，失败时是空数组 ⇒ 键被省略）。前端必须把这种形状读成
+          // "这次编译失败"，而不是"后端没有这个命令"（PR #60 审查抓到：桩早先自己补了
+          // `blocks: []`，于是**真机上才有的**那条路径在验收里根本走不到）。
+          // Rust 侧现在失败也发 `blocks: []`，但前端两条都得认 —— 旧安装包还在用户机器上。
           diagnostics: [
             {
               message: "假编译错误（@err 标记）：验证「错误所在块必须看得见」",
@@ -752,6 +767,7 @@ async function handleCommand(
             pages: 1,
             pageWidthPt: hit.pageWidthPt,
             textPt: fakeDocumentTextPt(doc),
+            geometryId: nextStubGeometryId(),
           };
         }
       }
@@ -766,7 +782,7 @@ async function handleCommand(
         }
       }
       notify(command);
-      return { ...out, textPt: fakeDocumentTextPt(doc) };
+      return { ...out, textPt: fakeDocumentTextPt(doc), geometryId: nextStubGeometryId() };
     }
     case "compile_math": {
       notify(command);
@@ -777,11 +793,14 @@ async function handleCommand(
         body,
         display: a.display === true,
         context: typeof a.context === "string" ? a.context : "",
+        // 字号也记下来：写作模式必须等于文档字号、源码模式 10.5pt（验收第 18 组锁这条，
+        // 见 PR #60 审查的第 2 条）
+        sizePt: typeof a.sizePt === "number" ? a.sizePt : null,
       };
       // 有注入的真实产物就用真实产物（浏览器里看到的是 typst 真排版，含真尺寸/真基线）。
       // 注意补 `ok: true`：夹具 json 里没有该字段，缺了会被前端当成"渲染失败"而不渲染
       // （实测踩过：页面里公式一直停在源码，看不出是夹具的问题）。
-      const sizePt = typeof a.sizePt === "number" ? a.sizePt : 12;
+      const sizePt = typeof a.sizePt === "number" ? a.sizePt : MATH_TEXT_PT;
       const real = realMath(body, a.display === true, sizePt);
       return real ? { ok: true, ...real } : fakeMath(body, a.display === true);
     }
@@ -789,6 +808,11 @@ async function handleCommand(
     case "block_hit_test": {
       if (!blocksStubEnabled()) return null;
       notify(command);
+      // 编号校验与真 Rust 侧一致：几何是"最近一次 compile_blocks"的，编号对不上就拒绝命中
+      // （真机上这对应"另一个窗口编译过" —— 见 HIT_CACHE 的说明与 PR #60 审查的第 4 条）。
+      // 前端不带编号（null/undefined）= 不校验，保持旧行为。
+      const wantId = typeof a.geometryId === "number" ? a.geometryId : null;
+      if (wantId !== null && wantId !== stubGeometryId) return null;
       const fromFixture = fixtureHit(a);
       return fromFixture !== null ? fromFixture : syntheticHit(a);
     }

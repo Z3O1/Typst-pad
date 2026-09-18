@@ -386,6 +386,12 @@
   let writingBlocksDoc = $state("");
   let writingBlocksExact = $state(false);
   /**
+   * 生成当前块表的那次编译在 Rust 侧写下的**几何编号**（`BlocksOutput.geometryId`）。
+   * 点切片时带回 `block_hit_test`：命中几何是**进程级**的，多窗口下会被另一个窗口的编译
+   * 覆盖，编号对不上时后端拒绝命中、这里退回"光标落到块首"（PR #60 审查的第 4 条）。
+   */
+  let writingGeometryId = $state(0);
+  /**
    * 写作模式正文列宽（pt）：块级渲染的**版心宽**，随编辑器列宽走。
    * 0 = 还没量到（编辑器未挂载）→ 编译时用默认值兜底，量到之后 scheduleWritingReflow 会重编一次。
    */
@@ -458,7 +464,14 @@
     if (range.to <= range.from) return null;
     const bounds = { fromByte: range.from, toByte: range.to };
     const hit = clampHitOffset(
-      await hitTestBlock(bounds.fromByte, bounds.toByte, req.page, req.xPt, req.yPt),
+      await hitTestBlock(
+        bounds.fromByte,
+        bounds.toByte,
+        req.page,
+        req.xPt,
+        req.yPt,
+        writingGeometryId,
+      ),
       bounds,
     );
     if (hit === null) return null;
@@ -1494,12 +1507,14 @@
     const prefixOnly = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
     for (const req of batch) {
       // 用请求自带的上下文编译（与生成缓存键时一致，见 MathRequest.context 的说明）
+      // 字号也来自请求（与生成缓存键时用的那个一致，见 MathRequest.sizePt 的说明）：
+      // 写作模式跟着文档字号走，源码模式 10.5pt
       let render = await compileMath(
         req.body,
         req.display,
         req.context,
         filePath,
-        undefined,
+        req.sizePt,
         fontArgs(),
       );
       if (!render.ok && prefixOnly !== req.context) {
@@ -1508,7 +1523,7 @@
           req.display,
           prefixOnly,
           filePath,
-          undefined,
+          req.sizePt,
           fontArgs(),
         );
         if (fallback.ok) render = fallback;
@@ -1551,6 +1566,7 @@
     writingBlocks = null;
     writingBlocksDoc = "";
     writingBlocksExact = false;
+    writingGeometryId = 0; // 没有块表就没有对应的几何，别拿旧编号去问后端
     blocksVersion++;
   }
 
@@ -1804,6 +1820,13 @@
       const window = writingWindowBytes();
       // 记下这一轮渲的窗口：视口内仍有"没拿到切片"的块时，同一个窗口不重复编译（见 handleBlocksNeeded）
       lastBlocksWindow = window === null ? "all" : `${window.from}:${window.to}`;
+      // **编译请求发出时的文档**：块区间是**字节偏移**，只有配上同一份文档才有意义。
+      // 写作模式的编译是去抖的（150ms），所以"文档已经改了、但新一轮编译还没开始"是常态 ——
+      // 这期间回来的旧结果若直接套到当前文档上，格子就会错位：旧切片盖住被移动的正文
+      // （表现为整行凭空消失 / 同一段既在切片里又露成源码），而 `compileSeq` 只在**新编译
+      // 开始**时才自增，拦不住这一段（PR #60 审查抓到；`remapBlocksForEdit` 此时无用，
+      // 因为它比较的是同一份新文档，前后缀差分看不出差别）。
+      const requestDoc = doc;
       const blocksResult = await compileBlocks(
         source,
         utf8Length(prefixEnabled ? ensureTrailingNewline(prefixCode) : ""),
@@ -1818,6 +1841,14 @@
         reportStartup();
       }
       if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
+      if (requestDoc !== doc) {
+        // 文档在这次编译期间变过 → 这份结果的坐标属于旧文档，**丢掉**。
+        // 编辑那条路已经排了一次去抖编译（handleDocChange → scheduleCompile），
+        // 它会带着新坐标回来；这期间块表保持 remapBlocksThroughEdit 之后的样子
+        // （改动过的块退回源码），是设计中的中间态。
+        dbg.log("compile", "块级渲染结果已过期（编译期间文档变了），丢弃");
+        return;
+      }
       if (!blocksResult.unavailable) {
         applyBlocksResult(blocksResult, t0);
         // 预览栏被手动打开时（视图菜单可以单独开），整页预览也要跟上：接着走下面的
@@ -1897,6 +1928,7 @@
       // 这一批切片与这份文档、这份几何（Rust 侧 HIT_CACHE 也是同一次编译）严格对应
       writingBlocksDoc = doc;
       writingBlocksExact = true;
+      writingGeometryId = result.geometryId;
       blocksVersion++;
       // 文档正文实际字号（源码透镜的字号基准，见 writingTextPt 的说明）
       if (result.textPt > 0 && Math.abs(result.textPt - writingTextPt) > 0.01) {
