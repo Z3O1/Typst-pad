@@ -237,15 +237,24 @@
     text-decoration: underline;
   }
 
+  /* 展开菜单：**固定浅色面板**（用户 2026-09-18 要求「把上方菜单栏的展开菜单改成白色」）——
+     深色主题下也保持白底黑字，所以这里的颜色**不跟 --bg-toolbar / --fg 走**，
+     而是就地声明一组局部变量（要调色只改这几行，别把某一条改回主题变量：白底 + 浅灰字 = 看不见）。
+     面板是白底 ⇒ 阴影比深色面板时代（0.35）压浅一些，否则白块边缘发黑。 */
   .menu-dropdown {
+    --menu-bg: #ffffff;
+    --menu-fg: #1f1f1f;
+    --menu-fg-dim: #6b6b6b;
+    --menu-hover-bg: #e8f2f9; /* 浅蓝底：比亮蓝底白字在白色面板上清楚得多 */
+    --menu-hover-fg: #0b6bb5;
     position: absolute;
     top: 100%;
     left: 0;
     min-width: 180px;
-    background: var(--bg-toolbar);
-    border: 1px solid var(--border);
+    background: var(--menu-bg);
+    border: 1px solid #d9d9d9;
     border-radius: 6px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
     padding: 4px;
     z-index: 50;
     display: flex;
@@ -261,7 +270,7 @@
     border: none;
     border-radius: 4px;
     background: transparent;
-    color: var(--fg);
+    color: var(--menu-fg);
     font-size: 13px;
     text-align: left;
     cursor: pointer;
@@ -269,25 +278,25 @@
   }
 
   .menu-item:hover {
-    background: var(--accent);
-    color: #ffffff;
+    background: var(--menu-hover-bg);
+    color: var(--menu-hover-fg);
   }
 
   .menu-item.checked {
-    color: var(--accent);
+    color: var(--menu-hover-fg);
   }
 
   .menu-item.checked:hover {
-    color: #ffffff;
+    color: var(--menu-hover-fg);
   }
 
-  /* 快捷键灰字：与标签左右分布（Windows 菜单风格）；悬停高亮下用半透明白保持可读 */
+  /* 快捷键灰字：与标签左右分布（Windows 菜单风格）；悬停时压成偏蓝的灰，仍在蓝色标签之下 */
   .menu-item-shortcut {
-    color: var(--fg-dim);
+    color: var(--menu-fg-dim);
     font-size: 12px;
   }
 
   .menu-item:hover .menu-item-shortcut {
-    color: rgba(255, 255, 255, 0.85);
+    color: #5a7f9c;
   }
 </style>
