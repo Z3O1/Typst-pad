@@ -2,6 +2,16 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.3] - 2026-09-18
+
+### Fixed
+
+- **`#import` / `#include` 别的文件夹里的文件不再报「would escape the project root」**（用户反馈「现在还是没法 #import 别的文件」；他那份幻灯片 `Typst/2026.6.3-随机化和近似算法/*.typ` 第一行就是 `#import "../touying/z.typ": *`）：**项目根**（相对导入的解析基准）此前被钉死在**文档所在目录**，而 typst 的 `..` 是按**虚拟路径**判越界的（`typst-syntax` 的 `Segments::push_component`：`..` 弹不动就是 `PathError::Escapes`）—— 目标文件明明躺在磁盘上、只是比项目根高一层，也照样拒，于是"只能导入同目录与子目录的文件"。现在项目根按**文档实际引用到的相对路径**自动放宽：扫描 `#import`/`#include` 的字面量（**递归**看被引用文件自己的引用，深度上限 8 + 已访问去重），取各条"最低可满足根"的公共祖先。关键细节：**按 `..` 的层数算，不是按目标文件的公共祖先** —— 反例是真实存在的 `Typst/touying/head.typ` 里那句 `#import "../touying/z.typ"`（按目标算仍会越界）。目标是 `.typ` 且磁盘上存在时才递归；放宽是**纯词法**的（目标文件还没建/名字写错也能算），所以这类错现在报 `file not found` 而不是越界。`@` 包、`/` 开头的根相对路径与绝对路径不参与放宽。
+  - **跨卷/跨盘仍是硬限制**（文档在 `\\wsl.localhost\` 里、模板在 `D:\` 时两者没有公共祖先；typst 的单根模型决定，CLI 也一样）：这种情况错误里会追加**当前项目根**与原因（typst 原文只有一句黑话，无从下手）。
+  - 未保存文档的相对导入预检从 `#include` 扩到 `#import`（此前 `#import` 会掉进引擎那句笼统的 `failed to load file`）。
+  - 实测（用户那份真文档，端到端编译）：**`ok=true` / 13 页**，含 `../touying/z.typ` 以及模板内部的 `@preview/touying:0.7.3`、`cetz:0.5.2`、`mitex:0.2.7`、`theorion:0.6.0`。
+- **编译错误的红波浪线回来了**（从 0.4.0 起桌面版**一条都不画**，0.4.0~0.8.2 一直如此）：Rust 侧对**主文档**的诊断发的是 `"path": null`，而前端的判据只认「键缺失」与空串，`null` 于是被判成"别的文件"直接跳过 —— 错误计数、错误列表弹窗都正常，所以看着像"能定位"，实际编辑区里没有任何标记。现在契约只留一种"这是主源"的表示：Rust 主源诊断**不带 `path` 键**（`skip_serializing_if`），前端 `diagnosticToLocation` 把 `null` 归一成 `undefined`、`squiggleRanges` 用 `d.path != null` 判定。浏览器验收用的桩过去干脆不发该字段，所以一直没被抓住 —— 现在桩按真实形状发 `path: null`，**验收新增第 42 组**（4 项）锁死这条链路。
+
 ## [0.8.2] - 2026-09-18
 
 ### Fixed
