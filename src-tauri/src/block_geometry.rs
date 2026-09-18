@@ -2182,12 +2182,21 @@ mod tests {
                     "[{name}] 切片宽度应等于正文列宽：{} vs {COLUMN_PT}",
                     b.width_pt
                 );
-                assert!(b.height_pt > 0.5, "[{name}] 切片高度应为正：{}", b.height_pt);
+                // **最小带高是 0.75pt**（见切带那段 `(band_bottom - band_top).max(0.75)`）——
+                // 别退回 `> 0.5` 那种"几乎恒真"的断言：当年脚注把带压到 ≤0.5pt 时，切片被丢弃、
+                // 正文重复渲染，而这条断言照样绿（PR #60 审查第 11 条）。
+                assert!(
+                    b.height_pt >= 0.74,
+                    "[{name}] 切片带高不该低于最小带（0.75pt）：{}",
+                    b.height_pt
+                );
             }
 
             // ② 高度之和 = 纵向跨度（首块顶 → 末块底）
             let mut by_y: Vec<&BlockCrop> = rendered.clone();
-            by_y.sort_by(|a, b| a.y_pt.partial_cmp(&b.y_pt).unwrap());
+            // `total_cmp` 而不是 `partial_cmp().unwrap()`：NaN 会 panic 在整个编译命令里
+            // （与上面 order.sort_by 同一个理由，PR #60 审查第 10 条）
+            by_y.sort_by(|a, b| a.y_pt.total_cmp(&b.y_pt));
             let span = by_y.last().unwrap().y_pt + by_y.last().unwrap().height_pt - by_y[0].y_pt;
             let total: f64 = by_y.iter().map(|b| b.height_pt).sum();
             assert!(
