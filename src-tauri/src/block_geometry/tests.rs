@@ -1,6 +1,7 @@
 // block_geometry 的单元测试（原 `mod tests`，逐字搬出，只去掉一层缩进）。
 use super::*;
-use super::probe::*; // 探针只在测试里用（mod.rs 不对外转出）
+// 探针（`ProbeBlock` / `ProbeReport` / `probe_blocks`）由 `use super::*` 带进来 ——
+// mod.rs 现在有 `pub use probe::*`（与拆分前的对外路径一致），不必再单独 `use super::probe::*`。
 
 /// **命中几何是进程级全局的**（`HIT_CACHE` 只保留"最近一次 `compile_blocks`"的字形几何）。
 /// 生产路径没问题：前端只对刚编译过的同一篇文档做命中测试，前面还有"块表必须与当前文档一致"
@@ -120,6 +121,7 @@ fn pick_hit_chooses_the_clicked_glyph() {
 /// —— 否则 `found && svg === ""` 会被 `notifyBlocksNeeded` 当成缺切片、每 150ms 重编译一次。
 #[test]
 fn oversized_block_is_skipped_not_rendered() {
+    let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
     const COLUMN_PT: f64 = 371.25;
     // 1000 行代码 ≈ 35KB，稳稳超过 8KB 的上限；前后各留一个正常段落当对照
     let mut code = String::new();
@@ -192,6 +194,7 @@ fn document_text_pt_is_clamped() {
 /// 现在 `compile_blocks` 的第 2b 步把每块的 bottom 夹到 y 序下一个块的顶。
 #[test]
 fn footnote_doc_keeps_every_band_and_stays_contiguous() {
+    let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
     const COLUMN_PT: f64 = 371.25;
     let doc = "= 结构与脚注\n\n                   正文里有一个脚注#footnote[脚注正文会被排到页底]，这是写作模式的已知不足点。\n\n\n                   ```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n                   #table(columns: 2, [甲], [乙], [1], [2])\n\n                   表格之后的段落。\n";
     let out = compile_blocks(
@@ -607,6 +610,7 @@ fn windowing_keeps_payload_bounded() {
 #[test]
 #[ignore = "按需运行：长文档下的块级渲染开销（窗口化的实测数据）"]
 fn dump_long_doc_blocks() {
+    let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
     for paragraphs in [20usize, 60, 120, 200] {
         let mut src = String::from("= 长文档\n\n");
         for i in 0..paragraphs {

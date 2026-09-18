@@ -33,6 +33,11 @@ function check(name, ok, detail = "") {
 }
 
 const fixtures = JSON.parse(readFileSync(FIXTURES, "utf8"));
+// 空夹具 = 0 项断言 + 退出码 0 的假绿（cargo test 命中 0 个用例时退出码仍是 0）⇒ 必须硬失败
+if (fixtures.length === 0) {
+  console.error(`夹具是空的：${FIXTURES}；先跑 npm run fixtures:blocks（别拿空夹具跑验收）`);
+  process.exit(1);
+}
 console.log(`夹具：${fixtures.length} 篇真实块级切片产物（来自 Rust compile_blocks）`);
 
 const c = await connect();

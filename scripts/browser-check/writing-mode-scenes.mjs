@@ -30,6 +30,11 @@ function check(name, ok, detail = "") {
 }
 
 const fixtures = JSON.parse(readFileSync(FIXTURES, "utf8"));
+// 空夹具 = 0 项断言 + 退出码 0 的假绿（cargo test 命中 0 个用例时退出码仍是 0）⇒ 必须硬失败
+if (fixtures.length === 0) {
+  console.error(`夹具是空的：${FIXTURES}；先跑 npm run fixtures:blocks（别拿空夹具跑验收）`);
+  process.exit(1);
+}
 console.log(`场景夹具：${fixtures.length} 篇（来自 Rust compile_blocks 的真实产物）`);
 
 const c = await connect();
@@ -145,7 +150,11 @@ if (!headings) {
   const h2 = await measureHeading("二级标题", 2);
   const h3 = await measureHeading("三级标题", 3);
   check("三级标题都能量到（切片展开成了源码）", !!h1 && !!h2 && !!h3, JSON.stringify({ h1, h2, h3 }));
-  if (h1 && h2 && h3) {
+  // 前置不成立时**不能静默跳过**下面 5 条断言（那样只是总数少 5 项、退出码仍是 0，
+  // 读日志的人看不出少的是哪一组）；这里再记一次失败，把跳过的那组写出来
+  if (!h1 || !h2 || !h3) {
+    check("标题字号断言的前提不成立（缺 h1/h2/h3）→ 后面 5 条断言未执行", false, JSON.stringify({ h1, h2, h3 }));
+  } else {
     // ① 梯度本身（与正文基准无关，只看各级之间的比例）：必须正好是 typst 的 1.4 / 1.2 / 1.0
     check(
       `h1/h3 = ${(h1.sourcePx / h3.sourcePx).toFixed(3)}（typst 1.4）`,

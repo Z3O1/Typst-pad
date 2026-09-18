@@ -45,6 +45,13 @@ function check(name, ok, detail = "") {
 
 const fixtures = JSON.parse(readFileSync(FIXTURES, "utf8"));
 const withProbes = fixtures.filter((f) => Array.isArray(f.hitProbes) && f.hitProbes.length > 0);
+// 空夹具 / 没探针 = 0 次点击 + 退出码 0 的假绿 ⇒ 必须硬失败
+if (fixtures.length === 0 || withProbes.length === 0) {
+  console.error(
+    `夹具是空的或没有点击探针：${FIXTURES}（${fixtures.length} 篇 / ${withProbes.length} 篇带探针）；先跑 npm run fixtures:blocks`,
+  );
+  process.exit(1);
+}
 console.log(
   `夹具：${withProbes.length} 篇带点击探针的真实产物（共 ${withProbes.reduce((n, f) => n + f.hitProbes.length, 0)} 个探针点）`,
 );
