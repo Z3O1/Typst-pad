@@ -418,6 +418,9 @@ function notify(command: string): void {
  * 切块规则与 Rust 侧 block_geometry 的"块"大致对应（空行分段、`=` 标题、`-`/`+` 列表项、
  * 围栏代码块各自成块），足以让验收脚本构造出想要的结构。真实几何由 Rust 侧负责。
  */
+/** 与 Rust `block_geometry::MAX_CROP_SOURCE_BYTES` 同一个值（改一处要改两处，契约要紧） */
+const STUB_MAX_CROP_SOURCE_BYTES = 8_000;
+
 export function fakeBlocks(doc: string): {
   ok: true;
   blocks: {
@@ -433,6 +436,8 @@ export function fakeBlocks(doc: string): {
     heightPt: number;
     bands: number;
     svg: string;
+    /** 与真 Rust 侧同形：超大块被有意跳过渲图（见 block_geometry::MAX_CROP_SOURCE_BYTES） */
+    skipped: boolean;
   }[];
   pages: number;
   pageWidthPt: number;
@@ -496,6 +501,10 @@ export function fakeBlocks(doc: string): {
       `<svg viewBox="0 0 ${PAGE_WIDTH} ${heightPt}" width="${PAGE_WIDTH}pt" height="${heightPt}pt" ` +
       `xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="white"/>` +
       `<g data-block="${kind}">${texts}</g></svg>`;
+    // **契约要与真后端同形**：超过上限的单块被有意跳过渲图（`skipped: true`、svg 为空），
+    // 前端必须把它与"缺切片"区分开（否则会每 150ms 要求补渲一次）。桩按同样的 8KB 判据走，
+    // 这样 `&blocks=1` 的验收也能覆盖这条契约（见 live-preview.test.ts 的同名用例）。
+    const skipped = lineEnd(j - 1) - lineStart[i] > STUB_MAX_CROP_SOURCE_BYTES;
     out.push({
       start: lineStart[i],
       end: lineEnd(j - 1),
@@ -508,7 +517,8 @@ export function fakeBlocks(doc: string): {
       widthPt: PAGE_WIDTH,
       heightPt,
       bands: rows,
-      svg,
+      svg: skipped ? "" : svg,
+      skipped,
     });
     y += heightPt;
     i = j;

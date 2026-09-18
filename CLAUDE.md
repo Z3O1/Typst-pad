@@ -38,8 +38,8 @@ Typst-pad：**仿 Typora 的 Typst 桌面编辑器，两套 UI**——「写作�
 npm install
 npm run tauri dev        # 桌面应用（WSL 里能跑；libEGL 那几行警告属正常，见「环境备忘」）
 npm run check            # 类型检查（当前 0 errors / 1 warning，那 1 个是历史遗留的 previewHost）
-npm test                 # 前端 + 脚本单测（38 个文件 / 707 项）
-cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（60 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
+npm test                 # 前端 + 脚本单测（38 个文件 / 710 项）
+cargo test --manifest-path src-tauri/Cargo.toml    # Rust 单测（61 passed / 6 ignored；那 6 个是按需跑的探针/夹具）
 node scripts/check-fonts.mjs                       # 打包字体魔数校验
 
 # 本地打包需要更新签名私钥（配置里已有 pubkey → 缺私钥打包会直接失败）：
@@ -272,6 +272,23 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   所以只渲**视口窗口**内的块（视口 ± 4000 字符；短文档 ≤ 8000 字符全渲），窗口外的块
   按"块类型 + 源码文本相同"沿用上一轮切片（`carryOverCrops`），滚动到没渲过的区域先显示
   源码、去抖 150ms 后按新窗口重编译。**别把它改回"每次都全渲"。**
+  - **窗口化是"按块"的，所以单块自己也得上限（红线，PR #60 审查第 7 条）**：
+    `in_window` 判的是"这一块的源码区间与窗口相交"，于是一块如果自己就很大（**没有空行的长段落**、
+    2000 行围栏代码块），它永远"在窗口内" ⇒ 每按一个键整块渲一遍（58 字节/源字符 → 6 万字符的
+    代码块就是 3MB 级的一次按键）。现在超过 `MAX_CROP_SOURCE_BYTES`（**8KB**，与前端"短文档
+    ≤ 8000 字符全渲"同一量级）的块**只回几何、不渲图**：`skipped = true` + `svg = ""`，
+    `found` 仍为 true（格子边界照旧）。
+    - **前端必须把 `skipped` 与"缺切片"分开**：`notifyBlocksNeeded` 的判据是
+      `found && svg === ""`（= 这一轮没拿到图、补渲一次），不排除 `skipped` 就会对同一个块
+      **每 150ms 重编译一次**。判据现在是 `!block.found || block.skipped || block.svg !== ""`。
+    - 两侧的锁：Rust `oversized_block_is_skipped_not_rendered`（1000 行代码块 → skipped + 空 svg，
+      同文档的段落照常渲）；前端 `live-preview.test.ts` 两条（skipped 不要求补渲 / 没 skipped
+      仍然要求补渲）+ `block-plan.test.ts`（skipped → `renderable: false` 且**不是** `noOutput`）。
+    - **还没做的**：把"超大块"按视口只渲**可见那一段 y 带**（widget 高度仍占满整块、图只画一条带），
+      那样超大块也能有切片而不只是显示源码。要做的话得让 `BlockCrop` 多带"带内偏移 / 整块高"，
+      前端再把图画在盒子里对应的位置 —— 现在的取舍是"显示源码"，因为超大块本来就要编辑。
+    - 半开窗口（只给 `want_from` / `want_to` 之一）**语义就是全渲**（写成显式的 match 分支，
+      别让它看起来像漏判）；前端只会两端都给或都不给。
   - **"有没有块缺切片"要直接看块表，不能看 `buildBlockCovers` 的结果（红线，实际踩过）**：
     那条路会把"能渲染但这一轮没拿到 svg"的块标成 `revealed`（它当下确实显示源码），于是
     `notifyBlocksNeeded` 里的 `!cover.revealed` 永远为假 —— **滚动到没渲过的区域一次都不会补渲**，
@@ -345,6 +362,10 @@ PDF 导出链路：`pdf-export.ts` 由文档标题推导文件名（"报告.pdf"
   （= 14px 正文；**注意源码模式根本不会有公式 widget** —— 内联渲染只在写作模式开，那条分支只是兜底）。
   字号随 `MathRequest.sizePt` 一起传给父组件（异步批处理，理由与 `context` 同理）；公式夹具因此
   导三档字号（11 / 12 / 10.5），验收 `writing-blocks.mjs` 第 18 组锁"sizePt = 正文 px × 0.75"。
+- **"块区间铺满全文"这句话要分清口径（别写成错的断言）**：`source_blocks` 是按 typst 语法树顶层
+  分的，**空行、无输出的块（`#set`/`#show`）不属于任何块** ⇒ `blocks` 之间有洞是正常的；
+  真正"铺满全文、首尾相接"的是**前端按行建的格子** `planBlockCovers` 的输出（每格从自己第一行
+  行首到下一块第一行行首）。所以断言"铺满"要断言在 covers 上，别断言在 `blocks` 上。
 - **文档切换（打开/新建/重读）必须 `resetBlocks()`**：旧块区间套在新文档上会**盖住正文**
   （比公式缓存过期的危害大得多），见 `resetBlocks` 的注释。
 - **版心宽是编译期输入**：`page(width: 列宽/(1-2×页边距比例), height: auto)`，所以窗口尺寸 /

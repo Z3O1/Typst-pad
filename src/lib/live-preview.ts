@@ -436,7 +436,9 @@ function notifyBlocksNeeded(
   const blocks = opts.blocks?.() ?? null;
   if (!blocks || blocks.length === 0) return;
   for (const block of blocks) {
-    if (!block.found || block.svg !== "") continue;
+    // `skipped` = 后端**有意**没给这一块渲图（源码太大）：保持源码显示，**别再要求补渲** ——
+    // 否则每 150ms 重编译一次（见 Block.skipped 的说明）。
+    if (!block.found || block.skipped || block.svg !== "") continue;
     const near = visible.some(
       (v) => block.to >= v.from - PREFETCH_MARGIN && block.from <= v.to + PREFETCH_MARGIN,
     );

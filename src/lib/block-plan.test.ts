@@ -646,3 +646,19 @@ describe("isSafeHref（链接热区的 href 白名单）", () => {
     expect(table.blocks[0].links?.map((l) => l.href)).toEqual(["https://ok.example"]);
   });
 });
+
+// PR #60 审查第 7 条：后端有意跳过的块（skipped）必须与"缺切片"分开 —— 它照给几何
+// （格子边界不变）但不可渲染，保持源码显示。
+describe("skipped 的块不可渲染", () => {
+  it("found=true 但 svg 为空且 skipped=true → renderable=false（而且不算 noOutput）", () => {
+    const table = toBlockTable("正文", [
+      { ...crop(0, 6), svg: "", skipped: true },
+      crop(6, 12),
+    ]);
+    expect(table.blocks[0].skipped).toBe(true);
+    const covers = planBlockCovers(table.blocks, Text.of(["正文正文"]));
+    const first = covers.find((c) => c.block.from === 0)!;
+    expect(first.renderable).toBe(false);
+    expect(first.noOutput).toBe(false); // 不是"引擎没画"，是"太大了我们不渲"
+  });
+});

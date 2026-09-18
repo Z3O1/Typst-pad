@@ -455,6 +455,15 @@ const PAGE_MARGIN_RATIO: f64 = 70.87 / 595.28;
 /// （11pt = 14.67px，与切片里的正文完全一致）。
 pub const DEFAULT_TEXT_PT: f64 = 11.0;
 
+/// **单个源块允许渲切片的字节上限**（超过就只回几何、不渲图，前端保持源码显示）。
+///
+/// 为什么需要（PR #60 审查第 7 条）：窗口化是**按块**的（`in_window`），于是一块如果自己就
+/// 很大（没有空行的长段落、2000 行的围栏代码块），它永远是"窗口内的块" ⇒ 每按一个键都整块渲
+/// 一遍，而逐块 SVG 约 **58 字节/源字符** —— 2000 行代码块（~6 万字符）就是 3MB 级的一次
+/// 按键开销。8KB 与前端"短文档 ≤ 8000 字符就全渲"同一量级：比这个还大的单块本身就比整篇短
+/// 文档还重，让它显示源码（可编辑）比渲一张巨图划算。
+pub const MAX_CROP_SOURCE_BYTES: usize = 8_000;
+
 /// 正文正字号的可接受区间（pt）—— 见 `document_text_pt` 的夹紧
 pub const MIN_TEXT_PT: f64 = 6.0;
 pub const MAX_TEXT_PT: f64 = 48.0;
@@ -491,6 +500,11 @@ pub struct BlockCrop {
     pub kind: String,
     /// 是否有渲染结果（`#let` / `#show` / 纯注释行没有 → 前端保持源码显示）
     pub found: bool,
+    /// **这一块被有意跳过渲图**（源码太大，见 `MAX_CROP_SOURCE_BYTES`）。
+    /// 前端必须把它与"缺切片"区分开：`found && svg === ""` 会被当成"缺切片"去要求补渲
+    /// （见 `notifyBlocksNeeded`），不区分的话就会变成**每 150ms 重编译一次的循环**。
+    #[serde(default)]
+    pub skipped: bool,
     /// 内容分布在几页（单张长页正常为 1；>1 = 文档自己分页了，此时只切首页那部分）
     pub pages: usize,
     /// 切片所在页（1-based）。点击定位要把"页面坐标"告诉 Rust 侧的命中测试
@@ -721,6 +735,8 @@ pub fn compile_blocks(
         );
         // 只渲"窗口内"的块：窗口外的块只回几何（前端沿用上一轮切片或先显示源码）
         // 窗口与返回的块区间**同一坐标系**（用户文档字节偏移，不含注入行与前缀）
+        // **半开窗口 = 全渲**：只给一端时无法判断"窗口内"，宁可全渲也不静默少渲
+        // （前端只会两端都给或都不给；这里把语义写明，别让它看起来像是漏判）。
         let in_window = match (want_from, want_to) {
             (Some(from), Some(to)) => {
                 let s = blocks[*idx].range.start;
@@ -729,7 +745,10 @@ pub fn compile_blocks(
             }
             _ => true,
         };
-        let svg = if in_window {
+        // 单块太大 → 只回几何、不渲图（见 MAX_CROP_SOURCE_BYTES 的说明）
+        let src_bytes = blocks[*idx].range.end.saturating_sub(blocks[*idx].range.start);
+        let skipped = in_window && src_bytes > MAX_CROP_SOURCE_BYTES;
+        let svg = if in_window && !skipped {
             match document.pages().get(g.page.saturating_sub(1)) {
                 Some(page) => render_crop(page, rect),
                 None => String::new(),
@@ -739,7 +758,7 @@ pub fn compile_blocks(
         };
         // 链接热区：只取落在这一带里的（换算成"带内相对 pt"，与切片 SVG 的坐标系一致）。
         // 与 svg 一样只给窗口内的块 —— 窗口外的块这一轮没有图，热区也就没有意义。
-        let links: Vec<CropLink> = if in_window && !svg.is_empty() {
+        let links: Vec<CropLink> = if in_window && !skipped && !svg.is_empty() {
             placed_links
                 .iter()
                 .filter(|l| l.page == g.page && rects_intersect(l.rect, rect))
@@ -776,6 +795,7 @@ pub fn compile_blocks(
             bands: g.bands,
             links,
             svg,
+            skipped,
         });
     }
 
@@ -786,7 +806,8 @@ pub fn compile_blocks(
             start: block.range.start,
             end: block.range.end,
             kind: block.kind.to_string(),
-            found: false,
+            found: false, // 没有几何 = 引擎这块没画（前端整格隐藏，见 noOutput）
+            skipped: false,
             pages: 0,
             page: 0,
             x_pt: 0.0,
@@ -1440,6 +1461,56 @@ mod tests {
             None,
             "没有这一页 → None"
         );
+    }
+
+    /// **超大单块只回几何、不渲图**（PR #60 审查第 7 条）：窗口化是按块的，一块自己就很大时
+    /// （没有空行的长段落 / 2000 行围栏代码块）永远"在窗口内" ⇒ 每按键整块全渲（58 字节/源字符）。
+    /// 现在超过 `MAX_CROP_SOURCE_BYTES` 的块 `svg` 为空且 `skipped = true`；
+    /// **`found` 仍为 true**（几何照给，前端格子边界不变），但前端必须按 `skipped` 区分于"缺切片"
+    /// —— 否则 `found && svg === ""` 会被 `notifyBlocksNeeded` 当成缺切片、每 150ms 重编译一次。
+    #[test]
+    fn oversized_block_is_skipped_not_rendered() {
+        const COLUMN_PT: f64 = 371.25;
+        // 1000 行代码 ≈ 35KB，稳稳超过 8KB 的上限；前后各留一个正常段落当对照
+        let mut code = String::new();
+        for i in 0..1000 {
+            code.push_str(&format!("let value_{i} = compute({i}, {i});\n"));
+        }
+        let doc = format!("第一段正文。\n\n```rust\n{code}```\n\n最后一段正文。\n");
+        let out = compile_blocks(
+            doc.clone(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
+        let big = out
+            .blocks
+            .iter()
+            .find(|b| b.kind == "Raw")
+            .expect("应该有那个围栏代码块");
+        assert!(
+            big.end - big.start > MAX_CROP_SOURCE_BYTES,
+            "用例前提：这一块要真的超过上限（实际 {} 字节）",
+            big.end - big.start
+        );
+        assert!(big.found, "几何照给（格子边界不变）");
+        assert!(big.skipped, "超大块必须被标成 skipped");
+        assert!(big.svg.is_empty(), "超大块不渲图");
+        assert!(big.links.is_empty(), "没有图就没有链接热区");
+
+        // 对照组：正常段落照常渲
+        let para = out
+            .blocks
+            .iter()
+            .find(|b| b.kind == "Paragraph")
+            .expect("应该有段落块");
+        assert!(!para.skipped, "正常大小的块不该被跳过");
+        assert!(!para.svg.is_empty(), "正常大小的块要渲出图");
     }
 
     /// **正文正字号要夹在合理区间里**（PR #60 审查第 7 条的附带项）。

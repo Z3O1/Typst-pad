@@ -25,6 +25,14 @@ export interface Block {
   /** 是否有渲染结果（`#let` / `#show` / 纯注释行没有） */
   found: boolean;
   /**
+   * **这一块被有意跳过渲图**（源码太大，见 Rust 侧 `MAX_CROP_SOURCE_BYTES`）。
+   *
+   * 与"缺切片"必须分开：`found && svg === ""` 会被 `notifyBlocksNeeded` 当成"这一轮没拿到图、
+   * 该补渲一次"，不区分就会**每 150ms 重编译一次**（PR #60 审查第 7 条：2000 行代码块每按键
+   * 整块全渲，约 58 字节/源字符）。跳过的块一律保持源码显示，而且**不许**要求补渲。
+   */
+  skipped?: boolean;
+  /**
    * **引擎对这块什么都没有画**（`#set` / `#show` / `#let` / 纯注释行这类"规则"）。
    *
    * 与 `found: false` 的区别很重要：`found: false` 还有另一种来源 —— 编辑之后块表"过期"了、
@@ -82,6 +90,7 @@ export function toBlockTable(
     | "end"
     | "kind"
     | "found"
+    | "skipped"
     | "svg"
     | "widthPt"
     | "heightPt"
@@ -121,6 +130,7 @@ export function toBlockTable(
       // 链接热区的 href：Rust 侧已经按白名单过滤过（见 block_geometry 的链接收集），
       // 这里**再挡一层**（PR #60 审查第 6 条的附带项）：前端是"点一下就交给系统打开"的那一端，
       // 不该只依赖上游的判断 —— `javascript:` / `data:` 这类伪协议落到 `<a href>` 上很危险。
+      skipped: b.skipped === true,
       links: Array.isArray(b.links)
         ? b.links.filter((l) => l && typeof l.href === "string" && isSafeHref(l.href))
         : [],
@@ -251,7 +261,7 @@ export function planBlockCovers(blocks: readonly Block[] | null, doc: Text): Blo
       block,
       coverFrom,
       coverTo,
-      renderable: block.found && block.svg !== "" && block.heightPt > 0.5,
+      renderable: block.found && !block.skipped && block.svg !== "" && block.heightPt > 0.5,
       // 只有"确实是引擎说的没输出"才隐藏（过期块表的 noOutput 已在 remap 里清掉）
       noOutput: block.noOutput === true,
       revealed: false, // 由 applyBlockSelection 填入
