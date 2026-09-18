@@ -87,6 +87,7 @@
     diagnosticListTitle,
     truncateStatus,
   } from "$lib/status-view";
+  import { isBenignScriptError, scriptErrorMessage, scriptErrorStatus } from "$lib/script-errors";
   import { copyPlainText } from "$lib/clipboard";
   import { mark, reportStartup } from "$lib/startup-timing";
   import { dbg, setCliDebug } from "$lib/debug";
@@ -2059,20 +2060,13 @@
    * 我们的预览画布正好是"量到宽度 → 设宽度"这种模式，所以它在缩放/改分栏时会偶发出现。
    * 报成「脚本错误」会让用户以为应用坏了（2026-09-14 实测被反馈），只写调试日志。
    */
-  const BENIGN_SCRIPT_ERRORS = [/ResizeObserver loop/i];
-
-  function isBenignScriptError(msg: string): boolean {
-    return BENIGN_SCRIPT_ERRORS.some((re) => re.test(msg));
-  }
-
   function reportScriptError(label: string, detail: unknown) {
-    const msg =
-      detail instanceof Error ? detail.message : typeof detail === "string" ? detail : String(detail);
+    const msg = scriptErrorMessage(detail);
     if (isBenignScriptError(msg)) {
       dbg.log("error", `${label}（引擎提示，忽略）`, detail);
       return;
     }
-    statusText = `脚本错误：${msg}`;
+    statusText = scriptErrorStatus(msg);
     dbg.log("error", label, detail);
     console.error(`[script-error] ${label}`, detail);
   }
