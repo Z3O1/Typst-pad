@@ -23,7 +23,6 @@
   import { clampHitOffset } from "$lib/block-hit";
   import type { Block } from "$lib/block-plan";
   import { buildFontFamilies, FONT_CHOICE_DEFAULT, normalizeFontDirs } from "$lib/font-settings";
-  import { describeCompileWarning } from "$lib/font-warnings";
   import type { MathRequest } from "$lib/live-preview";
   import type { WriteCommand } from "$lib/write-commands";
   import {
@@ -43,15 +42,25 @@
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { loadState, saveState } from "$lib/persistence";
-  import { decideAppKey, topModal } from "$lib/app-keys";
+  import { decideAppKey, runAppKeyAction, topModal } from "$lib/app-keys";
   import type { AppModal } from "$lib/app-keys";
   import { isEffectiveDirty, ensureTrailingNewline } from "$lib/doc-utils";
   import { failureStatus } from "$lib/failure-text";
   import { installEditorFonts, loadBundledFont } from "$lib/editor-font";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
+  import { buildMenuGroups } from "$lib/menu-model";
   import ContextMenu from "$lib/ContextMenu.svelte";
   import type { ContextMenuItem } from "$lib/ContextMenu.svelte";
+  import AboutDialog from "$lib/AboutDialog.svelte";
+  import ClosePromptDialog from "$lib/ClosePromptDialog.svelte";
+  import StatusBar from "$lib/StatusBar.svelte";
+  import PreviewPane from "$lib/PreviewPane.svelte";
+  import BrowserGate from "$lib/BrowserGate.svelte";
+  import SettingsDialog from "$lib/SettingsDialog.svelte";
+  import UpdateDialog from "$lib/UpdateDialog.svelte";
+  // 弹窗共享外壳样式见 src/lib/modal.css（页面作用域命中不了子组件）
+  import "$lib/modal.css";
   import {
     resolveContextZone,
     previewSelectionHasContent,
@@ -61,21 +70,26 @@
   } from "$lib/context-menu-utils";
   import { clearState } from "$lib/persistence";
   import {
-    buildErrorListItems,
-    formatErrorLoc,
-    formatCompileFailMessage,
-    hasErrorToShow,
     isErrorLineInPrefix,
-    prefixLineCharOffset,
     formatDiagnosticForClipboard,
     formatDiagnosticListForClipboard,
     type ErrorListItem,
     type LocatedErrorItem,
   } from "$lib/error-list";
+  import { nextBadgePopover, type BadgeKind } from "$lib/badge-popover";
+  import {
+    buildErrorItems,
+    buildWarningItems,
+    diagnosticCopyAllStatus,
+    diagnosticCopyStatus,
+    diagnosticListTitle,
+    truncateStatus,
+  } from "$lib/status-view";
+  import { reduceCompileStatus, type CompileStatusSource } from "$lib/compile-status";
+  import { isBenignScriptError, scriptErrorMessage, scriptErrorStatus } from "$lib/script-errors";
   import { copyPlainText } from "$lib/clipboard";
   import { mark, reportStartup } from "$lib/startup-timing";
   import { dbg, setCliDebug } from "$lib/debug";
-  import { clampPopoverRect } from "$lib/popover-utils";
   import {
     TYPST_DEFAULT_TEXT_PT,
     isReflowApplied,
@@ -90,36 +104,19 @@
     closeUpdate,
     type AvailableUpdate,
   } from "$lib/updater";
+  import { AUTO_CHECK_DELAY_MS, type UpdateFlow } from "$lib/update-utils";
   import {
-    AUTO_CHECK_DELAY_MS,
-    UPDATE_DISMISS_NOTICE,
-    formatBytes,
-    formatProgress,
-    isUpdatePromptSuppressed,
-    type DownloadProgress,
-  } from "$lib/update-utils";
-  import { renderUpdateNotes } from "$lib/update-notes";
-  import {
-    ZOOM_DEFAULT,
-    ZOOM_CONFIRM_DELAY_MS,
-    ZOOM_MEASURE_SETTLE_MS,
-    ZOOM_VERIFY_RESET_DELAY_MS,
-    ZOOM_VERIFY_WAITS_MS,
-    ZOOM_SETTLE_MAX_MS,
-    zoomFromWidths,
-    clampZoom,
-    createWheelAccumulator,
-    accumulateWheelSteps,
-    resetWheelAccumulator,
-    shouldRebaselineZoom,
-    zoomApplied,
-    zoomIn,
-    zoomLabel,
-    zoomOut,
-    zoomProbeVerdict,
-    zoomUnobservedNotice,
-    wheelPendingNotice,
-  } from "$lib/zoom";
+    CHECKING_STATUS,
+    planDismiss,
+    planInstallResult,
+    planInstallStart,
+    planUpdateCheck,
+    updateNoticeText,
+  } from "$lib/update-flow";
+  // zoom.ts 是纯逻辑（档位换算、判据、文案）；"引擎改档 + 复核"的编排在 zoom-controller.ts，
+  // 这里只留页面自己用得到的三样：默认档、收敛、档位文案。
+  import { ZOOM_DEFAULT, clampZoom, zoomLabel } from "$lib/zoom";
+  import { createZoomController } from "$lib/zoom-controller";
   // isWrapToggleKey 的判定已挪进 app-keys.decideAppKey（那里统一管按键路由，含它的顺序要求）
   import { WRAP_SOURCE_ONLY_NOTICE, wrapNotice } from "$lib/word-wrap";
 
@@ -152,9 +149,6 @@
 
   /** 副窗口首屏编译落地后写在状态栏的一句说明（见 onMount 末尾） */
   const NEW_WINDOW_NOTICE = "新窗口：这里的修改不会记进「上次内容」";
-
-  /** 复制诊断信息失败时的状态栏文案（execCommand 与 navigator.clipboard 两条路都没成） */
-  const COPY_FAILED_NOTICE = "复制失败：剪贴板不可用";
 
   /** 窗口 label 前缀：新窗口的 label 必须唯一（重名会创建失败），前缀要与 capabilities 里的 `editor-*` 一致 */
   const NEW_WINDOW_LABEL_PREFIX = "editor-";
@@ -205,10 +199,12 @@
   let previewError = $state("");
   let pageCount = $state(0);
   let charCount = $state(0); // 字符数（状态栏右侧独立显示）
-  let previewHost: HTMLElement;
-  // 预览滚动容器（ResizeObserver 观测其宽度变化）；$state 避免 bind:this 的
-  // non_reactive_update 警告（previewHost 属历史既有模式，此处新变量按新写法声明）
-  let previewBodyEl = $state<HTMLElement>();
+  /**
+   * 预览栏组件句柄：画布（paper）与滚动容器（body）两个元素都在 PreviewPane.svelte 里，
+   * 页面拿不到 bind:this ⇒ 组件用 export function 交出来（见那边文件头）。
+   * 挂载前为 null；页面对这两个元素只做四件事：写 innerHTML、设内联宽度、找 <svg>、量 clientWidth。
+   */
+  let previewPaneRef = $state<{ paper(): HTMLElement | undefined; body(): HTMLElement | undefined } | null>(null);
   let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
   let previewScaleFrame = 0; // 已排队的重算帧号（见 onMount 里的 ResizeObserver）
   /**
@@ -252,40 +248,17 @@
   let jumpTarget = $state<{ line: number; col: number; seq: number } | null>(null); // 编辑器跳转目标
   /**
    * 编译警告（Rust 侧 warnings）：字体族写错只会以警告形式出现，必须显示出来。
-   * 声明位置在徽标状态之前 —— 下面 `warningPopoverOpen` 这个 `$derived` 要读它
-   * （`$derived` 的表达式虽然是惰性的，但 TS 的"先用后声明"检查不认，实测会让 `npm run check` 报错）。
+   * 条数传给状态栏的警告徽标（DiagnosticBadge），条目由 warningItems() 组装。
    */
   let compileWarnings = $state<Diagnostic[]>([]);
-  let errorWrapEl = $state<HTMLElement | undefined>(undefined); // 错误徽标 + Popover 的外层容器（锚点，供外部点击判定）
-  let warningWrapEl = $state<HTMLElement | undefined>(undefined); // 警告徽标 + Popover 的外层容器（同上）
-  let errorPopoverEl = $state<HTMLElement | undefined>(undefined); // 错误列表 Popover 元素（打开后测量收边）
-  let warningPopoverEl = $state<HTMLElement | undefined>(undefined); // 警告列表 Popover 元素（同上）
-  // Popover 视口收边结果（打开时计算一次）：transform 平移量 + 可选限宽，内联样式应用。
-  // 两个浮层共用一份 —— 同一时刻只会开一个（见 openBadgePopover）。
-  let popoverClamp = $state({ translateX: 0, translateY: 0, maxWidth: 0 });
-
-  /** 错误浮层是否可见（开着 + 确实有内容）。有内容才让浮层存在：空浮层（只有标题）没意义 */
-  const errorPopoverOpen = $derived(
-    openBadgePopover === "errors" && hasErrorToShow(errorCount, lastNonPosError),
-  );
-  /** 警告浮层是否可见（同上） */
-  const warningPopoverOpen = $derived(
-    openBadgePopover === "warnings" && compileWarnings.length > 0,
-  );
-
+  // 浮层的可见性判定、Esc/点外部关闭、打开时视口收边都在 DiagnosticBadge 组件里
+  // （两个徽标共用同一份行为）；这里只留开合状态本身 —— 点浮层条目跳转后也要收起它。
   /** 点徽标/Enter：开这个、并顺手把另一个关掉（两个徽标共用一份状态 ⇒ 一次只开一个） */
-  function toggleBadgePopover(kind: "errors" | "warnings") {
-    openBadgePopover = openBadgePopover === kind ? "none" : kind;
+  function toggleBadgePopover(kind: BadgeKind) {
+    openBadgePopover = nextBadgePopover(openBadgePopover, kind);
   }
-
-  /** 两个浮层共用的收边内联样式（打开瞬间由下面的 $effect 算一次） */
-  function popoverStyle(): string {
-    const { translateX, translateY, maxWidth } = popoverClamp;
-    return `transform: translate(${translateX}px, ${translateY}px);${
-      maxWidth > 0 ? `max-width:${maxWidth}px` : ""
-    }`;
-  }
-  let settingsPrefixTextarea = $state<HTMLTextAreaElement | undefined>(undefined); // 设置弹窗中的前缀代码 textarea（错误落前缀时定位）
+  // 设置弹窗组件句柄（bind:this）：错误落在前缀代码内时用它定位到对应行（见 focusPrefixLine）
+  let settingsDialogRef = $state<{ focusPrefixLine(line: number): void } | null>(null);
   let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
   let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
   /**
@@ -319,44 +292,33 @@
    * webview 缩放发生在 CSS 层之下，所有这些单位都不动。
    */
   let uiZoom = $state(ZOOM_DEFAULT);
-  /** 缩放的"再确认一次"定时器（见 applyUiZoom / scheduleZoomConfirm） */
-  let zoomConfirmTimer: ReturnType<typeof setTimeout> | null = null;
   /**
-   * 我们对"引擎实际接受了多少缩放"的最佳估计（见 zoom.ts 的 zoomFromWidths）。
-   * 启动校准（先设 100%）后为 1；每次调档都按 CSS 布局宽度重新估一遍。
+   * 缩放编排（引擎改档 / 100% 基准 / 沉降窗口 / 复核代次 / 滚轮余量）在 zoom-controller.ts：
+   * 那边依赖全部由 hooks 注入，24 项单测把三条红线钉住了 —— ① 只观察、绝不改档（用户 2026-09-16
+   * 的取舍）；② 沉降窗口内 resize 不重校 100% 基准；③ 新复核一开始旧复核立刻作废。
+   * 这里只提供页面这一侧的东西：档位状态、状态栏反馈、真正的引擎 setZoom。
    */
-  let appliedZoom = 1;
-  /** 100% 时的 CSS 布局宽度（视口宽度判据的基准）；改档/窗口尺寸变化后按当前档位再校一遍 */
-  let zoomBaseline100 = 0;
-  /** 正在设一次缩放并测量（期间不接受 resize 事件改基准——那是缩放自己引起的） */
-  let zoomStepInFlight = false;
-  /**
-   * 本会话里**页面收到过多少次带 Ctrl 的滚轮事件**（只用于诊断，不参与任何判定）。
-   * 写进「界面缩放未生效」的文案里：0 次 ⇒ 事件压根没到页面（被引擎/系统吃掉了），
-   * 有次数 ⇒ 事件到了、是 `setZoom` 没生效。两种成因的修法完全不同，见 zoom.ts 的文案注解。
-   */
-  let zoomWheelEvents = 0;
-  /**
-   * 滚轮位移的"未走完余量"（见 zoom.ts 的 `accumulateWheelSteps` 注解）。
-   * 存在的理由（2026-09-16 用户反馈「Ctrl+滚轮常态可以、到上限就不行」，而状态栏写着
-   * 「缩放已是 250%（到边界了）」）：一次滚轮的位移可能不足一档（高倍缩放时每格位移会变小），
-   * 那种输入算出来的 4% 会被档位圆整抹掉 —— 没有累加器时这种滚轮**永远**动不了，还会被
-   * 误报成"到边界了"。攒够半档再走一档即可，100px 一格的手感完全不变。
-   */
-  const zoomWheelAcc = createWheelAccumulator();
-  /**
-   * 缩放沉降窗口的截止时间戳（见 zoom.ts 的注解）：从"我们让引擎改档"起算，到复核结束为止。
-   * 这期间收到的 `resize` **不许**重校 100% 基准 —— 引擎改档本身就会引发一次 resize，
-   * 而那时 `appliedZoom` 还是旧档位，一校就把基准压低成"新宽度"，复核随即把"引擎接受了"
-   * 读成"引擎没动"（2026-09-14 用户第五次反馈「还是会出现界面缩放未生效」的根因）。
-   */
-  let zoomSettlingUntil = 0;
-  /** 校准（100%）时的 devicePixelRatio：dpr 判据的基准（只作交叉验证，见 dprEngineZoomNow） */
-  let zoomDprAt100 = 0;
-  /** 复核的代次令牌：新的复核一开始，旧的立刻作废（否则旧复核会把新档位拉回引擎的旧读数） */
-  let zoomVerifySeq = 0;
-  /** 校准只做一次；并发调用共用同一个 promise */
-  let zoomCalibration: Promise<void> | null = null;
+  const zoom = createZoomController({
+    enabled: isTauri,
+    getLevel: () => uiZoom,
+    requestLevel: (level) => setUiZoom(level),
+    setStatus: (text) => {
+      statusText = text;
+    },
+    setWebviewZoom: (level) => getCurrentWebview().setZoom(level),
+    layoutWidth: () => document.documentElement.clientWidth,
+    devicePixelRatio: () => window.devicePixelRatio,
+    // 浏览器开发桩的 setZoom 是假的（`?browserdev=1` 的 fakeZoom）；zoomsim=1 是模拟引擎，照常复核
+    isFakeZoom: () =>
+      (window as unknown as { __browserDevStub?: { fakeZoom?: boolean } }).__browserDevStub
+        ?.fakeZoom === true,
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    nextFrame: () => new Promise((r) => requestAnimationFrame(() => r())),
+    setTimer: (fn, ms) => setTimeout(fn, ms) as unknown as number,
+    clearTimer: (id) => clearTimeout(id),
+    log: (msg) => dbg.log("zoom", msg),
+  });
   // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
   // Map 本身不需要响应式（变更后靠 mathVersion 代次通知编辑器重整装饰）
   const mathCache = new Map<string, MathRender>();
@@ -530,20 +492,8 @@
   let autoCheckUpdates = $state(true);
   let settingsAutoCheckUpdates = $state(true);
 
-  /**
-   * 更新流程状态机。刻意做成**单个对象**而不是若干布尔量：状态栏提示、弹窗内容、
-   * 按钮可用性都由它派生，避免出现"弹窗开着但状态是 idle""下载中又是 available"这类
-   * 自相矛盾的组合（更新流程有 7 个阶段，布尔量一多必然打架）。
-   */
-  type UpdateFlow =
-    | { kind: "idle" }
-    | { kind: "checking"; manual: boolean }
-    | { kind: "latest" }
-    | { kind: "available"; version: string; currentVersion: string; notes: string }
-    | { kind: "downloading"; version: string; progress: DownloadProgress }
-    | { kind: "installing"; version: string }
-    | { kind: "error"; message: string };
-
+  // 更新流程状态机：类型与语义见 update-utils.ts 的 UpdateFlow（刻意做成单个可判别联合，
+  // 而不是若干布尔量——理由写在那边的注释里）
   let updateFlow = $state<UpdateFlow>({ kind: "idle" });
   // 待安装的更新句柄：持有 Rust 侧资源（rid），不进响应式（模板不渲染它），换版本时 close
   let updateHandle: AvailableUpdate | null = null;
@@ -558,17 +508,8 @@
   let updateDismissedAt: number | null = null;
   let startupCheckTimer: ReturnType<typeof setTimeout> | undefined;
 
-  /** 状态栏的更新提示（点击重开更新弹窗）；无提示时为 null */
-  const updateNotice = $derived.by(() => {
-    const flow = updateFlow;
-    if (flow.kind === "available") return `可更新到 v${flow.version}`;
-    if (flow.kind === "downloading") {
-      return flow.progress.percent === null
-        ? `正在下载更新 v${flow.version}（已下载 ${formatBytes(flow.progress.downloaded)}）`
-        : `正在下载更新 v${flow.version}（${flow.progress.percent}%）`;
-    }
-    return null;
-  });
+  /** 状态栏的更新提示（点击重开更新弹窗）；无提示时为 null（文案在 update-flow.ts，有单测） */
+  const updateNotice = $derived(updateNoticeText(updateFlow));
 
   /**
    * 检查更新。manual = 用户点菜单：这类操作必须有明确反馈（"已是最新"也要说）；
@@ -580,7 +521,7 @@
     if (updateFlow.kind === "downloading" || updateFlow.kind === "installing") return;
     updateFlow = { kind: "checking", manual };
     if (manual) {
-      statusText = "正在检查更新…";
+      statusText = CHECKING_STATUS;
       // 手动检查 = 用户主动想知道有没有更新：清掉"别再自动弹窗"标记（"直到点了检查更新"）
       clearUpdateDismissed();
     }
@@ -590,39 +531,17 @@
     lastUpdateCheckAt = Date.now();
     schedulePersist();
 
-    if (outcome.kind === "none") {
-      updateFlow = { kind: "latest" };
-      if (manual) statusText = "已是最新版本";
-      return;
-    }
-    if (outcome.kind === "unsupported") {
-      updateFlow = { kind: "idle" };
-      if (manual) statusText = "当前环境不支持自动更新（仅桌面版可用）";
-      return;
-    }
-    if (outcome.kind === "error") {
-      updateFlow = { kind: "error", message: outcome.message };
-      if (manual) statusText = `检查更新失败：${outcome.message}`;
-      return;
-    }
-
     // 有可用新版本：释放上一个句柄，换成新的
-    await closeUpdate(updateHandle);
-    updateHandle = outcome.update;
-    updateFlow = {
-      kind: "available",
-      version: outcome.update.version,
-      currentVersion: outcome.update.currentVersion,
-      notes: outcome.update.notes,
-    };
-    // 用户点过「稍后」之后，自动检查只把入口留在状态栏（`updateNotice` 那个「可更新到 vX」按钮）：
-    // **不弹窗、也不动状态文字** —— 用户原话「不更新就再也别跳出来，直到点了检查更新」。
-    // 手动检查永远弹窗（上面的 clearUpdateDismissed 已经把标记清掉了）。
-    if (manual || !isUpdatePromptSuppressed(updateDismissedAt)) {
-      statusText = `发现新版本 v${outcome.update.version}`;
-      // 发现新版本 → 弹窗确认（不自动下载）；关掉弹窗后状态栏仍留着入口
-      showUpdateDialog = true;
+    if (outcome.kind === "available") {
+      await closeUpdate(updateHandle);
+      updateHandle = outcome.update;
     }
+    // 状态机 / 状态栏 / 弹窗怎么摆全在 update-flow.ts（有单测）：那里锁着"点过「稍后」之后
+    // 自动检查不弹窗、也不动状态文字"这条红线，以及"手动检查永远弹窗"。
+    const plan = planUpdateCheck(outcome, { manual, dismissedAt: updateDismissedAt });
+    updateFlow = plan.flow;
+    if (plan.status !== null) statusText = plan.status;
+    if (plan.openDialog) showUpdateDialog = true;
   }
 
   /** 清掉"别再自动弹更新窗"标记（显式操作：手动检查 / 点状态栏入口 / 开始下载） */
@@ -639,9 +558,10 @@
    */
   function dismissUpdatePrompt() {
     showUpdateDialog = false;
-    updateDismissedAt = Date.now();
+    const plan = planDismiss(Date.now());
+    updateDismissedAt = plan.dismissedAt;
     schedulePersist();
-    statusText = UPDATE_DISMISS_NOTICE;
+    statusText = plan.status;
   }
 
   /** 点状态栏的更新入口：与手动检查同属显式操作（清标记），然后打开弹窗 */
@@ -656,23 +576,15 @@
     if (!handle) return;
     // 用户改主意开始装了：标记没必要再留着（装完重启后又能正常自动提示下一个版本）
     clearUpdateDismissed();
-    updateFlow = {
-      kind: "downloading",
-      version: handle.version,
-      progress: { downloaded: 0, total: 0, percent: null },
-    };
+    updateFlow = planInstallStart(handle.version);
     const result = await downloadAndInstallUpdate(handle, (progress) => {
       // 用户可能已经点了「关闭」；只要还在下载阶段就继续更新进度
       if (updateFlow.kind === "downloading") updateFlow = { ...updateFlow, progress };
     });
-    if (result.ok) {
-      updateFlow = { kind: "installing", version: handle.version };
-      statusText = "更新已就绪：应用即将退出并安装新版本…";
-    } else {
-      updateFlow = { kind: "error", message: result.message };
-      statusText = `更新失败：${result.message}`;
-      showUpdateDialog = true; // 失败必须让用户看见（否则点了按钮好像什么也没发生）
-    }
+    const plan = planInstallResult(result, handle.version);
+    updateFlow = plan.flow;
+    statusText = plan.status;
+    if (plan.openDialog) showUpdateDialog = true; // 失败必须让用户看见
   }
 
   /** 关闭弹窗：保存后关闭 */
@@ -751,251 +663,48 @@
   }
 
   /**
-   * 把缩放系数交给 webview。非 Tauri 环境（提示页）或调用失败都静默忽略——
-   * 缩放不是关键路径，失败不该弹错（调试日志里留痕）。
-   *
-   * **为什么要"设完再确认一次"**（2026-09-14，实机反馈「放大根本没用、缩小有用」）：
-   * WebView2 在 Ctrl+滚轮这种缩放手势进行中/结束时，会用它自己那套逻辑处理这次手势
-   * （见 WebView2Feedback #1022：手势期间宿主设的 ZoomFactor 会被"还原"回手势开始时的值），
-   * 于是在滚轮事件里立刻就 setZoom 有可能被引擎抹掉。这里在**手势停下来之后**再设一遍同一个
-   * 系数：值没被抹掉时这次调用等价于空操作，被抹掉时就把界面拉回用户要的档位。
+   * 改缩放并反馈（滚轮 / 键盘 / 菜单共用）；值没变时提示"已到边界"，不重复写存档。
+   * **这是唯一的档位写入口**：控制器只通过 requestLevel 表达"用户要这个值"，不自己写 uiZoom。
    */
-  async function applyUiZoom(zoom: number) {
-    if (!isTauri()) return;
-    const target = clampZoom(zoom);
-    // 先校准 100% 基线（只做一次），后面才能把视口宽度换算成"引擎实际接受的档位"
-    await ensureZoomCalibration();
-    // 改档前若处于"已沉降"状态，先把基准按**当前档位**校一遍：沉降窗口里被跳过的 resize
-    // （用户拖了窗口）在这里自愈。连滚多档时不校 —— 那时的档位估计可能还没跟上真实值，
-    // 校了反而会把基准带偏（这正是用户第五次反馈的那条误判链路）。
-    const settled = shouldRebaselineZoom({
-      now: Date.now(),
-      settlingUntil: zoomSettlingUntil,
-      verifyInFlight: zoomStepInFlight,
-    });
-    if (settled) rebaselineZoom();
-    markZoomSettling();
-    try {
-      await getCurrentWebview().setZoom(target);
-      // `appliedZoom` = **我们请求的档位**（不再由复核改写）：它只用于诊断读数与基准换算
-      appliedZoom = target;
-      dbg.log("zoom", `set ${zoomLabel(target)}`);
-    } catch (e) {
-      dbg.log("zoom", "setZoom failed", e);
-      return;
-    }
-    scheduleZoomConfirm();
-  }
-
-  /**
-   * 记下"我们刚让引擎改档"：从这一刻起到复核结束，`resize` 一律当作缩放自己引发的，
-   * 不重校 100% 基准（见 zoom.ts 的「缩放沉降窗口」注解）。重复调用只是把窗口往后推。
-   */
-  function markZoomSettling() {
-    zoomSettlingUntil = Date.now() + ZOOM_SETTLE_MAX_MS;
-  }
-
-  /** 手势/连续调档停止后再确认一次缩放（见 applyUiZoom 的注解）；重复调用只保留最后一次 */
-  function scheduleZoomConfirm() {
-    if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
-    zoomConfirmTimer = setTimeout(() => {
-      zoomConfirmTimer = null;
-      const target = clampZoom(uiZoom);
-      markZoomSettling();
-      void getCurrentWebview()
-        .setZoom(target)
-        .then(() => {
-          dbg.log("zoom", `confirm ${zoomLabel(target)}`);
-          void observeZoomEffect(target);
-        })
-        // 这次是兜底重试，失败只记日志（首次调用已经把失败报过了）
-        .catch((e) => dbg.log("zoom", "confirm failed", e));
-    }, ZOOM_CONFIRM_DELAY_MS);
-  }
-
-  /** 浏览器开发桩的 setZoom 是假的吗（桩在 app.html 挂了 __browserDevStub；zoomsim 模式下是模拟的，照常复核） */
-  function zoomIsFaked(): boolean {
-    return (
-      (window as unknown as { __browserDevStub?: { fakeZoom?: boolean } }).__browserDevStub
-        ?.fakeZoom === true
-    );
-  }
-
-  /**
-   * 启动后校准一次：先把引擎设到 100%（顺便排掉 WebView2"记住上次站点缩放"的干扰），
-   * 记下此时的 **CSS 布局宽度** 作为基准。100% 是恒等档，任何引擎都会接受，所以这个基准可靠。
-   */
-  function ensureZoomCalibration(): Promise<void> {
-    if (zoomCalibration === null) {
-      zoomCalibration = (async () => {
-        try {
-          markZoomSettling(); // 校准本身也是一次改档（这一步引发的 resize 同样不该改基准）
-          await getCurrentWebview().setZoom(ZOOM_DEFAULT);
-          await new Promise((r) => setTimeout(r, 90));
-          const width = document.documentElement.clientWidth;
-          if (width > 0) {
-            zoomBaseline100 = width;
-            appliedZoom = ZOOM_DEFAULT;
-          }
-          // 100% 时的 dpr（= 显示器缩放 × 1）：它是**独立的第二条判据**，用来交叉验证宽度判据
-          // ——两条都读不出来时才是真的"量不到"（见 dprEngineZoomNow 与状态栏文案）。
-          const dpr = window.devicePixelRatio;
-          if (Number.isFinite(dpr) && dpr > 0) zoomDprAt100 = dpr;
-          dbg.log("zoom", `校准：100% 布局宽度 ${width}px，dpr ${dpr}`);
-        } catch (e) {
-          dbg.log("zoom", "缩放校准失败（本次不判定引擎档位）", e);
-        }
-      })();
-    }
-    return zoomCalibration;
-  }
-
-  /** 按"当前档位 × 当前宽度"重校基准：缩放与用户拖窗口之后都要校，否则判据会失真 */
-  function rebaselineZoom() {
-    const width = document.documentElement.clientWidth;
-    if (width > 0 && appliedZoom > 0) zoomBaseline100 = width * appliedZoom;
-  }
-
-  /** 引擎**实际接受**的档位（读 CSS 布局宽度；量不到时 null＝本次不判定） */
-  function engineZoomNow(): number | null {
-    return zoomFromWidths(zoomBaseline100, document.documentElement.clientWidth);
-  }
-
-  /**
-   * 用 `devicePixelRatio` 反推的引擎档位（`dpr = 显示器缩放 × 页面缩放`，所以比值就是档位）。
-   *
-   * **它是第二条独立判据，只用于交叉验证，不参与判定**（2026-09-14 的教训：真机上 dpr 不一定
-   * 跟随宿主设的 ZoomFactor，所以判据换成了布局宽度）。但两条一起写进"未生效"的状态栏文案，
-   * 一张截图就能分清"引擎真没动"（两条都说 1.00）与"我们自己量歪了"（宽度说 1.00、dpr 说 1.50）。
-   */
-  function dprEngineZoomNow(): number | null {
-    const dpr = window.devicePixelRatio;
-    if (!(zoomDprAt100 > 0) || !(dpr > 0) || !Number.isFinite(dpr)) return null;
-    return dpr / zoomDprAt100;
-  }
-
-  /** setTimeout 的 Promise 版（复核的等待节奏用） */
-  function sleep(ms: number): Promise<void> {
-    return new Promise((r) => setTimeout(r, ms));
-  }
-
-  /** 设完缩放后等引擎重排完，再读一次"引擎实际接受的档位" */
-  async function measureEngineZoom(): Promise<number | null> {
-    await new Promise((r) => requestAnimationFrame(() => r(null)));
-    await sleep(ZOOM_MEASURE_SETTLE_MS);
-    return engineZoomNow();
-  }
-
-  /**
-   * 改档之后**只观察、不改状态**（用户 2026-09-16 明确要求：「就应该缩放只有我能改，软件别自己动了」）。
-   *
-   * 历史（为什么以前会自己动）：从 0.7.4 起这里叫 `verifyZoomApplied` —— 设完档量一次，量到的档位与
-   * 请求值不一致就把 `uiZoom` **拉回引擎给的档位**，为的是防"引擎只肯到 100%、而状态一路涨到 250%，
-   * 于是往下滚要滚十几档才有反应"那个死区。代价是：**判断本身可能出错**，而一旦判错，用户要的缩放
-   * 就被我们自己弹回原档 —— 用户第六轮反馈的「用 Ctrl+滚轮会回退」正是它（他那台机器上两条判据都
-   * 读不出缩放变化，于是每一次缩放都被判成"引擎没动"并拉回）。用户已经明确取舍：**宁可没有死区
-   * 保护，也不要软件自己改缩放**。所以现在：
-   *   - 只在我们**执行用户操作**时调用 `setZoom`（见 applyUiZoom）；
-   *   - 这里量到的读数只用于**诊断**（调试日志 + 状态栏里一句"没观察到变化"的说明），
-   *     **绝不写 `uiZoom`、绝不改变引擎档位**；
-   *   - 因此"引擎上限"这类机器上状态可能高于引擎实际给的档位（死区回来了）——这是用户接受的代价，
-   *     真要再收，也应该由用户自己按 Ctrl+Shift+-，而不是我们偷偷改。
-   */
-  async function observeZoomEffect(target: number) {
-    if (zoomIsFaked()) return;
-    if (zoomCalibration === null) return; // 还没校准过（正常路径一定先经过 applyUiZoom）
-    const mySeq = ++zoomVerifySeq;
-    let observed: number | null = null;
-    let observedDpr: number | null = null;
-    let measurements = 0;
-    zoomStepInFlight = true;
-    markZoomSettling();
-    try {
-      for (const wait of ZOOM_VERIFY_WAITS_MS) {
-        if (wait > 0) await sleep(wait);
-        if (mySeq !== zoomVerifySeq) return; // 用户又调档了：这次观察作废
-        measurements += 1;
-        observed = await measureEngineZoom();
-        observedDpr = dprEngineZoomNow();
-        if (zoomApplied(target, observed) || zoomApplied(target, observedDpr)) break;
-      }
-    } catch (e) {
-      dbg.log("zoom", "观察缩放结果时出错", e);
-      return;
-    } finally {
-      if (mySeq === zoomVerifySeq) {
-        zoomStepInFlight = false;
-        zoomSettlingUntil = 0; // 观察收尾：之后引擎再触发 resize 就是用户拖窗口
-      }
-    }
-    if (mySeq !== zoomVerifySeq) return;
-    const currentWidth = document.documentElement.clientWidth;
-    if (zoomApplied(target, observed) || zoomApplied(target, observedDpr)) {
-      dbg.log("zoom", `观察：引擎侧与请求一致（${zoomLabel(target)}）`);
-      return;
-    }
-    // **没有观察到变化**：可能是引擎没接受，也可能是我们这两条判据读不出来（那台机器就是这样）。
-    // 无论哪种，都只写一句说明，档位保持用户操作后的值。
-    dbg.log(
-      "zoom",
-      `观察：没看到引擎侧变化（请求 ${zoomLabel(target)}，实测 ${observed === null ? "读不到" : observed.toFixed(3)}，` +
-        `量了 ${measurements} 次；布局宽度 ${Math.round(zoomBaseline100)}→${Math.round(currentWidth)}）`,
-    );
-    statusText = zoomUnobservedNotice(target, observed, {
-      measurements,
-      widths: { baseline: zoomBaseline100, current: currentWidth },
-      dpr: window.devicePixelRatio,
-      dprFactor: observedDpr,
-      wheelEvents: zoomWheelEvents,
-    });
-  }
-
-
-  /** 改缩放并反馈（滚轮 / 菜单共用）；值没变时提示"已到边界"，不重复写存档 */
   function setUiZoom(next: number) {
     const target = clampZoom(next);
     if (target === uiZoom) {
       statusText = `缩放已是 ${zoomLabel(target)}（到边界了）`;
       return;
     }
-    uiZoom = target; // $effect 把它交给 webview（见下方 applyUiZoom 的 effect）
+    uiZoom = target; // $effect 把它交给 webview（见下方 zoom.apply 的 effect）
     statusText = `缩放 ${zoomLabel(target)}`;
     schedulePersist();
   }
 
-  /** 缩放复位 100%（视图菜单） */
+  /** 缩放复位 100%（视图菜单）：整档操作，先丢掉滚轮余量 */
   function resetUiZoom() {
     if (uiZoom === ZOOM_DEFAULT) {
       statusText = "缩放已是 100%";
       return;
     }
-    resetWheelAccumulator(zoomWheelAcc);
+    zoom.resetWheel();
     setUiZoom(ZOOM_DEFAULT);
   }
 
   /**
    * `Ctrl+Shift+=` / `Ctrl+Shift+-`：±1 格（用户 2026-09-16 要求）。
    *
-   * 与滚轮走**同一条** setUiZoom → applyUiZoom → 复核链路，所以状态栏文案、存档、引擎复核
-   * 三处行为完全一致；差别只在于**没有滚轮手势**——WebView2 那条"手势结束时把 ZoomFactor 抹回去"
-   * 的路径（#1022）碰不到这里，这也是它被用户当"缩放失败的备用手段"的原因（见 app-keys.zoomKeySteps）。
+   * 与滚轮走**同一条** setUiZoom → 引擎改档 → 复核链路，所以状态栏文案、存档、复核三处行为完全
+   * 一致；差别只在于**没有滚轮手势**——WebView2 那条"手势结束时把 ZoomFactor 抹回去"的路径
+   * （#1022）碰不到这里，这也是它被用户当"缩放失败的备用手段"的原因（见 app-keys.zoomKeySteps）。
    */
   function zoomBySteps(steps: 1 | -1) {
-    resetWheelAccumulator(zoomWheelAcc); // 键盘调档没有"半格"这回事：丢掉滚轮留下的余量
-    setUiZoom(steps > 0 ? zoomIn(uiZoom) : zoomOut(uiZoom));
+    zoom.step(steps); // 里面先丢掉滚轮余量（键盘调档没有"半格"这回事）
   }
 
   /**
    * Ctrl+滚轮：放大/缩小整个界面（编辑区 + 预览 + 菜单 + 状态栏）。
    *
-   * 命中时**必须 preventDefault**：否则这次滚动会继续滚动编辑器/预览区，WebView2 还可能顺手
-   * 用它自己那套系数缩放页面（与我们的系数打架，表现为"缩放了但系数对不上"）。
-   * 位移量同时看 deltaY / deltaX（见 zoom.ts 的注解）：按 Shift 滚轮时浏览器把纵向转成横向。
-   *
-   * **位移不足一档时要攒着**（2026-09-16 修的死区，见 zoom.ts 的 `accumulateWheelSteps`）：
-   * 一次 40px 的滚轮折合 0.4 档 = 4%，直接算进档位会被 `clampZoom` 圆整抹掉 —— 那种输入
-   * 以前是"永远不动 + 状态栏误报「到边界了」"。所以这里累加余量，够了才 `setUiZoom`：
-   * 不足一档**什么都不做**（连状态栏都不动），这样「到边界了」重新只意味着"真到边界"。
+   * 命中时**必须 preventDefault**：否则这次滚动会继续滚动编辑器/预览区，WebView2 还可能顺手用
+   * 它自己那套系数缩放页面（与我们的系数打架，表现为"缩放了但系数对不上"）。位移量同时看
+   * deltaY / deltaX（按 Shift 滚轮时浏览器把纵向转成横向）；"不足一档要攒着"的余量逻辑在
+   * zoom-controller.ts（那里还有 2026-09-16 修的那个死区）。
    *
    * 监听挂在 `window` 的**捕获阶段**（注册见 onMount），不是挂在 `<main>` 上：
    * ① 鼠标在菜单栏/状态栏上滚也该能缩放（原先只有编辑区/预览区那一块有效）；
@@ -1006,25 +715,12 @@
   function handleZoomWheel(e: WheelEvent) {
     if (!e.ctrlKey) return;
     e.preventDefault();
-    // 计数只用于**诊断**（写进"未生效"文案，见 zoomRejectedNotice）：用户从 0.7.5 起反复反馈
-    // 「缩放调整失败」，而"页面压根没收到 Ctrl+滚轮"与"收到了但引擎没动"是完全不同的两个成因
-    // —— 前者说明事件在到达页面之前就被吃掉了（例如引擎自己那套缩放控件开着），
-    // 后者才是 setZoom 没生效。累计计数（不重置）就是为了让这条一眼可辨。
-    zoomWheelEvents += 1;
-    // 返回的是"这一次该走的整档数"（不足一档时是 0，余量留在累加器里）
-    const steps = accumulateWheelSteps(zoomWheelAcc, e.deltaY, e.deltaX, e.deltaMode);
-    if (steps === 0) {
-      // 不足一档：不动档位，但把"攒了多少"说出来 —— 否则"位移太小"和"事件没到页面"
-      // 在用户眼里完全一样（都是滚了没反应），而那两件事的修法完全不同（见 zoom.ts）。
-      statusText = wheelPendingNotice(zoomWheelAcc);
-      return;
-    }
-    setUiZoom(steps > 0 ? zoomIn(uiZoom, steps) : zoomOut(uiZoom, -steps));
+    zoom.wheel(e.deltaY, e.deltaX, e.deltaMode);
   }
 
   // 缩放变化（含启动恢复后的首次赋值）→ 交给 webview；失败不影响其它逻辑
   $effect(() => {
-    void applyUiZoom(uiZoom);
+    void zoom.apply(uiZoom);
   });
 
   /** 写作模式 ↔ 源码模式（仿 Typora 的"源代码模式"）：预览栏随模式联动 */
@@ -1224,7 +920,7 @@
     const hasSelection =
       zone === "editor"
         ? (editorRef?.hasSelection() ?? false)
-        : previewSelectionHasContent(window.getSelection(), previewHost);
+        : previewSelectionHasContent(window.getSelection(), previewPaneRef?.paper() ?? null);
     contextMenu = {
       x: e.clientX,
       y: e.clientY,
@@ -1278,9 +974,10 @@
   /** 预览区全选：用 Selection API 选中整个预览容器（SVG 不可编辑，execCommand selectAll 不适用） */
   function selectAllPreview() {
     const sel = window.getSelection();
-    if (!sel || !previewHost) return;
+    const paper = previewPaneRef?.paper();
+    if (!sel || !paper) return;
     const range = document.createRange();
-    range.selectNodeContents(previewHost);
+    range.selectNodeContents(paper);
     sel.removeAllRanges();
     sel.addRange(range);
   }
@@ -1315,104 +1012,34 @@
     statusText = "已新建";
   }
 
+  /**
+   * 菜单表：结构由 menu-model.ts 的 buildMenuGroups 纯函数产出（快捷键 → 命令映射、勾选态
+   * 都有单测，见 menu-model.test.ts）；这里只把当前状态与命令回调喂进去。
+   */
   function menuGroups(): MenuGroup[] {
-    return [
-      {
-        label: "文件",
-        accessKey: "F",
-        items: [
-          // shortcut 同时是菜单项右侧灰字显示与全局 Ctrl/Meta 组合键的触发来源（MenuBar 统一处理）
-          { label: "新建", shortcut: "Ctrl+N", action: handleNew },
-          {
-            // 带 Shift 的组合键 MenuBar 的匹配器不认（见 menu-keys.shortcutMatches 排除 Shift），
-            // 所以这里只是把姿势当灰字提示显示出来，真正的触发在 handleKeydown → openNewWindow
-            label: "新建窗口",
-            shortcut: "Ctrl+Shift+N",
-            action: openNewWindow,
-          },
-          { label: "打开…", shortcut: "Ctrl+O", action: handleOpen },
-          { label: "保存", shortcut: "Ctrl+S", action: handleSave },
-          { label: "设置…", shortcut: "Ctrl+,", action: openSettings },
-          { label: "导出 PDF…", shortcut: "Ctrl+P", action: handleExportPdf },
-        ],
-      },
-      {
-        label: "格式",
-        accessKey: "O",
-        items: [
-          { label: "加粗", shortcut: "Ctrl+B", action: () => runFormat("bold") },
-          { label: "斜体", shortcut: "Ctrl+I", action: () => runFormat("italic") },
-          { label: "行内代码", shortcut: "Ctrl+Shift+`", action: () => runFormat("code") },
-          { label: "行内公式", shortcut: "Ctrl+M", action: () => runFormat("math-inline") },
-          { label: "公式块", shortcut: "Ctrl+Shift+M", action: () => runFormat("math-block") },
-          { label: "标题 1", shortcut: "Ctrl+1", action: () => runFormat("heading1") },
-          { label: "标题 2", shortcut: "Ctrl+2", action: () => runFormat("heading2") },
-          { label: "标题 3", shortcut: "Ctrl+3", action: () => runFormat("heading3") },
-          { label: "正文", shortcut: "Ctrl+0", action: () => runFormat("body") },
-          { label: "无序列表", shortcut: "Ctrl+Shift+]", action: () => runFormat("bullet") },
-          { label: "有序列表", shortcut: "Ctrl+Shift+[", action: () => runFormat("ordered") },
-          { label: "引用", shortcut: "Ctrl+Shift+Q", action: () => runFormat("quote") },
-          { label: "代码块", shortcut: "Ctrl+Shift+C", action: () => runFormat("code-block") },
-          { label: "链接", shortcut: "Ctrl+K", action: () => runFormat("link") },
-        ],
-      },
-      {
-        label: "视图",
-        accessKey: "V",
-        items: [
-          {
-            label: "源代码模式",
-            // 键位：**模式切换用 Ctrl+E**（2026-09-18 用户要求）。
-            // 原来挂的是 Ctrl+/（Typora 的习惯），但那一按会**同时**做两件事：编辑器的 CM keymap
-            // 处理 `Mod-/` 只 preventDefault、不阻断冒泡，而这里（MenuBar 的 window 级匹配）不看
-            // defaultPrevented ⇒ 按一次既注释又切模式。Ctrl+/ 现在只归注释（VS Code 习惯）。
-            shortcut: "Ctrl+E",
-            checked: viewMode === "source",
-            action: () => toggleViewMode(),
-          },
-          {
-            label: "显示预览栏",
-            checked: showPreview,
-            action: () => (showPreview = !showPreview),
-          },
-          {
-            label: "自动换行",
-            // 同样只是灰字提示（MenuBar 的匹配器只认「Ctrl+单键」，不会命中 Alt+Z）；
-            // 真正的触发在 +page.svelte 的 handleKeydown 里
-            shortcut: "Alt+Z",
-            checked: editorWrap,
-            action: () => toggleEditorWrap(),
-          },
-          {
-            label: "放大",
-            // 灰字提示：Ctrl+滚轮 是手势（写不进快捷键匹配），Ctrl+Shift+= 是这一对键盘键里的"加"
-            shortcut: "Ctrl+滚轮 / Ctrl+Shift+=",
-            action: () => zoomBySteps(1),
-          },
-          {
-            label: "缩小",
-            shortcut: "Ctrl+Shift+-",
-            action: () => zoomBySteps(-1),
-          },
-          {
-            label: "重置缩放",
-            checked: uiZoom === ZOOM_DEFAULT,
-            action: resetUiZoom,
-          },
-          { label: "主题：自动", checked: theme === "system", action: () => (theme = "system") },
-          { label: "主题：暗", checked: theme === "dark", action: () => (theme = "dark") },
-          { label: "主题：明", checked: theme === "light", action: () => (theme = "light") },
-        ],
-      },
-      {
-        label: "帮助",
-        accessKey: "H",
-        items: [
-          { label: "检查更新…", action: () => checkUpdates(true) },
-          { label: "关于 Typst-pad", action: () => (showAbout = true) },
-        ],
-      },
-    ];
+    return buildMenuGroups({
+      viewMode,
+      showPreview,
+      editorWrap,
+      uiZoom,
+      theme,
+      onNew: handleNew,
+      onNewWindow: openNewWindow,
+      onOpen: handleOpen,
+      onSave: handleSave,
+      onOpenSettings: openSettings,
+      onExportPdf: handleExportPdf,
+      runFormat,
+      onToggleViewMode: toggleViewMode,
+      onTogglePreview: () => (showPreview = !showPreview),
+      onToggleWrap: toggleEditorWrap,
+      onZoomIn: () => zoomBySteps(1),
+      onZoomOut: () => zoomBySteps(-1),
+      onResetZoom: resetUiZoom,
+      onSetTheme: (t) => (theme = t),
+      onCheckUpdates: () => checkUpdates(true),
+      onShowAbout: () => (showAbout = true),
+    });
   }
 
   /**
@@ -1613,25 +1240,12 @@
     void refreshFontList(settingsFontDirs);
   }
 
-  /** 状态栏单行文案截断（警告可能很长，别把状态栏挤变形） */
-  function truncateStatus(text: string, max = 70): string {
-    return text.length > max ? `${text.slice(0, max)}…` : text;
-  }
-
-  /** 警告列表条目：有源码位置的可点击跳转（消息已翻成中文可行动提示），否则纯展示 */
+  /**
+   * 警告列表条目（组装在 status-view.ts，有单测）：有源码位置的可点击跳转（消息已翻成中文
+   * 可行动提示），否则纯展示。
+   */
   function warningItems(): ErrorListItem[] {
-    return compileWarnings.map((w) =>
-      w.line > 0
-        ? {
-            kind: "located" as const,
-            message: describeCompileWarning(w.message),
-            line: w.line,
-            col: w.column,
-            // 复制时把路径贴在行列前面（include/import 的文件给其路径；主源没有）
-            path: w.path ?? undefined,
-          }
-        : { kind: "generic" as const, message: describeCompileWarning(w.message) },
-    );
+    return buildWarningItems(compileWarnings);
   }
 
   /** 写作模式"打字期间不编译"的去抖时长（见 scheduleCompile） */
@@ -1655,9 +1269,9 @@
    *   打字期间**不需要**编译：正在编辑的那一块本来就是源码形态，其它块的切片内容也没变。
    */
 
-  /** 错误浮层当前的条目（复制/渲染共用一份来源，避免"复制的和看到的不一致"） */
+  /** 错误浮层当前的条目（组装在 status-view.ts，有单测；复制/渲染共用一份来源） */
   function errorItems(): ErrorListItem[] {
-    return buildErrorListItems(editorDiagnostics, lastNonPosError);
+    return buildErrorItems(editorDiagnostics, lastNonPosError);
   }
 
   /**
@@ -1667,21 +1281,16 @@
   async function copyDiagnostic(item: ErrorListItem, kind: "errors" | "warnings") {
     const text = formatDiagnosticForClipboard(item, filePath);
     const ok = await copyPlainText(text);
-    statusText = ok ? (kind === "errors" ? "已复制错误信息" : "已复制警告信息") : COPY_FAILED_NOTICE;
+    statusText = diagnosticCopyStatus(kind, ok);
   }
 
   /** 复制整个列表：首行是浮层标题原文（如 `编译错误（2 处）`），其后每条一行 */
   async function copyDiagnosticList(kind: "errors" | "warnings") {
     const items = kind === "errors" ? errorItems() : warningItems();
     const count = items.length;
-    const title =
-      kind === "errors" ? `编译错误（${count} 处）` : `编译警告（${count} 处）`;
+    const title = diagnosticListTitle(kind, count);
     const ok = await copyPlainText(formatDiagnosticListForClipboard(title, items, filePath));
-    statusText = ok
-      ? kind === "errors"
-        ? `已复制全部 ${count} 处错误`
-        : `已复制全部 ${count} 处警告`
-      : COPY_FAILED_NOTICE;
+    statusText = diagnosticCopyAllStatus(kind, count, ok);
   }
 
   function scheduleCompile() {
@@ -1767,19 +1376,21 @@
    * 测量失败（无产物/容器不可测）时清空内联宽度，回退 CSS width: 100%。
    */
   function applyPreviewScale() {
-    if (!previewBodyEl || !previewHost) return;
-    const svg = previewHost.querySelector("svg");
+    const body = previewPaneRef?.body();
+    const paper = previewPaneRef?.paper();
+    if (!body || !paper) return;
+    const svg = paper.querySelector("svg");
     if (!svg) {
-      previewHost.style.width = "";
+      paper.style.width = "";
       return;
     }
-    const containerWidth = previewBodyEl.clientWidth;
+    const containerWidth = body.clientWidth;
     const actualPageWidthPt = viewBoxWidthPt(svg.getAttribute("viewBox") ?? "");
     // 重排生效（产物页宽 = 我们请求的页宽）：画布恒 ≤ 栏宽 —— 这是"预览永不横向滚动"的保证。
     // 请求被文档自己的 #set page 覆盖时落到下面的等比缩放路径（那也是用户自己的纸型）。
     if (previewPageWidthUsed > 0 && isReflowApplied(actualPageWidthPt, previewPageWidthUsed)) {
       const reflowWidth = reflowCanvasWidth(containerWidth, actualPageWidthPt);
-      previewHost.style.width = Number.isNaN(reflowWidth) ? "" : `${reflowWidth}px`;
+      paper.style.width = Number.isNaN(reflowWidth) ? "" : `${reflowWidth}px`;
       return;
     }
     const displayWidth = previewCanvasWidth({
@@ -1787,7 +1398,7 @@
       pageWidthPt: actualPageWidthPt,
       uiZoom,
     });
-    previewHost.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
+    paper.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
   }
 
   /**
@@ -1801,7 +1412,8 @@
   function schedulePreviewReflow() {
     clearTimeout(previewReflowTimer);
     previewReflowTimer = setTimeout(() => {
-      const width = previewBodyEl ? previewPageWidthPt(previewBodyEl.clientWidth) : NaN;
+      const body = previewPaneRef?.body();
+      const width = body ? previewPageWidthPt(body.clientWidth) : NaN;
       const next = Number.isNaN(width) ? 0 : width;
       const changed = next === 0 ? previewPageWidthUsed > 0 : Math.abs(next - previewPageWidthRequest) > 2;
       if (!changed) return;
@@ -1809,6 +1421,25 @@
       dbg.log("preview-reflow", `页宽 ${next === 0 ? "关闭（不重排）" : `${next.toFixed(1)}pt`}`);
       void runCompile();
     }, 250);
+  }
+
+  /**
+   * 把编译结果这份派生状态落到页面（组装在 compile-status.ts，有单测）：
+   * 状态栏文案、错误/警告计数、波浪线、字符数。
+   * **成功才动页数与字符数**——失败时保留上一次成功预览（两条编译路径共用这一条语义）。
+   */
+  function applyCompileStatus(result: CompileStatusSource, docLength: number) {
+    const patch = reduceCompileStatus(result, docLength);
+    editorDiagnostics = patch.editorDiagnostics;
+    errorCount = patch.errorCount;
+    compileWarnings = patch.compileWarnings;
+    lastNonPosError = patch.lastNonPosError;
+    statusText = patch.statusText;
+    if (patch.ok) {
+      pageCount = patch.pageCount;
+      charCount = patch.charCount;
+      previewStatus = "ready";
+    }
   }
 
   async function runCompile() {
@@ -1820,8 +1451,9 @@
     // documentPath 传当前文档绝对路径（未保存为 null），Rust 侧以其所在目录解析 include
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
     // 首次编译可能早于 ResizeObserver 的第一次回调：这里补算一次页宽，避免启动时多编译一遍
-    if (previewPageWidthRequest === 0 && previewBodyEl) {
-      const initialWidth = previewPageWidthPt(previewBodyEl.clientWidth);
+    const previewBody = previewPaneRef?.body();
+    if (previewPageWidthRequest === 0 && previewBody) {
+      const initialWidth = previewPageWidthPt(previewBody.clientWidth);
       if (!Number.isNaN(initialWidth)) previewPageWidthRequest = initialWidth;
     }
     // 预览重排的页宽是**编译期输入**（Rust 侧据此注入 #set page），所以随本次编译一起发出；
@@ -1887,39 +1519,20 @@
     }
     if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
     if (result.ok) {
-      if (!previewHost) return; // 预览栏未挂载（理论上隐藏时仍在 DOM，这里兜底）
-      previewHost.innerHTML = result.svg;
+      // 预览栏未挂载（组件句柄没接上、或槽里的元素还没落地）就兜底返回 ——
+      // 拆分前判的是 `previewHost` 元素本身，这里同样判元素、不用非空断言
+      const paper = previewPaneRef?.paper();
+      if (!paper) return;
+      paper.innerHTML = result.svg;
       previewPageWidthUsed = requestedPreviewWidthPt; // 本次产物的请求页宽（0 = 没请求重排）
       applyPreviewScale(); // 新产物注入后按当前容器宽度重算画布宽度
-      pageCount = result.pageCount;
-      previewStatus = "ready";
-      editorDiagnostics = [];
-      errorCount = 0; // 编译成功：错误徽标归零（与状态栏文本同源）
-      lastNonPosError = null; // 编译成功：无非定位错误
-      charCount = doc.length;
-      // 编译警告（典型：unknown font family）必须可见——typst 对写错的字体族名只发 warning
-      // 然后静默改用其他字体，不显示出来用户只会看到"改了字体没用"（见 font-warnings.ts）
-      compileWarnings = result.warnings ?? [];
-      statusText =
-        compileWarnings.length > 0
-          ? truncateStatus(`警告：${describeCompileWarning(compileWarnings[0].message)}`)
-          : "就绪";
+      applyCompileStatus(result, doc.length);
       // 调试日志：编译结果摘要（ok/页数/耗时），排查编译链路时对照 compile-diagnostics
       dbg.log("compile", `ok pages:${result.pageCount} t:${(performance.now() - t0).toFixed(1)}ms`);
     } else {
       // 编译错误：保留最后一次成功预览（不置 error、不隐藏预览、不显示错误面板），
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
-      editorDiagnostics = result.errors;
-      errorCount = result.errors.length; // 与状态栏文本「编译错误：N 处」同源
-      compileWarnings = []; // 编译失败时 Rust 不返回 warnings（错误优先，避免两套提示打架）
-      // 非定位错误（如包不存在 / 访问模型异常）单独记录，供徽标弹窗展示
-      // （定位错误存在时与第一条同源，弹窗内不重复展示）
-      lastNonPosError = result.errors.length === 0 ? result.error : null;
-      // 非定位错误（如包不存在 / 访问模型异常）必须可见，不再被吞掉
-      statusText =
-        result.errors.length === 0 && result.error
-          ? formatCompileFailMessage(0, result.error)
-          : `编译错误：${result.errors.length} 处`;
+      applyCompileStatus(result, doc.length);
       // 调试日志：编译失败摘要（错误数/耗时），错误详情见 compile-diagnostics
       dbg.log("compile", `fail errors:${result.errors.length} t:${(performance.now() - t0).toFixed(1)}ms`);
     }
@@ -1954,17 +1567,7 @@
           `切片窗口：新渲 ${result.blocks.filter((b) => b.svg).length} / 沿用 ${carried.carried} / 待渲 ${carried.missing}`,
         );
       }
-      pageCount = result.pageCount;
-      previewStatus = "ready";
-      editorDiagnostics = [];
-      errorCount = 0;
-      lastNonPosError = null;
-      charCount = doc.length;
-      compileWarnings = result.warnings ?? [];
-      statusText =
-        compileWarnings.length > 0
-          ? truncateStatus(`警告：${describeCompileWarning(compileWarnings[0].message)}`)
-          : "就绪";
+      applyCompileStatus(result, doc.length);
       dbg.log(
         "compile",
         `blocks ok blocks:${result.blocks.length} 页宽:${result.pageWidthPt.toFixed(1)}pt t:${(
@@ -1985,14 +1588,7 @@
     writingBlocksDoc = doc;
     writingBlocksExact = false;
     blocksVersion++;
-    editorDiagnostics = result.errors;
-    errorCount = result.errors.length;
-    compileWarnings = [];
-    lastNonPosError = result.errors.length === 0 ? result.error : null;
-    statusText =
-      result.errors.length === 0 && result.error
-        ? formatCompileFailMessage(0, result.error)
-        : `编译错误：${result.errors.length} 处`;
+    applyCompileStatus(result, doc.length);
     dbg.log(
       "compile",
       `blocks fail errors:${result.errors.length} 保留切片:${remap.kept}/${remap.blocks.length} t:${(
@@ -2042,93 +1638,19 @@
    * 用户 2026-09-18 反馈「关闭警告的行为应该和错误是一样的」）。
    */
   function onDiagnosticItemClick(item: LocatedErrorItem) {
-    // 注：isErrorLineInPrefix / prefixLineCharOffset 用未规范化的 prefixCode 草稿值即可——
+    // 注：isErrorLineInPrefix（组件里的 focusPrefixLine → prefixLineCharOffset 同理）用未规范化的
+    // prefixCode 草稿值即可——
     // 追加尾换行不改变前缀区内行号与行首偏移，与规范化后的编译源语义一致
     if (prefixEnabled && isErrorLineInPrefix(item.line, prefixCode)) {
       openBadgePopover = "none";
       openSettings(); // 载入当前前缀副本到 settingsPrefixCode，点“保存”才生效
-      void tick().then(() => locatePrefixLine(item.line)); // 下一 tick：等设置弹窗渲染出 textarea
+      // 下一 tick：等设置弹窗渲染出前缀 textarea，再让组件自己定位（偏移按草稿前缀算）
+      void tick().then(() => settingsDialogRef?.focusPrefixLine(item.line));
     } else {
       jumpTarget = { line: item.line, col: item.col, seq: ++jumpSeq };
       openBadgePopover = "none";
     }
   }
-
-  /** 在设置弹窗的前缀代码 textarea 中定位第 line 行起点（偏移按 settingsPrefixCode 计算） */
-  function locatePrefixLine(line: number) {
-    const textarea = settingsPrefixTextarea;
-    if (!textarea) return;
-    const offset = prefixLineCharOffset(settingsPrefixCode, line);
-    textarea.focus();
-    textarea.setSelectionRange(offset, offset);
-    textarea.scrollIntoView({ block: "nearest" });
-  }
-
-  // 浮层的内容一旦没了就收起（错误修好 / 警告消失）。**这条不能省**：
-  // ① 错误侧以前只关 `{#if showErrors}`，修好错误后会留一个只有标题的空浮层；
-  // ② 警告侧以前只靠 `{#if … && compileWarnings.length > 0}` 隐藏、状态仍留在"开着"，
-  //    于是同一份文档里警告一回来浮层就自己弹开（验收第 43 组锁这两条）。
-  // 写在 effect 里是因为它读的 errorCount / lastNonPosError / compileWarnings 都是编译结果：
-  // 赋值后本 effect 再跑一次会走空分支，不会成环。
-  $effect(() => {
-    if (openBadgePopover === "errors" && !hasErrorToShow(errorCount, lastNonPosError)) {
-      openBadgePopover = "none";
-    } else if (openBadgePopover === "warnings" && compileWarnings.length === 0) {
-      openBadgePopover = "none";
-    }
-  });
-
-  // 浮层打开期间：Esc 关闭；点击浮层外部（mousedown，先于 click）关闭。
-  // **两个徽标同一条规则**（警告侧以前完全没有这段，所以浮层只能靠再点一次徽标关掉）。
-  // 徽标本身在自己的 wrap 内，所以点徽标的切换逻辑不受外部判定干扰。
-  // （Svelte 5 runes：effect 内注册/清理监听）
-  $effect(() => {
-    if (openBadgePopover === "none") return;
-    const wrap = openBadgePopover === "errors" ? errorWrapEl : warningWrapEl;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") openBadgePopover = "none";
-    };
-    const onMouseDown = (e: MouseEvent) => {
-      if (wrap && !wrap.contains(e.target as Node)) {
-        openBadgePopover = "none";
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("mousedown", onMouseDown);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("mousedown", onMouseDown);
-    };
-  });
-
-  // 浮层打开时做一次视口收边：徽标在状态栏内靠左排布（状态文本短时不在窗口右侧），
-  // 而浮层是 `left: 0` 锚定的 520px 宽块，窄窗口下会从窗口右缘溢出（用户在 400px 宽的
-  // 视口下实测右缘 406 > 400）。下一 tick 等 {#if} 渲染完成后再测量 getBoundingClientRect，
-  // 越界则用 transform 平移（必要时叠加限宽）收回视口内，不破坏锚定关系。
-  // 仅在打开瞬间 clamp 一次；窗口 resize 不重算——本页无现成 resize 监听，
-  // 且缩放时浮层通常已关闭，保持最小实现（ContextMenu 组件另有自己的重算逻辑）。
-  // **两个浮层共用这套收边**（同一时刻只开一个，所以共用一份结果就够了）。
-  $effect(() => {
-    const open = openBadgePopover;
-    if (open === "none") return;
-    let disposed = false;
-    // 关键：先复位上次打开遗留的 clamp（$state 在关闭时不自动清零）——否则第二次打开时
-    // 浮层带着旧的 transform 渲染，测量到的是已平移的正确矩形，算出位移 ≈ 0，
-    // 把变换清零后浮层跳回自然（溢出窗口）位置（实测「第一次对，第二次错」）。
-    // 复位触发一次额外渲染，tick() 在其后执行，保证测到的是未变换的自然矩形。
-    popoverClamp = { translateX: 0, translateY: 0, maxWidth: 0 };
-    void tick().then(() => {
-      const el = open === "errors" ? errorPopoverEl : warningPopoverEl;
-      if (disposed || !el) return;
-      popoverClamp = clampPopoverRect(el.getBoundingClientRect(), {
-        width: window.innerWidth,
-        height: window.innerHeight,
-      });
-    });
-    return () => {
-      disposed = true;
-    };
-  });
 
   /** 脚本错误统一提示：状态栏给出可读原因 + 调试日志留完整堆栈 */
   /**
@@ -2138,20 +1660,13 @@
    * 我们的预览画布正好是"量到宽度 → 设宽度"这种模式，所以它在缩放/改分栏时会偶发出现。
    * 报成「脚本错误」会让用户以为应用坏了（2026-09-14 实测被反馈），只写调试日志。
    */
-  const BENIGN_SCRIPT_ERRORS = [/ResizeObserver loop/i];
-
-  function isBenignScriptError(msg: string): boolean {
-    return BENIGN_SCRIPT_ERRORS.some((re) => re.test(msg));
-  }
-
   function reportScriptError(label: string, detail: unknown) {
-    const msg =
-      detail instanceof Error ? detail.message : typeof detail === "string" ? detail : String(detail);
+    const msg = scriptErrorMessage(detail);
     if (isBenignScriptError(msg)) {
       dbg.log("error", `${label}（引擎提示，忽略）`, detail);
       return;
     }
-    statusText = `脚本错误：${msg}`;
+    statusText = scriptErrorStatus(msg);
     dbg.log("error", label, detail);
     console.error(`[script-error] ${label}`, detail);
   }
@@ -2274,55 +1789,40 @@
   }
 
   /**
-   * 页面级快捷键：按键 → 动作的判定全在 app-keys.decideAppKey（纯函数，有单测），这里只负责执行。
+   * 页面级快捷键：判定在 app-keys.decideAppKey（纯函数，有单测），执行在 app-keys.runAppKeyAction
+   * （动作 → 回调表，preventDefault 统一在动作之前）。这里只提供当前状态与回调。
+   *
    * **判定顺序本身就是行为**：`Ctrl+Shift+N` 必须排在 Shift 格式表之前，否则新建窗口会被整段吞掉
-   * —— 0.7.0 起就是这个状态，用户 2026-09-14 报「Ctrl+Shift+N 新建窗口」没反应。
+   * —— 0.7.0 起就是这个状态，用户 2026-09-14 报「Ctrl+Shift+N 新建窗口」没反应（顺序锁在
+   * decideAppKey 里，app-keys.test.ts 逐条对着）。
    * 菜单项的全局快捷键（Ctrl+N 新建 / Ctrl+O 打开 / Ctrl+S 保存 / Ctrl+, 设置 / Ctrl+P 导出 PDF）
    * 由 MenuBar 的 window keydown 统一处理，不在此重复绑定（避免同一组合键双重触发）。
    */
   function handleKeydown(e: KeyboardEvent) {
-    const action = decideAppKey(e, {
-      hasFilePath: filePath !== null,
-      openModal: topModal({
-        "close-prompt": showClosePrompt,
-        update: showUpdateDialog,
-        settings: showSettings,
-        about: showAbout,
+    runAppKeyAction(
+      decideAppKey(e, {
+        hasFilePath: filePath !== null,
+        openModal: topModal({
+          "close-prompt": showClosePrompt,
+          update: showUpdateDialog,
+          settings: showSettings,
+          about: showAbout,
+        }),
       }),
-    });
-    if (!action) return;
-    switch (action.type) {
-      case "wrap-toggle":
-        e.preventDefault();
-        toggleEditorWrap();
-        return;
-      case "format":
-        e.preventDefault();
-        runFormat(action.command);
-        return;
-      case "zoom":
-        // Ctrl+Shift+= / Ctrl+Shift+-：±1 格（用户要求）。走和滚轮同一条 setUiZoom → applyUiZoom → 复核。
-        // 必须 preventDefault：否则引擎自己那套缩放会一并插手（与我们的系数打架）。
-        e.preventDefault();
-        zoomBySteps(action.steps);
-        return;
-      case "reload-file":
-        e.preventDefault(); // 仅在有文件时拦（没文件时 decideAppKey 已经返回 null，放行给浏览器刷新）
-        reloadFile();
-        return;
-      case "new-window":
-        e.preventDefault();
-        openNewWindow();
-        return;
-      case "close-window":
-        e.preventDefault();
-        closeCurrentWindow();
-        return;
-      case "dismiss-modal":
-        e.preventDefault();
-        dismissModal(action.modal);
-        return;
-    }
+      {
+        toggleWrap: toggleEditorWrap,
+        runFormat,
+        // Ctrl+Shift+= / Ctrl+Shift+-：±1 格（走和滚轮同一条 setUiZoom → 引擎改档 → 复核）。
+        // 必须 preventDefault（runAppKeyAction 统一做了）：否则引擎自己那套缩放会一并插手。
+        zoom: zoomBySteps,
+        // reloadFile 只在有文件时才会走到（没文件时 decideAppKey 返回 null，放行给浏览器刷新）
+        reloadFile,
+        openNewWindow,
+        closeWindow: () => void closeCurrentWindow(),
+        dismissModal,
+      },
+      () => e.preventDefault(),
+    );
   }
 
   onMount(() => {
@@ -2426,16 +1926,9 @@
     const onWindowResize = () => {
       // 写作模式的版心宽跟着编辑器列宽走：窗口/分栏变化后复核一次（去抖在函数里）
       scheduleWritingReflow();
-      const allowed = shouldRebaselineZoom({
-        now: Date.now(),
-        settlingUntil: zoomSettlingUntil,
-        verifyInFlight: zoomStepInFlight,
-      });
-      if (!allowed) {
-        dbg.log("zoom", "resize（缩放沉降窗口内，跳过基准重校）");
-        return;
-      }
-      rebaselineZoom();
+      // 视口判据的 100% 基准要跟着校；"缩放自己引发的 resize"由控制器按沉降窗口让开
+      // （判据是纯函数 shouldRebaselineZoom，见 zoom-controller.onResize）
+      zoom.onResize();
     };
     window.addEventListener("resize", onWindowResize);
     // 回到前台/重新聚焦时把当前档位再设一遍：WebView2 在一些时机（失焦、被系统改过缩放状态）
@@ -2443,8 +1936,7 @@
     // 值没被丢时这次调用是空操作；丢掉时它自己会走复核，结论照样写进状态栏（见 verifyZoomApplied）。
     const reapplyZoomOnReturn = () => {
       if (document.visibilityState !== "visible") return;
-      if (zoomIsFaked()) return;
-      void applyUiZoom(uiZoom);
+      zoom.reapply(); // 假引擎（浏览器桩）在里面直接返回
     };
     window.addEventListener("focus", reapplyZoomOnReturn);
     document.addEventListener("visibilitychange", reapplyZoomOnReturn);
@@ -2463,7 +1955,8 @@
         schedulePreviewReflow();
       });
     });
-    if (previewBodyEl) previewResizeObserver.observe(previewBodyEl); // bind:this 已在 onMount 前赋值
+    const previewBody = previewPaneRef?.body();
+    if (previewBody) previewResizeObserver.observe(previewBody); // 组件在 onMount 前已挂载
     // 写作模式的版心宽要等编辑器挂载后才能量到：量到就重排一次（首帧编译用的是兜底值）
     scheduleWritingReflow();
 
@@ -2545,7 +2038,7 @@
       window.removeEventListener("resize", onWindowResize);
       window.removeEventListener("focus", reapplyZoomOnReturn);
       document.removeEventListener("visibilitychange", reapplyZoomOnReturn);
-      if (zoomConfirmTimer !== null) clearTimeout(zoomConfirmTimer);
+      zoom.dispose(); // 取消还没落地的"缩放再确认一次"
       if (pendingOpenTimer !== null) clearTimeout(pendingOpenTimer); // 关窗时取消还没落地的兜底打开
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
@@ -2601,392 +2094,80 @@
         />
       </div>
     </section>
-    <section class="pane preview-pane" class:hidden={!showPreview}>
-      <!-- data-context-zone：右键区域判定标记（覆盖占位/错误/预览纸张全部子区域） -->
-      <div
-        class="pane-body preview-body"
-        data-context-zone="preview"
-        bind:this={previewBodyEl}
-      >
-        {#if previewStatus === "error"}
-          <div class="preview-error">
-            <div class="preview-error-title">编译错误</div>
-            <pre class="preview-error-text">{previewError}</pre>
-          </div>
-        {:else if previewStatus === "idle"}
-          <div class="preview-placeholder">等待编译…</div>
-        {/if}
-        <div
-          id="preview-host"
-          bind:this={previewHost}
-          class="preview-paper"
-          hidden={previewStatus !== "ready"}
-        ></div>
-      </div>
-    </section>
+    <PreviewPane
+      bind:this={previewPaneRef}
+      hidden={!showPreview}
+      status={previewStatus}
+      error={previewError}
+    />
   </main>
 
-  <footer class="statusbar">
-    <!-- 左侧最前：编译错误 + 编译警告计数（VS Code 状态栏同序：⊗ 0 ⚠ 0，用户给的参照图）。
-         两者都**常驻显示**（无问题时是 0）——它们在同一列里，常驻才能一眼看出"编译干净"，
-         也避免数字出现/消失时整条状态栏左右抖动。错误在警告**左边**。 -->
-    <span class="badge-group">
-      <span class="error-badge-wrap" bind:this={errorWrapEl}>
-        <span
-          class="error-badge"
-          class:clickable={hasErrorToShow(errorCount, lastNonPosError)}
-          class:active={errorPopoverOpen}
-          role="button"
-          tabindex="0"
-          aria-expanded={errorPopoverOpen}
-          title="编译错误（渲染已停止）"
-          onclick={() => {
-            if (hasErrorToShow(errorCount, lastNonPosError)) toggleBadgePopover("errors");
-          }}
-          onkeydown={(e) => {
-            if (e.key === "Enter" && hasErrorToShow(errorCount, lastNonPosError)) {
-              toggleBadgePopover("errors");
-            }
-          }}
-        >
-          <!-- 圆圈叉（VS Code 的 error 图标形状）：**整幅内联 SVG**，圆圈与叉一起画。
-               以前是 CSS 圆环 + `✕` 字形，字形随系统字体变粗变细、叉的粗细与圆圈对不上，
-               用户比对参照图后指出"不像"——现在两个图标都是 16×16 视图框里的描边图形，
-               线宽比例也照参照图定（圆环 1.5、叉 1.35，叉的线略细于圆环）。 -->
-          <svg class="error-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <circle cx="8" cy="8" r="7.25" fill="none" stroke="currentColor" stroke-width="1.5" />
-            <path
-              d="M5 5 11 11M11 5 5 11"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.35"
-              stroke-linecap="round"
-            />
-          </svg><span class="error-count">{errorCount}</span>
-        </span>
-        {#if errorPopoverOpen}
-          <div
-            class="error-popover"
-            bind:this={errorPopoverEl}
-            role="dialog"
-            aria-label="编译错误列表"
-            style={popoverStyle()}
-          >
-            <div class="error-popover-title">
-              <span>编译错误{errorCount > 0 ? `（${errorCount} 处）` : ""}</span>
-              <!-- 复制整份列表（首行是这段标题原文，其后每条一行，路径在行列前面） -->
-              <button
-                class="error-copy-all"
-                title="复制全部错误信息（含文件路径与行列）"
-                aria-label="复制全部错误信息"
-                onclick={() => void copyDiagnosticList("errors")}
-              >复制全部</button>
-            </div>
-            <div class="error-list">
-              {#each errorItems() as item}
-                <!-- 每条 = 「条目（点击跳转）」+「复制」两个兄弟按钮：
-                     按钮不能嵌按钮（HTML 非法），所以必须有这层 row 包裹 -->
-                <div class="error-item-row">
-                  {#if item.kind === "located"}
-                    <button class="error-item" onclick={() => onDiagnosticItemClick(item)}>
-                      <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                      <span class="error-item-msg">{item.message}</span>
-                    </button>
-                  {:else}
-                    <div class="error-item error-item-generic">
-                      <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                      <span class="error-item-msg">{item.message}</span>
-                    </div>
-                  {/if}
-                  <button
-                    class="error-item-copy"
-                    title="复制这条错误信息（含文件路径与行列）"
-                    aria-label="复制这条错误信息"
-                    onclick={() => void copyDiagnostic(item, "errors")}
-                  >复制</button>
-                </div>
-              {/each}
-            </div>
-          </div>
-        {/if}
-      </span>
-      <span class="error-badge-wrap warning-badge-wrap" bind:this={warningWrapEl}>
-        <span
-          class="error-badge warning-badge"
-          class:clickable={compileWarnings.length > 0}
-          class:active={warningPopoverOpen}
-          role="button"
-          tabindex="0"
-          aria-expanded={warningPopoverOpen}
-          title="编译警告（不中断渲染）"
-          onclick={() => {
-            if (compileWarnings.length > 0) toggleBadgePopover("warnings");
-          }}
-          onkeydown={(e) => {
-            if (e.key === "Enter" && compileWarnings.length > 0) {
-              toggleBadgePopover("warnings");
-            }
-          }}
-        >
-          <!-- 三角形内部感叹号（VS Code 的 warning 图标形状）：内联 SVG，用 currentColor
-               上色（不用 ⚠ 字形——跨字体渲染差异大，而且它是彩色 emoji 字体）。
-               描边路径的三个角都是**显式圆弧**（半径 1.25），比 stroke-linejoin 的圆角更接近
-               参照图里那种圆钝的三角；感叹号按参照图量出来的比例：竖杠略粗于三角线宽、圆点稍大。 -->
-          <svg class="warning-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <path
-              d="M15.09 12.83A1.3 1.3 0 0 1 13.95 14.75L2.05 14.75A1.3 1.3 0 0 1 0.91 12.83L6.86 1.93A1.3 1.3 0 0 1 9.14 1.93Z"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linejoin="round"
-            />
-            <path d="M8 5.4V9.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-            <circle cx="8" cy="11.6" r="0.9" fill="currentColor" />
-          </svg>
-          <span class="error-count">{compileWarnings.length}</span>
-        </span>
-        {#if warningPopoverOpen}
-          <div
-            class="error-popover warning-popover"
-            bind:this={warningPopoverEl}
-            role="dialog"
-            aria-label="编译警告列表"
-            style={popoverStyle()}
-          >
-            <div class="error-popover-title">
-              <span>编译警告（{compileWarnings.length} 处）</span>
-              <button
-                class="error-copy-all"
-                title="复制全部警告信息（含文件路径与行列）"
-                aria-label="复制全部警告信息"
-                onclick={() => void copyDiagnosticList("warnings")}
-              >复制全部</button>
-            </div>
-            <div class="error-list">
-              {#each warningItems() as item}
-                <div class="error-item-row">
-                  {#if item.kind === "located"}
-                    <button class="error-item" onclick={() => onDiagnosticItemClick(item)}>
-                      <span class="error-item-loc">{formatErrorLoc(item)}</span>
-                      <span class="error-item-msg">{item.message}</span>
-                    </button>
-                  {:else}
-                    <div class="error-item error-item-generic">
-                      <span class="error-item-msg">{item.message}</span>
-                    </div>
-                  {/if}
-                  <button
-                    class="error-item-copy"
-                    title="复制这条警告信息（含文件路径与行列）"
-                    aria-label="复制这条警告信息"
-                    onclick={() => void copyDiagnostic(item, "warnings")}
-                  >复制</button>
-                </div>
-              {/each}
-            </div>
-          </div>
-        {/if}
-      </span>
-    </span>
-    <!-- 状态文字：占满剩余空间、单行省略（可伸缩项，见 .status-text 的样式） -->
-    <span class="status-text">{statusText}</span>
-    {#if updateNotice}
-      <button
-        class="status-update"
-        title="打开更新窗口"
-        onclick={openUpdateDialogFromNotice}
-      >{updateNotice}</button>
-    {/if}
-    <span class="spacer"></span>
-    <span class="mode-tag">{viewMode === "write" ? "写作" : "源码"}</span>
-    {#if uiZoom !== ZOOM_DEFAULT}
-      <!-- 只在非 100% 时出现：缩放是"整界面都在变"的状态，得有个常驻的地方能看出来 -->
-      <span class="mode-tag" title="Ctrl+滚轮缩放；视图 → 重置缩放">缩放 {zoomLabel(uiZoom)}</span>
-    {/if}
-    <span>{charCount} 字符 · {pageCount} 页</span>
-    {#if viewMode === "source"}
-      <span>行 {cursorLine}, 列 {cursorCol}</span>
-    {/if}
-  </footer>
+  <StatusBar
+    {statusText}
+    {updateNotice}
+    onOpenUpdate={openUpdateDialogFromNotice}
+    {viewMode}
+    {uiZoom}
+    {charCount}
+    {pageCount}
+    {cursorLine}
+    {cursorCol}
+    {errorCount}
+    {lastNonPosError}
+    errorItems={errorItems()}
+    warningCount={compileWarnings.length}
+    warningItems={warningItems()}
+    openBadge={openBadgePopover}
+    onToggleBadge={toggleBadgePopover}
+    onCloseBadge={() => (openBadgePopover = "none")}
+    onItemClick={onDiagnosticItemClick}
+    onCopyOne={(item, kind) => void copyDiagnostic(item, kind)}
+    onCopyAll={(kind) => void copyDiagnosticList(kind)}
+  />
 
   {#if showAbout}
-    <button
-      class="modal-overlay"
-      aria-label="关闭关于窗口"
-      onclick={(e) => {
-        if (e.target === e.currentTarget) showAbout = false;
-      }}
-    >
-      <div class="modal about-modal">
-        <h3 class="modal-title">Typst-pad</h3>
-        <p class="modal-text">版本 {appVersion || "…"}</p>
-        <p class="modal-text">
-          仿 Typora 的 Typst 桌面编辑器：<strong>写作模式</strong>（默认）整页纸张，公式与标记就地排版，
-          光标 / 选区进入即展开源码；<strong>源代码模式</strong>（Ctrl+E）双栏对照，源码 + 整页预览。
-        </p>
-        <p class="modal-text">
-          排版由<strong>内置的 typst 引擎</strong>在本机完成：不联网，文档不出本机。
-        </p>
-        <p class="modal-text about-note">
-          MIT License © 2026 Z3O1 · 内置字体 Noto Serif CJK / Libertinus / New Computer Modern /
-          DejaVu Sans Mono 遵循各自的开源许可
-        </p>
-        <div class="modal-actions">
-          <span
-            class="modal-close"
-            role="button"
-            tabindex="0"
-            title={PROJECT_URL}
-            onclick={openProjectPage}
-            onkeydown={(e) => e.key === "Enter" && openProjectPage()}
-          >项目主页</span>
-          <span
-            class="modal-close"
-            role="button"
-            tabindex="0"
-            onclick={() => (showAbout = false)}
-            onkeydown={(e) => e.key === "Enter" && (showAbout = false)}
-          >关闭</span>
-        </div>
-      </div>
-    </button>
+    <AboutDialog
+      version={appVersion}
+      projectUrl={PROJECT_URL}
+      onClose={() => (showAbout = false)}
+      onOpenProject={openProjectPage}
+    />
   {/if}
 
   {#if showClosePrompt}
-    <div class="modal-overlay-static">
-      <div class="modal">
-        <h3 class="modal-title">未保存的修改</h3>
-        <p class="modal-text">当前文档有未保存的修改，是否保存？</p>
-        <div class="modal-actions">
-          <button class="modal-btn primary" onclick={onClosePromptSave}>保存</button>
-          <button class="modal-btn" onclick={onClosePromptDiscard}>不保存</button>
-          <button class="modal-btn" onclick={onClosePromptCancel}>取消</button>
-        </div>
-      </div>
-    </div>
+    <ClosePromptDialog
+      onSave={onClosePromptSave}
+      onDiscard={onClosePromptDiscard}
+      onCancel={onClosePromptCancel}
+    />
   {/if}
 
   {#if showSettings}
-    <div class="modal-overlay-static">
-      <div class="modal settings-modal">
-        <h3 class="modal-title">设置</h3>
-        <p class="modal-text">编译/导出时自动在代码前插入前缀代码（可配置页面、字体等全局项）。</p>
-        <label class="settings-row">
-          <input type="checkbox" bind:checked={settingsRestoreSession} />
-          <span>启动时恢复上次内容（未保存的修改不会丢）</span>
-        </label>
-        <label class="settings-row">
-          <input type="checkbox" bind:checked={settingsAutoCheckUpdates} />
-          <span>启动时自动检查更新（发现新版本会先询问，不会自己下载）</span>
-        </label>
-        <label class="settings-row">
-          <input type="checkbox" bind:checked={settingsPrefixEnabled} />
-          <span>启用前缀代码</span>
-        </label>
-        <textarea
-          class="settings-textarea"
-          bind:value={settingsPrefixCode}
-          bind:this={settingsPrefixTextarea}
-          placeholder="#set page(margin: 2cm)"
-          spellcheck="false"
-        ></textarea>
-        <label class="settings-row settings-row-font">
-          <span>正文字体（中文）</span>
-          <select class="settings-select" bind:value={settingsChineseFont}>
-            <option value={FONT_CHOICE_DEFAULT}>默认（思源宋体，缺字回退系统宋体）</option>
-            {#each availableFonts as font (font)}
-              <option value={font}>{font}</option>
-            {/each}
-          </select>
-        </label>
-        <p class="settings-hint">
-          只认字体文件里的英文族名；用「额外字体目录」加入自己的字体后，这里会多出对应选项。
-        </p>
-        <div class="settings-block">
-          <div class="settings-block-title">
-            额外字体目录（放进这里的字体立即可用，等同于 typst CLI 的 --font-path）
-          </div>
-          {#each settingsFontDirs as dir (dir)}
-            <div class="settings-dir">
-              <span class="settings-dir-path" title={dir}>{dir}</span>
-              <button class="modal-btn" onclick={() => removeFontDir(dir)}>移除</button>
-            </div>
-          {/each}
-          <div class="settings-dir-actions">
-            <button class="modal-btn" onclick={addFontDir} disabled={fontsLoading}>
-              添加字体目录…
-            </button>
-            {#if fontsLoading}
-              <span class="settings-hint">正在读取字体…</span>
-            {:else if availableFonts.length > 0}
-              <span class="settings-hint">可用字体族 {availableFonts.length} 个</span>
-            {/if}
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="modal-btn primary" onclick={saveSettings}>保存</button>
-          <button class="modal-btn" onclick={closeSettings}>关闭</button>
-        </div>
-      </div>
-    </div>
+    <SettingsDialog
+      bind:this={settingsDialogRef}
+      bind:restoreSession={settingsRestoreSession}
+      bind:autoCheckUpdates={settingsAutoCheckUpdates}
+      bind:prefixEnabled={settingsPrefixEnabled}
+      bind:prefixCode={settingsPrefixCode}
+      bind:chineseFont={settingsChineseFont}
+      bind:fontDirs={settingsFontDirs}
+      availableFonts={availableFonts}
+      fontsLoading={fontsLoading}
+      onAddFontDir={addFontDir}
+      onRemoveFontDir={removeFontDir}
+      onSave={saveSettings}
+      onClose={closeSettings}
+    />
   {/if}
 
   {#if showUpdateDialog && updateFlow.kind !== "latest" && updateFlow.kind !== "checking"}
-    <div class="modal-overlay-static">
-      <div class="modal update-modal">
-        {#if updateFlow.kind === "available"}
-          <h3 class="modal-title">发现新版本</h3>
-          <p class="modal-text">
-            当前 v{updateFlow.currentVersion} → 最新 v{updateFlow.version}
-          </p>
-          {#if updateFlow.notes}
-            <!-- 更新说明是 CHANGELOG 的 Markdown 原文（见 generate-latest-json.mjs）：
-                 交给 update-notes.ts 渲染成受控子集的安全 HTML，别再退回 <pre> 显示原文 -->
-            <div class="update-notes">{@html renderUpdateNotes(updateFlow.notes)}</div>
-          {/if}
-          <p class="modal-text update-hint">
-            下载并安装后应用会自动重启；安装包有签名校验，来源不对会被拒绝。
-          </p>
-          <div class="modal-actions">
-            <button class="modal-btn primary" onclick={startUpdateInstall}>下载并安装</button>
-            <!-- 「稍后」= 用户选择不更新：此后自动检查只更新状态栏、不再弹窗（见 dismissUpdatePrompt） -->
-            <button class="modal-btn" onclick={dismissUpdatePrompt}>稍后</button>
-          </div>
-        {:else if updateFlow.kind === "downloading"}
-          <h3 class="modal-title">正在下载更新 v{updateFlow.version}</h3>
-          <div class="update-progress">
-            <div
-              class="update-progress-fill"
-              style="width: {updateFlow.progress.percent ?? 0}%"
-            ></div>
-          </div>
-          <p class="modal-text">{formatProgress(updateFlow.progress)}</p>
-          <div class="modal-actions">
-            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>
-              后台继续下载
-            </button>
-          </div>
-        {:else if updateFlow.kind === "installing"}
-          <h3 class="modal-title">更新已就绪</h3>
-          <p class="modal-text">
-            应用即将退出并安装 v{updateFlow.version}，安装完成后会自动重新打开。
-          </p>
-          <p class="modal-text update-hint">有未保存的修改请先返回保存（安装期间窗口会关闭）。</p>
-          <div class="modal-actions">
-            <!-- Windows 上安装器会自己把应用拉起来；留个关闭按钮是为了非 Windows
-                 （安装完不退出的平台）不会被一个没有按钮的弹窗卡住 -->
-            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>关闭</button>
-          </div>
-        {:else if updateFlow.kind === "error"}
-          <h3 class="modal-title">更新失败</h3>
-          <p class="modal-text">{updateFlow.message}</p>
-          <div class="modal-actions">
-            <button class="modal-btn" onclick={() => (showUpdateDialog = false)}>关闭</button>
-            <button class="modal-btn primary" onclick={() => checkUpdates(true)}>重试</button>
-          </div>
-        {/if}
-      </div>
-    </div>
+    <UpdateDialog
+      flow={updateFlow}
+      onInstall={startUpdateInstall}
+      onDismiss={dismissUpdatePrompt}
+      onClose={() => (showUpdateDialog = false)}
+      onRetry={() => checkUpdates(true)}
+    />
   {/if}
 
   {#if contextMenu}
@@ -2998,29 +2179,7 @@
   {/if}
 </div>
 {:else}
-  <!-- 非 Tauri（浏览器直开）时的提示页。开发模式下额外给一键入口：
-       浏览器开发模式（?browserdev=1）会装假的 Tauri 环境 + 假编译，能完整调试编辑器交互
-       （所见即所得、快捷键、菜单、分栏），只是没有真实 typst 排版与文件功能。
-       不加这个入口时，裸开 http://localhost:1420/ 只会看到"请使用桌面应用版本"，
-       很容易误判成"用不了了"（实测踩过）。生产构建（非 DEV）不显示该入口。 -->
-  <div class="browser-gate">
-    <p class="browser-gate-title">请使用桌面应用版本</p>
-    <p class="browser-gate-text">Typst-pad 已移除浏览器支持，请下载桌面应用后使用。</p>
-    {#if import.meta.env.DEV}
-      <p class="browser-gate-text browser-gate-dev">
-        开发调试可改用<strong>浏览器开发模式</strong>：带 <code>?browserdev=1</code> 打开本页
-        （假 Tauri 环境 + 假编译，可调试编辑器交互与所见即所得）。
-      </p>
-      <button
-        class="modal-btn primary"
-        onclick={() => {
-          const url = new URL(location.href);
-          url.searchParams.set("browserdev", "1");
-          location.href = url.toString();
-        }}
-      >打开浏览器开发模式</button>
-    {/if}
-  </div>
+  <BrowserGate />
 {/if}
 
 <style>
@@ -3093,129 +2252,6 @@
     user-select: none;
   }
 
-  .modal-overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0, 0, 0, 0.45);
-    border: none;
-    padding: 0;
-    cursor: default;
-  }
-
-  .app.light .modal-overlay {
-    background: rgba(255, 255, 255, 0.55);
-  }
-
-  /* 弹窗（关于 / 设置 / 更新 / 未保存确认）：**固定浅色面板**，做法见 `:root` 的 --panel-*。
-     就地重绑主题变量 ⇒ 弹窗里的标题（--accent）、正文（--fg）、按钮与输入框（--bg-pane/--border）、
-     更新说明（--fg-dim）全都自动跟着变，不用逐个改。 */
-  .modal {
-    --bg-pane: var(--panel-soft-bg);
-    --bg-toolbar: var(--panel-bg);
-    --border: var(--panel-border);
-    --fg: var(--panel-fg);
-    --fg-dim: var(--panel-fg-dim);
-    --accent: var(--panel-accent);
-    min-width: 320px;
-    background: var(--panel-bg);
-    border: 1px solid var(--panel-border);
-    border-radius: 8px;
-    box-shadow: var(--panel-shadow);
-    color: var(--panel-fg); /* 见 :root 那段：不写这条就等于白底 + 深色主题的浅灰字 */
-    padding: 20px 24px;
-  }
-
-  .modal-title {
-    margin: 0 0 8px;
-    color: var(--accent);
-  }
-
-  .modal-text {
-    margin: 4px 0;
-    font-size: 13px;
-    color: var(--fg);
-  }
-
-  .modal-close {
-    display: inline-block;
-    margin-top: 12px;
-    padding: 6px 18px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-pane);
-    color: var(--fg);
-    font-size: 13px;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .modal-close:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  /* 关于弹窗：正文长一点，限宽换行才好看（其余弹窗是标签 + 输入框，不需要） */
-  .about-modal {
-    max-width: 460px;
-    line-height: 1.7;
-  }
-
-  .about-note {
-    font-size: 12px;
-    color: var(--fg-dim);
-  }
-
-  /* 关闭确认弹窗（纯静态遮罩：不响应点击，必须选择按钮） */
-  .modal-overlay-static {
-    position: fixed;
-    inset: 0;
-    z-index: 200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0, 0, 0, 0.45);
-  }
-
-  .app.light .modal-overlay-static {
-    background: rgba(255, 255, 255, 0.55);
-  }
-
-  .modal-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 16px;
-    justify-content: flex-end;
-  }
-
-  .modal-btn {
-    padding: 6px 18px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg-pane);
-    color: var(--fg);
-    font-size: 13px;
-    cursor: pointer;
-  }
-
-  .modal-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .modal-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #ffffff;
-  }
-
-  .modal-btn.primary:hover {
-    opacity: 0.9;
-  }
-
   .panes {
     flex: 1;
     display: flex;
@@ -3237,29 +2273,14 @@
     box-shadow: 0 0 12px rgba(0, 0, 0, 0.12);
   }
 
-  .mode-tag {
-    padding: 0 8px;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    color: var(--fg-dim);
-    font-size: 12px;
-  }
-
-  /* 单栏（所见即所得）：编辑区占满整宽，预览栏整体不参与布局 */
-  .panes.single .preview-pane {
-    display: none;
-  }
-
-  .preview-pane.hidden {
-    display: none;
-  }
-
   /* 单栏（写作模式）：编辑区不再与预览栏分界；纸张限宽居中由上面的 .pane-body 负责 */
   .panes.single .editor-pane {
     border-right: none;
   }
 
-  .pane {
+  /* 两栏共用的骨架。**必须是 :global** —— 预览栏已经搬进 PreviewPane.svelte，
+     页面 `<style>` 的作用域命中不了子组件里的元素（编辑栏那一半仍在页面里，一起用这两条）。 */
+  :global(.pane) {
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -3272,169 +2293,10 @@
     background: var(--bg-pane);
   }
 
-  .pane-body {
+  :global(.pane-body) {
     flex: 1;
     min-height: 0;
     overflow: auto;
-  }
-
-  .statusbar {
-    display: flex;
-    flex-wrap: nowrap; /* 不许换行：换行会让状态栏长成一大块（缩放到 190% + 长报错时实测过） */
-    align-items: center;
-    gap: 16px;
-    padding: 4px 12px;
-    background: var(--bg-toolbar);
-    border-top: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--fg-dim);
-    user-select: none;
-  }
-
-  /* 状态文字：占满剩余空间、**单行省略**（以前会被压成多行，把整条状态栏顶高）。
-     按**类名**定位而不是 `:first-child` —— 左侧最前现在是警告/错误两个徽标（2026-09-14 用户要求）。 */
-  .statusbar > .status-text {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-
-  /* 其余徽标/标签/计数：保持原尺寸，既不被压缩也不换行。
-     两条 `:not()` 都不可省：`.spacer`（撑开左右两组）与 `.status-text`（要可伸缩 + 省略号）
-     都在这条规则的命中范围里，漏掉就会被 `flex: none` 压成不可伸缩。 */
-  .statusbar > span:not(.spacer):not(.status-text) {
-    flex: none;
-    white-space: nowrap;
-  }
-
-  /* 左侧最前的两个计数徽标（警告、错误）成组：组内间距比状态栏主间距紧凑一点 */
-  .statusbar > .badge-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .spacer {
-    flex: 1;
-  }
-
-  /* 编译错误徽标：圆圈 ✕ + 个数，常驻显示（无错误时为 0） */
-  .error-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--fg-dim);
-  }
-
-  /* 两个状态徽标的图标：都是 16×16 视图框、显示 14px 的内联 SVG（尺寸与线宽都照
-     参照图标定：图标高度 / 数字高度 ≈ 1.6）。别再退回 CSS 圆环 + `✕` 字形或 `⚠` 字形 ——
-     字形随系统字体变粗细，跟旁边的描边图形不是一套观感（用户比对参照图后指出过）。 */
-  .error-icon,
-  .warning-icon {
-    display: block;
-    flex: none;
-  }
-
-  .error-count {
-    font-variant-numeric: tabular-nums; /* 数字变化时宽度稳定，不抖动 */
-  }
-
-  /* 徽标可点击（存在可展示内容时）：指针 + 悬停变亮，提示可查看详情。
-     **警告徽标也吃这条**（它的类名是 `error-badge warning-badge`）—— 所以这里的
-     `cursor: pointer` 是两个徽标共用的，别只留下面的黄色规则、把这条当成错误专用
-     （验收第 43 组两个徽标都断言 cursor: pointer，拆类名会让警告侧悄悄丢掉指针）。 */
-  .error-badge.clickable {
-    cursor: pointer;
-    color: #ff8a8a;
-  }
-
-  .error-badge.clickable:hover {
-    color: #ffc9c9;
-  }
-
-  /* 徽标 Popover 展开中：保持高亮，提示再次点击可收起 */
-  .error-badge.clickable.active {
-    color: #ffc9c9;
-  }
-
-  /* 编译警告徽标：与错误徽标同款但偏黄——警告不中断渲染，别让人以为编译挂了。
-     图标是内联 SVG 三角形+感叹号（VS Code 形状），用 currentColor 上色；
-     指针（`cursor: pointer`）由上面 `.error-badge.clickable` 那条一起给（类名共用）。 */
-  .warning-badge.clickable {
-    color: #e5c07b;
-  }
-  .warning-badge.clickable:hover,
-  .warning-badge.clickable.active {
-    color: #ffd79a;
-  }
-
-  /* 设置弹窗里的字体项：下拉与目录列表 */
-  .settings-row-font {
-    justify-content: space-between;
-    cursor: default;
-  }
-  .settings-select {
-    max-width: 260px;
-    padding: 4px 6px;
-    background: var(--bg-pane);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--fg);
-    font-size: 13px;
-  }
-  .settings-block {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin: 10px 0 4px;
-  }
-  .settings-block-title {
-    color: var(--fg-dim);
-    font-size: 12px;
-  }
-  .settings-hint {
-    margin: 2px 0;
-    color: var(--fg-dim);
-    font-size: 12px;
-  }
-  .settings-dir {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .settings-dir-path {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: 12px;
-  }
-  .settings-dir-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .preview-body {
-    display: flex;
-    flex-direction: column;
-    /* 交叉轴（水平）居中只作用于"装得下"的元素（错误框/占位符）；
-       画布自己用 margin-inline: auto，溢出时退化成左对齐（见 .preview-paper） */
-    align-items: center;
-    background: var(--bg-pane);
-    overflow: auto;
-    /* 常驻滚动条槽位：修复"窄窗口下预览画布持续闪烁"（实测 2026-09-10）。
-       成因是滚动条反馈环——画布宽度写为"容器可用宽度"时：
-         画布略宽 → 出现竖滚动条 → clientWidth 少 15px → 重算变窄 → 滚动条消失 → 变宽 …
-       无限循环，DOM 里 host 内联宽度在两个值之间反复翻转，视觉上就是来回闪。
-       窗口够宽（≥ 自然缩放 840px，缩放被 natural 夹住）或全屏时不再随容器变化，
-       所以此前只在中等窗口宽度复现（实测 1040~1060px 视口下 flips=7/秒）。
-       stable 让槽位常驻，clientWidth 不再随滚动条变化，反馈环断裂。
-       实测：修复前取值 ['512px','527px'] flips=22；修复后 ['512px'] flips=0。 */
-    scrollbar-gutter: stable;
   }
 
   .drop-overlay {
@@ -3456,384 +2318,4 @@
     background: rgba(255, 255, 255, 0.6);
   }
 
-  .preview-paper {
-    width: 100%;
-    /* 宽度默认铺满容器；applyPreviewScale 按容器宽度与页物理尺寸（pt）计算后
-       以内联样式覆盖为画布显示宽度（字号恒定等宽缩放），测量失败时回退本规则 */
-    /* 居中用**自身的 auto 外边距**，不用容器上的 align-items: center：
-       界面缩放放大后画布会比栏宽宽，此时 auto 外边距退化为 0（负剩余空间）→ 页面左对齐、
-       横向滚动条能真正滚到左缘；若靠容器居中，溢出的左半部分会被顶到滚动区之外，
-       scrollLeft 又不能为负 → 那部分永远看不到（实测踩过）。 */
-    margin-inline: auto;
-  }
-
-  /* 每页 SVG 顶层文档（compileToSvg 按页序拼接入预览容器）：铺满预览容器宽度
-     （容器宽度由缩放逻辑控制）、高度按比例——等宽缩放，文本不拉伸变形 */
-  .preview-paper > :global(svg) {
-    display: block;
-    width: 100%;
-    height: auto;
-  }
-
-  /* 页间分隔线（typst-engine composePages 注入的 <div class="page-separator">），随主题自适应 */
-  .preview-paper > :global(.page-separator) {
-    height: 1px;
-    background: var(--border);
-  }
-
-  .preview-placeholder {
-    color: var(--fg-dim);
-    font-size: 13px;
-    padding: 40px 0;
-  }
-
-  .preview-error {
-    width: 100%;
-    max-width: 820px;
-    background: #3c1f1f;
-    border: 1px solid #7a3a3a;
-    border-radius: 6px;
-    padding: 12px 16px;
-  }
-
-  .preview-error-title {
-    color: #ff8a8a;
-    font-weight: 600;
-    margin-bottom: 6px;
-  }
-
-  .preview-error-text {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: #ffc9c9;
-    font-size: 12px;
-  }
-
-  /* 设置弹窗 */
-  .settings-modal {
-    width: 520px;
-    max-width: 90vw;
-  }
-
-  .settings-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 10px 0 4px;
-    color: var(--fg);
-    font-size: 13px;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .settings-row input[type="checkbox"] {
-    accent-color: var(--accent);
-    width: 15px;
-    height: 15px;
-  }
-
-  .settings-textarea {
-    width: 100%;
-    min-height: 160px;
-    margin-top: 8px;
-    padding: 8px 10px;
-    background: var(--bg-pane);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--fg);
-    font-family: Consolas, "Cascadia Code", "Courier New", monospace;
-    font-size: 13px;
-    line-height: 1.5;
-    resize: vertical;
-    box-sizing: border-box;
-  }
-
-  .settings-textarea:focus {
-    outline: none;
-    border-color: var(--accent);
-  }
-
-  /* 错误徽标容器：Popover 的定位锚点（徽标 + 浮层同一容器） */
-  .error-badge-wrap {
-    position: relative;
-    display: inline-flex;
-  }
-
-  /* 编译错误/警告 Popover：锚定徽标上方，圆角阴影风格与菜单下拉一致，不遮全屏。
-     `left: 0` 而不是 `right: 0` —— 徽标现在在状态栏最左（2026-09-14），右对齐会把 520px 宽的
-     浮层整体推到窗口左侧外面（靠 clampPopoverRect 也能救回来，但那样每次都是"被夹住"的状态）。 */
-  .error-popover {
-    /* 与弹窗/菜单同一套固定浅色面板（做法见 `:root` 的 --panel-*）：
-       浮层本体白底，里面的**每一条诊断（.error-item）用浅灰块**——条目灰、面板白，
-       这是用户 2026-09-18 指定的（此前是浅色主题下的反过来的组合：灰面板 + 白条目）。 */
-    --bg-pane: var(--panel-soft-bg);
-    --border: var(--panel-border);
-    --fg: var(--panel-fg);
-    --fg-dim: var(--panel-fg-dim);
-    --accent: var(--panel-accent);
-    position: absolute;
-    left: 0;
-    bottom: calc(100% + 8px);
-    width: 520px;
-    max-width: 90vw;
-    max-height: 70vh;
-    display: flex;
-    flex-direction: column;
-    background: var(--panel-bg);
-    border: 1px solid var(--panel-border);
-    border-radius: 6px;
-    box-shadow: var(--panel-shadow);
-    color: var(--panel-fg); /* 不写这条 = 白底 + 深色主题的浅灰字（见 :root 那段） */
-    padding: 8px;
-    z-index: 50;
-    /* 状态栏整条是 user-select: none，这里必须显式放开：浮层里的诊断文字要能拖选复制
-       （「复制」按钮之外的第二条出路，用户 2026-09-18 要求"复制错误信息"） */
-    user-select: text;
-  }
-
-  /* 标题行：左边标题、右边「复制全部」（两个浮层同款） */
-  .error-popover-title {
-    margin: 2px 4px 6px;
-    color: var(--fg-dim);
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  /* 一条诊断 = 「条目」+「复制」两个兄弟按钮（按钮不能嵌按钮，见 markup 注释）。
-     条目占满剩余宽度（原来靠 width:100%，进了 flex row 要改成 flex: 1） */
-  .error-item-row {
-    display: flex;
-    align-items: stretch;
-    gap: 6px;
-  }
-
-  .error-item-row > .error-item {
-    flex: 1 1 auto;
-    /* min-width: 0 不能省：flex 项默认 min-width: auto，长消息会把 row 撑宽、
-       把旁边的「复制」挤出浮层（消息本身已有 word-break，交给它换行） */
-    min-width: 0;
-  }
-
-  /* 复制按钮：透明底、无边框的小字，悬停才描边 —— 不加色块（"界面不要多余凸出"） */
-  .error-item-copy,
-  .error-copy-all {
-    flex: none;
-    align-self: center;
-    padding: 3px 8px;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--fg-dim);
-    font-family: inherit;
-    font-size: 12px;
-    line-height: 1.4;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .error-item-copy:hover,
-  .error-copy-all:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .error-list {
-    margin-top: 4px;
-    min-height: 0; /* 允许在 max-height 的 Popover 内收缩，列表内部滚动 */
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  /* 可点击的错误条目：左对齐、等宽定位、悬停高亮。
-     底色走 `--bg-pane`（浮层里已重绑成 --panel-soft-bg 的浅灰）——
-     「白面板 + 灰条目」是用户 2026-09-18 指定的组合。 */
-  .error-item {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    width: 100%;
-    padding: 6px 10px;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    background: var(--bg-pane);
-    color: var(--fg);
-    font-size: 13px;
-    text-align: left;
-    cursor: pointer;
-    font-family: inherit;
-  }
-
-  .error-item:hover {
-    background: var(--panel-hover-bg);
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .error-item-loc {
-    flex: none;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: 12px;
-    color: var(--fg-dim);
-    white-space: nowrap;
-  }
-
-  .error-item-msg {
-    min-width: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  /* 非定位错误条目：纯文本展示，不可点击（悬停不高亮 —— 连底色也不许变） */
-  .error-item-generic {
-    cursor: default;
-  }
-
-  .error-item-generic:hover {
-    background: var(--bg-pane);
-    border-color: transparent;
-    color: var(--fg);
-  }
-
-  /* 浏览器提示页（非 Tauri 环境；已移除浏览器支持） */
-  .browser-gate {
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    background: var(--bg);
-    color: var(--fg);
-    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-  }
-
-  .browser-gate-title {
-    margin: 0;
-    font-size: 18px;
-    color: var(--accent);
-  }
-
-  .browser-gate-dev {
-    max-width: 520px;
-    line-height: 1.7;
-  }
-
-  .browser-gate-dev code {
-    padding: 1px 5px;
-    border-radius: 3px;
-    background: rgba(128, 128, 128, 0.25);
-  }
-
-  .browser-gate-text {
-    margin: 0;
-    font-size: 13px;
-    color: var(--fg-dim);
-  }
-
-  /* 状态栏的更新提示：只作文字强调（无底色块，保持状态栏干净），点击重开更新弹窗 */
-  .status-update {
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: var(--accent);
-    font-size: 12px;
-    font-family: inherit;
-    cursor: pointer;
-    text-decoration: underline dotted;
-  }
-
-  .status-update:hover {
-    text-decoration: underline solid;
-  }
-
-  /* 更新弹窗：说明可能很长，限宽 + 内部滚动，不把弹窗撑到屏幕外。
-     内容是 update-notes.ts 渲染的受控 HTML（标题/列表/粗体/行内代码），不是 <pre> 原文 */
-  .update-modal {
-    max-width: 560px;
-  }
-
-  .update-notes {
-    margin: 8px 0 0;
-    padding: 8px 12px;
-    max-height: 260px;
-    overflow-y: auto;
-    background: var(--bg-pane);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--fg);
-    font-size: 12.5px;
-    line-height: 1.7;
-    word-break: break-word;
-  }
-
-  .update-notes :global(h4),
-  .update-notes :global(h5) {
-    margin: 10px 0 4px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--fg);
-  }
-
-  /* 第一节的小标题不需要上边距，免得贴着一片空白 */
-  .update-notes :global(:first-child) {
-    margin-top: 0;
-  }
-
-  .update-notes :global(p) {
-    margin: 0 0 6px;
-  }
-
-  .update-notes :global(ul),
-  .update-notes :global(ol) {
-    margin: 0 0 6px;
-    padding-left: 20px;
-  }
-
-  .update-notes :global(li) {
-    margin: 2px 0;
-  }
-
-  .update-notes :global(strong) {
-    font-weight: 600;
-  }
-
-  .update-notes :global(code) {
-    padding: 1px 4px;
-    border-radius: 3px;
-    background: var(--bg-hover, rgba(128, 128, 128, 0.16));
-    font-family: var(--mono-font, ui-monospace, monospace);
-    font-size: 11.5px;
-  }
-
-  .update-notes :global(hr) {
-    margin: 8px 0;
-    border: none;
-    border-top: 1px solid var(--border);
-  }
-
-  .update-hint {
-    color: var(--fg-dim);
-    font-size: 12px;
-  }
-
-  .update-progress {
-    height: 6px;
-    margin: 12px 0 6px;
-    border-radius: 3px;
-    background: var(--bg-pane);
-    border: 1px solid var(--border);
-    overflow: hidden;
-  }
-
-  .update-progress-fill {
-    height: 100%;
-    background: var(--accent);
-    transition: width 0.2s linear; /* 进度回调是分片的，平滑一点免得跳 */
-  }
 </style>

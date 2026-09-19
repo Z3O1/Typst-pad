@@ -13,8 +13,8 @@ Typst-pad = 仿 Typora 的 Typst 桌面编辑器，两套 UI：「写作模式�
 
 ```bash
 npm run tauri dev    # 桌面应用（Vite 固定 1420；WSL 可跑，libEGL 警告正常）
-npm run check        # svelte-check（0 errors / 1 warning，遗留 previewHost）
-npm test             # 单测（38 文件 / 710 项）；npm test -- <文件> 跑单个
+npm run check        # svelte-check（0 errors / 0 warnings）
+npm test             # 单测（45 文件 / 834 项）；npm test -- <文件> 跑单个
 cargo test|check --manifest-path src-tauri/Cargo.toml   # Rust（61 passed / 6 ignored）
 node scripts/check-fonts.mjs
 # 动编辑器 / 装饰 / 布局时才跑浏览器验收（换端口，别跟 tauri dev 抢 1420）

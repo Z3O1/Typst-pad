@@ -1,19 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { decideMenuKey } from "./menu-keys";
+  // 菜单表的结构定义在 menu-model.ts（那份表由 buildMenuGroups 纯函数产出，可单测）。
+  // 这里保留 MenuBar 原有的 `export interface` 用法，语义不变。
+  import type { MenuModelGroup, MenuModelItem } from "./menu-model";
 
-  export interface MenuItem {
-    label: string;
-    action: () => void;
-    checked?: boolean;
-    shortcut?: string; // 快捷键显示文本（如 "Ctrl+N"），同时供全局 Ctrl/Meta 组合键匹配
-  }
+  export interface MenuItem extends MenuModelItem {}
 
-  export interface MenuGroup {
-    label: string;
-    accessKey?: string; // 菜单栏选中态下按此字母跳转/展开，如 文件(F) 的 F
-    items: MenuItem[];
-  }
+  export interface MenuGroup extends MenuModelGroup {}
 
   let {
     groups,
