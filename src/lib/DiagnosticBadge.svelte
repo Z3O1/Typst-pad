@@ -117,10 +117,10 @@
     class="error-badge"
     class:warning-badge={!isErrors}
     class:clickable
-    class:active={open}
+    class:active={visible}
     role="button"
     tabindex="0"
-    aria-expanded={open}
+    aria-expanded={visible}
     title={isErrors ? "编译错误（渲染已停止）" : "编译警告（不中断渲染）"}
     onclick={toggle}
     onkeydown={(e) => {
@@ -212,6 +212,12 @@
 </span>
 
 <style>
+  /* 页面那条 `* { box-sizing: border-box }` 因 Svelte 作用域命中不了子组件（见 07 分册），
+     搬出来的组件要自己声明 —— 浮层是 520px 定宽 + 内边距 + 边框，缺了它宽度会多出 18px。 */
+  * {
+    box-sizing: border-box;
+  }
+
   /* 错误徽标容器：Popover 的定位锚点（徽标 + 浮层同一容器） */
   .error-badge-wrap {
     position: relative;

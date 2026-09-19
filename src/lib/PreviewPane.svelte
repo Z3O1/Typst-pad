@@ -55,6 +55,12 @@
 </section>
 
 <style>
+  /* 页面那条 `* { box-sizing: border-box }` 因 Svelte 作用域命中不了子组件（见 07 分册），
+     搬出来的组件要自己声明 —— `.preview-error` 是 `width:100%` + 内边距 + 边框，缺了它会横向溢出。 */
+  * {
+    box-sizing: border-box;
+  }
+
   /* 单栏（所见即所得）：预览栏整体不参与布局。祖先 `.panes` 在页面里（写作模式那半边），
      所以这里必须写成 `:global(祖先) .自己的类` —— 只写 `.panes.single .preview-pane` 的话，
      页面的作用域命中不了本组件里的元素。 */

@@ -71,7 +71,6 @@
   import { clearState } from "$lib/persistence";
   import {
     isErrorLineInPrefix,
-    prefixLineCharOffset,
     formatDiagnosticForClipboard,
     formatDiagnosticListForClipboard,
     type ErrorListItem,
@@ -1520,8 +1519,11 @@
     }
     if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
     if (result.ok) {
-      if (!previewPaneRef) return; // 预览栏未挂载（理论上隐藏时仍在 DOM，这里兜底）
-      previewPaneRef.paper()!.innerHTML = result.svg;
+      // 预览栏未挂载（组件句柄没接上、或槽里的元素还没落地）就兜底返回 ——
+      // 拆分前判的是 `previewHost` 元素本身，这里同样判元素、不用非空断言
+      const paper = previewPaneRef?.paper();
+      if (!paper) return;
+      paper.innerHTML = result.svg;
       previewPageWidthUsed = requestedPreviewWidthPt; // 本次产物的请求页宽（0 = 没请求重排）
       applyPreviewScale(); // 新产物注入后按当前容器宽度重算画布宽度
       applyCompileStatus(result, doc.length);
@@ -1636,7 +1638,8 @@
    * 用户 2026-09-18 反馈「关闭警告的行为应该和错误是一样的」）。
    */
   function onDiagnosticItemClick(item: LocatedErrorItem) {
-    // 注：isErrorLineInPrefix / prefixLineCharOffset 用未规范化的 prefixCode 草稿值即可——
+    // 注：isErrorLineInPrefix（组件里的 focusPrefixLine → prefixLineCharOffset 同理）用未规范化的
+    // prefixCode 草稿值即可——
     // 追加尾换行不改变前缀区内行号与行首偏移，与规范化后的编译源语义一致
     if (prefixEnabled && isErrorLineInPrefix(item.line, prefixCode)) {
       openBadgePopover = "none";

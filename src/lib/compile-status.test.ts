@@ -136,6 +136,11 @@ describe("失败：只有非定位错误", () => {
       statusText: formatCompileFailMessage(0, "包不存在：@preview/foo:1.0.0"),
     });
     expect(patch.statusText).toBe("编译错误：包不存在：@preview/foo:1.0.0");
+    // 退化输入：失败但 `error` 是空串（IPC 抛了没有 message 的异常）时仍回到「编译错误：0 处」，
+    // 与拆分前的内联写法逐字一致 —— 别让状态栏只剩一个冒号（`编译错误：`）
+    expect(reduceCompileStatus({ ok: false, error: "", errors: [] }, 0).statusText).toBe(
+      "编译错误：0 处",
+    );
   });
 
   it("超长错误原因按 120 字截断（formatCompileFailMessage 的约定）", () => {
@@ -145,24 +150,51 @@ describe("失败：只有非定位错误", () => {
   });
 });
 
-describe("两条编译路径共用同一份归约", () => {
-  it("整页 CompileOk 与块级 BlocksOk 的成功支结果一致", () => {
-    const page = reduceCompileStatus(
+describe("两条编译路径共用同一份归约（键集合是契约）", () => {
+  // 这两条以前写成"同一入参调两次 reduceCompileStatus 再互比" —— 恒真，锁不住任何东西。
+  // 真正会坏的是**键集合**：页面按 patch 的键逐项写状态（+page.svelte 的 applyCompileStatus），
+  // 归约多一个键会被静默忽略、少一个键会留下上一轮的旧值，两条编译路径都可能踩。
+  it("成功支的键集合与契约逐字相同（多一个键会被页面静默忽略）", () => {
+    const patch = reduceCompileStatus(
       { ok: true, pageCount: 3, warnings: [warning({ message: "w" })] },
       11,
     );
-    const blocks = reduceCompileStatus(
-      { ok: true, pageCount: 3, warnings: [warning({ message: "w" })] },
-      11,
+    expect(Object.keys(patch).sort()).toEqual(
+      [
+        "ok",
+        "pageCount",
+        "charCount",
+        "editorDiagnostics",
+        "errorCount",
+        "compileWarnings",
+        "lastNonPosError",
+        "statusText",
+      ].sort(),
     );
-    expect(page).toEqual(blocks);
+    expect(patch).toMatchObject({
+      ok: true,
+      pageCount: 3,
+      charCount: 11,
+      editorDiagnostics: [],
+      errorCount: 0,
+      compileWarnings: [warning({ message: "w" })],
+      lastNonPosError: null,
+    });
+    expect(patch.statusText).toMatch(/^警告：/); // 成功但有警告时不写「就绪」
   });
 
-  it("整页 CompileFail 与块级 BlocksFail 的失败支结果一致", () => {
-    const errors = [error()];
-    expect(reduceCompileStatus({ ok: false, error: "e", errors }, 2)).toEqual(
-      reduceCompileStatus({ ok: false, error: "e", errors }, 2),
-    );
+  it("失败支**不带** pageCount / charCount（页面据此保留上一次成功预览的页数与字符数）", () => {
+    const patch = reduceCompileStatus({ ok: false, error: "e", errors: [error()] }, 2);
+    expect("pageCount" in patch).toBe(false);
+    expect("charCount" in patch).toBe(false);
+    expect(patch).toEqual({
+      ok: false,
+      editorDiagnostics: [error()],
+      errorCount: 1,
+      compileWarnings: [],
+      lastNonPosError: null,
+      statusText: "编译错误：1 处",
+    });
   });
 
   it("形状来源可判别：BlocksUnavailable 这种没有 error/errors 的结果传不进来", () => {

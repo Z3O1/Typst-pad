@@ -30,6 +30,12 @@
 </div>
 
 <style>
+  /* 页面那条 `* { box-sizing: border-box }` 因 Svelte 作用域命中不了子组件（见 07 分册），
+     搬出来的组件要自己声明。 */
+  * {
+    box-sizing: border-box;
+  }
+
   /* 浏览器提示页（非 Tauri 环境；已移除浏览器支持） */
   .browser-gate {
     height: 100vh;

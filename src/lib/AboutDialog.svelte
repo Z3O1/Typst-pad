@@ -59,6 +59,13 @@
 </button>
 
 <style>
+  /* 从页面搬出来的组件**必须自己声明这条**：页面的 `* { box-sizing: border-box }` 会被 Svelte
+     的作用域编译成 `.svelte-<页面hash>`，命中不了子组件里的元素（拆组件时踩过：弹窗宽度多出
+     padding+border、状态栏内容区变窄、错误框横向溢出。见 docs/实现细则/07-测试与审查.md）。 */
+  * {
+    box-sizing: border-box;
+  }
+
   /* 关于弹窗：正文长一点，限宽换行才好看（其余弹窗是标签 + 输入框，不需要） */
   .about-modal {
     max-width: 460px;

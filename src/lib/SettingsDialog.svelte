@@ -114,9 +114,24 @@
 </div>
 
 <style>
+  /* 页面那条 `* { box-sizing: border-box }` 因 Svelte 作用域命中不了子组件，搬出来的组件要自己
+     声明（见 docs/实现细则/07-测试与审查.md）。下面 `.settings-textarea` 的显式声明保留：它是
+     拆分前就有的，与这条重复也无害。 */
+  * {
+    box-sizing: border-box;
+  }
+
   .settings-modal {
     width: 520px;
     max-width: 90vw;
+  }
+
+  /* 字体项那一行：**这条必须排在 `.settings-row` 之前** —— 两者同为单类选择器，靠后者胜；
+     拆分前就是这个顺序，字体行的鼠标指针因此是 `.settings-row` 的 pointer。换顺序会把它变成
+     default（拆组件时踩过一次，见 PR #62 的审查评论）。 */
+  .settings-row-font {
+    justify-content: space-between;
+    cursor: default;
   }
 
   .settings-row {
@@ -155,11 +170,6 @@
   .settings-textarea:focus {
     outline: none;
     border-color: var(--accent);
-  }
-
-  .settings-row-font {
-    justify-content: space-between;
-    cursor: default;
   }
 
   .settings-select {

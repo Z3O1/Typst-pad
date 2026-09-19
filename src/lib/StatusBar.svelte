@@ -104,6 +104,12 @@
 </footer>
 
 <style>
+  /* 页面那条 `* { box-sizing: border-box }` 因 Svelte 作用域命中不了子组件（见 07 分册），
+     搬出来的组件要自己声明 —— 漏了就是静默退回 content-box。 */
+  * {
+    box-sizing: border-box;
+  }
+
   .statusbar {
     display: flex;
     flex-wrap: nowrap; /* 不许换行：换行会让状态栏长成一大块（缩放到 190% + 长报错时实测过） */

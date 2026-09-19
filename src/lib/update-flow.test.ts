@@ -149,7 +149,12 @@ describe("红线①：点过「稍后」之后，自动检查只留状态栏入�
 
 describe("红线②：只有「稍后」会写 dismissedAt", () => {
   it("planDismiss 记下时刻并说明后果", () => {
-    expect(planDismiss(1234)).toEqual({ dismissedAt: 1234, status: UPDATE_DISMISS_NOTICE });
+    const plan = planDismiss(1234);
+    expect(plan.dismissedAt).toBe(1234);
+    // 这里断言**文案本身**（不再引用 UPDATE_DISMISS_NOTICE：引用生产常量 = 恒真，
+    // 常量被改空也照样绿）
+    expect(plan.status).toContain("已停止自动提示更新");
+    expect(plan.status).toContain("随时可手动检查");
   });
 
   it("「稍后」的文案明确告诉用户还能手动检查", () => {

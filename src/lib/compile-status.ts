@@ -81,8 +81,11 @@ export function reduceCompileStatus(
     compileWarnings: [],
     // 非定位错误（如包不存在 / 访问模型异常）单独记录，供徽标弹窗展示
     lastNonPosError: hasLocated ? null : result.error,
+    // 非定位错误必须可见；`error` 为空串时仍回到「编译错误：0 处」——与拆分前逐字一致
     statusText: hasLocated
       ? `编译错误：${result.errors.length} 处`
-      : formatCompileFailMessage(0, result.error),
+      : result.error
+        ? formatCompileFailMessage(0, result.error)
+        : `编译错误：${result.errors.length} 处`,
   };
 }
