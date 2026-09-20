@@ -15,6 +15,13 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { byteOffsetsToPositions } from "./block-offsets";
 import { MATH_TEXT_PT } from "./typst-engine";
 import type { Diagnostic } from "./typst-engine";
+// 假产物生成器按职责分在 `browser-dev-stub/` 下（本文件只留：开关 + 命令路由 + 安装）：
+//   fake-layout —— 假整页 SVG（分页/折行/正文字号）
+//   fake-math   —— 假公式 SVG + 注入的真实公式产物
+//   fake-blocks —— 假块切片 + 假切片上的粗略点击定位
+import { fakeBlocks, syntheticHit, type FakeBlockRecord } from "./browser-dev-stub/fake-blocks";
+import { fakeDocumentTextPt, fakePages, warnFakeRendering } from "./browser-dev-stub/fake-layout";
+import { fakeMath, realMath } from "./browser-dev-stub/fake-math";
 
 /**
  * 假块级渲染（compile_blocks）的开关：`?browserdev=1&blocks=1` —— **只给验收脚本用**。
@@ -208,187 +215,6 @@ const FAKE_UPDATE = {
 };
 
 // ---------------------------------------------------------------------------
-// 假 SVG 生成：把文档按行转成 SVG 文本行；行数超过一页容量就分页。
-// 目的是让预览区有真实的多页结构（含 page-separator 分隔），便于调试滚动/缩放/分栏。
-// 注意：这只是"看起来像排版结果"，不是 Typst 的真实输出。
-// ---------------------------------------------------------------------------
-
-const PAGE_WIDTH = 595.28; // A4 宽（pt）
-const PAGE_HEIGHT = 841.89; // A4 高（pt）
-const MARGIN = 70;
-const LINE_HEIGHT = 22;
-const FONT_SIZE = 12;
-const MAX_COLUMNS = 32; // 超出按 CJK 双宽折行
-const LINES_PER_PAGE = Math.max(1, Math.floor((PAGE_HEIGHT - MARGIN * 2) / LINE_HEIGHT));
-
-/** XML 文本转义（拼进 SVG 前调用；不要对已转义结果二次调用） */
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-/** CJK 字符按 2 列计宽的简单折行（仅为了假预览不横向溢出，不做真实排版） */
-function wrapLine(line: string): string[] {
-  const lines: string[] = [];
-  let current = "";
-  let columns = 0;
-  for (const ch of line) {
-    const width = /[\u2e80-\u9fff\uff00-\uffef]/.test(ch) ? 2 : 1;
-    if (columns + width > MAX_COLUMNS) {
-      lines.push(current);
-      current = "";
-      columns = 0;
-    }
-    current += ch;
-    columns += width;
-  }
-  lines.push(current);
-  return lines;
-}
-
-/** 文档 → 供假 SVG 渲染的行数组（空行保留为空白行，段落不丢失） */
-function docToLines(doc: string): string[] {
-  const out: string[] = [];
-  for (const raw of doc.split("\n")) {
-    if (raw.trim() === "") {
-      out.push("");
-      continue;
-    }
-    out.push(...wrapLine(raw));
-  }
-  if (out.length === 0) out.push("");
-  return out;
-}
-
-/** 渲染单页 SVG 字符串（结构模仿 typst 的 SVG 输出：一个 svg 根 + 一组 text） */
-function renderPage(
-  lines: string[],
-  pageIndex: number,
-  pageCount: number,
-  pageWidthPt: number = PAGE_WIDTH,
-): string {
-  // 预览重排：**纸张宽度变窄、字号不变**（这正是"重排"与"等比缩小"的区别——真实后端由
-  // typst 按新页宽重排正文，`#set page(width:)` 不改 text size）。页高与边距按 A4 比例缩放
-  // （与 Rust 侧 preview_page_setup 一致），行高与字号保持原值 → 窄页排下更多行、页数变多。
-  const ratio = pageWidthPt / PAGE_WIDTH;
-  const width = pageWidthPt;
-  const height = PAGE_HEIGHT * ratio;
-  const margin = MARGIN * ratio;
-  const parts: string[] = [];
-  parts.push(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-  );
-  parts.push(`<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`);
-  lines.forEach((line, i) => {
-    if (line.trim() === "") return;
-    const y = margin + (i + 1) * LINE_HEIGHT;
-    parts.push(
-      `<text x="${margin}" y="${y}" font-family="Noto Serif CJK SC, Songti SC, serif" font-size="${FONT_SIZE}" fill="#111111">${escapeXml(line)}</text>`,
-    );
-  });
-  // 页脚页号：便于确认多页拼接与 page-separator 分隔生效
-  parts.push(
-    `<text x="${width / 2}" y="${height - margin / 2}" text-anchor="middle" font-family="Noto Serif CJK SC, serif" font-size="10" fill="#666666">${pageIndex + 1} / ${pageCount}</text>`,
-  );
-  parts.push("</svg>");
-  return parts.join("");
-}
-
-/** 注入页面的真实公式产物（见 scripts/browser-check/wysiwyg-visual.mjs 与 Rust 的 dump_math_fixtures） */
-interface RealMathFixture {
-  body: string;
-  display: boolean;
-  /** 编译字号（pt）：必须与被请求的字号一致，否则尺寸/基线都不对 */
-  sizePt?: number;
-  svg: string;
-  widthPt: number;
-  heightPt: number;
-  baselinePt: number;
-}
-
-/**
- * 取注入的真实公式产物：body + 风格 + **字号** 三者都要对上（字号不同尺寸就不对，
- * 宁可退回假 SVG 也不要给出尺寸错误的"真产物"）。夹具未标字号时按旧格式放行。
- */
-function realMath(body: string, display: boolean, sizePt: number): RealMathFixture | undefined {
-  const list = (window as unknown as { __DEV_MATH_FIXTURES?: RealMathFixture[] })
-    .__DEV_MATH_FIXTURES;
-  if (!Array.isArray(list)) return undefined;
-  return list.find(
-    (f) =>
-      f.body === body &&
-      f.display === display &&
-      (f.sizePt === undefined || Math.abs(f.sizePt - sizePt) < 0.01),
-  );
-}
-
-/**
- * 假公式渲染：结构模仿 typst 的 compile_math 产物（贴边 viewBox + 透明底 + 文本），
- * 尺寸/基线给合理量级，用于在浏览器里验证「公式内联渲染」的布局与对齐（非真实排版）。
- */
-/**
- * 桩的「文档正文实际字号」（pt）：真实现是 Rust 侧按字符数投票取众数
- * （`block_geometry::document_text_pt`）。桩只要认得 `#set text(size: Npt)` 就够了 ——
- * 有了它，浏览器验收才能覆盖"源码透镜跟随文档字号"（默认 11pt → 14.67px、
- * `#set text(size: 12pt)` → 16px，见 writing-mode-scenes.mjs 的检查）。
- */
-function fakeDocumentTextPt(doc: string): number {
-  const m = /#set\s+text\(\s*size:\s*([0-9.]+)pt/.exec(doc);
-  const pt = m ? Number(m[1]) : NaN;
-  return Number.isFinite(pt) && pt > 0 ? pt : 11;
-}
-
-function fakeMath(body: string, display: boolean) {
-  const widthPt = Math.max(4, body.length * 5.2);
-  const heightPt = display ? 16 : 7.2;
-  const baselinePt = display ? 8.4 : 5.6;
-  // 虚线边框 + 「dev 假渲染」标注：这个桩画的**不是** typst 排版，必须一眼看得出来，
-  // 否则很容易把假产物当成真渲染去排查（实测踩过：以为公式渲染错了）。
-  const svg =
-    `<svg viewBox="0 0 ${widthPt} ${heightPt}" width="${widthPt}pt" height="${heightPt}pt" ` +
-    `xmlns="http://www.w3.org/2000/svg">` +
-    `<rect x="0.4" y="0.4" width="${Math.max(0, widthPt - 0.8)}" height="${Math.max(0, heightPt - 0.8)}" ` +
-    `fill="none" stroke="#e05555" stroke-width="0.8" stroke-dasharray="2 1.5"/>` +
-    `<text x="0" y="${baselinePt}" font-size="10.5" ` +
-    `font-style="italic" font-family="New Computer Modern Math, serif" fill="#000000">` +
-    `${escapeXml(body)}</text></svg>`;
-  return { ok: true, svg, widthPt, heightPt, baselinePt };
-}
-
-/**
- * 真产物的可用性提示：如果**真实编译未接入**（浏览器里只能假渲染），首次挂载时在控制台
- * 明确说一次，并把提示写进页面标题，避免"假排版当成真排版"。
- */
-export function warnFakeRendering(): void {
-  console.warn(
-    "[browser-dev] 公式与整页预览都是**桩产物**（不是 typst 排版）：仅用于调 UI 与交互。\n" +
-      "要看到真实排版，请用桌面版 `npm run tauri dev`。",
-  );
-}
-
-/** 当前文档 → 假 SVG 页数组；pageWidthPt = 预览重排请求的页宽（缺省 A4） */
-export function fakePages(doc: string, pageWidthPt?: number): string[] {
-  const lines = docToLines(doc);
-  // 预览重排（compile_doc 的 previewWidthPt）在假实现里也要有可见效果：页更窄 → 同一段文字
-  // 排到更多页（真实后端由 typst 重排，见 typst_world::preview_page_setup）
-  const width = typeof pageWidthPt === "number" && pageWidthPt > 0 ? pageWidthPt : PAGE_WIDTH;
-  // 每页行数按"纸张高度（随宽度等比缩放）− 边距"算：字号与行高不变 → 窄页排得下的行更少、页数更多
-  const ratio = width / PAGE_WIDTH;
-  const usableHeight = PAGE_HEIGHT * ratio - 2 * MARGIN * ratio;
-  const perPage = Math.max(1, Math.floor(usableHeight / LINE_HEIGHT));
-  const pages: string[][] = [];
-  for (let i = 0; i < lines.length; i += perPage) {
-    pages.push(lines.slice(i, i + perPage));
-  }
-  if (pages.length === 0) pages.push([""]);
-  return pages.map((pageLines, i) => renderPage(pageLines, i, pages.length, width));
-}
-
-// ---------------------------------------------------------------------------
 // 假命令：只实现前端实际会调用的那几个（见 file-ops.ts / typst-engine.ts / +page.svelte）
 // ---------------------------------------------------------------------------
 
@@ -407,122 +233,48 @@ function notify(command: string): void {
 }
 
 /**
- * 假块级渲染产物（`compile_blocks` 的桩）：**不是 typst 排版**，只用来在真实浏览器里
- * 验证"块级切片"这条链路的交互（非光标块被替换、光标进入展开、点击回到源码、源码模式不受影响）。
- *
- * 切块规则与 Rust 侧 block_geometry 的"块"大致对应（空行分段、`=` 标题、`-`/`+` 列表项、
- * 围栏代码块各自成块），足以让验收脚本构造出想要的结构。真实几何由 Rust 侧负责。
+ * 浏览器开发模式下的假字体列表（设置 → 正文字体 的下拉数据源）。
+ * 真实字体集由 Rust 侧 FontBook 提供（打包字体 + 系统字体 + 额外目录），浏览器里没有；
+ * 这里给出与真实形状一致的数据，让验收脚本能覆盖"下拉/额外字体目录"这条 UI 链路。
+ * DEFAULT 与 typst_world/fonts.rs 的 DEFAULT_FONT_FAMILIES 保持一致。
  */
-/** 与 Rust `block_geometry::MAX_CROP_SOURCE_BYTES` 同一个值（改一处要改两处，契约要紧） */
-const STUB_MAX_CROP_SOURCE_BYTES = 8_000;
+const FAKE_FONT_FAMILIES = [
+  "DejaVu Sans Mono",
+  "Libertinus Serif",
+  "Microsoft YaHei",
+  "New Computer Modern Math",
+  "Noto Serif CJK SC",
+  "SimSun",
+  "Songti SC",
+  "STSong",
+];
+const FAKE_FONT_FAMILIES_DEFAULT = [
+  "Libertinus Serif",
+  "Noto Serif CJK SC",
+  "SimSun",
+  "Songti SC",
+  "Source Han Serif SC",
+  "Noto Serif SC",
+  "Microsoft YaHei",
+];
 
-export function fakeBlocks(doc: string): {
-  ok: true;
-  blocks: {
-    start: number;
-    end: number;
-    kind: string;
-    found: boolean;
-    pages: number;
-    page: number;
-    xPt: number;
-    yPt: number;
-    widthPt: number;
-    heightPt: number;
-    bands: number;
-    svg: string;
-    /** 与真 Rust 侧同形：超大块被有意跳过渲图（见 block_geometry::MAX_CROP_SOURCE_BYTES） */
-    skipped: boolean;
-  }[];
-  pages: number;
-  pageWidthPt: number;
-} {
-  const encoder = new TextEncoder();
-  const lines = doc.split("\n");
-  /** 行号 → 该行起始字节偏移 */
-  const lineStart: number[] = [];
-  let bytes = 0;
-  for (const line of lines) {
-    lineStart.push(bytes);
-    bytes += encoder.encode(line).length + 1; // +1 = 换行
-  }
-  const lineEnd = (i: number) => lineStart[i] + encoder.encode(lines[i]).length;
-
-  const out: ReturnType<typeof fakeBlocks>["blocks"] = [];
-  let i = 0;
-  let y = MARGIN;
-  while (i < lines.length) {
-    const line = lines[i];
-    if (line.trim() === "") {
-      i++;
-      continue;
-    }
-    const isHeading = /^=+\s/.test(line);
-    const isList = /^\s*[-+]\s/.test(line);
-    const isFence = line.trimStart().startsWith("```");
-    let j = i;
-    if (isFence) {
-      j = i + 1;
-      while (j < lines.length && !lines[j].trimStart().startsWith("```")) j++;
-      if (j < lines.length) j++; // 收尾围栏
-    } else if (isHeading || isList) {
-      j = i + 1; // 标题/列表项：一行一块（列表不合并，便于验收精确断言）
-    } else {
-      // 段落：吃到空行为止
-      while (j + 1 < lines.length && lines[j + 1].trim() !== "" && !/^=+\s/.test(lines[j + 1])) j++;
-      j++;
-    }
-    const rows = j - i;
-    const heightPt = rows * LINE_HEIGHT + 6;
-    const kind = isHeading ? "Heading" : isList ? "ListItem" : isFence ? "Raw" : "Paragraph";
-    // 假切片：与整页 SVG 同构（svg 根 + 若干 text），尺寸按块自身高度。
-    // **标记要抹掉**（`= ` 标题、`- ` 列表符号、围栏、行间公式的 `$`）：真实 typst 渲染
-    // 出来的就是"没有标记"的样子；验收也正是靠这一点断言"被切片盖住的块不再是源码形态"
-    // （留着标记的话，切片内文本与源码文本无法区分）。
-    const texts = lines
-      .slice(i, j)
-      .filter((t) => !t.trimStart().startsWith("```"))
-      .map((raw, k) => {
-        const t = raw
-          .replace(/^\s*=+\s*/, "")
-          .replace(/^\s*[-+]\s+/, "• ")
-          .replace(/^\s*\$\s*/, "")
-          .replace(/\s*\$\s*$/, "");
-        const esc = t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        return `<text x="${MARGIN}" y="${MARGIN + (k + 1) * LINE_HEIGHT - 6}" font-size="14">${esc}</text>`;
-      })
-      .join("");
-    const svg =
-      `<svg viewBox="0 0 ${PAGE_WIDTH} ${heightPt}" width="${PAGE_WIDTH}pt" height="${heightPt}pt" ` +
-      `xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="white"/>` +
-      `<g data-block="${kind}">${texts}</g></svg>`;
-    // **契约要与真后端同形**：超过上限的单块被有意跳过渲图（`skipped: true`、svg 为空），
-    // 前端必须把它与"缺切片"区分开（否则会每 150ms 要求补渲一次）。桩按同样的 8KB 判据走，
-    // 这样 `&blocks=1` 的验收也能覆盖这条契约（见 live-preview.test.ts 的同名用例）。
-    const skipped = lineEnd(j - 1) - lineStart[i] > STUB_MAX_CROP_SOURCE_BYTES;
-    out.push({
-      start: lineStart[i],
-      end: lineEnd(j - 1),
-      kind,
-      found: true,
-      pages: 1,
-      page: 1,
-      xPt: MARGIN,
-      yPt: y,
-      widthPt: PAGE_WIDTH,
-      heightPt,
-      bands: rows,
-      svg: skipped ? "" : svg,
-      skipped,
-    });
-    y += heightPt;
-    i = j;
-  }
-  return { ok: true, blocks: out, pages: 1, pageWidthPt: PAGE_WIDTH };
+/**
+ * 模拟"编译不是瞬时完成"的那段窗口（`?browserdev=1&blockslow=1`）——**只给验收脚本用**。
+ *
+ * 真实的 typst 编译要几十到几百毫秒（debug 构建的长文档更久），而块表是**上一次编译的产物**：
+ * 这中间的"旧表 + 新文档"窗口里最容易出毛病（刚打的字被旧切片盖住、同一段文字重复显示）。
+ * 桩默认瞬时返回，这些毛病在浏览器里根本复现不出来，所以给一个显式的慢编译开关。
+ */
+function blockslowEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("blockslow");
 }
 
+/** 假编译的耗时（ms）：只在 blockslow 打开时生效 */
+const SLOW_COMPILE_MS = 350;
+
 // ---------------------------------------------------------------------------
-// 假"点击定位"（block_hit_test 的桩）
+// 假"点击定位"（block_hit_test 的桩）——**状态与夹具那一半**（纯几何模型在 fake-blocks.ts）
 //
 // 真实实现（src-tauri/src/block_geometry/hit.rs 的 pick_hit）在**排版引擎的帧**里找最近的字形，
 // 浏览器里没有帧，所以分两条路：
@@ -533,15 +285,8 @@ export function fakeBlocks(doc: string): {
 //    原样点下去（这正是"端到端验真实几何"的做法：期望值来自 Rust，链路在浏览器里跑）。
 // ② 假切片（&blocks=1 的交互验收）：按"等宽字符 + 均分行高"的粗略模型算 —— 足够验
 //    "点左边 → 靠前、点下面 → 靠后、结果钳在块内"这些**交互性质**，精度不作数。
+//    （那部分在 `browser-dev-stub/fake-blocks.ts` 的 syntheticHit，本文件只持有它的输入。）
 // ---------------------------------------------------------------------------
-interface FakeBlockRecord {
-  start: number;
-  end: number;
-  xPt: number;
-  yPt: number;
-  widthPt: number;
-  heightPt: number;
-}
 
 /** 最近一次假编译的文档与块（假命中测试要用它做坐标 ↔ 字符的换算） */
 let lastFake: { doc: string; blocks: FakeBlockRecord[] } | null = null;
@@ -585,72 +330,6 @@ function fixtureHit(args: Record<string, unknown>): number | null {
   }
   return best ? best.o : null;
 }
-
-/** 假切片上的粗略定位：等宽字符 + 均分行高（只保证"方向对、钳在块内"） */
-function syntheticHit(args: Record<string, unknown>): number | null {
-  if (!lastFake) return null;
-  const block = lastFake.blocks.find((b) => b.start === args.start && b.end === args.end);
-  if (!block) return null;
-  const bytes = new TextEncoder().encode(lastFake.doc);
-  const src = new TextDecoder().decode(bytes.slice(block.start, block.end));
-  const lines = src.split("\n");
-  const rows = Math.max(1, lines.length);
-  const rowH = block.heightPt / rows;
-  const row = Math.min(rows - 1, Math.max(0, Math.floor((Number(args.yPt) - block.yPt) / rowH)));
-  const line = Array.from(lines[row] ?? "");
-  const maxChars = Math.max(1, ...lines.map((l) => Array.from(l).length));
-  const charW = block.widthPt / maxChars;
-  const col = Math.min(
-    line.length,
-    Math.max(0, Math.round((Number(args.xPt) - block.xPt) / charW)),
-  );
-  const before = new TextEncoder();
-  const inLine = before.encode(line.slice(0, col).join("")).length;
-  const rowStart = before.encode(lines.slice(0, row).join("\n")).length + (row > 0 ? 1 : 0);
-  const offset = block.start + rowStart + inLine;
-  return Math.min(block.end, Math.max(block.start, offset));
-}
-
-/**
- * 浏览器开发模式下的假字体列表（设置 → 正文字体 的下拉数据源）。
- * 真实字体集由 Rust 侧 FontBook 提供（打包字体 + 系统字体 + 额外目录），浏览器里没有；
- * 这里给出与真实形状一致的数据，让验收脚本能覆盖"下拉/额外字体目录"这条 UI 链路。
- * DEFAULT 与 typst_world/fonts.rs 的 DEFAULT_FONT_FAMILIES 保持一致。
- */
-const FAKE_FONT_FAMILIES = [
-  "DejaVu Sans Mono",
-  "Libertinus Serif",
-  "Microsoft YaHei",
-  "New Computer Modern Math",
-  "Noto Serif CJK SC",
-  "SimSun",
-  "Songti SC",
-  "STSong",
-];
-const FAKE_FONT_FAMILIES_DEFAULT = [
-  "Libertinus Serif",
-  "Noto Serif CJK SC",
-  "SimSun",
-  "Songti SC",
-  "Source Han Serif SC",
-  "Noto Serif SC",
-  "Microsoft YaHei",
-];
-
-/**
- * 模拟"编译不是瞬时完成"的那段窗口（`?browserdev=1&blockslow=1`）——**只给验收脚本用**。
- *
- * 真实的 typst 编译要几十到几百毫秒（debug 构建的长文档更久），而块表是**上一次编译的产物**：
- * 这中间的"旧表 + 新文档"窗口里最容易出毛病（刚打的字被旧切片盖住、同一段文字重复显示）。
- * 桩默认瞬时返回，这些毛病在浏览器里根本复现不出来，所以给一个显式的慢编译开关。
- */
-function blockslowEnabled(): boolean {
-  if (typeof window === "undefined") return false;
-  return new URLSearchParams(window.location.search).has("blockslow");
-}
-
-/** 假编译的耗时（ms）：只在 blockslow 打开时生效 */
-const SLOW_COMPILE_MS = 350;
 
 async function handleCommand(
   command: string,
@@ -822,7 +501,7 @@ async function handleCommand(
       const wantId = typeof a.geometryId === "number" ? a.geometryId : null;
       if (wantId !== null && wantId !== stubGeometryId) return null;
       const fromFixture = fixtureHit(a);
-      return fromFixture !== null ? fromFixture : syntheticHit(a);
+      return fromFixture !== null ? fromFixture : syntheticHit(a, lastFake);
     }
     case "write_file": {
       const path = typeof a.path === "string" ? a.path : FAKE_PATH;

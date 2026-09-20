@@ -8,12 +8,21 @@
 //
 // 任何一层对不上，**代码都能跑、页面都不报错**，只是悄悄退回系统字体 —— 正是这个仓库最怕的
 // "看着能用、其实没生效"（见 CLAUDE.md 里 0.7.10 的主题）。所以这里静态钉住。
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const RUST_WORLD = "src-tauri/src/typst_world/fonts.rs";
 const TS_FONTS = "src/lib/editor-font.ts";
 const TAURI_CONF = "src-tauri/tauri.conf.json";
+
+/** 递归收集 `src-tauri/src` 下的所有 .rs：命令的**定义**可能被拆进任意子模块 */
+function rustSources(dir = "src-tauri/src") {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory()) return rustSources(p);
+    return e.name.endsWith(".rs") ? [p] : [];
+  });
+}
 
 const rust = readFileSync(RUST_WORLD, "utf8");
 const ts = readFileSync(TS_FONTS, "utf8");
@@ -76,8 +85,16 @@ describe("写作模式的打包字体（Rust 白名单 ↔ 前端 @font-face ↔
   });
 
   it("Rust 侧的命令注册在 invoke_handler 里（漏注册 = 前端拿到 unknown command）", () => {
+    // 定义在哪个文件里不关这条测试的事 —— lib.rs 按关注点拆过（2026-09-20），
+    // `bundled_font` 现在住 `font_commands.rs`。写死路径会让"搬家"平白弄红一条守卫。
+    // 用 `pub fn` 而不是 `fn`：真命令是 `pub fn`，而 `block_geometry/tests.rs` / `typst_world/tests.rs`
+    // 里的同名 helper 不是 —— 否则"真命令删了、测试文件里补一个同名 helper"也能骗过这条。
+    const defines = rustSources().some((f) =>
+      /pub\s+(?:async\s+)?fn bundled_font\s*\(/.test(readFileSync(f, "utf8")),
+    );
+    expect(defines, "src-tauri/src 下没有任何文件定义 bundled_font").toBe(true);
+    // 真正要钉的是**注册表**：`generate_handler!` 就是 IPC 契约，漏一条只在真机上暴露
     const lib = readFileSync("src-tauri/src/lib.rs", "utf8");
-    expect(lib).toMatch(/fn bundled_font\(/);
     const handler = lib.slice(lib.indexOf("generate_handler!"));
     expect(handler.slice(0, handler.indexOf("]"))).toContain("bundled_font");
   });
