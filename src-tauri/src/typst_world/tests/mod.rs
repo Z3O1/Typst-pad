@@ -6,6 +6,10 @@
 use super::*;
 use std::path::PathBuf;
 
+// ⚠️ 两个 glob 会把**同名的兄弟模块**也带进作用域（`tests/` 里的 `crops`/`hit` 与被测模块的
+// 私有 `mod crops` / `mod hit` 同名；`typst_world` 侧是 `fonts`/`math`/`paths`）。今天合法，
+// 因为没人裸用这些模块名；但**别在分册里写 `crops::foo` 这种裸模块路径** —— 那会撞 E0659。
+
 /// 测试用字体目录：`src-tauri/fonts`（与打包资源同源，见 resolve_fonts_dir；cargo test 的
 /// CWD 是 src-tauri，用 CARGO_MANIFEST_DIR 定位更稳）
 fn fonts_dir() -> PathBuf {
