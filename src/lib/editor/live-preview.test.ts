@@ -5,10 +5,10 @@
 // 注意：不引入 typst() 语言扩展（其 wasm 解析器在 Node 下处理文档变更会 panic，
 // 见 editor-keymap.test.ts 的说明）。
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { EditorState } from "@codemirror/state";
+import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { basicSetup } from "codemirror";
-import { livePreview } from "./live-preview";
+import { livePreview, refreshLivePreview } from "./live-preview";
 import type { Block } from "../core/block-plan";
 import { mathCacheKey } from "../core/math-ranges";
 import type { MathRequest } from "./live-preview";
@@ -82,6 +82,19 @@ describe("livePreview 扩展", () => {
   afterEach(() => {
     view?.destroy();
     host.remove();
+  });
+
+  // `requests.ts` 的 update 里那道闸门是 `docChanged || viewportChanged || selectionSet || refreshed`；
+  // **只有 `refreshed` 这一条**不是 CodeMirror 自己会产生的 —— 它靠的就是这个 effect。少了它，
+  // 父组件把渲染结果塞进缓存后没人重新规划，公式会一直停在源码（浏览器验收里表现为"刚打开开关
+  // 要再敲一个字才渲染"）。这条单测专门钉住"没有文档/选区变化也要重规划"。
+  it("refreshLivePreview effect：没有文档/选区变化时也重新规划请求", () => {
+    mount("公式 $x^2$ 还没渲染\n");
+    expect(requests.length).toBeGreaterThan(0); // 挂载时先请求了一次
+    requests.length = 0;
+    view.dispatch({ effects: refreshLivePreview.of(null) });
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests[0].body).toBe("x^2"); // 重新规划的是同一个公式，不是别的什么请求
   });
 
   // 回归：空正文的标记构造（`== ` 还没写标题文字、`**` 还没写内容）曾让 CM6 抛
@@ -919,5 +932,39 @@ describe("livePreview 块级切片", () => {
       }),
     });
     expect(host.querySelectorAll(".cm-block-crop-dark").length).toBe(1);
+  });
+
+  // **红线**：竖直移动不许退回"一次跨一整块"（0.7.x 那版 `verticalBlockTarget`）。这里直接验
+  // `block-moves.ts` 的分支：当**默认走法跨过了未展开的切片**时，它要按源码行只走一行。
+  //
+  // jsdom 没有真实几何，`view.moveVertically` 量不到坐标（默认会原地不动，于是"没跨过切片"
+  // 那条早退分支吃掉一切）。所以**把这个默认走法换成"跳到文档开头"**（等价于"默认把切片当空气
+  // 直接跨过去"），正是我们要拦的那种情形 —— 断言光标落在**上一行**，而不是第一块的行首。
+  //
+  // 前提（改这块时注意）：本用例**依赖 `view.moveVertically` 这个接缝**来伪造"默认走法"，
+  // 换掉默认落点的求法就会假红；只覆盖 ArrowUp（ArrowDown / Shift 变体同源同分支）。
+  // 列校正分支（`coordsAtPos` 有真实几何才有意义）不在单测范围，见
+  // `scripts/browser-check/writing-blocks.mjs` 的竖直移动那组。
+  it("跨块竖直移动：默认走法跨过切片时按**源码行走一行**（不是跨一整块）", () => {
+    mount("aaa\n\nbbb\n\nccc\n", [crop(0, 3), crop(5, 8), crop(10, 13)], 5);
+    // 默认走法（被替换）：直接跳到第一块的行首 —— 就是"跨一整块"的坏行为
+    const spy = vi
+      .spyOn(EditorView.prototype, "moveVertically")
+      .mockReturnValue(EditorSelection.cursor(0));
+    try {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowUp",
+          code: "ArrowUp",
+          keyCode: 38,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    // 正确落点：上一行（第 1 行那个空行，pos 4），而不是 pos 0
+    expect(view.state.selection.main.head).toBe(4);
   });
 });
