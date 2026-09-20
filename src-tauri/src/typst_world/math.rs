@@ -44,7 +44,7 @@ impl MathOutput {
     }
 
     /// 任务异常终止（spawn_blocking panic 等），命令层使用
-    pub fn internal_error(message: impl Into<String>) -> Self {
+    pub(crate) fn internal_error(message: impl Into<String>) -> Self {
         Self::fail(message)
     }
 }

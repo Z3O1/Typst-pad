@@ -1,4 +1,5 @@
 use super::*;
+use crate::typst_world::offset_to_line_column;
 
 // ---------------------------------------------------------------------------
 // 探针：一批真实文档跑一遍，把"能不能切"变成数字
@@ -76,7 +77,8 @@ pub fn probe_blocks(
     page_width_pt: f64,
 ) -> ProbeReport {
     // 与预览同一套版心参数：A4 宽度下的默认页边距按比例缩放，页高随内容（单张长页，无分页）
-    let margin = page_width_pt * (70.87 / 595.28);
+    // 与 `typst_world::A4_WIDTH_PT` 同源（别再抄一遍 595.28）
+    let margin = page_width_pt * (70.87 / crate::typst_world::A4_WIDTH_PT);
     let injected =
         format!("#set page(width: {page_width_pt:.2}pt, height: auto, margin: {margin:.2}pt)\n");
     let compiled_src = format!("{injected}{src}");
@@ -329,22 +331,4 @@ pub fn probe_blocks(
 fn preview_of(src: &str, range: Range<usize>) -> String {
     let s: String = src[range].chars().take(40).collect();
     s.replace('\n', "⏎")
-}
-
-/// 字节偏移 → (行号, 列号)，1-based（与 `typst_world::offset_to_line_column` 同语义）。
-/// 偏移落在多字节字符中间时**向下取到字符边界**（块区间来自语法树，末字节可能是 CJK 的后半截）。
-fn offset_to_line_column(text: &str, offset: usize) -> (u32, u32) {
-    let mut offset = offset.min(text.len());
-    while offset > 0 && !text.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    let mut line = 1u32;
-    let mut line_start = 0usize;
-    for (i, c) in text[..offset].char_indices() {
-        if c == '\n' {
-            line += 1;
-            line_start = i + 1;
-        }
-    }
-    (line, (offset - line_start) as u32 + 1)
 }

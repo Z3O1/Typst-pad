@@ -4,9 +4,9 @@ use super::*;
 // 写作模式的块级渲染（阶段 1）：整篇编译一次 → 每个源块切一块 SVG 给编辑器内联显示
 // ---------------------------------------------------------------------------
 
-/// 页面默认页边距比例（70.87pt / 595.28pt，即 A4 默认页边距）。与 `typst_world::preview_page_setup`
-/// 同源：正文列宽 = 页宽 × (1 - 2×比例)，因此反推页宽 = 列宽 / (1 - 2×比例)。
-const PAGE_MARGIN_RATIO: f64 = 70.87 / 595.28;
+/// 页面默认页边距比例（A4 默认页边距 70.87pt），与 `typst_world::preview_page_setup` **同源**：
+/// 数值直接取自 `typst_world::A4_WIDTH_PT`，不再把 595.28 抄一遍（抄两份就会漂）。
+const PAGE_MARGIN_RATIO: f64 = 70.87 / crate::typst_world::A4_WIDTH_PT;
 
 /// typst 的默认正文字号（pt）：文档没有 `#set text(size:)` 时源码透镜就用它
 /// （11pt = 14.67px，与切片里的正文完全一致）。

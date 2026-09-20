@@ -242,9 +242,20 @@ pub(crate) fn check_relative_imports(src: &str) -> Option<Vec<Diagnostic>> {
     }
 }
 
-/// 字节偏移 → (1-based 行, 1-based 列)
-fn offset_to_line_column(text: &str, offset: usize) -> (u32, u32) {
-    let prefix = &text[..offset.min(text.len())];
+/// 字节偏移 → (1-based 行, 1-based 列)，**列按字符数**（诊断要给前端按字符定位）。
+///
+/// 偏移落在多字节字符中间时**向下取到字符边界**：诊断的偏移来自 typst（天生对齐），
+/// 但块区间来自语法树、末字节可能是 CJK 的后半截（见 `block_geometry::probe` 的调用），
+/// 直接 `&text[..offset]` 会 panic。
+///
+/// 这是全仓**唯一**一份实现（原先 `block_geometry/probe.rs` 还有一份"同语义"的，但那份列按
+/// 字节数、只被用来取行号 —— 已经删掉改调这里）。
+pub(crate) fn offset_to_line_column(text: &str, offset: usize) -> (u32, u32) {
+    let mut offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let prefix = &text[..offset];
     let line = prefix.bytes().filter(|&b| b == b'\n').count() as u32 + 1;
     let column = prefix
         .rsplit_once('\n')
