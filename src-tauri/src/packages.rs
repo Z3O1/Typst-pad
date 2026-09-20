@@ -196,8 +196,8 @@ fn extract_safely(bytes: &[u8], dst: &Path) -> FileResult<()> {
 /// 生产下载实现：ureq 轻量 HTTP；仅 404 视为"包不存在"，其余错误归网络不可用
 fn fetch_from_packages_org(url: &str) -> Result<Vec<u8>, FetchError> {
     let mut resp = AGENT.get(url).call().map_err(|err| match err {
-        // 4xx/5xx 默认转 Error::StatusCode
-        ureq::Error::StatusCode(code) if code == 404 => FetchError::NotFound,
+        // 4xx/5xx 默认转 Error::StatusCode；只有 404 视为"包不存在"
+        ureq::Error::StatusCode(404) => FetchError::NotFound,
         ureq::Error::StatusCode(code) => FetchError::Network(format!("HTTP {code}")),
         other => FetchError::Network(other.to_string()),
     })?;

@@ -3,7 +3,10 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
+// `Emitter` 只被 macOS 分支的 queue_open（app.emit）用到，加 cfg 免掉其它平台的未使用导入
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
 
 mod packages;
 mod typst_world;
@@ -130,6 +133,9 @@ async fn compile_doc(
 ///   块区间同一坐标系；null = 全渲）。
 ///   逐块 SVG 会各自复制字形轮廓（实测约 58 字节/源字符），所以编辑器按视口请求窗口
 /// * Err 仅用于任务异常终止（正常编译失败仍走 Ok(ok:false)）
+// 参数表就是前端 `invoke("compile_blocks", {…})` 的契约（前端按名字传参）：收成一个结构体
+// 等于改线上协议，所以这里**刻意保留多参数**并显式豁免参数个数检查。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn compile_blocks(
     state: tauri::State<'_, CompileState>,
@@ -145,7 +151,7 @@ async fn compile_blocks(
     let lock = std::sync::Arc::clone(&state.lock);
     let fonts_dir = state.fonts_dir.clone();
     let fonts = typst_world::FontConfig::new(font_families, font_dirs);
-    Ok(tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         block_geometry::compile_blocks(
             src,
@@ -159,7 +165,7 @@ async fn compile_blocks(
         )
     })
     .await
-    .map_err(|_| "块级编译任务异常终止".to_string())?)
+    .map_err(|_| "块级编译任务异常终止".to_string())
 }
 
 /// 点击定位（阶段 2）：把写作模式切片上的一个点映射回**源码字节偏移**。
@@ -195,6 +201,8 @@ fn block_hit_test(
 /// 写作模式正文 16px 时前端传 12。
 /// 与 compile_doc 同走命令层互斥锁 + spawn_blocking（一次一个编译，不阻塞 UI）。
 /// Err 仅用于任务本身异常终止（公式语法错误等正常失败走 Ok(ok:false, error)）。
+// 同 compile_blocks：多参数就是 IPC 契约，豁免而不是包成结构体。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn compile_math(
     state: tauri::State<'_, CompileState>,
@@ -338,6 +346,10 @@ fn get_debug_flag(state: tauri::State<'_, CliDebugFlag>) -> bool {
 }
 
 /// 把 .typ 路径加入待打开队列，并实时广播给已就绪的前端
+///
+/// 目前只有 macOS 的 `RunEvent::Opened` 会调它（Finder「打开方式」走 Apple Events，
+/// 命令行参数拿不到）；其它平台加 `#[cfg]` 是为了不留一个永远不调用的函数。
+#[cfg(target_os = "macos")]
 fn queue_open(app: &tauri::AppHandle, path: String) {
     if let Some(state) = app.try_state::<PendingFiles>() {
         if let Ok(mut q) = state.0.lock() {

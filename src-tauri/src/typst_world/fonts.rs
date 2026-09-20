@@ -55,6 +55,7 @@ pub struct FontConfig {
     /// - `None`（走 FontConfig::new）= DEFAULT_FONT_FAMILIES（默认：中文直接命中宋体）；
     /// - `Some(空 vec)` = **完全不注入**，交给 typst 原生默认与自动回退；
     /// - `Some(v)` = 注入 v。
+    ///
     /// 文档里的 `#set text(font: ...)` 优先级始终更高（library.styles 是基础层）。
     pub families: Vec<String>,
     /// 额外字体目录（对齐 typst CLI 的 `--font-path` / `TYPST_FONT_PATHS`）：
@@ -193,6 +194,7 @@ fn register_font_file(path: &Path, book: &mut FontBook, fonts: &mut Vec<Font>) {
 /// - Linux：`/usr/share/fonts`、`/usr/local/share/fonts`、`~/.fonts`（旧约定）、用户字体目录
 ///   （`$XDG_DATA_HOME/fonts`，未设置时 `$HOME/.local/share/fonts`）
 /// - macOS：`/System/Library/Fonts`、`/Library/Fonts`、`~/Library/Fonts`
+///
 /// 目录可能不存在/不可读，由调用方（load_fonts_with_system）静默跳过。
 fn system_font_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -242,12 +244,14 @@ fn system_font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// 字体缓存的值：目录列表 → 加载好的 FontBook + 用于回退匹配的 Font 列表
+type FontCacheMap = HashMap<Vec<PathBuf>, Arc<(FontBook, Vec<Font>)>>;
+
 /// 进程级字体缓存：按「打包目录 + 额外字体目录」列表做 key。
 /// 字体集合在一个进程内是静态的（打包/系统目录不变），但用户可以在设置里增删额外字体
 /// 目录，所以缓存必须按目录列表区分；Font 为 Arc 引用计数，FontBook 克隆廉价。
 /// 前端每次按键都会触发编译，若每次重读几百个系统字体文件将严重拖慢输入。
-static FONT_CACHE: OnceLock<Mutex<HashMap<Vec<PathBuf>, Arc<(FontBook, Vec<Font>)>>>> =
-    OnceLock::new();
+static FONT_CACHE: OnceLock<Mutex<FontCacheMap>> = OnceLock::new();
 
 /// 获取字体集：命中缓存返回克隆，未命中则从打包目录 + 系统目录 + 额外目录全量加载。
 pub(crate) fn cached_fonts(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBook, Vec<Font>) {

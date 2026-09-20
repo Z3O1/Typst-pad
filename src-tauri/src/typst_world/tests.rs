@@ -135,7 +135,7 @@ fn compile_math_baseline_measures_depth() {
     assert!(sup.ok);
     let sup_depth = sup.height_pt - sup.baseline_pt;
     assert!(
-        sup_depth >= 0.0 && sup_depth < 3.0,
+        (0.0..3.0).contains(&sup_depth),
         "x^2 视觉上不下沉（只留字体 descender 余量），实际 depth={sup_depth}"
     );
     assert!(

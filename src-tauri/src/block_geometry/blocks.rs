@@ -119,7 +119,7 @@ fn is_display_equation(src: &str, range: &Range<usize>) -> bool {
     let inner = inner.trim_start_matches('$');
     match (inner.chars().next(), inner.chars().last()) {
         (Some(first), Some(last)) => {
-            first.is_whitespace() && last.is_whitespace() && inner.trim().len() > 0
+            first.is_whitespace() && last.is_whitespace() && !inner.trim().is_empty()
         }
         _ => false,
     }

@@ -287,7 +287,7 @@ pub fn probe_blocks(
         }
         prev_bottom = Some(b.y + b.h);
     }
-    if !found.is_empty() && min_gap.is_finite() == false {
+    if !found.is_empty() && !min_gap.is_finite() {
         min_gap = 0.0;
     }
     if max_gap == f64::NEG_INFINITY {

@@ -162,6 +162,9 @@ impl BlocksOutput {
 ///
 /// 失败与 `compile_doc` 同样返回结构化诊断（行号口径一致：注入的 `#set page` 行已减掉，
 /// 但**前缀行仍在**，与现有 `mapCompiledPosToDoc` 的假设一致）。
+// 参数与 IPC 命令 `compile_blocks` 一一对应（同一个窗口三元组 want_from/want_to 必须一起传），
+// 收成结构体只是换个写法、并不能减少调用方要提供的信息，所以显式豁免参数个数检查。
+#[allow(clippy::too_many_arguments)]
 pub fn compile_blocks(
     src: String,
     doc_offset: usize,
