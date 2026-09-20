@@ -29,6 +29,15 @@
     FONT_CHOICE_DEFAULT,
     normalizeFontDirs,
   } from "$lib/core/font-settings";
+  import {
+    copySettings,
+    defaultSettings,
+    diffSettings,
+    SETTINGS_SAVED_STATUS,
+    statusAfterSettingsSave,
+  } from "$lib/core/app-settings";
+  import type { AppSettings } from "$lib/core/app-settings";
+  import { createFontList } from "$lib/core/font-list";
   import { createMathQueue } from "$lib/editor/math-queue";
   import type { WriteCommand } from "$lib/core/write-commands";
   import {
@@ -488,9 +497,10 @@
     return positionRangeToByteRange(doc, from, to);
   }
 
-  // 设置弹窗中的临时值（点“保存”才写回并持久化）
-  let settingsPrefixEnabled = $state(false);
-  let settingsPrefixCode = $state("");
+  // 设置弹窗里的**草稿**（点“保存”才写回并持久化）：一个 `$state` 对象，
+  // 打开时用 `copySettings` 从生效配置拷一份 —— 见 core/app-settings.ts 的三条理由。
+  // 模板里用 `bind:xxx={settingsDraft.xxx}` 绑进它的成员（SettingsDialog 的 props 形状没变）。
+  let settingsDraft = $state<AppSettings>(defaultSettings());
   // ---------------------------------------------------------------------------
   // 字体设置（见 font-settings.ts / font-warnings.ts 的模块注释）
   // 起因：typst 默认正文是 Libertinus Serif（无汉字），不指定字体时中文全走自动回退，
@@ -501,8 +511,6 @@
   let chineseFont = $state(FONT_CHOICE_DEFAULT);
   /** 额外字体目录（对齐 typst CLI 的 --font-path） */
   let fontDirs = $state<string[]>([]);
-  let settingsChineseFont = $state(FONT_CHOICE_DEFAULT);
-  let settingsFontDirs = $state<string[]>([]);
   /** 可用字体族（设置里下拉的数据源，打开设置时从 Rust 取一次） */
   let availableFonts = $state<string[]>([]);
   /** Rust 内置默认字体族（拼"选中项 + 其余兜底"用；启动时取一次） */
@@ -510,14 +518,12 @@
   let fontsLoading = $state(false);
   // 启动时恢复上次未保存的内容（设置弹窗里的开关，默认开；关掉即回到"每次全新开始"）
   let restoreSession = $state(true);
-  let settingsRestoreSession = $state(true);
 
   // ---------------------------------------------------------------------------
   // 自动更新（tauri-plugin-updater；端点与签名公钥在 tauri.conf.json 的 plugins.updater）
   // ---------------------------------------------------------------------------
   /** 启动时自动检查更新（设置弹窗开关，默认开）。只影响自动检查，菜单里的手动检查始终可用 */
   let autoCheckUpdates = $state(true);
-  let settingsAutoCheckUpdates = $state(true);
 
   // 更新流程状态机：类型与语义见 update-utils.ts 的 UpdateFlow（刻意做成单个可判别联合，
   // 而不是若干布尔量——理由写在那边的注释里）
@@ -1093,33 +1099,26 @@
   }
 
   /** 取可用字体族（下拉数据源）与内置默认列表；打开设置、增删字体目录后调用 */
-  async function refreshFontList(dirs: string[]) {
-    fontsLoading = true;
-    try {
-      const [families, defaults] = await Promise.all([
-        listFontFamilies(normalizeFontDirs(dirs)),
-        defaultFontFamilies(),
-      ]);
+  // 字体下拉的数据源（扫描 / 添加目录 / 移除目录）在 `$lib/core/font-list`：
+  // 这里只注入页面状态与三个 Rust 调用，"归一化目录"和"默认族不许被空列表覆盖"两条规则在那边。
+  const fontList = createFontList({
+    listFamilies: listFontFamilies,
+    defaultFamilies: defaultFontFamilies,
+    pickDir: pickFontDir,
+    setFamilies: (families) => {
       availableFonts = families;
-      if (defaults.length > 0) defaultFonts = defaults;
-    } finally {
-      fontsLoading = false;
-    }
-  }
-
-  /** 添加额外字体目录（系统目录选择器）→ 立刻重新扫描字体，让下拉里出现新字体 */
-  async function addFontDir() {
-    const dir = await pickFontDir();
-    if (!dir) return;
-    settingsFontDirs = normalizeFontDirs([...settingsFontDirs, dir]);
-    await refreshFontList(settingsFontDirs);
-  }
-
-  /** 移除额外字体目录 → 同步刷新字体列表 */
-  function removeFontDir(dir: string) {
-    settingsFontDirs = settingsFontDirs.filter((d) => d !== dir);
-    void refreshFontList(settingsFontDirs);
-  }
+    },
+    setDefaults: (families) => {
+      defaultFonts = families;
+    },
+    setLoading: (loading) => {
+      fontsLoading = loading;
+    },
+    dirs: () => settingsDraft.fontDirs,
+    setDirs: (dirs) => {
+      settingsDraft.fontDirs = dirs;
+    },
+  });
 
   /**
    * 警告列表条目（组装在 status-view.ts，有单测）：有源码位置的可点击跳转（消息已翻成中文
@@ -1188,48 +1187,55 @@
     runCompile();
   }
 
-  /** 打开设置弹窗：载入当前前缀配置副本，点“保存”才生效 */
-  function openSettings() {
-    settingsPrefixEnabled = prefixEnabled;
-    settingsPrefixCode = prefixCode;
-    settingsRestoreSession = restoreSession;
-    settingsAutoCheckUpdates = autoCheckUpdates;
-    settingsChineseFont = chineseFont;
-    settingsFontDirs = [...fontDirs];
-    showSettings = true;
-    // 字体下拉的选项来自 Rust 侧真实注册的字体（结构上不可能写出一个不存在的族名）
-    void refreshFontList(settingsFontDirs);
+  /** 生效配置（读页面 `$state`）：**调用时**取值，别缓存 */
+  function currentSettings(): AppSettings {
+    return {
+      prefixEnabled,
+      prefixCode,
+      chineseFont,
+      fontDirs,
+      restoreSession,
+      autoCheckUpdates,
+    };
   }
 
-  /** 保存设置：应用前缀配置并持久化 */
+  /** **唯一**把生效配置写回 `$state` 的地方（字段清单与 `AppSettings` 一一对应） */
+  function applySettings(next: AppSettings) {
+    prefixEnabled = next.prefixEnabled;
+    prefixCode = next.prefixCode;
+    restoreSession = next.restoreSession;
+    autoCheckUpdates = next.autoCheckUpdates;
+    chineseFont = next.chineseFont;
+    fontDirs = next.fontDirs;
+  }
+
+  /** 打开设置弹窗：载入生效配置的**副本**，点“保存”才生效 */
+  function openSettings() {
+    settingsDraft = copySettings(currentSettings());
+    showSettings = true;
+    // 字体下拉的选项来自 Rust 侧真实注册的字体（结构上不可能写出一个不存在的族名）
+    void fontList.refresh(settingsDraft.fontDirs);
+  }
+
+  /** 保存设置：把草稿落成生效配置并持久化 */
   function saveSettings() {
-    const fontsChanged =
-      settingsChineseFont !== chineseFont ||
-      normalizeFontDirs(settingsFontDirs).join("\n") !== fontDirs.join("\n");
-    const prefixChanged =
-      settingsPrefixEnabled !== prefixEnabled || settingsPrefixCode !== prefixCode;
-    prefixEnabled = settingsPrefixEnabled;
-    prefixCode = settingsPrefixCode;
-    restoreSession = settingsRestoreSession;
-    autoCheckUpdates = settingsAutoCheckUpdates;
-    chineseFont = settingsChineseFont;
-    fontDirs = normalizeFontDirs(settingsFontDirs);
+    const diff = diffSettings(currentSettings(), settingsDraft);
+    applySettings(diff.applied);
     schedulePersist();
     showSettings = false;
     // 公式缓存的键是「风格 + 前缀 + 公式文本」，不含字体配置 → 改了字体必须整体作废，
     // 否则视口内的公式会一直用旧字体（编辑器收到 mathVersion 变化后重新请求渲染）。
-    if (fontsChanged) resetMathCache();
+    if (diff.fontsChanged) resetMathCache();
     // **保存后立即重编译**：以前只写状态不重编译，预览停在上一次结果，看起来就是
     // "改了字体/前缀没生效"（要在正文里敲一个字才刷新）。字体与前缀都会进编译源，故都要重编译。
-    if (fontsChanged || prefixChanged) {
-      // 重编译完成后再补一次确认：编译成功会把状态栏写成「就绪」，先写的那句会被顶掉
-      // （实测：点保存后 "设置已保存" 一闪而过，验收也因此判失败）。只在编译没有给出更重要的
-      // 提示（警告/编译错误）时才补——那些提示比"已保存"要紧。
+    if (diff.fontsChanged || diff.prefixChanged) {
+      // 重编译落地后再定状态栏文案：编译只写「就绪」时补「设置已保存」，有警告/错误就让位
+      // （实测：点保存后 "设置已保存" 一闪而过，验收也因此判失败 —— 见 app-settings.ts）。
       void runCompile().finally(() => {
-        if (statusText === "就绪") statusText = "设置已保存";
+        statusText = statusAfterSettingsSave(statusText);
       });
     }
-    statusText = "设置已保存";
+    statusText = SETTINGS_SAVED_STATUS;
   }
 
   /** 关闭设置弹窗：放弃未保存的修改 */
@@ -1530,7 +1536,7 @@
     // 追加尾换行不改变前缀区内行号与行首偏移，与规范化后的编译源语义一致
     if (prefixEnabled && isErrorLineInPrefix(item.line, prefixCode)) {
       openBadgePopover = "none";
-      openSettings(); // 载入当前前缀副本到 settingsPrefixCode，点“保存”才生效
+      openSettings(); // 载入当前前缀的**草稿副本**（settingsDraft），点“保存”才生效
       // 下一 tick：等设置弹窗渲染出前缀 textarea，再让组件自己定位（偏移按草稿前缀算）
       void tick().then(() => settingsDialogRef?.focusPrefixLine(item.line));
     } else {
@@ -2038,16 +2044,16 @@
     {#if showSettings}
       <SettingsDialog
         bind:this={settingsDialogRef}
-        bind:restoreSession={settingsRestoreSession}
-        bind:autoCheckUpdates={settingsAutoCheckUpdates}
-        bind:prefixEnabled={settingsPrefixEnabled}
-        bind:prefixCode={settingsPrefixCode}
-        bind:chineseFont={settingsChineseFont}
-        bind:fontDirs={settingsFontDirs}
+        bind:restoreSession={settingsDraft.restoreSession}
+        bind:autoCheckUpdates={settingsDraft.autoCheckUpdates}
+        bind:prefixEnabled={settingsDraft.prefixEnabled}
+        bind:prefixCode={settingsDraft.prefixCode}
+        bind:chineseFont={settingsDraft.chineseFont}
+        bind:fontDirs={settingsDraft.fontDirs}
         {availableFonts}
         {fontsLoading}
-        onAddFontDir={addFontDir}
-        onRemoveFontDir={removeFontDir}
+        onAddFontDir={() => void fontList.addDir()}
+        onRemoveFontDir={fontList.removeDir}
         onSave={saveSettings}
         onClose={closeSettings}
       />
