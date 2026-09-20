@@ -55,8 +55,6 @@ describe("isEffectiveDirty", () => {
   });
 });
 
-
-
 describe("ensureTrailingNewline", () => {
   it("空字符串：原样返回", () => {
     expect(ensureTrailingNewline("")).toBe("");
@@ -64,9 +62,7 @@ describe("ensureTrailingNewline", () => {
 
   it("已以 \\n 结尾：原样返回（单行/多行/纯换行）", () => {
     expect(ensureTrailingNewline("#set text(14pt)\n")).toBe("#set text(14pt)\n");
-    expect(ensureTrailingNewline("// 注释\n#set text(14pt)\n")).toBe(
-      "// 注释\n#set text(14pt)\n",
-    );
+    expect(ensureTrailingNewline("// 注释\n#set text(14pt)\n")).toBe("// 注释\n#set text(14pt)\n");
     expect(ensureTrailingNewline("\n")).toBe("\n");
   });
 
@@ -76,9 +72,7 @@ describe("ensureTrailingNewline", () => {
   });
 
   it("多行但末尾无 \\n：只在最末补一个 \\n，不触碰中间内容", () => {
-    expect(ensureTrailingNewline("// 注释\n#set text(14pt)")).toBe(
-      "// 注释\n#set text(14pt)\n",
-    );
+    expect(ensureTrailingNewline("// 注释\n#set text(14pt)")).toBe("// 注释\n#set text(14pt)\n");
   });
 
   it("幂等性：对已规范化的输入再调用结果不变", () => {

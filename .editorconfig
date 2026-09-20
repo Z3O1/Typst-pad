@@ -1,0 +1,22 @@
+root = true
+
+# 全仓库统一：UTF-8、LF、去行尾空白（实测 174 个文本文件全是 LF，别改成 CRLF）
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Rust 用 4 空格（rustfmt 默认）
+[*.rs]
+indent_size = 4
+
+# Markdown 的表格与对齐依赖行尾空格，不能自动删
+[*.md]
+trim_trailing_whitespace = false
+
+# 二进制/产物目录不参与
+[{*.png,*.ico,*.icns,*.ttf,*.otf,*.ttc,*.woff2}]
+insert_final_newline = false

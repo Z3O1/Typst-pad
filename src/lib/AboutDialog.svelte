@@ -45,15 +45,15 @@
         tabindex="0"
         title={projectUrl}
         onclick={onOpenProject}
-        onkeydown={(e) => e.key === "Enter" && onOpenProject()}
-      >项目主页</span>
+        onkeydown={(e) => e.key === "Enter" && onOpenProject()}>项目主页</span
+      >
       <span
         class="modal-close"
         role="button"
         tabindex="0"
         onclick={onClose}
-        onkeydown={(e) => e.key === "Enter" && onClose()}
-      >关闭</span>
+        onkeydown={(e) => e.key === "Enter" && onClose()}>关闭</span
+      >
     </div>
   </div>
 </button>

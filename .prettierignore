@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+/build/
+.svelte-kit/
+src-tauri/target/
+src-tauri/gen/
+.browser-check/
+.npm-cache/
+.cache/
+
+# Markdown：文档里的表格列宽、缩进对齐是手写的，格式化会拆掉可读性
+*.md
+docs/
+
+# CI YAML：带大量解释性注释与手工对齐，且不是产品代码
+.github/
+
+# 锁文件：格式化只产生噪音 diff
+package-lock.json
+
+# 更新签名私钥（已 gitignore，但盘上可能存在）：不该被任何工具读进内存
+/.updater-keys/

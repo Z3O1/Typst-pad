@@ -92,7 +92,8 @@ pub fn compile_math(
             output: Ok(doc), ..
         } => doc,
         typst::diag::Warned {
-            output: Err(errors), ..
+            output: Err(errors),
+            ..
         } => {
             // 诊断位置属于内部探针文档（含前缀偏移），对用户无意义，只回消息
             let first = errors
@@ -134,9 +135,7 @@ pub fn compile_math(
         match typst::compile::<PagedDocument>(&world) {
             typst::diag::Warned {
                 output: Ok(doc), ..
-            } => {
-                svg_for_page(&doc.pages()[0])
-            }
+            } => svg_for_page(&doc.pages()[0]),
             // 第二遍只是"把画布撑大"，失败了就用第一遍的产物（少一截总比什么都没有强）
             typst::diag::Warned { output: Err(_), .. } => svg_for_page(&pages[0]),
         }
@@ -186,7 +185,9 @@ fn math_probe_source(
             // 第一页：显式尺寸 + 顶部内边距（内容整体下移 pad_top，墨迹才落在画布内）
             src.push_str("#set page(margin: 0pt, fill: none)\n");
             src.push_str(&format!("#set text(size: {size_pt}pt)\n"));
-            src.push_str(&format!("#set page(width: {page_w}pt, height: {page_h}pt)\n"));
+            src.push_str(&format!(
+                "#set page(width: {page_w}pt, height: {page_h}pt)\n"
+            ));
             // 注意：进了 pad(...) 的**代码模式**后子里不能再写 `#box(...)`（会报
             // "the character `#` is not valid in code"），用内容块 `[ ... ]` 回到 markup 模式
             src.push_str(&format!("#pad(top: {pad_top}pt)[#box({math})]\n"));
@@ -281,35 +282,4 @@ fn item_ink_bounds(item: &FrameItem) -> (Abs, Abs) {
         }
         FrameItem::Tag(_) => (Abs::zero(), Abs::zero()),
     }
-}
-
-/// 把公式 SVG 的视口（`viewBox` 与 width/height）撑到给定尺寸，**内容坐标不动**。
-/// 只用于"墨迹比页框大"的情形（见 `ink_bounds_of_frame`）：内容锚在左上角，画布变高即可。
-fn grow_svg_viewport(svg: &str, width_pt: f64, height_pt: f64) -> String {
-    let fmt = |v: f64| {
-        let s = format!("{v:.4}");
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    };
-    let mut out = svg.to_string();
-    let Some(start) = out.find("<svg ") else { return out };
-    let Some(tag_end_rel) = out[start..].find('>') else { return out };
-    let tag_end = start + tag_end_rel;
-    let tag = out[start..tag_end].to_string();
-    let mut new_tag = tag.clone();
-    for (attr, value) in [
-        ("viewBox", format!("0 0 {} {}", fmt(width_pt), fmt(height_pt))),
-        ("width", format!("{}pt", fmt(width_pt))),
-        ("height", format!("{}pt", fmt(height_pt))),
-    ] {
-        let needle = format!("{attr}=\"");
-        if let Some(i) = new_tag.find(&needle) {
-            let val_start = i + needle.len();
-            if let Some(rel_end) = new_tag[val_start..].find('"') {
-                let val_end = val_start + rel_end;
-                new_tag.replace_range(val_start..val_end, &value);
-            }
-        }
-    }
-    out.replace_range(start..tag_end, &new_tag);
-    out
 }

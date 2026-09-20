@@ -15,45 +15,16 @@
 //   - pt → px 的尺寸映射是否符合预期（1pt = 4/3 px）
 //   - 行间公式块级 widget 是否居中、是否占据整行
 //   - 暗色主题下公式是否可见（typst 产物是黑字，需反色）
-import { readFileSync } from "node:fs";
 import { connect, DEV_URL } from "./cdp.mjs";
+import { boot, createChecker, finish, loadFixtures, shotPath as SHOT } from "./harness.mjs";
 
-const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
-const FIXTURES = new URL("../../.browser-check/math-fixtures.json", import.meta.url).pathname;
+const { check, state } = createChecker();
 
-let passed = 0;
-function check(name, ok, detail = "") {
-  if (ok) {
-    passed++;
-    console.log(`  ✓ ${name}`);
-  } else {
-    console.log(`  ✗ ${name} ${detail}`);
-    process.exitCode = 1;
-  }
-}
-
-const fixtures = JSON.parse(readFileSync(FIXTURES, "utf8"));
-// 空夹具 = 0 项断言 + 退出码 0 的假绿（cargo test 命中 0 个用例时退出码仍是 0）⇒ 必须硬失败
-if (fixtures.length === 0) {
-  console.error(`夹具是空的：${FIXTURES}；先跑 npm run fixtures:math（别拿空夹具跑验收）`);
-  process.exit(1);
-}
+const fixtures = loadFixtures("math-fixtures.json", { hint: "先跑 npm run fixtures:math" });
 console.log(`夹具：${fixtures.length} 条真实公式产物（来自 Rust compile_math）`);
 
 const c = await connect();
-await c.send("Page.enable");
-// 必须在导航前注入：桩在 compile_math 里优先取这里的产品（见 browser-dev-stub.ts）
-await c.send("Page.addScriptToEvaluateOnNewDocument", {
-  source: `window.__DEV_MATH_FIXTURES = ${JSON.stringify(fixtures)};`,
-});
-
-await c.goto(DEV_URL);
-// 清掉上一轮遗留的界面模式 / 主题，保证从默认态（写作模式）开始：
-// 否则上一轮若停在源码模式，页面加载后不渲染任何公式，第一条断言就会莫名超时（实测踩过）
-await c.evaluate(`localStorage.clear()`);
-await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 800));
+await boot(c, DEV_URL, { mathFixtures: fixtures });
 
 console.log("1) 行内公式：真实 typst 产物 + 基线对齐");
 // 文档：中文正文 + 行内公式（含下沉的积分、上标、分数），全部用夹具里的公式
@@ -105,7 +76,11 @@ const measured = await c.evaluate(`(() => {
 })()`);
 
 check("5 个行内公式都渲染出来", measured.length === 5, JSON.stringify(measured.map((m) => m.body)));
-check("每个公式都匹配到真实夹具（不是桩的假 SVG）", measured.every((m) => m.body !== "(未知)"), JSON.stringify(measured.map((m) => m.body)));
+check(
+  "每个公式都匹配到真实夹具（不是桩的假 SVG）",
+  measured.every((m) => m.body !== "(未知)"),
+  JSON.stringify(measured.map((m) => m.body)),
+);
 
 const sizeErrors = measured
   .filter((m) => m.expectedWidthPx !== null)
@@ -124,7 +99,9 @@ const withFixture = measured.filter((m) => m.delta !== null);
 check(
   "行内公式基线与同行文字基线齐平（误差 < 1px）",
   withFixture.every((m) => m.delta < 1),
-  JSON.stringify(withFixture.map((m) => ({ body: m.body, delta: Math.round(m.delta * 100) / 100 }))),
+  JSON.stringify(
+    withFixture.map((m) => ({ body: m.body, delta: Math.round(m.delta * 100) / 100 })),
+  ),
 );
 // 有下沉部分的公式（积分）必须真的往下沉：vertical-align 为负、且盒底低于基线
 const integral = measured.find((m) => m.body.startsWith("integral"));
@@ -251,7 +228,11 @@ const dark = await c.evaluate(`(() => {
   };
 })()`);
 check("暗色主题下 widget 带反色类", dark.hasDarkClass, JSON.stringify(dark));
-check("SVG 应用了 invert 滤镜（黑字在深底上可见）", dark.filter.includes("invert"), JSON.stringify(dark));
+check(
+  "SVG 应用了 invert 滤镜（黑字在深底上可见）",
+  dark.filter.includes("invert"),
+  JSON.stringify(dark),
+);
 check(
   "编辑器背景确实是深色（亮度低于 0x60）",
   dark.bg.length > 0 &&
@@ -318,5 +299,4 @@ check(
 );
 await c.screenshot(SHOT("visual-4-ink-audit"));
 
-console.log(`\n通过 ${passed} 项检查；截图：${SHOT("visual-*")}`);
-c.close();
+finish(`通过 ${state.passed} 项检查；截图：${SHOT("visual-*")}`);

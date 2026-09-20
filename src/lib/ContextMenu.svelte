@@ -142,7 +142,9 @@
   }
 
   .menu-item:hover {
-    background: var(--panel-hover-bg); /* 浅蓝底 + 蓝字：与菜单下拉的悬停一致（白底上用蓝底白字不清楚） */
+    background: var(
+      --panel-hover-bg
+    ); /* 浅蓝底 + 蓝字：与菜单下拉的悬停一致（白底上用蓝底白字不清楚） */
     color: var(--panel-hover-fg);
   }
 

@@ -94,7 +94,11 @@ pub fn pick_hit(
     }
     let (item, _, _) = best?;
     let mid = (item.rect.min.x + item.rect.max.x) / 2.0;
-    let offset = if x < mid { item.range.start } else { item.range.end };
+    let offset = if x < mid {
+        item.range.start
+    } else {
+        item.range.end
+    };
     Some(offset.clamp(start, end))
 }
 

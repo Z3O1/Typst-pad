@@ -120,7 +120,7 @@ describe("describeUpdateError", () => {
     expect(describeUpdateError("target not found: darwin-aarch64")).toContain("本平台");
   });
 
-  it("未知错误原样透出；空错误给\"未知错误\"", () => {
+  it('未知错误原样透出；空错误给"未知错误"', () => {
     expect(describeUpdateError("莫名其妙的东西")).toBe("莫名其妙的东西");
     expect(describeUpdateError(null)).toBe("未知错误");
     expect(describeUpdateError("   ")).toBe("未知错误");

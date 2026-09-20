@@ -16,11 +16,6 @@ export function mark(name: string): number {
   return t;
 }
 
-/** 已记录的打点（测试/调试用，返回副本） */
-export function getMarks(): StartMark[] {
-  return marks.slice();
-}
-
 /** 输出启动报告（仅一次）：阶段表 + 页面加载阶段耗时 */
 export function reportStartup(): void {
   if (reported || marks.length === 0) return;
@@ -33,10 +28,11 @@ export function reportStartup(): void {
   // 页面加载阶段（document 下载 → JS 完成 → load），补全 JS 侧打点之前的窗口
   try {
     const nav = performance.getEntriesByType("navigation")[0] as
-      | PerformanceNavigationTiming
-      | undefined;
+      PerformanceNavigationTiming | undefined;
     if (nav) {
-      console.log(`[startup] phase:nav-responseEnd t:${(nav.responseEnd - nav.startTime).toFixed(1)}`);
+      console.log(
+        `[startup] phase:nav-responseEnd t:${(nav.responseEnd - nav.startTime).toFixed(1)}`,
+      );
       console.log(
         `[startup] phase:nav-domContentLoaded t:${(nav.domContentLoadedEventEnd - nav.startTime).toFixed(1)}`,
       );

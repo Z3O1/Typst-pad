@@ -55,6 +55,7 @@ pub struct FontConfig {
     /// - `None`（走 FontConfig::new）= DEFAULT_FONT_FAMILIES（默认：中文直接命中宋体）；
     /// - `Some(空 vec)` = **完全不注入**，交给 typst 原生默认与自动回退；
     /// - `Some(v)` = 注入 v。
+    ///
     /// 文档里的 `#set text(font: ...)` 优先级始终更高（library.styles 是基础层）。
     pub families: Vec<String>,
     /// 额外字体目录（对齐 typst CLI 的 `--font-path` / `TYPST_FONT_PATHS`）：
@@ -67,7 +68,10 @@ impl FontConfig {
     pub fn new(families: Option<Vec<String>>, dirs: Option<Vec<String>>) -> Self {
         Self {
             families: match families {
-                None => DEFAULT_FONT_FAMILIES.iter().map(|s| s.to_string()).collect(),
+                None => DEFAULT_FONT_FAMILIES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
                 Some(v) => v,
             },
             dirs: dirs
@@ -115,7 +119,10 @@ pub(crate) fn load_fonts(dir: &Path) -> (FontBook, Vec<Font>) {
 /// 与 typst CLI 字体集对齐：CLI 默认加载系统全部字体，typst-pad 此前只加载打包的
 /// 7 个字体，同一文档在两边的字体解析结果可能不一致。目录不存在/不可读时静默跳过。
 /// `extra_dirs` 是用户在设置里添加的额外字体目录（同样静默跳过不存在的）。
-pub(crate) fn load_fonts_with_system(bundled_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBook, Vec<Font>) {
+pub(crate) fn load_fonts_with_system(
+    bundled_dir: &Path,
+    extra_dirs: &[PathBuf],
+) -> (FontBook, Vec<Font>) {
     let (mut book, mut fonts) = load_fonts(bundled_dir);
     for dir in system_font_dirs() {
         load_fonts_from_dir(&dir, &mut book, &mut fonts);
@@ -136,11 +143,13 @@ pub(crate) fn load_fonts_from_dir(dir: &Path, book: &mut FontBook, fonts: &mut V
     for entry in entries.flatten() {
         let path = entry.path();
         // metadata 跟随符号链接：broken symlink 会 Err 而跳过
-        let Ok(meta) = fs::metadata(&path) else { continue };
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
         if meta.is_dir() {
             // 符号链接目录一律不递归（防环）
-            let is_symlink = fs::symlink_metadata(&path)
-                .is_ok_and(|sm| sm.file_type().is_symlink());
+            let is_symlink =
+                fs::symlink_metadata(&path).is_ok_and(|sm| sm.file_type().is_symlink());
             if is_symlink {
                 continue;
             }
@@ -185,6 +194,7 @@ fn register_font_file(path: &Path, book: &mut FontBook, fonts: &mut Vec<Font>) {
 /// - Linux：`/usr/share/fonts`、`/usr/local/share/fonts`、`~/.fonts`（旧约定）、用户字体目录
 ///   （`$XDG_DATA_HOME/fonts`，未设置时 `$HOME/.local/share/fonts`）
 /// - macOS：`/System/Library/Fonts`、`/Library/Fonts`、`~/Library/Fonts`
+///
 /// 目录可能不存在/不可读，由调用方（load_fonts_with_system）静默跳过。
 fn system_font_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -219,7 +229,10 @@ fn system_font_dirs() -> Vec<PathBuf> {
             dirs.push(PathBuf::from(home).join(".fonts"));
         }
         // XDG 优先：$XDG_DATA_HOME/fonts；未设置时退回 $HOME/.local/share/fonts
-        match std::env::var("XDG_DATA_HOME").ok().filter(|s| !s.is_empty()) {
+        match std::env::var("XDG_DATA_HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
             Some(xdg) => dirs.push(PathBuf::from(xdg).join("fonts")),
             None => {
                 if let Some(home) = std::env::var_os("HOME") {
@@ -231,12 +244,14 @@ fn system_font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// 字体缓存的值：目录列表 → 加载好的 FontBook + 用于回退匹配的 Font 列表
+type FontCacheMap = HashMap<Vec<PathBuf>, Arc<(FontBook, Vec<Font>)>>;
+
 /// 进程级字体缓存：按「打包目录 + 额外字体目录」列表做 key。
 /// 字体集合在一个进程内是静态的（打包/系统目录不变），但用户可以在设置里增删额外字体
 /// 目录，所以缓存必须按目录列表区分；Font 为 Arc 引用计数，FontBook 克隆廉价。
 /// 前端每次按键都会触发编译，若每次重读几百个系统字体文件将严重拖慢输入。
-static FONT_CACHE: OnceLock<Mutex<HashMap<Vec<PathBuf>, Arc<(FontBook, Vec<Font>)>>>> =
-    OnceLock::new();
+static FONT_CACHE: OnceLock<Mutex<FontCacheMap>> = OnceLock::new();
 
 /// 获取字体集：命中缓存返回克隆，未命中则从打包目录 + 系统目录 + 额外目录全量加载。
 pub(crate) fn cached_fonts(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBook, Vec<Font>) {
@@ -256,7 +271,10 @@ pub(crate) fn cached_fonts(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBoo
 /// warning 就静默回退到楷体，见模块文档）。
 pub fn list_font_families(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> Vec<String> {
     let (book, _) = cached_fonts(fonts_dir, extra_dirs);
-    let mut names: Vec<String> = book.families().map(|(family, _)| family.to_string()).collect();
+    let mut names: Vec<String> = book
+        .families()
+        .map(|(family, _)| family.to_string())
+        .collect();
     names.sort_unstable();
     names.dedup();
     names

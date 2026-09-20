@@ -181,7 +181,13 @@ describe("格式菜单", () => {
 describe("视图菜单", () => {
   it("勾选态跟随状态（默认态）", () => {
     const groups = buildMenuGroups(
-      makeDeps({ viewMode: "write", showPreview: false, editorWrap: false, uiZoom: 1.5, theme: "dark" }),
+      makeDeps({
+        viewMode: "write",
+        showPreview: false,
+        editorWrap: false,
+        uiZoom: 1.5,
+        theme: "dark",
+      }),
     );
     expect(item(groups, "视图", "源代码模式").checked).toBe(false);
     expect(item(groups, "视图", "显示预览栏").checked).toBe(false);

@@ -43,10 +43,7 @@ export async function readTypFile(path: string): Promise<OpenedFile> {
  * 保存内容到 path；path 为 null 时弹出另存为对话框。
  * 返回最终保存的路径；取消返回 null。
  */
-export async function saveTypFile(
-  path: string | null,
-  content: string,
-): Promise<string | null> {
+export async function saveTypFile(path: string | null, content: string): Promise<string | null> {
   if (!isTauri()) {
     alert("文件功能仅在 Tauri 桌面应用内可用（浏览器中请直接编辑）");
     return null;

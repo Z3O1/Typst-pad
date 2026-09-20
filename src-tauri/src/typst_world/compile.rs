@@ -33,6 +33,10 @@ fn preview_page_setup(width_pt: f64) -> Option<String> {
 
 /// 编译文档为每页 SVG（pages 按页序，含 <svg> 标签）。
 /// 失败时返回诊断列表；成功但带警告时 warnings 附加返回。
+///
+/// **仅单测使用**：生产路径一律带预览页宽，这个包装只是让单测省掉一个 `None` 实参；
+/// 加 `#[cfg(test)]` 是为了不留一个生产侧永远不调用的 `pub fn`。
+#[cfg(test)]
 pub fn compile(
     src: String,
     document_path: Option<String>,
@@ -42,7 +46,7 @@ pub fn compile(
     compile_with_page_width(src, document_path, fonts_dir, font_config, None)
 }
 
-/// 同 [`compile`]，但可以指定**预览页宽**（pt）：`Some(w)` 时在编译源最前面注入一行
+/// 同上，但可以指定**预览页宽**（pt）：`Some(w)` 时在编译源最前面注入一行
 /// [`preview_page_setup`]，让预览按预览栏宽度重新排版（见那里的说明）。
 /// 主源诊断的行号会**减回**注入的那一行，所以前端的位置映射逻辑完全不用改；
 /// include 文件（path 非空）的诊断行号不动。
@@ -84,7 +88,7 @@ pub fn compile_with_page_width(
                 ok: true,
                 pages,
                 diagnostics: Vec::new(),
-                warnings: collect_diagnostics(&world, warnings.into_iter(), main_line_offset),
+                warnings: collect_diagnostics(&world, warnings, main_line_offset),
             }
         }
         typst::diag::Warned {
@@ -93,7 +97,7 @@ pub fn compile_with_page_width(
         } => CompileOutput {
             ok: false,
             pages: Vec::new(),
-            diagnostics: collect_diagnostics(&world, errors.into_iter(), main_line_offset),
+            diagnostics: collect_diagnostics(&world, errors, main_line_offset),
             warnings: Vec::new(),
         },
     }

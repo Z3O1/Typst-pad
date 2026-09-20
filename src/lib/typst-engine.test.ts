@@ -30,9 +30,14 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 describe("diagnosticToLocation（Rust 结构化诊断 → 编辑器位置）", () => {
   it("1-based 行列原样透传；end 缺省回退为起点", () => {
-    expect(
-      diagnosticToLocation({ message: "m", severity: "error", line: 2, column: 9 }),
-    ).toEqual({ message: "m", line: 2, col: 9, endLine: 2, endCol: 9, path: undefined });
+    expect(diagnosticToLocation({ message: "m", severity: "error", line: 2, column: 9 })).toEqual({
+      message: "m",
+      line: 2,
+      col: 9,
+      endLine: 2,
+      endCol: 9,
+      path: undefined,
+    });
   });
 
   it("end 显式传入时透传（独占终点语义）", () => {
@@ -81,9 +86,9 @@ describe("errorLocations（错误级过滤）", () => {
 
 describe("formatDiagnostic", () => {
   it("消息带位置后缀", () => {
-    expect(
-      formatDiagnostic({ message: "unexpected", severity: "error", line: 2, column: 9 }),
-    ).toBe("unexpected (行 2, 列 9)");
+    expect(formatDiagnostic({ message: "unexpected", severity: "error", line: 2, column: 9 })).toBe(
+      "unexpected (行 2, 列 9)",
+    );
   });
 });
 
@@ -223,7 +228,10 @@ describe("compileToPdf（invoke / dialog 已 mock）", () => {
   it("字体配置透传：families/dirs 原样进 invoke（设置改了必须作用于导出）", async () => {
     vi.mocked(save).mockResolvedValue("C:\\out\\a.pdf");
     vi.mocked(invoke).mockResolvedValue({ ok: true });
-    await compileToPdf("x", null, "a.typ", { families: ["Libertinus Serif", "SimSun"], dirs: ["D:\\fonts"] });
+    await compileToPdf("x", null, "a.typ", {
+      families: ["Libertinus Serif", "SimSun"],
+      dirs: ["D:\\fonts"],
+    });
     expect(vi.mocked(invoke)).toHaveBeenCalledWith(
       "export_pdf",
       expect.objectContaining({
@@ -376,9 +384,7 @@ describe("compileBlocks：区分「后端不支持」与「编译失败」", () 
   });
 
   it("命令不存在 → unavailable（旧安装包走这条路）", async () => {
-    vi.mocked(invoke).mockRejectedValue(
-      new Error("Command compile_blocks not found"),
-    );
+    vi.mocked(invoke).mockRejectedValue(new Error("Command compile_blocks not found"));
     const res = await compileBlocks("= t\n", 0, null, 420);
     expect(res.unavailable).toBe(true);
   });

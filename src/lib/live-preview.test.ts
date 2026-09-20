@@ -89,7 +89,9 @@ describe("livePreview 扩展", () => {
   // （用户报过"输入 `= 1 = 2` 后无法再输入任何东西" / "输入 `==` 所有标题都被展开"）
   it("空正文的标题（`== `）不抛异常，且后续输入照常生效", () => {
     mount("= 标题\n正文\n== ");
-    expect(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "x" } })).not.toThrow();
+    expect(() =>
+      view.dispatch({ changes: { from: view.state.doc.length, insert: "x" } }),
+    ).not.toThrow();
     expect(view.state.doc.toString()).toBe("= 标题\n正文\n== x");
     // 空正文那一行不产生样式类，正常标题仍然带样式
     expect(host.querySelectorAll(".cm-markup-heading").length).toBeGreaterThan(0);
@@ -149,7 +151,11 @@ describe("livePreview 扩展", () => {
   });
 
   it("渲染失败（ok:false）不显示 widget，保持源码", () => {
-    cache.set(mathCacheKey("bad", false, "", MATH_TEXT_PT), { ...render("bad"), ok: false, error: "boom" });
+    cache.set(mathCacheKey("bad", false, "", MATH_TEXT_PT), {
+      ...render("bad"),
+      ok: false,
+      error: "boom",
+    });
     mount("$bad$");
     expect(widgetCount()).toBe(0);
     expect(text()).toContain("$bad$");
@@ -382,7 +388,8 @@ describe("livePreview 代码块（``` 围栏）", () => {
 // ---------------------------------------------------------------------------
 describe("livePreview 块级切片", () => {
   /** 假切片：真实契约里 svg 来自 Rust 的 compile_blocks */
-  const blockSvg = (tag: string) => `<svg viewBox="0 0 100 20" width="100pt" height="20pt"><g>${tag}</g></svg>`;
+  const blockSvg = (tag: string) =>
+    `<svg viewBox="0 0 100 20" width="100pt" height="20pt"><g>${tag}</g></svg>`;
   /** 父组件传下来的是**已换算成 CodeMirror 位置**的块（见 block-plan.toBlockTable）；
    *  下面用纯 ASCII 文档，位置与字节偏移一致 */
   const crop = (from: number, to: number, opts: Record<string, unknown> = {}): Block => ({
@@ -406,12 +413,7 @@ describe("livePreview 块级切片", () => {
   let view: EditorView;
 
   /** 用纯 ASCII 文档：字节偏移 == CodeMirror 位置，测试不必掺进换算噪音 */
-  function mount(
-    doc: string,
-    blocks: Block[] | null,
-    sel?: number,
-    onBlocksNeeded?: () => void,
-  ) {
+  function mount(doc: string, blocks: Block[] | null, sel?: number, onBlocksNeeded?: () => void) {
     host = document.createElement("div");
     document.body.appendChild(host);
     const list = blocks;
@@ -469,7 +471,9 @@ describe("livePreview 块级切片", () => {
     if (typeof Range !== "undefined" && !Range.prototype.getClientRects) {
       Range.prototype.getClientRects = function () {
         const rect = document.createElement("div").getBoundingClientRect();
-        return Object.assign([rect], { item: (i: number) => (i === 0 ? rect : null) }) as unknown as DOMRectList;
+        return Object.assign([rect], {
+          item: (i: number) => (i === 0 ? rect : null),
+        }) as unknown as DOMRectList;
       };
     }
   });
@@ -533,7 +537,17 @@ describe("livePreview 块级切片", () => {
     };
     const asked: { page: number; xPt: number; yPt: number; from: number; to: number }[] = [];
     // jsdom 没有布局：把 rect 量成"100px 宽 = 371.25pt"的假矩形，点击落在 75% 处
-    const rect = { left: 0, top: 0, width: 100, height: 50, right: 100, bottom: 50, x: 0, y: 0, toJSON: () => ({}) };
+    const rect = {
+      left: 0,
+      top: 0,
+      width: 100,
+      height: 50,
+      right: 100,
+      bottom: 50,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    };
     const spy = vi
       .spyOn(Element.prototype, "getBoundingClientRect")
       .mockReturnValue(rect as DOMRect);
@@ -580,7 +594,17 @@ describe("livePreview 块级切片", () => {
   it("命中测试失败（返回 null）→ 退回块首，点击不会被吞掉", async () => {
     const doc = "aaa\n\nbbb\n\nccc\n";
     const geo = { page: 1, xPt: 58, yPt: 100, widthPt: 371.25, heightPt: 20 };
-    const rect = { left: 0, top: 0, width: 100, height: 50, right: 100, bottom: 50, x: 0, y: 0, toJSON: () => ({}) };
+    const rect = {
+      left: 0,
+      top: 0,
+      width: 100,
+      height: 50,
+      right: 100,
+      bottom: 50,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    };
     const spy = vi
       .spyOn(Element.prototype, "getBoundingClientRect")
       .mockReturnValue(rect as DOMRect);
@@ -605,7 +629,9 @@ describe("livePreview 块级切片", () => {
       }),
     });
     const fallback = crops()[0] as HTMLElement;
-    fallback.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }));
+    fallback.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }),
+    );
     document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 75, clientY: 25 }));
     await new Promise((r) => setTimeout(r, 0));
     expect(view.state.selection.main.head).toBe(0);
@@ -615,7 +641,17 @@ describe("livePreview 块级切片", () => {
   it("在切片上按下再拖到另一张切片 → 选出一段跨块的**源码**区间（阶段 3 拖选）", async () => {
     const doc = "aaa\n\nbbb\n\nccc\n";
     const geo = { page: 1, xPt: 58, yPt: 100, widthPt: 371.25, heightPt: 20 };
-    const rect = { left: 0, top: 0, width: 100, height: 50, right: 100, bottom: 50, x: 0, y: 0, toJSON: () => ({}) };
+    const rect = {
+      left: 0,
+      top: 0,
+      width: 100,
+      height: 50,
+      right: 100,
+      bottom: 50,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    };
     vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(rect as DOMRect);
     // 假命中测试：第一块给"块首"、第二块给"块尾"，便于断言选区两端
     const asked: number[] = [];
@@ -646,12 +682,16 @@ describe("livePreview 块级切片", () => {
     let under = list[0];
     (document as unknown as Record<string, unknown>).elementFromPoint = () => under;
     // ① 在**第一张切片**上按下（锚点）
-    list[0].dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 10, clientY: 10, buttons: 1 }));
+    list[0].dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, clientX: 10, clientY: 10, buttons: 1 }),
+    );
     await new Promise((r) => setTimeout(r, 0));
     expect(view.state.selection.main.head).toBe(0); // 精确命中的锚点
     // ② 拖到**第二张切片**上（buttons: 1 = 还在按着，CM 的 MouseSelection 靠它判断"在拖"）
     under = list[1];
-    document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 90, clientY: 10, buttons: 1 }));
+    document.dispatchEvent(
+      new MouseEvent("mousemove", { bubbles: true, clientX: 90, clientY: 10, buttons: 1 }),
+    );
     document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 90, clientY: 10 }));
     await new Promise((r) => setTimeout(r, 0));
     const sel = view.state.selection.main;
@@ -706,7 +746,9 @@ describe("livePreview 块级切片", () => {
         ],
       }),
     });
-    const overlays = Array.from(host.querySelectorAll(".cm-block-crop-link")) as HTMLAnchorElement[];
+    const overlays = Array.from(
+      host.querySelectorAll(".cm-block-crop-link"),
+    ) as HTMLAnchorElement[];
     expect(overlays.length).toBe(2);
     expect(overlays.map((a) => a.getAttribute("href"))).toEqual([
       "https://example.com/x",

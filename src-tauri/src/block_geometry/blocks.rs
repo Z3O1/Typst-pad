@@ -38,7 +38,10 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
     let close_para = |para: &mut Option<Range<usize>>, out: &mut Vec<SourceBlock>| {
         if let Some(r) = para.take() {
             if r.end > r.start {
-                out.push(SourceBlock { kind: "Paragraph", range: r });
+                out.push(SourceBlock {
+                    kind: "Paragraph",
+                    range: r,
+                });
             }
         }
     };
@@ -81,7 +84,10 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
 
         if own_block {
             close_para(&mut para, &mut out);
-            out.push(SourceBlock { kind: kind_name(kind), range });
+            out.push(SourceBlock {
+                kind: kind_name(kind),
+                range,
+            });
             continue;
         }
 
@@ -102,10 +108,19 @@ fn is_display_equation(src: &str, range: &Range<usize>) -> bool {
     if chars.next() != Some('$') {
         return false;
     }
-    let inner: String = text.chars().rev().skip(1).collect::<String>().chars().rev().collect();
+    let inner: String = text
+        .chars()
+        .rev()
+        .skip(1)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     let inner = inner.trim_start_matches('$');
     match (inner.chars().next(), inner.chars().last()) {
-        (Some(first), Some(last)) => first.is_whitespace() && last.is_whitespace() && inner.trim().len() > 0,
+        (Some(first), Some(last)) => {
+            first.is_whitespace() && last.is_whitespace() && !inner.trim().is_empty()
+        }
         _ => false,
     }
 }

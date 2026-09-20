@@ -16,12 +16,6 @@ import { byteOffsetsToPositions } from "./block-offsets";
 import { MATH_TEXT_PT } from "./typst-engine";
 import type { Diagnostic } from "./typst-engine";
 
-/** 是否以"浏览器开发模式"启动（?browserdev=1） */
-export function isBrowserDev(): boolean {
-  if (typeof window === "undefined") return false;
-  return new URLSearchParams(window.location.search).has("browserdev");
-}
-
 /**
  * 假块级渲染（compile_blocks）的开关：`?browserdev=1&blocks=1` —— **只给验收脚本用**。
  *
@@ -107,7 +101,8 @@ function zoomSimMode(): {
   // 这是用户那台机器的形状：截图里「布局宽度没变（1379px）」与「dpr 1.50」两条都没动，
   // 而界面其实是变了的（他说「会回退」＝先变过又被打回来）。页面侧靠"判据能力探针"识别这种机器。
   const blind = params.has("zoomblind");
-  if (params.has("zoomcap")) return { sim: true, cap: 1, delay, widthStuck: widthStuck || blind, blind };
+  if (params.has("zoomcap"))
+    return { sim: true, cap: 1, delay, widthStuck: widthStuck || blind, blind };
   const max = Number(params.get("zoommax"));
   return {
     sim: true,
@@ -204,7 +199,7 @@ const FAKE_UPDATE = {
     "",
     "- **中文不再被渲染成楷体**：typst 默认正文字体不含汉字，中文全走自动回退。",
     "  - 现在由 Rust 侧注入默认字体族，`font-warnings.ts` 负责提示族名写错的情况。",
-    "- <img src=x onerror=\"alert(1)\"> 这段必须原样显示成文本，不能被当标签解析。",
+    '- <img src=x onerror="alert(1)"> 这段必须原样显示成文本，不能被当标签解析。',
     "",
     "### Added",
     "",
@@ -285,19 +280,19 @@ function renderPage(
   const margin = MARGIN * ratio;
   const parts: string[] = [];
   parts.push(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
   );
   parts.push(`<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`);
   lines.forEach((line, i) => {
     if (line.trim() === "") return;
     const y = margin + (i + 1) * LINE_HEIGHT;
     parts.push(
-      `<text x="${margin}" y="${y}" font-family="Noto Serif CJK SC, Songti SC, serif" font-size="${FONT_SIZE}" fill="#111111">${escapeXml(line)}</text>`
+      `<text x="${margin}" y="${y}" font-family="Noto Serif CJK SC, Songti SC, serif" font-size="${FONT_SIZE}" fill="#111111">${escapeXml(line)}</text>`,
     );
   });
   // 页脚页号：便于确认多页拼接与 page-separator 分隔生效
   parts.push(
-    `<text x="${width / 2}" y="${height - margin / 2}" text-anchor="middle" font-family="Noto Serif CJK SC, serif" font-size="10" fill="#666666">${pageIndex + 1} / ${pageCount}</text>`
+    `<text x="${width / 2}" y="${height - margin / 2}" text-anchor="middle" font-family="Noto Serif CJK SC, serif" font-size="10" fill="#666666">${pageIndex + 1} / ${pageCount}</text>`,
   );
   parts.push("</svg>");
   return parts.join("");
@@ -569,8 +564,7 @@ function fixtureHit(args: Record<string, unknown>): number | null {
   const fixtures = injectedBlockFixtures();
   if (!fixtures || !lastFake) return null;
   const fx = fixtures.find((f) => f.doc === lastFake!.doc) as
-    | (BlockFixture & { hitProbes?: { b: number; x: number; y: number; o: number }[] })
-    | undefined;
+    (BlockFixture & { hitProbes?: { b: number; x: number; y: number; o: number }[] }) | undefined;
   const probes = fx?.hitProbes;
   if (!probes || probes.length === 0) return null;
   const index = (fx!.blocks as FakeBlockRecord[]).findIndex(
@@ -595,9 +589,7 @@ function fixtureHit(args: Record<string, unknown>): number | null {
 /** 假切片上的粗略定位：等宽字符 + 均分行高（只保证"方向对、钳在块内"） */
 function syntheticHit(args: Record<string, unknown>): number | null {
   if (!lastFake) return null;
-  const block = lastFake.blocks.find(
-    (b) => b.start === args.start && b.end === args.end,
-  );
+  const block = lastFake.blocks.find((b) => b.start === args.start && b.end === args.end);
   if (!block) return null;
   const bytes = new TextEncoder().encode(lastFake.doc);
   const src = new TextDecoder().decode(bytes.slice(block.start, block.end));
@@ -608,7 +600,10 @@ function syntheticHit(args: Record<string, unknown>): number | null {
   const line = Array.from(lines[row] ?? "");
   const maxChars = Math.max(1, ...lines.map((l) => Array.from(l).length));
   const charW = block.widthPt / maxChars;
-  const col = Math.min(line.length, Math.max(0, Math.round((Number(args.xPt) - block.xPt) / charW)));
+  const col = Math.min(
+    line.length,
+    Math.max(0, Math.round((Number(args.xPt) - block.xPt) / charW)),
+  );
   const before = new TextEncoder();
   const inLine = before.encode(line.slice(0, col).join("")).length;
   const rowStart = before.encode(lines.slice(0, row).join("\n")).length + (row > 0 ? 1 : 0);
@@ -659,7 +654,7 @@ const SLOW_COMPILE_MS = 350;
 
 async function handleCommand(
   command: string,
-  args: Record<string, unknown> | undefined
+  args: Record<string, unknown> | undefined,
 ): Promise<unknown> {
   const a = args ?? {};
   if (blockslowEnabled() && (command === "compile_blocks" || command === "compile_doc")) {
@@ -694,8 +689,11 @@ async function handleCommand(
       // 预览重排：请求了页宽就让假页按它重排（页更窄 → 页数更多）。
       // `&reflowfail=1` 模拟"文档自己写了 #set page(...)"那台机器：注入被覆盖、产物页宽
       // 仍是 A4 —— 前端据此退回旧的等比缩放路径（见 preview-scale.isReflowApplied）。
-      const requested = typeof a.previewWidthPt === "number" && a.previewWidthPt > 0 ? a.previewWidthPt : undefined;
-      const honored = new URLSearchParams(window.location.search).has("reflowfail") ? undefined : requested;
+      const requested =
+        typeof a.previewWidthPt === "number" && a.previewWidthPt > 0 ? a.previewWidthPt : undefined;
+      const honored = new URLSearchParams(window.location.search).has("reflowfail")
+        ? undefined
+        : requested;
       // 假编译错误：文档里出现标记 `DIAG-ERROR-MARKER` 时返回一条**主源错误诊断**，
       // 专门给验收锁住"编译错误必须在编辑器里画红波浪线"这条链路。
       // **故意发 `path: null`**：那是 Rust 0.4.0~0.8.2 的真实写法，前端的判据必须容忍它
@@ -898,7 +896,9 @@ async function handleCommand(
     case "plugin:opener|open_url": {
       const url = typeof a.url === "string" ? a.url : null;
       const w = window as unknown as Record<string, unknown>;
-      const urls = Array.isArray(w.__browserDevOpenUrls) ? (w.__browserDevOpenUrls as unknown[]) : [];
+      const urls = Array.isArray(w.__browserDevOpenUrls)
+        ? (w.__browserDevOpenUrls as unknown[])
+        : [];
       urls.push(url);
       w.__browserDevOpenUrls = urls;
       notify(command);
@@ -907,7 +907,8 @@ async function handleCommand(
     case "plugin:updater|check": {
       notify(command);
       const w = window as unknown as Record<string, unknown>;
-      w.__browserDevUpdaterChecks = (typeof w.__browserDevUpdaterChecks === "number" ? w.__browserDevUpdaterChecks : 0) + 1;
+      w.__browserDevUpdaterChecks =
+        (typeof w.__browserDevUpdaterChecks === "number" ? w.__browserDevUpdaterChecks : 0) + 1;
       return isFakeUpdateEnabled() ? FAKE_UPDATE : null;
     }
     // 界面缩放（Ctrl+滚轮）：浏览器开发模式没有 Tauri 的 webview 缩放，但**记录请求的系数**，
@@ -922,7 +923,8 @@ async function handleCommand(
       }
       // 调用次数：界面缩放会"设一次 + 手势停下后再确认一次"（见 +page.svelte 的
       // applyUiZoom/scheduleZoomConfirm），验收据此锁定那个兜底重试确实发出去了。
-      w.__browserDevZoomCalls = (typeof w.__browserDevZoomCalls === "number" ? w.__browserDevZoomCalls : 0) + 1;
+      w.__browserDevZoomCalls =
+        (typeof w.__browserDevZoomCalls === "number" ? w.__browserDevZoomCalls : 0) + 1;
       notify(command);
       return null;
     }
@@ -960,10 +962,9 @@ async function handleCommand(
       // 永远拿到 null、点了没反应（第 25 组因此卡在找不到 .settings-dir-path）。
       // 两种形状都接受，避免插件升级/调用方写法变化时又静默失效。
       if (command === "plugin:dialog|open") {
-        const options = (typeof a.options === "object" && a.options !== null ? a.options : a) as Record<
-          string,
-          unknown
-        >;
+        const options = (
+          typeof a.options === "object" && a.options !== null ? a.options : a
+        ) as Record<string, unknown>;
         if (options.directory === true) {
           return typeof options.defaultPath === "string" ? options.defaultPath : "D:\\fake-fonts";
         }
@@ -1074,7 +1075,7 @@ export function installBrowserDevStub(): void {
 
   // 开发信息：确认桩已生效
   console.info(
-    "[browser-dev] 浏览器开发模式已启用：__TAURI_INTERNALS__ 为假实现，预览来自假 SVG。"
+    "[browser-dev] 浏览器开发模式已启用：__TAURI_INTERNALS__ 为假实现，预览来自假 SVG。",
   );
   warnFakeRendering();
   console.info(`[browser-dev] @tauri-apps/api 的 invoke 类型：${typeof tauriInvoke}`);

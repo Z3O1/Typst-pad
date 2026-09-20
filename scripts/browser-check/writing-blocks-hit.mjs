@@ -22,67 +22,40 @@
 // 前置：`npm run dev -- --port 1425` + 一个 headless Chromium（CDP，见 cdp.mjs 注释）。
 // 运行：`npm run fixtures:blocks && CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-hit.mjs`
 // 环境变量 HIT_FULL=1 → 跑全部 15 个探针（默认每块 4 个，够覆盖左中右 × 三行，跑得快）
-import { readFileSync } from "node:fs";
-import { connect, DEV_URL } from "./cdp.mjs";
+import { connect } from "./cdp.mjs";
+import {
+  BLOCKS_URL as URL_BLOCKS,
+  boot,
+  byteToPos,
+  createChecker,
+  finish,
+  loadFixtures,
+  replaceDocument,
+  shotPath as SHOT,
+} from "./harness.mjs";
 
-const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
-const FIXTURES = new URL("../../.browser-check/block-fixtures.json", import.meta.url).pathname;
-const URL_BLOCKS = `${DEV_URL}&blocks=1`;
 const FULL = process.env.HIT_FULL === "1";
 /** 默认取这 4 个探针下标（0=左上 6=中上 11=中下 14=右下），完整网格见 HIT_FULL */
 const PROBE_PICK = FULL ? null : [0, 6, 11, 14];
 
-let passed = 0;
-function check(name, ok, detail = "") {
-  if (ok) {
-    passed++;
-    console.log(`  ✓ ${name}`);
-  } else {
-    console.log(`  ✗ ${name} ${detail}`);
-    process.exitCode = 1;
-  }
-}
+const { check, state } = createChecker();
 
-const fixtures = JSON.parse(readFileSync(FIXTURES, "utf8"));
-const withProbes = fixtures.filter((f) => Array.isArray(f.hitProbes) && f.hitProbes.length > 0);
 // 空夹具 / 没探针 = 0 次点击 + 退出码 0 的假绿 ⇒ 必须硬失败
-if (fixtures.length === 0 || withProbes.length === 0) {
-  console.error(
-    `夹具是空的或没有点击探针：${FIXTURES}（${fixtures.length} 篇 / ${withProbes.length} 篇带探针）；先跑 npm run fixtures:blocks`,
-  );
-  process.exit(1);
-}
+const fixtures = loadFixtures("block-fixtures.json", {
+  predicate: (f) =>
+    f.length > 0 && f.some((x) => Array.isArray(x.hitProbes) && x.hitProbes.length > 0),
+  what: "点击探针夹具",
+  hint: "先跑 npm run fixtures:blocks",
+});
+const withProbes = fixtures.filter((f) => Array.isArray(f.hitProbes) && f.hitProbes.length > 0);
 console.log(
   `夹具：${withProbes.length} 篇带点击探针的真实产物（共 ${withProbes.reduce((n, f) => n + f.hitProbes.length, 0)} 个探针点）`,
 );
 
 const c = await connect();
-await c.send("Page.enable");
-await c.send("Runtime.enable");
-// 必须在导航前注入：桩在 compile_blocks / block_hit_test 里优先取这里的产品
-await c.send("Page.addScriptToEvaluateOnNewDocument", {
-  source: `window.__DEV_BLOCK_FIXTURES = ${JSON.stringify(fixtures)};`,
-});
-
-/**
- * 页面里的取数小工具（注入一次，后面都用它）：
- * - `view()`：CodeMirror 的 EditorView —— 通过内容元素上的 `cmTile.root.view` 拿
- *   （CM6 把 DOM 瓦片挂在元素上；这是验收专用的取数，页面代码本身不依赖它）；
- * - 顺带记住文档原文，用来算"字节偏移 ↔ UTF-16 位置"。
- */
-const INSTALL = `(() => {
-  const el = document.querySelector(".cm-content");
-  const view = el && el.cmTile && el.cmTile.root && el.cmTile.root.view;
-  if (!view) return false;
-  const scroller = document.querySelector(".cm-scroller");
-  const rectOf = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; };
-  return true;
-})()`;
-
-await c.goto(URL_BLOCKS);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 600));
-await c.evaluate(INSTALL);
+// 这里**不需要** `Runtime.enable`：本套件不读 `c.events`（只有 writing-blocks.mjs 与 probe.mjs 读）。
+// 拆分前那份代码顺手开了它，但没有任何断言用到；清掉免得后来人以为这里在查控制台。
+await boot(c, URL_BLOCKS, { blockFixtures: fixtures, settleMs: 600 });
 
 /** 点击点 → 页面坐标 → 视口坐标（照探针点的定义反算） */
 async function probePoint(blockFrom, block, probe) {
@@ -124,25 +97,24 @@ async function caret() {
   })()`);
 }
 
-const byteToPos = (doc, bytes) => new TextDecoder().decode(new TextEncoder().encode(doc).slice(0, bytes)).length;
-
 let totalClicks = 0;
 let totalMatched = 0;
 let totalSkipped = 0;
 
 for (const fx of withProbes) {
-  const picked = PROBE_PICK ? fx.hitProbes.filter((_, i) => PROBE_PICK.includes(i % 15)) : fx.hitProbes;
+  const picked = PROBE_PICK
+    ? fx.hitProbes.filter((_, i) => PROBE_PICK.includes(i % 15))
+    : fx.hitProbes;
   console.log(`\n=== ${fx.name}（${fx.blocks.length} 块 / ${picked.length} 个探针点）`);
   // 逐篇输入同一份文档（桩按文档原文命中夹具）
-  await c.click(400, 300);
-  await c.selectAll();
-  await c.type(fx.doc);
-  await new Promise((r) => setTimeout(r, 700));
+  await replaceDocument(c, fx.doc);
   // 光标挪到文档开头：第一块成为"活动块"（源码形态），其余块都是切片
   await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
   // 等切片真的出来：既有编译**去抖 150ms**，而首篇还会赶上"启动时恢复的长文档"那一轮编译，
   // 不显式等就会偶发"所有探针都找不到切片"（实测踩过三次，都发生在首篇）
-  await c.waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 }).catch(() => {});
+  await c
+    .waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 })
+    .catch(() => {});
   await new Promise((r) => setTimeout(r, 350));
 
   // 按块分组（每块若干探针），轮转下单：点完一块它就变源码，所以下一次点**另一块**
@@ -243,8 +215,7 @@ for (const fx of withProbes) {
   await c.screenshot(SHOT(`writing-blocks-hit-${fx.name}`));
 }
 
-console.log(
-  `\n点击合计：命中 ${totalMatched}/${totalClicks}，跳过 ${totalSkipped}（探针点不在视口内）；通过 ${passed} 项检查`,
+finish(
+  `点击合计：命中 ${totalMatched}/${totalClicks}，跳过 ${totalSkipped}（探针点不在视口内）；通过 ${state.passed} 项检查\n` +
+    "截图：.browser-check/writing-blocks-hit-*.png",
 );
-console.log("截图：.browser-check/writing-blocks-hit-*.png");
-process.exit(process.exitCode ?? 0);

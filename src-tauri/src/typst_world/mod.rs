@@ -42,14 +42,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::Serialize;
 use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
+use typst::layout::{Abs, Frame, FrameItem, Point};
 use typst::syntax::{FileId, LinkedNode, RootedPath, Source, SyntaxKind, VirtualPath, VirtualRoot};
 use typst::text::{
-    BottomEdge, BottomEdgeMetric, Font, FontBook, FontFamily, FontList, TextEdgeBounds,
-    TextElem, TopEdge, TopEdgeMetric,
+    BottomEdge, BottomEdgeMetric, Font, FontBook, FontFamily, FontList, TextEdgeBounds, TextElem,
+    TopEdge, TopEdgeMetric,
 };
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
-use typst::layout::{Abs, Frame, FrameItem, Point};
 use typst_layout::{Page, PagedDocument};
 use typst_pdf::PdfOptions;
 use typst_svg::SvgOptions;

@@ -86,11 +86,15 @@ describe("decideAppKey：Ctrl+Shift+= / - 调整界面缩放（用户要求）",
   });
 
   it("按物理键也能命中（键盘布局把字符改掉时靠 code 兜住）", () => {
-    expect(decideAppKey(key("?", { ctrlKey: true, shiftKey: true, code: "Equal" }), state())).toEqual({
+    expect(
+      decideAppKey(key("?", { ctrlKey: true, shiftKey: true, code: "Equal" }), state()),
+    ).toEqual({
       type: "zoom",
       steps: 1,
     });
-    expect(decideAppKey(key("_", { ctrlKey: true, shiftKey: true, code: "NumpadSubtract" }), state())).toEqual({
+    expect(
+      decideAppKey(key("_", { ctrlKey: true, shiftKey: true, code: "NumpadSubtract" }), state()),
+    ).toEqual({
       type: "zoom",
       steps: -1,
     });
@@ -109,7 +113,9 @@ describe("decideAppKey：Ctrl+Shift+= / - 调整界面缩放（用户要求）",
   });
 
   it("带 Alt 的组合不认（部分输入法/布局另有含义）", () => {
-    expect(decideAppKey(key("=", { ctrlKey: true, shiftKey: true, altKey: true }), state())).toBeNull();
+    expect(
+      decideAppKey(key("=", { ctrlKey: true, shiftKey: true, altKey: true }), state()),
+    ).toBeNull();
   });
 
   it("缩放这一对不影响既有的 Shift 手势：Ctrl+Shift+N 仍是新建窗口、Ctrl+Shift+M 仍是公式块", () => {
@@ -137,7 +143,10 @@ describe("decideAppKey：Esc 关弹窗", () => {
 
   it("Esc 优先于其它判定：同时按着 Ctrl 也只会关弹窗，不会去改格式", () => {
     expect(
-      decideAppKey(key("Escape", { ctrlKey: true, shiftKey: true }), state({ openModal: "settings" })),
+      decideAppKey(
+        key("Escape", { ctrlKey: true, shiftKey: true }),
+        state({ openModal: "settings" }),
+      ),
     ).toEqual({ type: "dismiss-modal", modal: "settings" });
   });
 
@@ -247,7 +256,9 @@ describe("runAppKeyAction：动作 → 回调", () => {
       expect(runAppKeyAction(action, h, preventDefault)).toBe(true);
       expect(preventDefault).toHaveBeenCalledTimes(1);
       for (const [name, fn] of Object.entries(h)) {
-        expect(fn, `${action.type} 不该调 ${name}`).toHaveBeenCalledTimes(name === handlerName ? 1 : 0);
+        expect(fn, `${action.type} 不该调 ${name}`).toHaveBeenCalledTimes(
+          name === handlerName ? 1 : 0,
+        );
       }
       expect(h[handlerName]).toHaveBeenCalledWith(...args);
       expect(preventDefault.mock.invocationCallOrder[0]).toBeLessThan(
@@ -294,11 +305,7 @@ describe("runAppKeyAction：动作 → 回调", () => {
 
   it("端到端：Esc 把最上层弹窗交给 dismissModal", () => {
     const h = makeHandlers();
-    runAppKeyAction(
-      decideAppKey(key("Escape"), state({ openModal: "update" })),
-      h,
-      vi.fn(),
-    );
+    runAppKeyAction(decideAppKey(key("Escape"), state({ openModal: "update" })), h, vi.fn());
     expect(h.dismissModal).toHaveBeenCalledWith("update");
   });
 });

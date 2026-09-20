@@ -11,6 +11,9 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "test": "vitest run",
     "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify:browser": "node scripts/browser-check/run-all.mjs",
     "tauri": "tauri",
     "fixtures:blocks": "mkdir -p .browser-check && cargo test --manifest-path src-tauri/Cargo.toml dump_block_fixtures -- --ignored --nocapture 2>/dev/null | grep '^BLOCKFIXTURE:' | sed 's/^BLOCKFIXTURE://' | node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=s.split('\\n').filter(Boolean).map(JSON.parse);if(!a.length){console.error('夹具为空：cargo test 没有输出 BLOCKFIXTURE 行（用例名被改 / 编译失败 / 被 #[cfg] 掉？）；不要用这个空文件跑验收');process.exit(1)}require('fs').writeFileSync('.browser-check/block-fixtures.json',JSON.stringify(a,null,1))})\"",
     "fixtures:math": "mkdir -p .browser-check && cargo test --manifest-path src-tauri/Cargo.toml dump_math_fixtures -- --ignored --nocapture 2>/dev/null | grep '^FIXTURE:' | sed 's/^FIXTURE://' | node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=s.split('\\n').filter(Boolean).map(JSON.parse);if(!a.length){console.error('夹具为空：cargo test 没有输出 FIXTURE 行（用例名被改 / 编译失败 / 被 #[cfg] 掉？）；不要用这个空文件跑验收');process.exit(1)}require('fs').writeFileSync('.browser-check/math-fixtures.json',JSON.stringify(a,null,1))})\""
@@ -32,6 +35,8 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tauri-apps/cli": "^2",
     "jsdom": "^30.0.1",
+    "prettier": "^3.9.8",
+    "prettier-plugin-svelte": "^4.1.1",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
     "typescript": "~5.6.2",

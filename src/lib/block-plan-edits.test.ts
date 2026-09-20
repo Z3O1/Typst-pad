@@ -81,7 +81,10 @@ function blocksOf(doc: string, pieces: string[]): Block[] {
 /** 一次编辑动作：给定文档与光标位置，算出新文档与新的光标位置（null = 这个位置不适用） */
 interface EditOp {
   name: string;
-  run: (doc: string, at: number) => { next: string; caret: number; changed: [number, number] } | null;
+  run: (
+    doc: string,
+    at: number,
+  ) => { next: string; caret: number; changed: [number, number] } | null;
 }
 
 const lineStartOf = (doc: string, at: number) => doc.lastIndexOf("\n", Math.max(0, at - 1)) + 1;
@@ -101,20 +104,45 @@ const OPS: EditOp[] = [
   { name: "退格删一个字符", run: (d, at) => del(d, at - 1, at) },
   { name: "Delete 删一个字符", run: (d, at) => del(d, at, at + 1) },
   { name: "退格删到与上一行合并", run: (d, at) => del(d, at - 1, at) },
-  { name: "删掉一整行", run: (d, at) => del(d, lineStartOf(d, at), lineStartOf(d, at) + (d.slice(lineStartOf(d, at)).split("\n")[0]?.length ?? 0) + 1) },
-  { name: "选中一段替换", run: (d, at) => {
+  {
+    name: "删掉一整行",
+    run: (d, at) =>
+      del(
+        d,
+        lineStartOf(d, at),
+        lineStartOf(d, at) + (d.slice(lineStartOf(d, at)).split("\n")[0]?.length ?? 0) + 1,
+      ),
+  },
+  {
+    name: "选中一段替换",
+    run: (d, at) => {
       const from = Math.max(0, at - 3);
       const cut = del(d, from, at);
       if (!cut) return null;
-      return { next: cut.next.slice(0, from) + "替换" + cut.next.slice(from), caret: from + 2, changed: [from, from + 2] };
-    } },
+      return {
+        next: cut.next.slice(0, from) + "替换" + cut.next.slice(from),
+        caret: from + 2,
+        changed: [from, from + 2],
+      };
+    },
+  },
   { name: "全选替换成短文档", run: (d) => ({ next: "短。\n", caret: 2, changed: [0, d.length] }) },
-  { name: "全选替换成长文档", run: (d) => ({
+  {
+    name: "全选替换成长文档",
+    run: (d) => ({
       next: Array.from({ length: 12 }, (_, i) => `第 ${i} 段正文。`).join("\n\n") + "\n",
       caret: 0,
       changed: [0, d.length],
-    }) },
-  { name: "撤销（回退到上一版文档）", run: (d, at) => ({ next: d.slice(0, Math.max(0, d.length - 3)), caret: Math.max(0, d.length - 3), changed: [Math.max(0, d.length - 3), d.length] }) },
+    }),
+  },
+  {
+    name: "撤销（回退到上一版文档）",
+    run: (d, at) => ({
+      next: d.slice(0, Math.max(0, d.length - 3)),
+      caret: Math.max(0, d.length - 3),
+      changed: [Math.max(0, d.length - 3), d.length],
+    }),
+  },
 ];
 
 function ins(doc: string, at: number, text: string) {
@@ -127,7 +155,11 @@ function ins(doc: string, at: number, text: string) {
 
 function del(doc: string, from: number, to: number) {
   if (from < 0 || to > doc.length || from >= to) return null;
-  return { next: doc.slice(0, from) + doc.slice(to), caret: from, changed: [from, from] as [number, number] };
+  return {
+    next: doc.slice(0, from) + doc.slice(to),
+    caret: from,
+    changed: [from, from] as [number, number],
+  };
 }
 
 /**
@@ -142,20 +174,29 @@ function checkAfterEdit(
   what: string,
 ): void {
   // ① 旧表 + 新文档：**不能抛**（越界坐标必须被滤掉）
-  expect(() => planBlockCovers(blocks, Text.of(next.split("\n"))), `${what}：旧表不许抛异常`).not.toThrow();
+  expect(
+    () => planBlockCovers(blocks, Text.of(next.split("\n"))),
+    `${what}：旧表不许抛异常`,
+  ).not.toThrow();
 
   // ② 增量平移后重建格子；**按页面侧同样的过滤**（越界 / 退化的格子会被丢掉，见 buildBlockCovers）
   const remap = remapBlocksThroughEdit(blocks, doc, next);
   const all = planBlockCovers(remap.blocks, Text.of(next.split("\n")));
   const covers = all.filter(
     (c) =>
-      c.coverFrom >= 0 && c.coverTo <= next.length && c.coverTo > c.coverFrom && c.block.from < next.length,
+      c.coverFrom >= 0 &&
+      c.coverTo <= next.length &&
+      c.coverTo > c.coverFrom &&
+      c.block.from < next.length,
   );
   expect(covers.length, `${what}：至少还得有一格`).toBeGreaterThan(0);
   applyBlockSelection(covers, [{ from: caret, to: caret }], next.length);
 
   const span = changedSpan(doc, next);
-  const newSpan = { from: span.from, to: Math.max(span.from, next.length - (doc.length - span.to)) };
+  const newSpan = {
+    from: span.from,
+    to: Math.max(span.from, next.length - (doc.length - span.to)),
+  };
 
   // ③ 改动必须落在**已展开**的格子里
   for (const c of covers as BlockCover[]) {
@@ -190,11 +231,15 @@ function checkAfterEdit(
       );
     }
     if (i > 0 && (covers[i - 1] as BlockCover).coverTo !== c.coverFrom) {
-      throw new Error(`${what}：格子之间不连续 ${(covers[i - 1] as BlockCover).coverTo} ≠ ${c.coverFrom}`);
+      throw new Error(
+        `${what}：格子之间不连续 ${(covers[i - 1] as BlockCover).coverTo} ≠ ${c.coverFrom}`,
+      );
     }
   }
   expect((covers[0] as BlockCover).coverFrom, `${what}：首格应从 0 开始`).toBe(0);
-  expect((covers[covers.length - 1] as BlockCover).coverTo, `${what}：末格应到文末`).toBe(next.length);
+  expect((covers[covers.length - 1] as BlockCover).coverTo, `${what}：末格应到文末`).toBe(
+    next.length,
+  );
 }
 
 describe("各种输入下的块级渲染不变量（每个位置逐个来）", () => {

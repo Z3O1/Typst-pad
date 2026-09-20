@@ -11,7 +11,6 @@
     defaultFontFamilies,
   } from "$lib/typst-engine";
   import type {
-    BlockCrop,
     BlocksFail,
     BlocksOk,
     CompileErrorLocation,
@@ -65,7 +64,6 @@
     resolveContextZone,
     previewSelectionHasContent,
     buildContextMenuItems,
-    type ContextZone,
     type ContextMenuItemSpec,
   } from "$lib/context-menu-utils";
   import { clearState } from "$lib/persistence";
@@ -204,7 +202,10 @@
    * 页面拿不到 bind:this ⇒ 组件用 export function 交出来（见那边文件头）。
    * 挂载前为 null；页面对这两个元素只做四件事：写 innerHTML、设内联宽度、找 <svg>、量 clientWidth。
    */
-  let previewPaneRef = $state<{ paper(): HTMLElement | undefined; body(): HTMLElement | undefined } | null>(null);
+  let previewPaneRef = $state<{
+    paper(): HTMLElement | undefined;
+    body(): HTMLElement | undefined;
+  } | null>(null);
   let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
   let previewScaleFrame = 0; // 已排队的重算帧号（见 onMount 里的 ResizeObserver）
   /**
@@ -993,9 +994,7 @@
    */
   async function handleNew() {
     if (isEffectiveDirty(dirty, doc)) {
-      const ok = await confirmDiscard(
-        "当前文档有未保存的修改，新建将丢弃这些修改。仍要新建吗？",
-      );
+      const ok = await confirmDiscard("当前文档有未保存的修改，新建将丢弃这些修改。仍要新建吗？");
       if (!ok) return;
     }
     doc = "";
@@ -1067,11 +1066,6 @@
     resolveTheme();
     schedulePersist();
   });
-
-  function toggleTheme() {
-    theme =
-      theme === "system" ? "dark" : theme === "dark" ? "light" : "system";
-  }
 
   async function handleExportPdf() {
     statusText = "导出 PDF…";
@@ -1415,7 +1409,8 @@
       const body = previewPaneRef?.body();
       const width = body ? previewPageWidthPt(body.clientWidth) : NaN;
       const next = Number.isNaN(width) ? 0 : width;
-      const changed = next === 0 ? previewPageWidthUsed > 0 : Math.abs(next - previewPageWidthRequest) > 2;
+      const changed =
+        next === 0 ? previewPageWidthUsed > 0 : Math.abs(next - previewPageWidthRequest) > 2;
       if (!changed) return;
       previewPageWidthRequest = next;
       dbg.log("preview-reflow", `页宽 ${next === 0 ? "关闭（不重排）" : `${next.toFixed(1)}pt`}`);
@@ -1534,7 +1529,10 @@
       // 状态栏提示错误个数，编辑器内以红色波浪线标出错误位置（hover 可看详情）
       applyCompileStatus(result, doc.length);
       // 调试日志：编译失败摘要（错误数/耗时），错误详情见 compile-diagnostics
-      dbg.log("compile", `fail errors:${result.errors.length} t:${(performance.now() - t0).toFixed(1)}ms`);
+      dbg.log(
+        "compile",
+        `fail errors:${result.errors.length} t:${(performance.now() - t0).toFixed(1)}ms`,
+      );
     }
   }
 
@@ -1622,7 +1620,9 @@
   /** 窗口标题同步为“文件名 - Typst-pad”；未保存修改时文件名后加圆点（Tauri） */
   function syncWindowTitle() {
     if (!isTauri()) return;
-    getCurrentWindow().setTitle(`${fileTitle}${isEffectiveDirty(dirty, doc) ? " ●" : ""} - Typst-pad`);
+    getCurrentWindow().setTitle(
+      `${fileTitle}${isEffectiveDirty(dirty, doc) ? " ●" : ""} - Typst-pad`,
+    );
   }
 
   // fileTitle / dirty 变化时（打开/保存/新建/编辑）同步窗口标题
@@ -1849,9 +1849,11 @@
     restoreSession = saved.restoreSession ?? true;
     autoCheckUpdates = saved.autoCheckUpdates ?? true;
     // 上次检查时间只用于显示/诊断，读回来原样存回去即可（启动检查不再看它）
-    lastUpdateCheckAt = typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
+    lastUpdateCheckAt =
+      typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
     // "点过稍后 = 别再自动弹窗"（旧存档没有这个字段 → null = 照常弹窗）
-    updateDismissedAt = typeof saved.updateDismissedAt === "number" ? saved.updateDismissedAt : null;
+    updateDismissedAt =
+      typeof saved.updateDismissedAt === "number" ? saved.updateDismissedAt : null;
     // 界面缩放：旧存档没有该字段 → 100%；越界/脏数据由 clampZoom 收敛（随后由 $effect 应用）
     uiZoom = clampZoom(saved.uiZoom);
     // **副窗口（Ctrl+Shift+N 新建的窗口）一律不恢复**：它是空白草稿窗口，恢复出主窗口的文档
@@ -1876,7 +1878,9 @@
 
     // 关于弹窗版本号：从 Tauri 运行时读取（getVersion 返回 tauri.conf.json 的
     // version，如 0.4.0）；失败静默忽略，弹窗显示占位符
-    getVersion().then((v) => (appVersion = v)).catch(() => {});
+    getVersion()
+      .then((v) => (appVersion = v))
+      .catch(() => {});
     // 内置默认字体族（拼"选中项 + 其余兜底"用）：静态列表，取一次即可
     void defaultFontFamilies().then((v) => {
       if (v.length > 0) defaultFonts = v;
@@ -1971,7 +1975,9 @@
     if (isTauri()) {
       // CLI --debug 开关（异步，仅桌面构建生效）：invoke 返回后补开调试日志；
       // 浏览器 dev 环境无此来源（且 dev 构建本身已默认开启），跳过
-      invoke<boolean>("get_debug_flag").then(setCliDebug).catch(() => {});
+      invoke<boolean>("get_debug_flag")
+        .then(setCliDebug)
+        .catch(() => {});
       // 关闭确认：有实际未保存修改（dirty 且内容非空）时显示前端自定义三按钮弹窗
       // （不依赖 dialog 插件返回值的语义差异，保证 保存/不保存/取消 可靠）
       // 内容为空（含仅空白字符）视为无可丢失内容：输入过又删光后 dirty 仍为 true，
@@ -2055,129 +2061,129 @@
 </script>
 
 {#if isDesktopApp}
-<div class="app" class:light={resolvedTheme === "light"}>
-  <header class="toolbar">
-    <MenuBar
-      bind:this={menuBarRef}
-      groups={menuGroups()}
-      onMenuFocusChange={handleMenuFocusChange}
-    />
-  </header>
+  <div class="app" class:light={resolvedTheme === "light"}>
+    <header class="toolbar">
+      <MenuBar
+        bind:this={menuBarRef}
+        groups={menuGroups()}
+        onMenuFocusChange={handleMenuFocusChange}
+      />
+    </header>
 
-  <main class="panes" class:single={!showPreview}>
-    {#if dragActive}
-      <div class="drop-overlay">释放以打开 .typ 文件</div>
+    <main class="panes" class:single={!showPreview}>
+      {#if dragActive}
+        <div class="drop-overlay">释放以打开 .typ 文件</div>
+      {/if}
+      <section class="pane editor-pane">
+        <div class="pane-body">
+          <Editor
+            bind:this={editorRef}
+            initialDoc={editorDoc}
+            doc={editorDoc}
+            theme={resolvedTheme}
+            diagnostics={editorDiagnostics}
+            prefixCode={prefixEnabled ? ensureTrailingNewline(prefixCode) : ""}
+            jumpTo={jumpTarget}
+            onCursor={handleCursor}
+            onDocChange={handleDocChange}
+            mode={viewMode}
+            wrap={viewMode === "source" ? editorWrap : true}
+            lookupMath={(key) => mathCache.get(key)}
+            onMathRequest={handleMathRequest}
+            {mathVersion}
+            blocks={writingBlocks}
+            {blocksVersion}
+            docTextPt={writingTextPt}
+            onBlocksNeeded={handleBlocksNeeded}
+            onCropClick={handleCropClick}
+            onOpenLink={handleOpenLink}
+          />
+        </div>
+      </section>
+      <PreviewPane
+        bind:this={previewPaneRef}
+        hidden={!showPreview}
+        status={previewStatus}
+        error={previewError}
+      />
+    </main>
+
+    <StatusBar
+      {statusText}
+      {updateNotice}
+      onOpenUpdate={openUpdateDialogFromNotice}
+      {viewMode}
+      {uiZoom}
+      {charCount}
+      {pageCount}
+      {cursorLine}
+      {cursorCol}
+      {errorCount}
+      {lastNonPosError}
+      errorItems={errorItems()}
+      warningCount={compileWarnings.length}
+      warningItems={warningItems()}
+      openBadge={openBadgePopover}
+      onToggleBadge={toggleBadgePopover}
+      onCloseBadge={() => (openBadgePopover = "none")}
+      onItemClick={onDiagnosticItemClick}
+      onCopyOne={(item, kind) => void copyDiagnostic(item, kind)}
+      onCopyAll={(kind) => void copyDiagnosticList(kind)}
+    />
+
+    {#if showAbout}
+      <AboutDialog
+        version={appVersion}
+        projectUrl={PROJECT_URL}
+        onClose={() => (showAbout = false)}
+        onOpenProject={openProjectPage}
+      />
     {/if}
-    <section class="pane editor-pane">
-      <div class="pane-body">
-        <Editor
-          bind:this={editorRef}
-          initialDoc={editorDoc}
-          doc={editorDoc}
-          theme={resolvedTheme}
-          diagnostics={editorDiagnostics}
-          prefixCode={prefixEnabled ? ensureTrailingNewline(prefixCode) : ""}
-          jumpTo={jumpTarget}
-          onCursor={handleCursor}
-          onDocChange={handleDocChange}
-          mode={viewMode}
-          wrap={viewMode === "source" ? editorWrap : true}
-          lookupMath={(key) => mathCache.get(key)}
-          onMathRequest={handleMathRequest}
-          mathVersion={mathVersion}
-          blocks={writingBlocks}
-          blocksVersion={blocksVersion}
-          docTextPt={writingTextPt}
-          onBlocksNeeded={handleBlocksNeeded}
-          onCropClick={handleCropClick}
-          onOpenLink={handleOpenLink}
-        />
-      </div>
-    </section>
-    <PreviewPane
-      bind:this={previewPaneRef}
-      hidden={!showPreview}
-      status={previewStatus}
-      error={previewError}
-    />
-  </main>
 
-  <StatusBar
-    {statusText}
-    {updateNotice}
-    onOpenUpdate={openUpdateDialogFromNotice}
-    {viewMode}
-    {uiZoom}
-    {charCount}
-    {pageCount}
-    {cursorLine}
-    {cursorCol}
-    {errorCount}
-    {lastNonPosError}
-    errorItems={errorItems()}
-    warningCount={compileWarnings.length}
-    warningItems={warningItems()}
-    openBadge={openBadgePopover}
-    onToggleBadge={toggleBadgePopover}
-    onCloseBadge={() => (openBadgePopover = "none")}
-    onItemClick={onDiagnosticItemClick}
-    onCopyOne={(item, kind) => void copyDiagnostic(item, kind)}
-    onCopyAll={(kind) => void copyDiagnosticList(kind)}
-  />
+    {#if showClosePrompt}
+      <ClosePromptDialog
+        onSave={onClosePromptSave}
+        onDiscard={onClosePromptDiscard}
+        onCancel={onClosePromptCancel}
+      />
+    {/if}
 
-  {#if showAbout}
-    <AboutDialog
-      version={appVersion}
-      projectUrl={PROJECT_URL}
-      onClose={() => (showAbout = false)}
-      onOpenProject={openProjectPage}
-    />
-  {/if}
+    {#if showSettings}
+      <SettingsDialog
+        bind:this={settingsDialogRef}
+        bind:restoreSession={settingsRestoreSession}
+        bind:autoCheckUpdates={settingsAutoCheckUpdates}
+        bind:prefixEnabled={settingsPrefixEnabled}
+        bind:prefixCode={settingsPrefixCode}
+        bind:chineseFont={settingsChineseFont}
+        bind:fontDirs={settingsFontDirs}
+        {availableFonts}
+        {fontsLoading}
+        onAddFontDir={addFontDir}
+        onRemoveFontDir={removeFontDir}
+        onSave={saveSettings}
+        onClose={closeSettings}
+      />
+    {/if}
 
-  {#if showClosePrompt}
-    <ClosePromptDialog
-      onSave={onClosePromptSave}
-      onDiscard={onClosePromptDiscard}
-      onCancel={onClosePromptCancel}
-    />
-  {/if}
+    {#if showUpdateDialog && updateFlow.kind !== "latest" && updateFlow.kind !== "checking"}
+      <UpdateDialog
+        flow={updateFlow}
+        onInstall={startUpdateInstall}
+        onDismiss={dismissUpdatePrompt}
+        onClose={() => (showUpdateDialog = false)}
+        onRetry={() => checkUpdates(true)}
+      />
+    {/if}
 
-  {#if showSettings}
-    <SettingsDialog
-      bind:this={settingsDialogRef}
-      bind:restoreSession={settingsRestoreSession}
-      bind:autoCheckUpdates={settingsAutoCheckUpdates}
-      bind:prefixEnabled={settingsPrefixEnabled}
-      bind:prefixCode={settingsPrefixCode}
-      bind:chineseFont={settingsChineseFont}
-      bind:fontDirs={settingsFontDirs}
-      availableFonts={availableFonts}
-      fontsLoading={fontsLoading}
-      onAddFontDir={addFontDir}
-      onRemoveFontDir={removeFontDir}
-      onSave={saveSettings}
-      onClose={closeSettings}
-    />
-  {/if}
-
-  {#if showUpdateDialog && updateFlow.kind !== "latest" && updateFlow.kind !== "checking"}
-    <UpdateDialog
-      flow={updateFlow}
-      onInstall={startUpdateInstall}
-      onDismiss={dismissUpdatePrompt}
-      onClose={() => (showUpdateDialog = false)}
-      onRetry={() => checkUpdates(true)}
-    />
-  {/if}
-
-  {#if contextMenu}
-    <ContextMenu
-      position={{ x: contextMenu.x, y: contextMenu.y }}
-      items={contextMenu.items}
-      onClose={() => (contextMenu = null)}
-    />
-  {/if}
-</div>
+    {#if contextMenu}
+      <ContextMenu
+        position={{ x: contextMenu.x, y: contextMenu.y }}
+        items={contextMenu.items}
+        onClose={() => (contextMenu = null)}
+      />
+    {/if}
+  </div>
 {:else}
   <BrowserGate />
 {/if}
@@ -2317,5 +2323,4 @@
   .app.light .drop-overlay {
     background: rgba(255, 255, 255, 0.6);
   }
-
 </style>

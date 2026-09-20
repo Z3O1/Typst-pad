@@ -29,9 +29,7 @@ describe("buildErrorListItems", () => {
 
   it("仅非定位错误：非定位消息转成 generic 项", () => {
     const items = buildErrorListItems([], "package @preview/cetz:0.1.0 not found");
-    expect(items).toEqual([
-      { kind: "generic", message: "package @preview/cetz:0.1.0 not found" },
-    ]);
+    expect(items).toEqual([{ kind: "generic", message: "package @preview/cetz:0.1.0 not found" }]);
   });
 
   it("定位 + 非定位混合：只展示定位错误（非定位与第一条同源，不重复）", () => {
@@ -50,9 +48,7 @@ describe("buildErrorListItems", () => {
 
 describe("formatErrorLoc", () => {
   it("located 项显示「行 x, 列 y」", () => {
-    expect(
-      formatErrorLoc({ kind: "located", message: "m", line: 3, col: 12 }),
-    ).toBe("行 3, 列 12");
+    expect(formatErrorLoc({ kind: "located", message: "m", line: 3, col: 12 })).toBe("行 3, 列 12");
   });
 
   it("generic 项显示 —", () => {
@@ -141,7 +137,13 @@ describe("formatDiagnosticForClipboard / formatDiagnosticListForClipboard（复�
   it("定位条目：路径 + 行列 + 消息（用户要求「路径贴到前面」）", () => {
     expect(
       formatDiagnosticForClipboard(
-        { kind: "located", message: "expected closing `)`", line: 3, col: 5, path: "D:\\work\\lib.typ" },
+        {
+          kind: "located",
+          message: "expected closing `)`",
+          line: 3,
+          col: 5,
+          path: "D:\\work\\lib.typ",
+        },
         win,
       ),
     ).toBe("D:\\work\\lib.typ: 行 3, 列 5：expected closing `)`");
@@ -169,12 +171,12 @@ describe("formatDiagnosticForClipboard / formatDiagnosticListForClipboard（复�
   });
 
   it("generic 条目（无位置，如包不存在）：有路径则带路径，否则只有消息", () => {
-    expect(formatDiagnosticForClipboard({ kind: "generic", message: "package not found" }, win)).toBe(
-      `${win}: package not found`,
-    );
-    expect(formatDiagnosticForClipboard({ kind: "generic", message: "package not found" }, null)).toBe(
-      "package not found",
-    );
+    expect(
+      formatDiagnosticForClipboard({ kind: "generic", message: "package not found" }, win),
+    ).toBe(`${win}: package not found`);
+    expect(
+      formatDiagnosticForClipboard({ kind: "generic", message: "package not found" }, null),
+    ).toBe("package not found");
   });
 
   it("整份列表：首行是浮层标题原文，其后每条一行，末尾不带换行", () => {
@@ -187,11 +189,7 @@ describe("formatDiagnosticForClipboard / formatDiagnosticListForClipboard（复�
       win,
     );
     expect(text).toBe(
-      [
-        "编译错误（2 处）",
-        `${win}: 行 3, 列 5：a`,
-        "D:\\work\\z.typ: 行 7, 列 1：b",
-      ].join("\n"),
+      ["编译错误（2 处）", `${win}: 行 3, 列 5：a`, "D:\\work\\z.typ: 行 7, 列 1：b"].join("\n"),
     );
     expect(text.endsWith("\n")).toBe(false);
   });
@@ -207,9 +205,9 @@ describe("formatCompileFailMessage（自 typst-libs 迁移）", () => {
   });
 
   it("errorCount = 0 显示错误消息", () => {
-    expect(
-      formatCompileFailMessage(0, "package @preview/cetz:0.1.0 not found"),
-    ).toBe("编译错误：package @preview/cetz:0.1.0 not found");
+    expect(formatCompileFailMessage(0, "package @preview/cetz:0.1.0 not found")).toBe(
+      "编译错误：package @preview/cetz:0.1.0 not found",
+    );
   });
 
   it("长消息截断到 ~120 字符", () => {

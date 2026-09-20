@@ -14,32 +14,20 @@
 //
 // 注意：这里的切片是**桩产物**（browser-dev-stub 的 fakeBlocks），验的是"链路与交互"；
 // 真实排版几何由 Rust 侧 block_geometry 的测试与真机（tauri dev）负责。
-import { connect, DEV_URL } from "./cdp.mjs";
+import { connect } from "./cdp.mjs";
+import {
+  BLOCKS_URL as URL_BLOCKS,
+  boot,
+  createChecker,
+  finish,
+  shotPath as SHOT,
+} from "./harness.mjs";
 
-const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
-const URL_BLOCKS = `${DEV_URL}&blocks=1`;
-
-let passed = 0;
-function check(name, ok, detail = "") {
-  if (ok) {
-    passed++;
-    console.log(`  ✓ ${name}`);
-  } else {
-    console.log(`  ✗ ${name} ${detail}`);
-    process.exitCode = 1;
-  }
-}
+const { check, state } = createChecker();
 
 const c = await connect();
-await c.send("Page.enable");
-await c.send("Runtime.enable"); // 第 12 组要读控制台（"装饰重建失败 / 插件崩了"）
-// 先导航一次再清存档：冷启动时页面还停在 about:blank，那里读 localStorage 会抛 SecurityError
-await c.goto(URL_BLOCKS);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await c.evaluate(`localStorage.clear()`); // 清掉上一轮验收留下的存档（可能是一篇长文档）
-await c.goto(URL_BLOCKS);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 800));
+// runtime: true —— 第 12 组要读控制台（"装饰重建失败 / 插件崩了"）
+await boot(c, URL_BLOCKS, { runtime: true });
 
 const CONTENT = `document.querySelector(".cm-content").textContent`;
 /**
@@ -74,7 +62,11 @@ const linesText = await c.evaluate(LINES_TEXT);
 const contentText = await c.evaluate(CONTENT);
 check("非光标块被替换成切片（≥3 块）", crops >= 3, `实际 ${crops}`);
 check("光标所在块（列表项）保持源码形态", linesText.includes("列表项"), JSON.stringify(linesText));
-check("被切片盖住的正文不再是源码形态", !linesText.includes("第一段正文"), JSON.stringify(linesText));
+check(
+  "被切片盖住的正文不再是源码形态",
+  !linesText.includes("第一段正文"),
+  JSON.stringify(linesText),
+);
 check("被切片盖住的标题不再是源码形态", !linesText.includes("章节标题"), JSON.stringify(linesText));
 check(
   "标记只在源码形态里出现（标题的 `= ` 已随切片消失）",
@@ -104,10 +96,18 @@ await c.click(firstCropY.x, firstCropY.y);
 await new Promise((r) => setTimeout(r, 400));
 const afterClick = await c.evaluate(LINES_TEXT);
 const cropsAfter = await c.evaluate(CROPS);
-check("被点的那一块展开了源码（标题可见）", afterClick.includes("章节标题"), JSON.stringify(afterClick));
+check(
+  "被点的那一块展开了源码（标题可见）",
+  afterClick.includes("章节标题"),
+  JSON.stringify(afterClick),
+);
 check("原来的活动块（列表项）变成切片", !afterClick.includes("列表项"), JSON.stringify(afterClick));
 check("切片数量不变（换了一块而已）", cropsAfter === crops, `${crops} → ${cropsAfter}`);
-check("`= ` 标记重新出现在源码里（展开后能看到标记）", afterClick.includes("= 章节标题"), JSON.stringify(afterClick));
+check(
+  "`= ` 标记重新出现在源码里（展开后能看到标记）",
+  afterClick.includes("= 章节标题"),
+  JSON.stringify(afterClick),
+);
 await c.screenshot(SHOT("writing-blocks-click"));
 
 console.log("4) 活动块内仍可正常编辑（真实输入路径）");
@@ -131,7 +131,11 @@ check(
   "模式没切过去（Ctrl+/ 没生效）",
 );
 check("源码模式下没有切片", (await c.evaluate(CROPS)) === 0, "仍有切片");
-check("源码模式下正文全部可见", (await c.evaluate(LINES_TEXT)).includes("第一段正文"), "源码未显示");
+check(
+  "源码模式下正文全部可见",
+  (await c.evaluate(LINES_TEXT)).includes("第一段正文"),
+  "源码未显示",
+);
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
 check("切回写作模式后切片回来", (await c.evaluate(CROPS)) >= 1, "没有切片");
@@ -160,10 +164,9 @@ await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 const SENTENCE = "这一段用来把文档撑过写作模式块级渲染的窗口化阈值，观察滚动时的补渲行为。";
 // **段落之间要有空行**：没有空行的话整篇就是一个块，光标一进去它整篇都是"活动块"，
 // 切片数会是 0（实测踩过）。
-const longDoc = Array.from(
-  { length: 120 },
-  (_, i) => `第 ${i} 段。` + SENTENCE.repeat(3),
-).join("\n\n");
+const longDoc = Array.from({ length: 120 }, (_, i) => `第 ${i} 段。` + SENTENCE.repeat(3)).join(
+  "\n\n",
+);
 await c.click(400, 300);
 await c.selectAll();
 await c.type(longDoc);
@@ -175,7 +178,9 @@ await new Promise((r) => setTimeout(r, 400));
 await c.wheel(700, 400, 4000);
 await new Promise((r) => setTimeout(r, 1500)); // 等去抖 150ms + 假编译
 const longCropsAfter = await c.evaluate(CROPS);
-const tailVisible = await c.evaluate(`document.querySelector(".cm-content").textContent.includes("第 119 段")`);
+const tailVisible = await c.evaluate(
+  `document.querySelector(".cm-content").textContent.includes("第 119 段")`,
+);
 // 文档长度从状态栏读（`.cm-content` 只含视口附近的行，CM 会虚拟化，量不到全文）
 const docLen = await c.evaluate(
   `Number((document.body.innerText.match(/(\\d+)\\s*字符/) ?? [0, 0])[1])`,
@@ -187,7 +192,9 @@ check("滚动到底部后仍有切片（窗口跟着视口走）", longCropsAfte
 check("滚到的位置能看到该块的源码或切片", tailVisible || longCropsAfter > 0, "底部什么都没显示");
 await c.screenshot(SHOT("writing-blocks-long"));
 
-console.log("8) 竖直移动 = 代码模式：逐源码行走、空行也停、列保留、Shift 扩选（用户：「光标移动和代码模式的光标移动一样」）");
+console.log(
+  "8) 竖直移动 = 代码模式：逐源码行走、空行也停、列保留、Shift 扩选（用户：「光标移动和代码模式的光标移动一样」）",
+);
 // 历史：这一组以前锁的是"一次跨一整块"（从段落末行直接进下一段、向上落到上一块末字符），
 // 理由写在 block-plan.verticalBlockTarget 里。用户 2026-09-16 明确要求「和代码模式一样」→
 // 现在改成：默认走法**没跨过切片**就完全交回 CodeMirror（逐可见行、空行也停、列保留），
@@ -264,7 +271,10 @@ check(
 const d2 = await arrowDown();
 check(
   `↓ 再一次 → 第 3 行第 1 列（下一块正文开头，那一块因此展开）`,
-  d2.line === 3 && d2.col === 0 && d2.lineText.startsWith("第一段") && d2.revealed.includes("第一段"),
+  d2.line === 3 &&
+    d2.col === 0 &&
+    d2.lineText.startsWith("第一段") &&
+    d2.revealed.includes("第一段"),
   JSON.stringify(d2),
 );
 check(
@@ -301,8 +311,11 @@ const colStep1 = await arrowDown(); // → 空行（夹到第 1 列）
 const colStep2 = await arrowDown(); // → 列表项那一行
 check(
   `列保留：从「第一段。」行尾（列 ${colStart.col}）往下两行后仍在同一水平位置（x ${colStart.x?.toFixed(0) ?? "?"} → ${colStep2.x?.toFixed(0) ?? "?"}）`,
-  colStep1.lineText === "" && colStep2.lineText.startsWith("- 列表项") &&
-    colStart.x !== null && colStep2.x !== null && Math.abs(colStep2.x - colStart.x) <= 16,
+  colStep1.lineText === "" &&
+    colStep2.lineText.startsWith("- 列表项") &&
+    colStart.x !== null &&
+    colStep2.x !== null &&
+    Math.abs(colStep2.x - colStart.x) <= 16,
   JSON.stringify({ colStart, colStep1: colStep1.head, colStep2 }),
 );
 
@@ -310,7 +323,11 @@ check(
 await c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 文档末尾
 await new Promise((r) => setTimeout(r, 400));
 const fromEnd = await caret();
-check("起点：光标在文档末尾（最后一块展开源码）", fromEnd.revealed.includes("最后一段"), JSON.stringify(fromEnd));
+check(
+  "起点：光标在文档末尾（最后一块展开源码）",
+  fromEnd.revealed.includes("最后一段"),
+  JSON.stringify(fromEnd),
+);
 const ups = [fromEnd];
 for (let i = 0; i < 5; i++) ups.push(await arrowUp());
 const backwards = ups.slice(1).every((s, i) => s.line === ups[i].line - 1);
@@ -324,7 +341,11 @@ check(
   ups[1].head !== 0,
   JSON.stringify(ups[1]),
 );
-check("按到第 1 行后不再动（位置 0）", ups[ups.length - 1].line > 1 || ups[ups.length - 1].head === 0, JSON.stringify(ups[ups.length - 1]));
+check(
+  "按到第 1 行后不再动（位置 0）",
+  ups[ups.length - 1].line > 1 || ups[ups.length - 1].head === 0,
+  JSON.stringify(ups[ups.length - 1]),
+);
 check("状态栏没有脚本错误", !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"));
 
 // ⑤ Shift+↓：扩选也走同一套语义（过去没接管 → CodeMirror 默认会跳过整块切片）
@@ -348,7 +369,6 @@ check(
 );
 await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 }); // 收起选区（非空选区按 ↑ = 收到一端）
 await new Promise((r) => setTimeout(r, 250));
-
 
 // ---------------------------------------------------------------------------
 // 阶段 2：点击定位 / 点击与刷新时的滚动锚定 / 翻页 / 编译失败不整篇作废
@@ -433,7 +453,13 @@ if (!midCrop) throw new Error("视口中间没有切片，这一组（点击锚�
   check(
     `点击锚定：被点的字符仍留在鼠标那一带（偏移 ${drift.toFixed(0)}px / 行高 ${st.lineHeight.toFixed(0)}px，滚动 ${st.scrollTop.toFixed(0)}）`,
     st.maxScroll > 0 && drift <= st.lineHeight * 0.8,
-    JSON.stringify({ drift, lineHeight: st.lineHeight, maxScroll: st.maxScroll, clickY: cyLow, caretY: st.caretY }),
+    JSON.stringify({
+      drift,
+      lineHeight: st.lineHeight,
+      maxScroll: st.maxScroll,
+      clickY: cyLow,
+      caretY: st.caretY,
+    }),
   );
   const cropsAfterClick = await c.evaluate(
     `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
@@ -465,7 +491,9 @@ check(
 );
 check(
   `PageDown 后光标仍停在原来的屏幕高度（${page0.caretY?.toFixed(0) ?? "?"} → ${page1.caretY?.toFixed(0) ?? "?"}）`,
-  page0.caretY === null || page1.caretY === null || Math.abs(page1.caretY - page0.caretY) <= page1.lineHeight * 1.5,
+  page0.caretY === null ||
+    page1.caretY === null ||
+    Math.abs(page1.caretY - page0.caretY) <= page1.lineHeight * 1.5,
   JSON.stringify({ before: page0.caretY, after: page1.caretY }),
 );
 await c.key("PageDown", { code: "PageDown", keyCode: 34 });
@@ -473,15 +501,27 @@ await new Promise((r) => setTimeout(r, 400));
 await c.key("PageDown", { code: "PageDown", keyCode: 34 });
 await new Promise((r) => setTimeout(r, 400));
 const page3 = await c.evaluate(VIEW);
-check("连续 PageDown 单调前进", page3.head > page1.head && page3.scrollTop > page1.scrollTop, JSON.stringify({ h1: page1.head, h3: page3.head }));
+check(
+  "连续 PageDown 单调前进",
+  page3.head > page1.head && page3.scrollTop > page1.scrollTop,
+  JSON.stringify({ h1: page1.head, h3: page3.head }),
+);
 await c.key("PageUp", { code: "PageUp", keyCode: 33 });
 await new Promise((r) => setTimeout(r, 400));
 const pageUp = await c.evaluate(VIEW);
-check("PageUp 往回走（位置变小、滚动变小）", pageUp.head < page3.head && pageUp.scrollTop < page3.scrollTop, JSON.stringify({ up: pageUp.head, before: page3.head }));
+check(
+  "PageUp 往回走（位置变小、滚动变小）",
+  pageUp.head < page3.head && pageUp.scrollTop < page3.scrollTop,
+  JSON.stringify({ up: pageUp.head, before: page3.head }),
+);
 await c.key("PageUp", { code: "PageUp", keyCode: 33, modifiers: 8 }); // Shift+PageUp
 await new Promise((r) => setTimeout(r, 400));
 const shiftUp = await c.evaluate(VIEW);
-check("Shift+PageUp 仍然是选区扩展（anchor 不动、head 往回走）", shiftUp.anchor > shiftUp.head, JSON.stringify({ anchor: shiftUp.anchor, head: shiftUp.head }));
+check(
+  "Shift+PageUp 仍然是选区扩展（anchor 不动、head 往回走）",
+  shiftUp.anchor > shiftUp.head,
+  JSON.stringify({ anchor: shiftUp.anchor, head: shiftUp.head }),
+);
 
 // 两端：到头之后**不许绕过所有切片跳到另一头**（默认翻页在写作模式里就是这个毛病）
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home → 文档开头
@@ -524,7 +564,9 @@ await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
 await c.selectAll();
-await c.type("第一段正文，用来验证编译失败时的取舍。\n\n第二段正文。\n\n第三段正文。\n\n第四段正文。\n\n第五段正文。\n");
+await c.type(
+  "第一段正文，用来验证编译失败时的取舍。\n\n第二段正文。\n\n第三段正文。\n\n第四段正文。\n\n第五段正文。\n",
+);
 await new Promise((r) => setTimeout(r, 900));
 const beforeErr = await c.evaluate(CROPS);
 check("失败前：非光标块是切片", beforeErr >= 3, `实际 ${beforeErr}`);
@@ -535,7 +577,10 @@ const target = await c.evaluate(MIDDLE_CROP);
 check("编译失败这组的前提：视口中间找得到目标切片", !!target, JSON.stringify(target));
 if (!target) throw new Error("中间没有切片，编译失败那组无法进行");
 {
-  await c.click(Math.round(target.left + target.width * 0.4), Math.round(target.top + target.height * 0.5));
+  await c.click(
+    Math.round(target.left + target.width * 0.4),
+    Math.round(target.top + target.height * 0.5),
+  );
   await new Promise((r) => setTimeout(r, 350));
   await c.type("@err");
   await new Promise((r) => setTimeout(r, 900));
@@ -545,10 +590,26 @@ if (!target) throw new Error("中间没有切片，编译失败那组无法进�
   );
   const linesAfterErr = await c.evaluate(LINES_TEXT);
   const statusText = await c.evaluate(`document.body.innerText`);
-  check("编译失败后**没有整篇退回源码**（其它块的切片还在）", cropsAfterErr >= 2, `实际 ${cropsAfterErr} 张（失败前 ${beforeErr}）`);
-  check("出错的那一块退回源码（它的起点不再有切片）", !cropFroms.includes(target.from), JSON.stringify({ cropFroms, from: target.from }));
-  check("出错的源码可见（能读到 @err）", linesAfterErr.includes("@err"), linesAfterErr.slice(0, 120));
-  check("状态栏仍然报出编译错误", /编译错误/.test(statusText), statusText.replace(/\s+/g, " ").slice(0, 120));
+  check(
+    "编译失败后**没有整篇退回源码**（其它块的切片还在）",
+    cropsAfterErr >= 2,
+    `实际 ${cropsAfterErr} 张（失败前 ${beforeErr}）`,
+  );
+  check(
+    "出错的那一块退回源码（它的起点不再有切片）",
+    !cropFroms.includes(target.from),
+    JSON.stringify({ cropFroms, from: target.from }),
+  );
+  check(
+    "出错的源码可见（能读到 @err）",
+    linesAfterErr.includes("@err"),
+    linesAfterErr.slice(0, 120),
+  );
+  check(
+    "状态栏仍然报出编译错误",
+    /编译错误/.test(statusText),
+    statusText.replace(/\s+/g, " ").slice(0, 120),
+  );
   check(
     "错误位置有红色波浪线（切片盖不住它，见 revealBlocksWithDiagnostics）",
     (await c.evaluate(`document.querySelectorAll(".cm-diag-wavy").length`)) > 0,
@@ -565,7 +626,10 @@ if (!target) throw new Error("中间没有切片，编译失败那组无法进�
   // 整条断言静默消失（PR #60 审查的第 12 条）。前置断言代替静默跳过。
   check("编译恢复后中间那块仍在视口里（下面那条断言的前提）", !!other, JSON.stringify(other));
   if (!other) throw new Error("中间块不在视口里，第 11 组的恢复断言无法进行");
-  await c.click(Math.round(other.left + other.width * 0.4), Math.round(other.top + other.height * 0.5));
+  await c.click(
+    Math.round(other.left + other.width * 0.4),
+    Math.round(other.top + other.height * 0.5),
+  );
   await new Promise((r) => setTimeout(r, 500));
   const cropFromsFixed = await c.evaluate(
     `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
@@ -577,8 +641,9 @@ if (!target) throw new Error("中间没有切片，编译失败那组无法进�
   );
 }
 
-
-console.log("12) 块内按 Enter 插入新块：旧表那段时间里刚打的字不许被切片吞掉（真机编译有延迟，桩用 &blockslow=1 模拟）");
+console.log(
+  "12) 块内按 Enter 插入新块：旧表那段时间里刚打的字不许被切片吞掉（真机编译有延迟，桩用 &blockslow=1 模拟）",
+);
 // 为什么单独一组：真实的 typst 编译要几十到几百毫秒，而**块表是上一次编译的产物** ——
 // 这段"旧表 + 新文档"的窗口里，旧坐标放在新文档上会算错行，于是要么刚打的字被旁边那张旧切片
 // 盖住（看不见）、要么同一段文字既在切片里又露成源码（重复）。桩的假编译是瞬时的，默认复现不出来。
@@ -636,14 +701,21 @@ check(
   mismatch.missing.length === 0,
   JSON.stringify(mismatch),
 );
-check("也没有「重复显示」（同一段文字既在切片里又露成源码）", mismatch.dup.length === 0, JSON.stringify(mismatch.dup.slice(0, 2)));
+check(
+  "也没有「重复显示」（同一段文字既在切片里又露成源码）",
+  mismatch.dup.length === 0,
+  JSON.stringify(mismatch.dup.slice(0, 2)),
+);
 await new Promise((r) => setTimeout(r, 900)); // 等慢编译回来
 
 // 场景 B：点进第二段中间（让它展开成源码），再按 Enter 拆成两行，然后马上打字（编译还没回来）
 const midCrop2 = await c.evaluate(MIDDLE_CROP);
 check("慢编译下仍能点进某一块", midCrop2 !== null, JSON.stringify(midCrop2));
 if (midCrop2) {
-  await c.click(Math.round(midCrop2.left + midCrop2.width * 0.35), Math.round(midCrop2.top + midCrop2.height * 0.5));
+  await c.click(
+    Math.round(midCrop2.left + midCrop2.width * 0.35),
+    Math.round(midCrop2.top + midCrop2.height * 0.5),
+  );
   await new Promise((r) => setTimeout(r, 400));
   await c.key("Enter", { code: "Enter", keyCode: 13 });
   await new Promise((r) => setTimeout(r, 60));
@@ -651,20 +723,36 @@ if (midCrop2) {
   await c.type(mark);
   await new Promise((r) => setTimeout(r, 80)); // 仍然在慢编译的窗口里
   const during = await c.evaluate(MARK_VISIBLE(mark));
-  check("编译还没回来时，刚打的字立刻可见（没有被旧切片吞掉）", during.visible, JSON.stringify(during));
+  check(
+    "编译还没回来时，刚打的字立刻可见（没有被旧切片吞掉）",
+    during.visible,
+    JSON.stringify(during),
+  );
   await new Promise((r) => setTimeout(r, 900)); // 等这一轮慢编译回来
   const afterSlow = await c.evaluate(MARK_VISIBLE(mark));
-  check("编译回来后仍然看得见（源码或渲染时含它的切片）", afterSlow.visible, JSON.stringify(afterSlow));
+  check(
+    "编译回来后仍然看得见（源码或渲染时含它的切片）",
+    afterSlow.visible,
+    JSON.stringify(afterSlow),
+  );
   const linesWithMark = await c.evaluate(
     `Array.from(document.querySelectorAll(".cm-line")).map((el) => el.textContent).filter((t) => t.includes(${JSON.stringify(mark)})).length`,
   );
-  check("标记文本只出现一处，不重复（隐藏的那份 + 露出的一份）", linesWithMark <= 1, `出现在 ${linesWithMark} 行`);
+  check(
+    "标记文本只出现一处，不重复（隐藏的那份 + 露出的一份）",
+    linesWithMark <= 1,
+    `出现在 ${linesWithMark} 行`,
+  );
   const slowCropsNow = await c.evaluate(CROPS);
   check("插入新块之后仍然有切片（其余块照旧渲染）", slowCropsNow >= 2, `实际 ${slowCropsNow}`);
   const mismatchBefore = await c.evaluate(MARK_VISIBLE(mark));
   const mismatch2 = await c.evaluate(TEXT_MISMATCH);
   check("块内拆行之后正文一行都没丢", mismatch2.missing.length === 0, JSON.stringify(mismatch2));
-  check("块内拆行也没有「重复显示」", mismatch2.dup.length === 0, JSON.stringify(mismatch2.dup.slice(0, 2)));
+  check(
+    "块内拆行也没有「重复显示」",
+    mismatch2.dup.length === 0,
+    JSON.stringify(mismatch2.dup.slice(0, 2)),
+  );
   check("拆行后的标记文本仍然可见", mismatchBefore.visible, JSON.stringify(mismatchBefore));
   await c.screenshot(SHOT("writing-blocks-enter"));
 }
@@ -682,7 +770,9 @@ const shortState = await c.evaluate(`(() => {
   return { len: view.state.doc.length, head: view.state.selection.main.head };
 })()`);
 check("全选重打之后文档确实变短了", shortState.len < 40, JSON.stringify(shortState));
-const shortVisible = await c.evaluate(`document.querySelector(".cm-content").textContent.includes("短文档")`);
+const shortVisible = await c.evaluate(
+  `document.querySelector(".cm-content").textContent.includes("短文档")`,
+);
 check("缩短后的正文看得见（没有整篇卡在源码/空白）", shortVisible);
 
 // 控制台不许出现"装饰重建失败 / 插件崩了"——那段"旧表 + 新文档"的窗口最容易把它们引出来
@@ -699,8 +789,9 @@ check(
   JSON.stringify(badConsole.slice(0, 1)),
 );
 
-
-console.log("13) 各种输入：打字 / 回车 / 退格 / 删除 / 撤销 / 粘贴 / 缩进 / 公式 / 全选重打 —— 每个动作之后正文都得看得见");
+console.log(
+  "13) 各种输入：打字 / 回车 / 退格 / 删除 / 撤销 / 粘贴 / 缩进 / 公式 / 全选重打 —— 每个动作之后正文都得看得见",
+);
 // 与第 12 组同一套判据（那段"旧表 + 新文档"的窗口），但把**常见编辑动作**逐个走一遍：
 // 每做完一个动作就立刻打一个标记词，然后检查「标记看得见 / 一行都没丢 / 不重复 / 切片还在 / 控制台干净」。
 const CONSOLE_MARK = c.events.length;
@@ -722,17 +813,97 @@ const resetDoc = async () => {
 };
 
 const SCENARIOS = [
-  { name: "段中打字", act: async () => { await home(); await right(3); await c.type("插字"); } },
-  { name: "段尾回车（新建一段）", act: async () => { await home(); await right(4); await c.key("Enter", { code: "Enter", keyCode: 13 }); } },
-  { name: "段首回车（前面插一段）", act: async () => { await home(); await c.key("Enter", { code: "Enter", keyCode: 13 }); } },
-  { name: "段中回车（把一段拆成两行）", act: async () => { await home(); await right(2); await c.key("Enter", { code: "Enter", keyCode: 13 }); } },
-  { name: "连按两次回车（插入新块）", act: async () => { await home(); await right(4); await c.key("Enter", { code: "Enter", keyCode: 13 }); await c.key("Enter", { code: "Enter", keyCode: 13 }); } },
-  { name: "退格吃掉上一行的换行（两段合并）", act: async () => { await home(); await right(4); await right(1); await c.key("Backspace", { code: "Backspace", keyCode: 8 }); } },
-  { name: "选中一整段删掉", act: async () => { await home(); await right(3); await c.key("End", { code: "End", keyCode: 35 }); await c.key("Backspace", { code: "Backspace", keyCode: 8 }); } },
-  { name: "打完字再撤销（Ctrl+Z）", act: async () => { await home(); await right(2); await c.type("临时"); await new Promise((r) => setTimeout(r, 120)); await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 }); } },
-  { name: "粘贴多段文本（一次插入一大段）", act: async () => { await home(); await c.type("新段一。\n\n新段二。\n\n"); } },
-  { name: "Tab 缩进行首", act: async () => { await home(); await c.key("Tab", { code: "Tab", keyCode: 9 }); } },
-  { name: "输入 `$` 起一个行间公式", act: async () => { await home(); await c.key("Enter", { code: "Enter", keyCode: 13 }); await c.type("$"); await new Promise((r) => setTimeout(r, 200)); } },
+  {
+    name: "段中打字",
+    act: async () => {
+      await home();
+      await right(3);
+      await c.type("插字");
+    },
+  },
+  {
+    name: "段尾回车（新建一段）",
+    act: async () => {
+      await home();
+      await right(4);
+      await c.key("Enter", { code: "Enter", keyCode: 13 });
+    },
+  },
+  {
+    name: "段首回车（前面插一段）",
+    act: async () => {
+      await home();
+      await c.key("Enter", { code: "Enter", keyCode: 13 });
+    },
+  },
+  {
+    name: "段中回车（把一段拆成两行）",
+    act: async () => {
+      await home();
+      await right(2);
+      await c.key("Enter", { code: "Enter", keyCode: 13 });
+    },
+  },
+  {
+    name: "连按两次回车（插入新块）",
+    act: async () => {
+      await home();
+      await right(4);
+      await c.key("Enter", { code: "Enter", keyCode: 13 });
+      await c.key("Enter", { code: "Enter", keyCode: 13 });
+    },
+  },
+  {
+    name: "退格吃掉上一行的换行（两段合并）",
+    act: async () => {
+      await home();
+      await right(4);
+      await right(1);
+      await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+    },
+  },
+  {
+    name: "选中一整段删掉",
+    act: async () => {
+      await home();
+      await right(3);
+      await c.key("End", { code: "End", keyCode: 35 });
+      await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+    },
+  },
+  {
+    name: "打完字再撤销（Ctrl+Z）",
+    act: async () => {
+      await home();
+      await right(2);
+      await c.type("临时");
+      await new Promise((r) => setTimeout(r, 120));
+      await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+    },
+  },
+  {
+    name: "粘贴多段文本（一次插入一大段）",
+    act: async () => {
+      await home();
+      await c.type("新段一。\n\n新段二。\n\n");
+    },
+  },
+  {
+    name: "Tab 缩进行首",
+    act: async () => {
+      await home();
+      await c.key("Tab", { code: "Tab", keyCode: 9 });
+    },
+  },
+  {
+    name: "输入 `$` 起一个行间公式",
+    act: async () => {
+      await home();
+      await c.key("Enter", { code: "Enter", keyCode: 13 });
+      await c.type("$");
+      await new Promise((r) => setTimeout(r, 200));
+    },
+  },
   {
     name: "全选重打（换一份短文档）",
     act: async () => {
@@ -767,11 +938,13 @@ for (const [i, sc] of SCENARIOS.entries()) {
   // 切片数量在**编译回来之后**看：改动期间"相关块全退回源码"是设计如此
   if (cropsAfter < 1) {
     bad.push(
-      `编译回来后切片全没了（${JSON.stringify(await c.evaluate(`(() => {
+      `编译回来后切片全没了（${JSON.stringify(
+        await c.evaluate(`(() => {
         const v = document.querySelector(".cm-content").cmTile.root.view;
         const s = v.state.selection.main;
         return { doc: v.state.doc.toString(), sel: [s.from, s.to, s.head], lines: Array.from(document.querySelectorAll(".cm-line")).map((e) => e.textContent) };
-      })()`))}）`,
+      })()`),
+      )}）`,
     );
   }
   inputChecks++;
@@ -789,7 +962,8 @@ for (const ev of c.events.slice(CONSOLE_MARK)) {
   const txt = (ev.params.args ?? []).map((a) => a.value ?? a.description ?? "").join(" ");
   if (/plugin crashed|装饰重建失败|Invalid position/.test(txt)) consoleBad.push(txt.slice(0, 300));
 }
-passed += inputChecks - inputBad;
+// 这一组是逐条手写 ✓/✗（不是走 check()），所以手工把对账结果并进计数
+state.passed += inputChecks - inputBad;
 process.exitCode = inputBad > 0 || consoleBad.length > 0 ? 1 : process.exitCode;
 check(
   `${inputChecks} 种输入动作之后正文都看得见、不丢行、不重复、切片还在`,
@@ -802,8 +976,9 @@ check(
   JSON.stringify(consoleBad.slice(0, 1)),
 );
 
-
-console.log("14) 切片上拖选 + 复制（阶段 3）：从一张切片拖到另一张 → 选出一段跨块源码，Ctrl+C 能复制走");
+console.log(
+  "14) 切片上拖选 + 复制（阶段 3）：从一张切片拖到另一张 → 选出一段跨块源码，Ctrl+C 能复制走",
+);
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
@@ -857,7 +1032,11 @@ if (dragCrops.length >= 2) {
     JSON.stringify(sel.text),
   );
   const cropsAfterDrag = await c.evaluate(CROPS);
-  check("被选区碰到的块展开成源码、剩下的仍是切片", cropsAfterDrag < dragCrops.length, `拖前 ${dragCrops.length} → 拖后 ${cropsAfterDrag}`);
+  check(
+    "被选区碰到的块展开成源码、剩下的仍是切片",
+    cropsAfterDrag < dragCrops.length,
+    `拖前 ${dragCrops.length} → 拖后 ${cropsAfterDrag}`,
+  );
 
   // Ctrl+C：走 CM 的复制（选区是真的，复制出来的就是源码）
   await c.key("c", { code: "KeyC", keyCode: 67, modifiers: 2 });
@@ -866,7 +1045,10 @@ if (dragCrops.length >= 2) {
   check(
     "Ctrl+C 复制到的内容与选区一致（跨块源码）",
     typeof copied === "string" && copied.length > 0 && copied === sel.text,
-    JSON.stringify({ copied: typeof copied === "string" ? copied.slice(0, 40) : copied, expect: sel.text.slice(0, 40) }),
+    JSON.stringify({
+      copied: typeof copied === "string" ? copied.slice(0, 40) : copied,
+      expect: sel.text.slice(0, 40),
+    }),
   );
   await c.screenshot(SHOT("writing-blocks-drag-select"));
 
@@ -881,13 +1063,16 @@ if (dragCrops.length >= 2) {
   );
 }
 
-
-console.log("15) 选中整块的规则（用户要求「选中整个代码块不要展开」）：整块被盖住时保持切片外观 + 一层淡色底");
+console.log(
+  "15) 选中整块的规则（用户要求「选中整个代码块不要展开」）：整块被盖住时保持切片外观 + 一层淡色底",
+);
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
 await c.selectAll();
-await c.type("#set text(size: 11pt)\n\n开头一段。\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n结尾一段。\n");
+await c.type(
+  '#set text(size: 11pt)\n\n开头一段。\n\n```rust\nfn main() {\n    println!("hello");\n}\n```\n\n结尾一段。\n',
+);
 await new Promise((r) => setTimeout(r, 900));
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // 光标回文首 → 代码块是切片
 await new Promise((r) => setTimeout(r, 400));
@@ -957,7 +1142,10 @@ if (paras.first && paras.last) {
   check("它挂上了「整块被选中」的淡色底", a.selected >= 1, JSON.stringify(a));
   check(
     "淡色底**真的看得见**（染色层盖在 SVG 之上、不拦事件）",
-    a.tintBg !== null && a.tintBg !== "rgba(0, 0, 0, 0)" && a.tintCoversSvg === true && a.tintNoPointer === true,
+    a.tintBg !== null &&
+      a.tintBg !== "rgba(0, 0, 0, 0)" &&
+      a.tintCoversSvg === true &&
+      a.tintNoPointer === true,
     JSON.stringify(a),
   );
   check(
@@ -971,7 +1159,9 @@ if (paras.first && paras.last) {
     a.selText.includes("fn main()"),
     JSON.stringify(a.selText),
   );
-  await c.evaluate(`(() => { window.__copied = null; document.addEventListener("copy", (e) => { try { window.__copied = e.clipboardData.getData("text/plain"); } catch {} }); return true; })()`);
+  await c.evaluate(
+    `(() => { window.__copied = null; document.addEventListener("copy", (e) => { try { window.__copied = e.clipboardData.getData("text/plain"); } catch {} }); return true; })()`,
+  );
   await c.key("c", { code: "KeyC", keyCode: 67, modifiers: 2 });
   await new Promise((r) => setTimeout(r, 300));
   check("Ctrl+C 复制的是整块源码", (await c.evaluate(`window.__copied`)) === a.selText);
@@ -1021,18 +1211,30 @@ if (!rawRect || !blockPoint) throw new Error("代码块切片不在视口里，�
   await c.drag(srcRect.x1, srcRect.y1, srcRect.x2, srcRect.y2);
   await new Promise((r) => setTimeout(r, 500));
   const b = await c.evaluate(SNAPSHOT);
-  check("在代码块里拖整块：它展开成源码（光标在里面，不展开就打不了字）", b.codeInSource === true, JSON.stringify(b));
+  check(
+    "在代码块里拖整块：它展开成源码（光标在里面，不展开就打不了字）",
+    b.codeInSource === true,
+    JSON.stringify(b),
+  );
   check("但**两行围栏被藏起来**（看不到 ```rust）", b.fenceInSource === false, JSON.stringify(b));
-  check("代码正文仍是真实文本、选区跨了整块", b.selText.includes("fn main()"), JSON.stringify(b.selText));
+  check(
+    "代码正文仍是真实文本、选区跨了整块",
+    b.selText.includes("fn main()"),
+    JSON.stringify(b.selText),
+  );
   // 打字仍然有效（DOM 里得有真实文本 —— 这正是"光标那一块必须展开"的原因，实测踩过）
   await c.type("// x");
   await new Promise((r) => setTimeout(r, 600));
-  const typed = await c.evaluate(`document.querySelector(".cm-content").cmTile.root.view.state.doc.toString()`);
+  const typed = await c.evaluate(
+    `document.querySelector(".cm-content").cmTile.root.view.state.doc.toString()`,
+  );
   check("展开之后打字照样进得去", typed.includes("// x"), JSON.stringify(typed.slice(0, 40)));
   await c.screenshot(SHOT("writing-blocks-codeblock-inside"));
 }
 
-console.log("16) 在行尾按 Enter 拆分块 → 光标落在新行行首（用户报「用 enter 拆分块的时候，光标会有问题」）");
+console.log(
+  "16) 在行尾按 Enter 拆分块 → 光标落在新行行首（用户报「用 enter 拆分块的时候，光标会有问题」）",
+);
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
@@ -1200,7 +1402,8 @@ const writeMath = await c.evaluate(`(() => {
 })()`);
 check(
   `写作模式的公式按文档字号渲染（sizePt=${writeMath.sizePt} = 正文 ${writeMath.editorPx}）`,
-  writeMath.sizePt !== null && Math.abs(writeMath.sizePt - parseFloat(writeMath.editorPx) * 0.75) < 0.01,
+  writeMath.sizePt !== null &&
+    Math.abs(writeMath.sizePt - parseFloat(writeMath.editorPx) * 0.75) < 0.01,
   JSON.stringify(writeMath),
 );
 check(
@@ -1341,10 +1544,22 @@ check("点第一张切片 → 光标落在这一块里（选区为空）", first
 // ② Shift+点下面那张切片：应当**从原位置扩选**到这一块，而不是收掉选区
 const shiftClick = async (x, y) => {
   await c.send("Input.dispatchMouseEvent", {
-    type: "mousePressed", x, y, button: "left", clickCount: 1, buttons: 1, modifiers: 8,
+    type: "mousePressed",
+    x,
+    y,
+    button: "left",
+    clickCount: 1,
+    buttons: 1,
+    modifiers: 8,
   });
   await c.send("Input.dispatchMouseEvent", {
-    type: "mouseReleased", x, y, button: "left", clickCount: 1, buttons: 0, modifiers: 8,
+    type: "mouseReleased",
+    x,
+    y,
+    button: "left",
+    clickCount: 1,
+    buttons: 0,
+    modifiers: 8,
   });
 };
 await shiftClick(two.b.x, two.b.y);
@@ -1372,5 +1587,4 @@ check(
 );
 await c.screenshot(SHOT("writing-blocks-shift-click"));
 
-console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
-process.exit(process.exitCode ?? 0);
+finish(`通过 ${state.passed} 项检查；截图：.browser-check/writing-blocks-*.png`);

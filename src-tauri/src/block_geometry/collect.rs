@@ -40,7 +40,10 @@ pub struct FrameStats {
 ///
 /// `world.range(span)` 把 `Span` 解成**编译那一份 `Source`** 上的字节区间 —— 必须用编译时的
 /// world，不能拿最新文本来解旧帧（`Span` 是编译期的节点编号，文本一改编号就漂）。
-pub fn collect_geometry(world: &dyn World, document: &PagedDocument) -> (Vec<PlacedItem>, FrameStats) {
+pub fn collect_geometry(
+    world: &dyn World,
+    document: &PagedDocument,
+) -> (Vec<PlacedItem>, FrameStats) {
     collect_geometry_with_links(world, document).0
 }
 
@@ -82,10 +85,7 @@ fn walk_frame(
 ) {
     for (pos, item) in frame.items() {
         // 该项原点在本层坐标系里的页面坐标（ts 是"本帧内容相对页面"的变换，顶层为 identity）
-        let origin = Point::new(
-            offset.x + pos.x,
-            offset.y + pos.y,
-        ).transform(ts);
+        let origin = Point::new(offset.x + pos.x, offset.y + pos.y).transform(ts);
         match item {
             FrameItem::Text(text) => {
                 stats.text_items += 1;
@@ -118,7 +118,16 @@ fn walk_frame(
                 if group.clip.is_some() {
                     stats.clipped_groups += 1;
                 }
-                walk_frame(world, &group.frame, page, origin, group.transform, out, links, stats);
+                walk_frame(
+                    world,
+                    &group.frame,
+                    page,
+                    origin,
+                    group.transform,
+                    out,
+                    links,
+                    stats,
+                );
             }
             FrameItem::Shape(shape, span) => {
                 stats.shapes += 1;
@@ -189,7 +198,12 @@ fn glyph_range(
         .text
         .get(glyph.range())
         .map(|s| s.len())
-        .or_else(|| text.text.get(start..).and_then(|s| s.chars().next()).map(char::len_utf8))
+        .or_else(|| {
+            text.text
+                .get(start..)
+                .and_then(|s| s.chars().next())
+                .map(char::len_utf8)
+        })
         .unwrap_or(1);
     let end = (start + len).min(base.end);
     Some(start..end.max(start))

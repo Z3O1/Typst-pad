@@ -17,37 +17,47 @@ describe("clampPopoverRect 水平收边", () => {
 
   it("左缘越界：向右平移回视口（保留 margin）", () => {
     // 徽标靠左：Popover 从窗口左缘溢出，left = -300 → 平移量 = 8 - (-300) = 308
-    expect(
-      clampPopoverRect({ ...rect, left: -300, right: 220 }, viewport),
-    ).toEqual({ translateX: 308, translateY: 0, maxWidth: 0 });
+    expect(clampPopoverRect({ ...rect, left: -300, right: 220 }, viewport)).toEqual({
+      translateX: 308,
+      translateY: 0,
+      maxWidth: 0,
+    });
   });
 
   it("右缘越界：向左平移回视口（保留 margin）", () => {
     // right = 1020 → 平移量 = (1000 - 8) - 1020 = -28
-    expect(
-      clampPopoverRect({ ...rect, left: 500, right: 1020 }, viewport),
-    ).toEqual({ translateX: -28, translateY: 0, maxWidth: 0 });
+    expect(clampPopoverRect({ ...rect, left: 500, right: 1020 }, viewport)).toEqual({
+      translateX: -28,
+      translateY: 0,
+      maxWidth: 0,
+    });
   });
 
   it("恰好贴边（rect.left = margin）：不平移", () => {
-    expect(
-      clampPopoverRect({ ...rect, left: 8, right: 528 }, viewport),
-    ).toEqual({ translateX: 0, translateY: 0, maxWidth: 0 });
+    expect(clampPopoverRect({ ...rect, left: 8, right: 528 }, viewport)).toEqual({
+      translateX: 0,
+      translateY: 0,
+      maxWidth: 0,
+    });
   });
 
   it("恰好贴边（rect.right = vw − margin）：不平移", () => {
-    expect(
-      clampPopoverRect({ ...rect, left: 472, right: 992 }, viewport),
-    ).toEqual({ translateX: 0, translateY: 0, maxWidth: 0 });
+    expect(clampPopoverRect({ ...rect, left: 472, right: 992 }, viewport)).toEqual({
+      translateX: 0,
+      translateY: 0,
+      maxWidth: 0,
+    });
   });
 });
 
 describe("clampPopoverRect 垂直收边", () => {
   it("顶部越界：向下平移回视口", () => {
     // top = -100 → 平移量 = 8 - (-100) = 108
-    expect(
-      clampPopoverRect({ ...rect, top: -100 }, viewport),
-    ).toEqual({ translateX: 0, translateY: 108, maxWidth: 0 });
+    expect(clampPopoverRect({ ...rect, top: -100 }, viewport)).toEqual({
+      translateX: 0,
+      translateY: 108,
+      maxWidth: 0,
+    });
   });
 
   it("顶部未越界：垂直不平移", () => {
@@ -97,9 +107,11 @@ describe("clampPopoverRect 极小窗口（整层宽于视口可用空间）", ()
 
 describe("clampPopoverRect 自定义 margin 与组合越界", () => {
   it("自定义 margin（20px）生效", () => {
-    expect(clampPopoverRect({ ...rect, left: -10, right: 510 }, viewport, 20)).toEqual(
-      { translateX: 30, translateY: 0, maxWidth: 0 },
-    );
+    expect(clampPopoverRect({ ...rect, left: -10, right: 510 }, viewport, 20)).toEqual({
+      translateX: 30,
+      translateY: 0,
+      maxWidth: 0,
+    });
   });
 
   it("水平 + 垂直同时越界：两个方向各自收边", () => {

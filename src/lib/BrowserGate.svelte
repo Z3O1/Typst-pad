@@ -22,8 +22,8 @@
   <p class="browser-gate-text">Typst-pad 已移除浏览器支持，请下载桌面应用后使用。</p>
   {#if import.meta.env.DEV}
     <p class="browser-gate-text browser-gate-dev">
-      开发调试可改用<strong>浏览器开发模式</strong>：带 <code>?browserdev=1</code> 打开本页
-      （假 Tauri 环境 + 假编译，可调试编辑器交互与所见即所得）。
+      开发调试可改用<strong>浏览器开发模式</strong>：带 <code>?browserdev=1</code> 打开本页 （假 Tauri
+      环境 + 假编译，可调试编辑器交互与所见即所得）。
     </p>
     <button class="modal-btn primary" onclick={openBrowserDev}>打开浏览器开发模式</button>
   {/if}

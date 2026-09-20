@@ -33,9 +33,7 @@
     },
     "fileAssociations": [
       {
-        "ext": [
-          "typ"
-        ],
+        "ext": ["typ"],
         "name": "Typst-pad.typ",
         "description": "Typst Source File",
         "role": "Editor",
@@ -52,9 +50,7 @@
   },
   "plugins": {
     "updater": {
-      "endpoints": [
-        "https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json"
-      ],
+      "endpoints": ["https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json"],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI1N0IzNDcxRERDMDc5NEUKUldST2VjRGRjVFI3dGExQlRRRk9rQUw2bFFMelVUUFExa0poeTFIMUZDRlFLSk1qNEVVcVdJN2IK",
       "windows": {
         "installMode": "passive"

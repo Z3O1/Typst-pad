@@ -18,10 +18,7 @@ export interface PopoverClamp {
 }
 
 /** 点徽标 / Enter：开这个、并顺手把另一个关掉（两个徽标共用一份状态 ⇒ 一次只开一个） */
-export function nextBadgePopover(
-  current: BadgePopoverState,
-  kind: BadgeKind,
-): BadgePopoverState {
+export function nextBadgePopover(current: BadgePopoverState, kind: BadgeKind): BadgePopoverState {
   return current === kind ? "none" : kind;
 }
 

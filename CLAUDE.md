@@ -14,16 +14,20 @@ Typst-pad = 仿 Typora 的 Typst 桌面编辑器，两套 UI：「写作模式�
 ```bash
 npm run tauri dev    # 桌面应用（Vite 固定 1420；WSL 可跑，libEGL 警告正常）
 npm run check        # svelte-check（0 errors / 0 warnings）
-npm test             # 单测（45 文件 / 834 项）；npm test -- <文件> 跑单个
-cargo test|check --manifest-path src-tauri/Cargo.toml   # Rust（61 passed / 6 ignored）
+npm test             # 单测（44 文件 / 815 项）；npm test -- <文件> 跑单个
+npm run format:check # prettier（`npm run format` 是对称的写入版）
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check                  # rustfmt（默认风格，无 rustfmt.toml）
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单测（61 passed / 6 ignored）
 node scripts/check-fonts.mjs
-# 动编辑器 / 装饰 / 布局时才跑浏览器验收（换端口，别跟 tauri dev 抢 1420）
+# 动编辑器 / 装饰 / 布局 / 组件样式时才跑浏览器验收（换端口，别跟 tauri dev 抢 1420）
+npm run verify:browser   # **推荐**：自己起 dev server + headless Chromium + 导夹具 + 跑七套 + 汇总
 npm run dev -- --port 1425
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs                              # 290 项
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs   # 改块级渲染必跑
 ```
 
-打包、发布、其余 5 套验收脚本的命令全文：`docs/实现细则/06-命令与发布.md`。
+打包、发布、全部验收脚本的命令全文：`docs/实现细则/06-命令与发布.md`。
 
 ## 改动前的红线（勿回退）
 
@@ -38,6 +42,7 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-
 9. **绝不阻塞等 workflow**：推 main / 打 tag / 后续命令一律不等 CI、Release；不挂轮询任务；状态最多**单查**一次 `gh run list`；不要加"别在 CI 运行中 push main"这类限制。
 10. 签名密钥不许动：Secrets 删了就构建不了、换了就再也发不出更新。
 11. 发版权在用户手里：改版本号 / CHANGELOG 版本段 / 打 tag / 建发 Release，只在他说"发 X.Y.Z"之后做。
+12. **五道格式/静态检查门不许摘**（都在 CI 的 `test` job 里，摘一道就等于没有）：`npm run check`、`npm test`、`npm run format:check`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`，另有 `cargo test --manifest-path src-tauri/Cargo.toml`。改完先本地跑齐；`cargo check` 那一步已被 `clippy --all-targets` 取代（两步都跑等于同一份代码编两遍）。
 
 ## 细则红线（一句话版；展开与理由见对应分册）
 
@@ -71,7 +76,7 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-
 ## 环境备忘（本机 WSL）
 
 - push 22 端口被掐走 443：`GIT_SSH_COMMAND="ssh -p 443 -o StrictHostKeyChecking=accept-new" git push git@ssh.github.com:Z3O1/Typst-pad.git HEAD:main`（`accept-new` 不可省）；fetch 同理显式 443 URL + tracking ref。
-- 1420 = Vite，9333 = CDP；查占用 `ss -ltnp | grep :1420` / Windows `netstat.exe -ano | findstr :1420`。`gh` 用 Windows 版（`--repo Z3O1/Typst-pad`）。
+- 1420 = Vite，CDP 默认 9333（单跑套件）/ 9335（`npm run verify:browser`）；查占用 `ss -ltnp | grep :1420` / Windows `netstat.exe -ano | findstr :1420`。`gh` 用 Windows 版（`--repo Z3O1/Typst-pad`）。
 - headless Chromium 用 Windows Chrome（镜像网络下 WSL 才能连 9333）或 WSL Playwright 的 `chromium_headless_shell-*`；**用托管后台任务起**，收尾按记下的 job/端口关。
 
 ## 文档地图（改哪块，先读哪册）
@@ -84,4 +89,4 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-
 | 所见即所得（范围识别 / 公式 / 标记 / 两套 UI / 缩放 / 状态栏） | `docs/实现细则/04-所见即所得.md`＋`docs/WYSIWYG-调研.md` |
 | 按键路由、多窗口与 ACL、自动更新、启动打点 | `docs/实现细则/05-窗口与更新.md` |
 | 全部命令与验收脚本、CI 缓存纪律、签名与发版 | `docs/实现细则/06-命令与发布.md` |
-| 单测范围与坑、五套浏览器验收、PR 审查两条腿 | `docs/实现细则/07-测试与审查.md` |
+| 单测范围与坑、浏览器验收（七套 + 一条命令）、PR 审查两条腿 | `docs/实现细则/07-测试与审查.md` |

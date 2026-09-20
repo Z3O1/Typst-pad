@@ -28,7 +28,7 @@ describe("extractMathDefinitions", () => {
   });
 
   it("含内容块 `[...]` 或多行的 let 保守跳过（拼接后可能残缺）", () => {
-    expect(extractMathDefinitions('#let a = [*粗*]')).toBe("");
+    expect(extractMathDefinitions("#let a = [*粗*]")).toBe("");
     expect(extractMathDefinitions("#let f(x) = {\n  x + 1\n}")).toBe("");
   });
 

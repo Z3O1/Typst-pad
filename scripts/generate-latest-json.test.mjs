@@ -227,7 +227,15 @@ describe("CLI（node scripts/generate-latest-json.mjs）", () => {
 
     execFileSync(
       process.execPath,
-      [join(process.cwd(), script), "--bundle", join(dir, "bundle"), "--version", "0.8.0", "--out", out],
+      [
+        join(process.cwd(), script),
+        "--bundle",
+        join(dir, "bundle"),
+        "--version",
+        "0.8.0",
+        "--out",
+        out,
+      ],
       { cwd: dir, encoding: "utf8" },
     );
     expect(JSON.parse(readFileSync(out, "utf8")).notes).toContain("- 自动更新");

@@ -85,17 +85,12 @@ describe("scanMarkupDecorations", () => {
 
   it("多个标记按位置升序返回", () => {
     const doc = "= 标题\n正文 *粗* 与 _斜_ 与 `码`";
-    expect(parts(doc).map((p) => p.kind)).toEqual([
-      "heading",
-      "strong",
-      "emph",
-      "raw-inline",
-    ]);
+    expect(parts(doc).map((p) => p.kind)).toEqual(["heading", "strong", "emph", "raw-inline"]);
   });
 });
 
 describe("scanMarkupDecorations 链接", () => {
-  it("`#link(\"url\")[文字]` → 隐藏 link 调用与方括号，只留文字", () => {
+  it('`#link("url")[文字]` → 隐藏 link 调用与方括号，只留文字', () => {
     const doc = '见 #link("https://typst.app")[官网] 说明';
     expect(parts(doc)).toEqual([
       {
@@ -107,7 +102,7 @@ describe("scanMarkupDecorations 链接", () => {
     ]);
   });
 
-  it("无内容块的 `#link(\"url\")` 不装饰（没有可显示的链接文字）", () => {
+  it('无内容块的 `#link("url")` 不装饰（没有可显示的链接文字）', () => {
     expect(parts('#link("https://typst.app")')).toEqual([]);
   });
 
@@ -204,11 +199,7 @@ describe("区域极多时的判定（二分相交检查的功能守护）", () =
   it("粗体/斜体与公式、代码区紧邻时不被误判", () => {
     const doc = "$a*b$ 与 *真粗* 与 `c*d` 与 _真斜_";
     // 行内原始文本本身是一条合法装饰（反引号收起），此处只关心粗/斜没被公式与代码带偏
-    expect(scanMarkupDecorations(doc).map((m) => m.kind)).toEqual([
-      "strong",
-      "raw-inline",
-      "emph",
-    ]);
+    expect(scanMarkupDecorations(doc).map((m) => m.kind)).toEqual(["strong", "raw-inline", "emph"]);
     const strong = scanMarkupDecorations(doc)[0];
     expect(doc.slice(strong.content.from, strong.content.to)).toBe("真粗");
   });

@@ -47,11 +47,7 @@ export function diagnosticCopyStatus(kind: DiagnosticKind, ok: boolean): string 
 }
 
 /** 「复制全部」的状态栏反馈 */
-export function diagnosticCopyAllStatus(
-  kind: DiagnosticKind,
-  count: number,
-  ok: boolean,
-): string {
+export function diagnosticCopyAllStatus(kind: DiagnosticKind, count: number, ok: boolean): string {
   if (!ok) return COPY_FAILED_NOTICE;
   return kind === "errors" ? `已复制全部 ${count} 处错误` : `已复制全部 ${count} 处警告`;
 }

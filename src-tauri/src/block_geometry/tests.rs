@@ -14,7 +14,9 @@ static HIT_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// 拿测试锁（用 `into_inner` 兜住中毒：某个用例 panic 了也要放别人过去）
 fn hit_cache_guard() -> std::sync::MutexGuard<'static, ()> {
-    HIT_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    HIT_CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// **编译失败时 `blocks` 键也必须在**（PR #60 审查抓到的真机 bug 的锁）。
@@ -92,7 +94,11 @@ fn pick_hit_chooses_the_clicked_glyph() {
     let hit = |x: f64, y: f64| pick_hit(&items, 0, 15, 1, Abs::pt(x), Abs::pt(y));
     // 第一行：左半 → 字前，右半 → 字后
     assert_eq!(hit(2.0, 15.0), Some(0), "第一个字左半 → 偏移 0");
-    assert_eq!(hit(8.0, 15.0), Some(3), "第一个字右半 → 偏移 3（第二个字之前）");
+    assert_eq!(
+        hit(8.0, 15.0),
+        Some(3),
+        "第一个字右半 → 偏移 3（第二个字之前）"
+    );
     assert_eq!(hit(25.0, 15.0), Some(9), "第三个字右半 → 偏移 9（= 行尾）");
     // 行外：右侧空白 → 行尾；左侧空白 → 行首
     assert_eq!(hit(200.0, 15.0), Some(9), "点在这一行右边很远 → 行尾");
@@ -216,7 +222,10 @@ fn footnote_doc_keeps_every_band_and_stays_contiguous() {
         .filter(|(_, b)| !b.found || b.svg.is_empty())
         .map(|(i, b)| (i, b.height_pt, b.found))
         .collect();
-    assert!(dropped.is_empty(), "不该有块被丢掉（索引/带高/找到没）: {dropped:?}");
+    assert!(
+        dropped.is_empty(),
+        "不该有块被丢掉（索引/带高/找到没）: {dropped:?}"
+    );
     // ② 一块都不许被压扁（最小带 0.75pt）
     let squashed: Vec<(usize, f64)> = out
         .blocks
@@ -225,7 +234,10 @@ fn footnote_doc_keeps_every_band_and_stays_contiguous() {
         .filter(|(_, b)| b.height_pt < 0.75)
         .map(|(i, b)| (i, b.height_pt))
         .collect();
-    assert!(squashed.is_empty(), "裁剪带被压扁了（脚注段吞掉了后面的块？）: {squashed:?}");
+    assert!(
+        squashed.is_empty(),
+        "裁剪带被压扁了（脚注段吞掉了后面的块？）: {squashed:?}"
+    );
     // ③ **首尾相接**：同页相邻块 i 的底 == 块 i+1 的顶（"切片摞起来 == 原版式"的来源，
     //    也是夹紧生效的判据 —— 不夹紧时脚注段的底会远超下一块的顶）
     for w in out.blocks.windows(2) {
@@ -332,7 +344,14 @@ fn hit_test_on_real_layout_maps_edges_to_block_bounds() {
 
     // 单行块：横向两端必定落在块首 / 块尾（y 取带里任意高度都行 —— 同一行的字形纵向距离相同）
     let y = single.y_pt + single.height_pt * 0.5;
-    let left = hit_test(single.start, single.end, single.page, single.x_pt + 0.5, y, None);
+    let left = hit_test(
+        single.start,
+        single.end,
+        single.page,
+        single.x_pt + 0.5,
+        y,
+        None,
+    );
     let right = hit_test(
         single.start,
         single.end,
@@ -532,7 +551,14 @@ fn writing_mode_window_limits_crops() {
     let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
     let src = "= 标题\n\n第一段。\n\n第二段。\n\n第三段。\n";
     let out_all = compile_blocks(
-        src.to_string(), 0, None, &fonts_dir(), &FontConfig::default(), 371.25, None, None,
+        src.to_string(),
+        0,
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        371.25,
+        None,
+        None,
     );
     assert!(out_all.ok);
     let all_svgs = out_all.blocks.iter().filter(|b| !b.svg.is_empty()).count();
@@ -540,11 +566,21 @@ fn writing_mode_window_limits_crops() {
 
     // 窗口只覆盖文档最前面几个字节 → 只有第一个块出切片
     let out_win = compile_blocks(
-        src.to_string(), 0, None, &fonts_dir(), &FontConfig::default(), 371.25, Some(0), Some(3),
+        src.to_string(),
+        0,
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        371.25,
+        Some(0),
+        Some(3),
     );
     assert!(out_win.ok);
     let win_svgs = out_win.blocks.iter().filter(|b| !b.svg.is_empty()).count();
-    assert!(win_svgs < all_svgs, "窗口化应减少切片数量：{win_svgs} vs {all_svgs}");
+    assert!(
+        win_svgs < all_svgs,
+        "窗口化应减少切片数量：{win_svgs} vs {all_svgs}"
+    );
     assert!(win_svgs >= 1, "窗口内的块仍要出切片");
     // 窗口外的块仍要回几何（前端要靠它判断"这块能渲染，只是还没渲"）
     assert!(out_win.blocks.iter().filter(|b| b.found).count() >= 3);
@@ -565,7 +601,16 @@ fn windowing_keeps_payload_bounded() {
     }
     let column = 371.25;
     // 全渲（对照）：这是**不许**出现在按键路径上的量级
-    let all = compile_blocks(src.clone(), 0, None, &fonts_dir(), &FontConfig::default(), column, None, None);
+    let all = compile_blocks(
+        src.clone(),
+        0,
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        column,
+        None,
+        None,
+    );
     assert!(all.ok, "{:?}", all.diagnostics);
     let all_blocks = all.blocks.iter().filter(|b| !b.svg.is_empty()).count();
     let all_bytes: usize = all.blocks.iter().map(|b| b.svg.len()).sum();
@@ -619,7 +664,16 @@ fn dump_long_doc_blocks() {
             ));
         }
         let t = Instant::now();
-        let out = compile_blocks(src.clone(), 0, None, &fonts_dir(), &FontConfig::default(), 371.25, None, None);
+        let out = compile_blocks(
+            src.clone(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            371.25,
+            None,
+            None,
+        );
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         assert!(out.ok, "编译应成功: {:?}", out.diagnostics);
         let rendered: Vec<&BlockCrop> = out.blocks.iter().filter(|b| !b.svg.is_empty()).collect();
@@ -655,13 +709,19 @@ fn dump_long_doc_blocks() {
             &fonts_dir(),
             &FontConfig::default(),
         );
-        if let typst::diag::Warned { output: Ok(doc), .. } = typst::compile::<PagedDocument>(&world) {
+        if let typst::diag::Warned {
+            output: Ok(doc), ..
+        } = typst::compile::<PagedDocument>(&world)
+        {
             let page_bytes: usize = doc
                 .pages()
                 .iter()
                 .map(|p| typst_svg::svg(p, &SvgOptions::default()).len())
                 .sum();
-            println!("LONGDOC-PAGE: 同一文档整页 SVG {:.1}KB", page_bytes as f64 / 1024.0);
+            println!(
+                "LONGDOC-PAGE: 同一文档整页 SVG {:.1}KB",
+                page_bytes as f64 / 1024.0
+            );
         }
     }
 }
@@ -783,15 +843,24 @@ fn block_partition_matches_typst_semantics() {
     let display = "前文。\n\n$ a + b = c $\n\n后文。\n";
     let got = blocks(display);
     assert!(
-        got.iter().any(|(k, t)| *k == "Equation" && t.contains("a + b")),
+        got.iter()
+            .any(|(k, t)| *k == "Equation" && t.contains("a + b")),
         "行间公式应自成一块：{got:?}"
     );
-    assert_eq!(got.iter().filter(|(k, _)| *k == "Paragraph").count(), 2, "前后各有段落");
+    assert_eq!(
+        got.iter().filter(|(k, _)| *k == "Paragraph").count(),
+        2,
+        "前后各有段落"
+    );
 
     // ③ 行内 raw（单反引号）不是块；围栏 raw 是块
     let raw = "正文里有 `code` 一段。\n\n```rust\nfn main() {}\n```\n\n后文。\n";
     let got = blocks(raw);
-    assert_eq!(got.iter().filter(|(k, _)| *k == "Raw").count(), 1, "只有围栏算块：{got:?}");
+    assert_eq!(
+        got.iter().filter(|(k, _)| *k == "Raw").count(),
+        1,
+        "只有围栏算块：{got:?}"
+    );
     assert!(
         got.iter().any(|(k, t)| *k == "Raw" && t.starts_with("```")),
         "块级 raw 应该是那段围栏：{got:?}"
@@ -828,7 +897,11 @@ fn block_crop_geometry_invariants() {
         );
         assert!(out.ok, "[{name}] 编译应成功：{:?}", out.diagnostics);
         let rendered: Vec<&BlockCrop> = out.blocks.iter().filter(|b| !b.svg.is_empty()).collect();
-        assert!(rendered.len() >= 3, "[{name}] 应切出多块，实际 {}", rendered.len());
+        assert!(
+            rendered.len() >= 3,
+            "[{name}] 应切出多块，实际 {}",
+            rendered.len()
+        );
 
         for b in &rendered {
             assert!(
@@ -908,7 +981,10 @@ fn dump_real_doc_fixture() {
         src.chars().count()
     );
     for d in &out.diagnostics {
-        println!("REALDOC-DIAG: [{}] 行{} 列{} {}", d.severity, d.line, d.column, d.message);
+        println!(
+            "REALDOC-DIAG: [{}] 行{} 列{} {}",
+            d.severity, d.line, d.column, d.message
+        );
     }
     for b in &out.blocks {
         println!(
@@ -932,16 +1008,28 @@ fn dump_real_doc_fixture() {
             &fonts_dir(),
             &FontConfig::default(),
         );
-        if let typst::diag::Warned { output: Ok(doc), .. } = typst::compile::<PagedDocument>(&world) {
+        if let typst::diag::Warned {
+            output: Ok(doc), ..
+        } = typst::compile::<PagedDocument>(&world)
+        {
             let (items, _) = collect_geometry(&world, &doc);
             let doc_start = injected.len();
             let mut in_region: Vec<(f64, usize, usize)> = items
                 .iter()
                 .filter(|i| i.rect.min.y.to_pt() > 480.0 && i.rect.min.y.to_pt() < 540.0)
-                .map(|i| (i.rect.min.y.to_pt(), i.range.start.saturating_sub(doc_start), i.range.end.saturating_sub(doc_start)))
+                .map(|i| {
+                    (
+                        i.rect.min.y.to_pt(),
+                        i.range.start.saturating_sub(doc_start),
+                        i.range.end.saturating_sub(doc_start),
+                    )
+                })
                 .collect();
             in_region.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            println!("REALDOC-REGION: y 480..540 的帧项 {} 个（y, 文档区间）", in_region.len());
+            println!(
+                "REALDOC-REGION: y 480..540 的帧项 {} 个（y, 文档区间）",
+                in_region.len()
+            );
             for (y, a, b) in in_region.iter().take(40) {
                 println!("  y={y:>6.1} 文档 [{a},{b})");
             }
@@ -971,7 +1059,10 @@ fn dump_scene_item_matching() {
         let compiled = format!("{injected}{src}");
         let doc_start = injected.len();
         let world = TypstWorld::new(compiled, None, &fonts_dir(), &FontConfig::default());
-        let typst::diag::Warned { output: Ok(doc), .. } = typst::compile::<PagedDocument>(&world) else {
+        let typst::diag::Warned {
+            output: Ok(doc), ..
+        } = typst::compile::<PagedDocument>(&world)
+        else {
             println!("SCENE[{name}] 编译失败");
             continue;
         };
@@ -979,8 +1070,13 @@ fn dump_scene_item_matching() {
         println!("\nSCENE[{name}] 帧项 {} 个", items.len());
         for b in source_blocks(src) {
             let range = (b.range.start + doc_start)..(b.range.end + doc_start);
-            let hit = items.iter().filter(|i| i.range.start < range.end && i.range.end >= range.start).count();
-            let first = items.iter().find(|i| i.range.start < range.end && i.range.end >= range.start);
+            let hit = items
+                .iter()
+                .filter(|i| i.range.start < range.end && i.range.end >= range.start)
+                .count();
+            let first = items
+                .iter()
+                .find(|i| i.range.start < range.end && i.range.end >= range.start);
             println!(
                 "  {} [{}..{}) 项 {} 首个项区间 {:?}（文档坐标 {:?}..{:?}）",
                 b.kind,
@@ -1070,7 +1166,16 @@ fn writing_mode_block_crops_are_sane() {
     let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
     const COLUMN_PT: f64 = 371.25; // = 495px（写作模式常见正文列宽）
     let src = "= 标题\n\n第一段正文，写得长一点以便观察断行与段落间距。\n\n- 列表项一\n- 列表项二\n\n$ integral_0^1 f(x) dif x $\n\n结尾段落。\n";
-    let out = compile_blocks(src.to_string(), 0, None, &fonts_dir(), &FontConfig::default(), COLUMN_PT, None, None);
+    let out = compile_blocks(
+        src.to_string(),
+        0,
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        COLUMN_PT,
+        None,
+        None,
+    );
     assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
     assert!(out.pages == Some(1), "page(height: auto) 应为单张长页");
 
@@ -1082,7 +1187,11 @@ fn writing_mode_block_crops_are_sane() {
         out.blocks.len()
     );
     for b in &rendered {
-        assert!(b.svg.contains("<svg"), "切片应是 SVG：{}", &b.svg[..b.svg.len().min(60)]);
+        assert!(
+            b.svg.contains("<svg"),
+            "切片应是 SVG：{}",
+            &b.svg[..b.svg.len().min(60)]
+        );
         assert!(
             (b.width_pt - COLUMN_PT).abs() < 0.5,
             "切片宽度应等于正文列宽 {}，实际 {}",
@@ -1125,7 +1234,12 @@ fn block_crops_carry_link_hotspots() {
     );
     assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
     let with_links: Vec<&BlockCrop> = out.blocks.iter().filter(|b| !b.links.is_empty()).collect();
-    assert_eq!(with_links.len(), 2, "段落与列表各自带链接：{:?}", with_links.len());
+    assert_eq!(
+        with_links.len(),
+        2,
+        "段落与列表各自带链接：{:?}",
+        with_links.len()
+    );
 
     let hrefs: Vec<&str> = out
         .blocks
@@ -1134,7 +1248,11 @@ fn block_crops_carry_link_hotspots() {
         .collect();
     assert_eq!(
         hrefs,
-        vec!["https://typst.app/docs", "https://example.com/a", "mailto:a@b.c"],
+        vec![
+            "https://typst.app/docs",
+            "https://example.com/a",
+            "mailto:a@b.c"
+        ],
         "三个链接都要在，且按出现顺序"
     );
 
@@ -1174,7 +1292,10 @@ fn block_crops_carry_link_hotspots() {
         None,
     );
     assert!(plain.ok);
-    assert!(plain.blocks.iter().all(|b| b.links.is_empty()), "没有链接就不该有热区");
+    assert!(
+        plain.blocks.iter().all(|b| b.links.is_empty()),
+        "没有链接就不该有热区"
+    );
 
     // 页内目标（`#link(<label>)`）不当作外部 URL：热区为空（映射回源码位置属后续工作）
     let internal = compile_blocks(
@@ -1227,7 +1348,13 @@ fn writing_mode_blocks_ignore_prefix_offset() {
 #[test]
 fn geometry_finds_typical_blocks() {
     let src = "= 标题\n\n正文一段，后面还有一句普通的中文句子用来拉高正文比例。\n\n$ x^2 $\n";
-    let report = probe_blocks(src.to_string(), None, &fonts_dir(), &FontConfig::default(), 495.0);
+    let report = probe_blocks(
+        src.to_string(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        495.0,
+    );
     assert!(report.ok, "应编译成功: {:?}", report.error);
     assert_eq!(report.pages, 1, "page(height: auto) 应为单张长页");
     assert!(

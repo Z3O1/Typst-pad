@@ -12,13 +12,7 @@ import { scanNonMarkupRegions, scanMarkupRegions } from "./typst-lex";
 import type { Region } from "./typst-lex";
 
 export type MarkupKind =
-  | "heading"
-  | "strong"
-  | "emph"
-  | "raw-inline"
-  | "raw-block"
-  | "list-marker"
-  | "link";
+  "heading" | "strong" | "emph" | "raw-inline" | "raw-block" | "list-marker" | "link";
 
 export interface MarkupDecoration {
   kind: MarkupKind;
@@ -285,10 +279,7 @@ function dedent(code: string): string {
 }
 
 /** 行内原始文本的正文范围（`` `code` `` → code）；块级（多行 / ``` 围栏）返回 null */
-function rawInlineInner(
-  region: Region,
-  text: string,
-): { from: number; to: number } | null {
+function rawInlineInner(region: Region, text: string): { from: number; to: number } | null {
   if (text.includes("\n")) return null; // 块级原始文本：本轮不处理
   const m = /^(`+)([\s\S]*?)\1$/.exec(text);
   if (!m) return null;

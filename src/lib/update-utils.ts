@@ -33,8 +33,7 @@ export const AUTO_CHECK_DELAY_MS = 4000;
  * 用户点过「稍后」之后的状态栏提示（说明"以后不会再自动弹，但可以手动查"）。
  * 验收里断言的就是这句话，改文案要两边一起改。
  */
-export const UPDATE_DISMISS_NOTICE =
-  "已停止自动提示更新（「帮助 → 检查更新…」随时可手动检查）";
+export const UPDATE_DISMISS_NOTICE = "已停止自动提示更新（「帮助 → 检查更新…」随时可手动检查）";
 
 /**
  * 自动检查是否应该**只更新状态栏、不弹窗**：`dismissedAt` 有合法值就是"用户说过不更新"。
@@ -94,7 +93,9 @@ export function progressFrom(downloaded: number, total: number): DownloadProgres
       : 0;
   const safeTotal = typeof total === "number" && Number.isFinite(total) && total > 0 ? total : 0;
   const percent =
-    safeTotal > 0 ? Math.max(0, Math.min(100, Math.round((safeDownloaded / safeTotal) * 100))) : null;
+    safeTotal > 0
+      ? Math.max(0, Math.min(100, Math.round((safeDownloaded / safeTotal) * 100)))
+      : null;
   return { downloaded: safeDownloaded, total: safeTotal, percent };
 }
 
@@ -151,7 +152,11 @@ export function describeUpdateError(error: unknown): string {
   ) {
     return `连接更新服务器失败（检查网络或代理设置）。原始错误：${message}`;
   }
-  if (lower.includes("permission") || lower.includes("not allowed") || lower.includes("forbidden")) {
+  if (
+    lower.includes("permission") ||
+    lower.includes("not allowed") ||
+    lower.includes("forbidden")
+  ) {
     return `没有执行更新的权限（安装程序可能被系统策略拦下），可到 GitHub Releases 手动下载安装包。原始错误：${message}`;
   }
   return message === "" ? "未知错误" : message;

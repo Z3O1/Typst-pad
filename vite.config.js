@@ -61,7 +61,7 @@ const syncWasmInit = {
   apply: "serve", // 只作用于 dev：生产构建（WebView2/Chromium）走原路径即可，不动产物
   transform(code, id) {
     // 同步 helper：替换 vite-plugin-wasm 的异步初始化函数（data:URL → atob → 同步实例化）
-    if (code.includes("url.startsWith(\"data:\")") && code.includes("export default async")) {
+    if (code.includes('url.startsWith("data:")') && code.includes("export default async")) {
       return [
         "export default function initWasm(imports, url) {",
         "  if (!url.startsWith('data:')) {",
@@ -86,17 +86,18 @@ const syncWasmInit = {
          * @param {string} spec
          */
         (_match, spec) => {
-        let filePath = spec.replace(/^\/@fs\//, "");
-        if (!filePath.startsWith("/")) filePath = id.replace(/[^/]*$/, "") + filePath;
-        // vite 的路径是相对 server root 的（如 /node_modules/...），补上项目根才可读
-        // @ts-expect-error process is a nodejs global
-        if (filePath.startsWith("/node_modules")) filePath = process.cwd() + filePath;
-        const buf = readFileSync(filePath);
-        return `const __vite__wasmUrl = "data:application/wasm;base64,${buf.toString("base64")}";`;
-      });
+          let filePath = spec.replace(/^\/@fs\//, "");
+          if (!filePath.startsWith("/")) filePath = id.replace(/[^/]*$/, "") + filePath;
+          // vite 的路径是相对 server root 的（如 /node_modules/...），补上项目根才可读
+          // @ts-expect-error process is a nodejs global
+          if (filePath.startsWith("/node_modules")) filePath = process.cwd() + filePath;
+          const buf = readFileSync(filePath);
+          return `const __vite__wasmUrl = "data:application/wasm;base64,${buf.toString("base64")}";`;
+        },
+      );
       code = code.replace(
         "const __vite__wasmModule = await __vite__initWasm(",
-        "const __vite__wasmModule = __vite__initWasm("
+        "const __vite__wasmModule = __vite__initWasm(",
       );
       return code;
     }

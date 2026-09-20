@@ -10,31 +10,13 @@
 // 因此这里验证的是**编辑器的装饰/选区/开关链路**；公式的真实排版由 Rust 单测覆盖
 // （cargo test compile_math）。
 import { connect, DEV_URL } from "./cdp.mjs";
+import { boot, createChecker, finish, shotPath as SHOT } from "./harness.mjs";
 
-// 截图写到仓库内（.browser-check/，见 .gitignore）：沙箱只允许写工作区，
-// 而 Chrome 需要 Windows 路径 —— 故用 CDP 取 base64 后由 Node 落到仓库里。
-const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
-
-/** 断言 + 计数 */
-let passed = 0;
-function check(name, ok, detail = "") {
-  if (ok) {
-    passed++;
-    console.log(`  ✓ ${name}`);
-  } else {
-    console.log(`  ✗ ${name} ${detail}`);
-    process.exitCode = 1;
-  }
-}
+// 断言 + 计数、截图路径、启动序列、收尾都来自 harness.mjs（六套件共用一份）
+const { check, state } = createChecker();
 
 const c = await connect();
-await c.goto(DEV_URL);
-// 清掉上一轮遗留的界面模式 / 主题，保证从默认态（写作模式）开始：
-// 否则上一轮若停在源码模式，页面加载后不渲染任何公式，第一条断言就会莫名超时（实测踩过）
-await c.evaluate(`localStorage.clear()`);
-await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 800));
+await boot(c, DEV_URL);
 
 /** 编辑器内的可见文本（widget 已替换的部分不出现，除非有 title/aria） */
 const editorText = `document.querySelector(".cm-content").innerText`;
@@ -71,7 +53,10 @@ await c.waitFor(widgetCount + ` === 1 && ` + blockCount + ` === 1`, { timeout: 8
 const text1 = await c.evaluate(editorText);
 const geo1 = await c.evaluate(widgetGeo);
 check("行内公式 → 行内 widget", geo1.length === 1, JSON.stringify(geo1));
-check("widget 内含 SVG", geo1.every((g) => g.hasSvg));
+check(
+  "widget 内含 SVG",
+  geo1.every((g) => g.hasSvg),
+);
 check(
   "行内公式源码被替换（DOM 里看不到 $x^2 + y^2$）",
   !text1.includes("$x^2 + y^2$"),
@@ -127,7 +112,11 @@ await c.key("ArrowRight", { code: "ArrowRight", keyCode: 39 });
 await c.key("End", { code: "End", keyCode: 35 });
 await c.waitFor(widgetCount + ` === 1 && ` + blockCount + ` === 1`, { timeout: 5000 });
 const text3 = await c.evaluate(editorText);
-check("光标离开后重新渲染（行内 widget 回到 1、块级仍在）", !text3.includes("$x^2 + y^2$"), JSON.stringify(text3));
+check(
+  "光标离开后重新渲染（行内 widget 回到 1、块级仍在）",
+  !text3.includes("$x^2 + y^2$"),
+  JSON.stringify(text3),
+);
 await c.screenshot(SHOT("wysiwyg-3-caret-outside"));
 
 console.log("4) 视图菜单「源代码模式」：开启 → 全部显示源码 + 右栏预览");
@@ -252,11 +241,27 @@ check(
   Array.isArray(underlinedInHeading) && underlinedInHeading.length === 0,
   JSON.stringify(underlinedInHeading),
 );
-check("粗体标记 `*` 被隐藏（文字保留）", markup.lines[2].includes("粗体") && !markup.lines[2].includes("*"), JSON.stringify(markup.lines[2]));
+check(
+  "粗体标记 `*` 被隐藏（文字保留）",
+  markup.lines[2].includes("粗体") && !markup.lines[2].includes("*"),
+  JSON.stringify(markup.lines[2]),
+);
 check("粗体字重为 700", markup.strongWeight === "700", String(markup.strongWeight));
-check("斜体样式生效且 `_` 被隐藏", markup.emphStyle === "italic" && !markup.lines[2].includes("_"), String(markup.emphStyle));
-check("行内代码等宽显示且反引号被隐藏", /mono/i.test(markup.rawFamily ?? "") && !markup.lines[2].includes("`"), String(markup.rawFamily));
-check("无序列表符号替换为圆点", markup.replacement === "• " && markup.lines[4].trim().endsWith("列表项"), JSON.stringify(markup));
+check(
+  "斜体样式生效且 `_` 被隐藏",
+  markup.emphStyle === "italic" && !markup.lines[2].includes("_"),
+  String(markup.emphStyle),
+);
+check(
+  "行内代码等宽显示且反引号被隐藏",
+  /mono/i.test(markup.rawFamily ?? "") && !markup.lines[2].includes("`"),
+  String(markup.rawFamily),
+);
+check(
+  "无序列表符号替换为圆点",
+  markup.replacement === "• " && markup.lines[4].trim().endsWith("列表项"),
+  JSON.stringify(markup),
+);
 await c.screenshot(SHOT("wysiwyg-7-markup"));
 
 console.log("7) 光标进入标题 → 标记符号重新露出（可编辑源码）");
@@ -285,8 +290,16 @@ const link = await c.evaluate(`(() => {
     underline: el ? getComputedStyle(el).textDecorationLine : null,
   };
 })()`);
-check("链接只留文字（#link(...) 与方括号不可见）", link.line.includes("官网") && !link.line.includes("#link") && !link.line.includes("["), JSON.stringify(link.line));
-check("链接文字带颜色与下划线", link.underline === "underline" && link.color !== "rgb(0, 0, 0)", JSON.stringify(link));
+check(
+  "链接只留文字（#link(...) 与方括号不可见）",
+  link.line.includes("官网") && !link.line.includes("#link") && !link.line.includes("["),
+  JSON.stringify(link.line),
+);
+check(
+  "链接文字带颜色与下划线",
+  link.underline === "underline" && link.color !== "rgb(0, 0, 0)",
+  JSON.stringify(link),
+);
 await c.screenshot(SHOT("wysiwyg-9-link"));
 
 console.log("9) 独占整行的行间公式 → 块级 widget（居中）");
@@ -311,10 +324,16 @@ const block = await c.evaluate(`(() => {
   };
 })()`);
 check("跨行行间公式渲染为块级 widget（含 SVG）", block.hasSvg);
-check("块级公式居中显示", block.textAlign === "center" && Math.abs(block.leftGap - block.rightGap) < 40, JSON.stringify(block));
+check(
+  "块级公式居中显示",
+  block.textAlign === "center" && Math.abs(block.leftGap - block.rightGap) < 40,
+  JSON.stringify(block),
+);
 check(
   "源码定界符消失、前后正文保留",
-  block.lines.includes("前文") && block.lines.includes("后文") && !block.lines.some((l) => l.includes("$")),
+  block.lines.includes("前文") &&
+    block.lines.includes("后文") &&
+    !block.lines.some((l) => l.includes("$")),
   JSON.stringify(block.lines),
 );
 await c.screenshot(SHOT("wysiwyg-10-block-math"));
@@ -326,8 +345,14 @@ const blockPoint = await c.evaluate(`(() => {
 })()`);
 await c.click(blockPoint.x, blockPoint.y);
 await c.waitFor(`document.querySelectorAll(".cm-math-block").length === 0`, { timeout: 5000 });
-const revealed = await c.evaluate(`Array.from(document.querySelectorAll(".cm-line")).map(l => l.innerText)`);
-check("整行公式展开为源码（可见 $ 定界符）", revealed.join("\n").includes("$"), JSON.stringify(revealed));
+const revealed = await c.evaluate(
+  `Array.from(document.querySelectorAll(".cm-line")).map(l => l.innerText)`,
+);
+check(
+  "整行公式展开为源码（可见 $ 定界符）",
+  revealed.join("\n").includes("$"),
+  JSON.stringify(revealed),
+);
 await c.screenshot(SHOT("wysiwyg-11-block-caret"));
 
 console.log("11) 文档内 #let 宏进入公式编译上下文");
@@ -347,7 +372,11 @@ check(
 );
 // 定义变化的公式用同一上下文（体现"上下文参与缓存键"，改定义会触发重渲染）
 const ctx2 = await c.evaluate(`window.__browserDevLastMath.context`);
-check("上下文以换行结尾（可直接拼接探针文档）", typeof ctx2 === "string" && ctx2.endsWith("\n"), JSON.stringify(ctx2));
+check(
+  "上下文以换行结尾（可直接拼接探针文档）",
+  typeof ctx2 === "string" && ctx2.endsWith("\n"),
+  JSON.stringify(ctx2),
+);
 
 console.log("12) 有序列表 `+ ` → 序号");
 await c.selectAll();
@@ -357,7 +386,11 @@ const list = await c.evaluate(`(() => {
   const reps = Array.from(document.querySelectorAll(".cm-markup-replacement")).map(e => e.textContent);
   return { reps, lines: Array.from(document.querySelectorAll(".cm-line")).map(l => l.innerText.trim()) };
 })()`);
-check("`+ ` 替换为 1. / 2. 序号", JSON.stringify(list.reps) === JSON.stringify(["1. ", "2. ", "1. "]), JSON.stringify(list));
+check(
+  "`+ ` 替换为 1. / 2. 序号",
+  JSON.stringify(list.reps) === JSON.stringify(["1. ", "2. ", "1. "]),
+  JSON.stringify(list),
+);
 await c.screenshot(SHOT("wysiwyg-12-ordered-list"));
 
 console.log("13) 代码块（``` 围栏）→ 块级代码块 widget");
@@ -375,9 +408,17 @@ const codeBlock = await c.evaluate(`(() => {
     hasFence: document.querySelector(".cm-content").innerText.includes("\u0060\u0060\u0060"),
   };
 })()`);
-check("围栏代码块渲染为 widget（代码内容正确、公共缩进已剔除）", codeBlock.code === "#let x = 1\n  let y = 2", JSON.stringify(codeBlock));
+check(
+  "围栏代码块渲染为 widget（代码内容正确、公共缩进已剔除）",
+  codeBlock.code === "#let x = 1\n  let y = 2",
+  JSON.stringify(codeBlock),
+);
 check("代码块等宽显示", /mono/i.test(codeBlock.family), codeBlock.family);
-check("围栏不可见、前后正文保留", !codeBlock.hasFence && codeBlock.lines.includes("前文") && codeBlock.lines.includes("后文"), JSON.stringify(codeBlock.lines));
+check(
+  "围栏不可见、前后正文保留",
+  !codeBlock.hasFence && codeBlock.lines.includes("前文") && codeBlock.lines.includes("后文"),
+  JSON.stringify(codeBlock.lines),
+);
 await c.screenshot(SHOT("wysiwyg-13-code-block"));
 
 console.log("14) 光标进入代码块 → 回到源码");
@@ -387,7 +428,9 @@ const codePoint = await c.evaluate(`(() => {
 })()`);
 await c.click(codePoint.x, codePoint.y);
 await c.waitFor(`document.querySelectorAll(".cm-raw-block").length === 0`, { timeout: 5000 });
-const fenceBack = await c.evaluate(`document.querySelector(".cm-content").innerText.includes("\u0060\u0060\u0060")`);
+const fenceBack = await c.evaluate(
+  `document.querySelector(".cm-content").innerText.includes("\u0060\u0060\u0060")`,
+);
 check("围栏重新可见（可编辑源码）", fenceBack === true);
 await c.screenshot(SHOT("wysiwyg-14-code-block-caret"));
 
@@ -416,9 +459,21 @@ const single = await c.evaluate(`(() => {
     previewExistsInDom: !!document.querySelector("#preview-host"),
   };
 })()`);
-check("默认（写作模式）为单栏：预览栏不显示", single.previewDisplay === "none", JSON.stringify(single));
-check("编辑区占满整宽", Math.abs(single.editorWidth - single.panesWidth) <= 2, JSON.stringify(single));
-check("编辑器作为纸张块居中（左右留白接近）", Math.abs(single.leftGap - single.rightGap) < 20, JSON.stringify(single));
+check(
+  "默认（写作模式）为单栏：预览栏不显示",
+  single.previewDisplay === "none",
+  JSON.stringify(single),
+);
+check(
+  "编辑区占满整宽",
+  Math.abs(single.editorWidth - single.panesWidth) <= 2,
+  JSON.stringify(single),
+);
+check(
+  "编辑器作为纸张块居中（左右留白接近）",
+  Math.abs(single.leftGap - single.rightGap) < 20,
+  JSON.stringify(single),
+);
 check("预览容器仍在 DOM 中（编译链路不受影响）", single.previewExistsInDom === true);
 await c.screenshot(SHOT("wysiwyg-15-single-pane"));
 
@@ -459,13 +514,19 @@ const previewItem = await c.evaluate(`(() => {
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()`);
 await c.click(previewItem.x, previewItem.y);
-await c.waitFor(`getComputedStyle(document.querySelector(".preview-pane")).display !== "none"`, { timeout: 5000 });
+await c.waitFor(`getComputedStyle(document.querySelector(".preview-pane")).display !== "none"`, {
+  timeout: 5000,
+});
 const split = await c.evaluate(`(() => {
   const editor = document.querySelector(".editor-pane").getBoundingClientRect();
   const panes = document.querySelector(".panes").getBoundingClientRect();
   return { editorWidth: Math.round(editor.width), panesWidth: Math.round(panes.width) };
 })()`);
-check("打开「显示预览栏」后回到双栏（编辑区约半宽）", split.editorWidth < split.panesWidth * 0.6, JSON.stringify(split));
+check(
+  "打开「显示预览栏」后回到双栏（编辑区约半宽）",
+  split.editorWidth < split.panesWidth * 0.6,
+  JSON.stringify(split),
+);
 await c.screenshot(SHOT("wysiwyg-16-split-again"));
 
 // 展开菜单在**深色主题**下也必须是白底黑字（用户提这条需求时用的就是深色主题）。
@@ -566,7 +627,11 @@ const paper = await c.evaluate(`(() => {
 })()`);
 check("写作模式下编辑器带 write 类", paper.hostHasWriteClass, JSON.stringify(paper));
 check("无行号槽（Typora 没有行号）", paper.gutterDisplay === "none", paper.gutterDisplay);
-check("正文是衬线字体（与预览/PDF 输出一致）", /serif|Songti|Noto Serif/i.test(paper.fontFamily), paper.fontFamily);
+check(
+  "正文是衬线字体（与预览/PDF 输出一致）",
+  /serif|Songti|Noto Serif/i.test(paper.fontFamily),
+  paper.fontFamily,
+);
 check(
   // 写作模式的正文必须**跟文档实际字号走**（Rust 侧 textPt → --write-doc-px），行高用 typst 的
   // leading（0.65em → 1.65）：光标进出块时那一块的字号/行距才不会变（用户：「不要光标在哪里
@@ -578,7 +643,11 @@ check(
   JSON.stringify([paper.fontSize, paper.lineHeight]),
 );
 check("整页纸张限宽居中", paper.paperMaxWidth !== "none", paper.paperMaxWidth);
-check("状态栏有模式标识且不显示行列", paper.status.includes("写作") && !paper.status.includes("行 "), paper.status);
+check(
+  "状态栏有模式标识且不显示行列",
+  paper.status.includes("写作") && !paper.status.includes("行 "),
+  paper.status,
+);
 await c.screenshot(SHOT("wysiwyg-18-write-ui"));
 
 // 格式菜单：加粗（Ctrl+B）
@@ -595,7 +664,11 @@ check("Ctrl+B 加粗（插入 Typst 标记）", bold.includes("*要加粗的文�
 await c.key("1", { code: "Digit1", keyCode: 49, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 300));
 const heading = await c.evaluate(`document.querySelector(".cm-content").innerText`);
-check("Ctrl+1 标题（行首加 `= `，写作模式下立刻变大）", heading.trim().startsWith("= "), JSON.stringify(heading));
+check(
+  "Ctrl+1 标题（行首加 `= `，写作模式下立刻变大）",
+  heading.trim().startsWith("= "),
+  JSON.stringify(heading),
+);
 const headingSize = await c.evaluate(`(() => {
   const el = document.querySelector(".cm-markup-heading");
   return el ? parseFloat(getComputedStyle(el).fontSize) : null;
@@ -734,7 +807,9 @@ await new Promise((r) => setTimeout(r, 900));
 const notRestored = await c.evaluate(`document.querySelector(".cm-content").innerText.trim()`);
 check("关掉「启动时恢复」后不恢复内容", notRestored === "", JSON.stringify(notRestored));
 
-console.log("22) Alt 激活菜单栏：编辑器不失焦、光标与滚动位置不变（用户反馈「不要改变当前编辑位置」）");
+console.log(
+  "22) Alt 激活菜单栏：编辑器不失焦、光标与滚动位置不变（用户反馈「不要改变当前编辑位置」）",
+);
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
@@ -745,7 +820,9 @@ const altDoc = Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 行`).join("\n
 await c.type(altDoc);
 await new Promise((r) => setTimeout(r, 700));
 // 把视口滚到中间，并记住滚动位置与焦点状态
-await c.evaluate(`(() => { const sc = document.querySelector(".cm-scroller"); sc.scrollTop = Math.floor(sc.scrollHeight / 2); return 1; })()`);
+await c.evaluate(
+  `(() => { const sc = document.querySelector(".cm-scroller"); sc.scrollTop = Math.floor(sc.scrollHeight / 2); return 1; })()`,
+);
 await new Promise((r) => setTimeout(r, 300));
 const probe = `(() => {
   const sc = document.querySelector(".cm-scroller");
@@ -759,22 +836,38 @@ const probe = `(() => {
   };
 })()`;
 const beforeAlt = await c.evaluate(probe);
-check("起点：焦点在编辑区、菜单未激活、已滚动", beforeAlt.focusInEditor && !beforeAlt.menuSelected && beforeAlt.scrollTop > 0, JSON.stringify(beforeAlt));
+check(
+  "起点：焦点在编辑区、菜单未激活、已滚动",
+  beforeAlt.focusInEditor && !beforeAlt.menuSelected && beforeAlt.scrollTop > 0,
+  JSON.stringify(beforeAlt),
+);
 
 await c.key("Alt", { code: "AltLeft", keyCode: 18, modifiers: 1 });
 await new Promise((r) => setTimeout(r, 500));
 const afterAlt = await c.evaluate(probe);
 check("Alt 后菜单栏进入选中态", afterAlt.menuSelected, JSON.stringify(afterAlt));
 check("Alt 后编辑器**仍然**持有焦点（光标没丢）", afterAlt.focusInEditor, JSON.stringify(afterAlt));
-check("Alt 后滚动位置不变（编辑位置没被改）", afterAlt.scrollTop === beforeAlt.scrollTop, `${beforeAlt.scrollTop} → ${afterAlt.scrollTop}`);
-check("Alt 后文档内容没变", afterAlt.text === beforeAlt.text, `${beforeAlt.text} → ${afterAlt.text}`);
+check(
+  "Alt 后滚动位置不变（编辑位置没被改）",
+  afterAlt.scrollTop === beforeAlt.scrollTop,
+  `${beforeAlt.scrollTop} → ${afterAlt.scrollTop}`,
+);
+check(
+  "Alt 后文档内容没变",
+  afterAlt.text === beforeAlt.text,
+  `${beforeAlt.text} → ${afterAlt.text}`,
+);
 await c.screenshot(SHOT("wysiwyg-22-alt-keeps-focus"));
 
 // 再按一次 Alt 取消选中：仍然保持编辑区焦点
 await c.key("Alt", { code: "AltLeft", keyCode: 18, modifiers: 1 });
 await new Promise((r) => setTimeout(r, 400));
 const afterAlt2 = await c.evaluate(probe);
-check("再按 Alt 取消选中后焦点仍在编辑区", !afterAlt2.menuSelected && afterAlt2.focusInEditor, JSON.stringify(afterAlt2));
+check(
+  "再按 Alt 取消选中后焦点仍在编辑区",
+  !afterAlt2.menuSelected && afterAlt2.focusInEditor,
+  JSON.stringify(afterAlt2),
+);
 
 console.log("23) 自动更新入口（浏览器开发模式：桩固定返回「没有新版本」）");
 // 桩对 plugin:updater|check 返回 null（见 browser-dev-stub.ts），所以这里断言的是
@@ -824,8 +917,16 @@ const afterCheck = await c.evaluate(`({
   notice: !!document.querySelector(".status-update"),
   focusInEditor: !!document.activeElement && !!document.activeElement.closest(".cm-content"),
 })`);
-check("手动检查后状态栏显示「已是最新版本」", afterCheck.status.includes("已是最新版本"), JSON.stringify(afterCheck.status));
-check("没有新版本：不弹更新窗、状态栏也不留更新入口", !afterCheck.dialog && !afterCheck.notice, JSON.stringify(afterCheck));
+check(
+  "手动检查后状态栏显示「已是最新版本」",
+  afterCheck.status.includes("已是最新版本"),
+  JSON.stringify(afterCheck.status),
+);
+check(
+  "没有新版本：不弹更新窗、状态栏也不留更新入口",
+  !afterCheck.dialog && !afterCheck.notice,
+  JSON.stringify(afterCheck),
+);
 check("检查更新不抢编辑区焦点", afterCheck.focusInEditor, JSON.stringify(afterCheck));
 await c.screenshot(SHOT("wysiwyg-23-update-check"));
 
@@ -838,7 +939,11 @@ const autoRow = await c.evaluate(`(() => {
     .find(e => (e.textContent || "").includes("自动检查更新"));
   return row ? { checked: row.querySelector("input").checked, text: row.textContent.trim() } : null;
 })()`);
-check("设置里有「启动时自动检查更新」且默认勾选", !!autoRow && autoRow.checked, JSON.stringify(autoRow));
+check(
+  "设置里有「启动时自动检查更新」且默认勾选",
+  !!autoRow && autoRow.checked,
+  JSON.stringify(autoRow),
+);
 await c.screenshot(SHOT("wysiwyg-23-update-settings"));
 await c.evaluate(
   `Array.from(document.querySelectorAll(".settings-modal .modal-btn")).find(b => (b.textContent || "").includes("关闭")).click()`,
@@ -875,7 +980,11 @@ check(
   Math.abs((zoomStart.requested ?? -1) - 1) < 0.001,
   JSON.stringify(zoomStart),
 );
-check("默认状态栏不显示缩放徽标", !zoomStart.tags.some((t) => t.includes("缩放")), JSON.stringify(zoomStart.tags));
+check(
+  "默认状态栏不显示缩放徽标",
+  !zoomStart.tags.some((t) => t.includes("缩放")),
+  JSON.stringify(zoomStart.tags),
+);
 
 // Ctrl + 滚轮向上 5 格 → 150%（一档 10%）
 for (let i = 0; i < 5; i++) {
@@ -983,14 +1092,17 @@ check(
 await clickMenuItem("重置缩放");
 await new Promise((r) => setTimeout(r, 400));
 const reset = await c.evaluate(zoomProbe);
-check("「重置缩放」回到 100%", Math.abs((reset.requested ?? 0) - 1) < 0.001, String(reset.requested));
+check(
+  "「重置缩放」回到 100%",
+  Math.abs((reset.requested ?? 0) - 1) < 0.001,
+  String(reset.requested),
+);
 check(
   "回到 100% 后状态栏不再显示缩放徽标",
   !reset.tags.some((t) => t.includes("缩放")),
   JSON.stringify(reset.tags),
 );
 await c.screenshot(SHOT("wysiwyg-24-zoom-reset"));
-
 
 // ---------------------------------------------------------------------------
 // 第 25 组：正文字体设置（中文不再被 typst 回退成楷体）
@@ -1026,13 +1138,21 @@ const fontUi = await c.evaluate(`(() => {
   };
 })()`);
 check("设置弹窗里有「正文字体（中文）」下拉", fontUi.hasSelect, JSON.stringify(fontUi));
-check("下拉首项是「默认」（值 = 空串）", fontUi.options[0] === "", JSON.stringify(fontUi.options.slice(0, 3)));
+check(
+  "下拉首项是「默认」（值 = 空串）",
+  fontUi.options[0] === "",
+  JSON.stringify(fontUi.options.slice(0, 3)),
+);
 check(
   "下拉选项来自字体列表（桩给出 SimSun / Noto Serif CJK SC）",
   fontUi.options.includes("SimSun") && fontUi.options.includes("Noto Serif CJK SC"),
   JSON.stringify(fontUi.options),
 );
-check("有「额外字体目录」区与添加按钮", fontUi.hasDirBlock && fontUi.hasAddBtn, JSON.stringify(fontUi));
+check(
+  "有「额外字体目录」区与添加按钮",
+  fontUi.hasDirBlock && fontUi.hasAddBtn,
+  JSON.stringify(fontUi),
+);
 
 // 添加字体目录（桩的目录选择器返回假目录）→ 目录进列表、字体列表随之刷新
 await c.evaluate(`(() => {
@@ -1041,7 +1161,9 @@ await c.evaluate(`(() => {
   );
   btn.click();
 })()`);
-await c.waitFor(`!!document.querySelector(".settings-modal .settings-dir-path")`, { timeout: 5000 });
+await c.waitFor(`!!document.querySelector(".settings-modal .settings-dir-path")`, {
+  timeout: 5000,
+});
 const afterAdd = await c.evaluate(`(() => {
   const modal = document.querySelector(".settings-modal");
   const select = modal.querySelector("select.settings-select");
@@ -1095,7 +1217,11 @@ check(
   !!saved.last && Array.isArray(saved.last.fontDirs) && saved.last.fontDirs.length === 1,
   JSON.stringify(saved.last && saved.last.fontDirs),
 );
-check("保存后弹窗关闭并给出状态栏反馈", !saved.modalOpen && saved.status.includes("设置已保存"), saved.status.slice(0, 40));
+check(
+  "保存后弹窗关闭并给出状态栏反馈",
+  !saved.modalOpen && saved.status.includes("设置已保存"),
+  saved.status.slice(0, 40),
+);
 
 // 字体族名写错（中文族名永远匹配不上）→ typst 只发 warning：必须可见，否则就是"改了字体没用"
 await c.evaluate(`localStorage.clear()`);
@@ -1115,9 +1241,7 @@ check(
 );
 await c.evaluate(`document.querySelector(".warning-badge").click()`);
 await c.waitFor(`!!document.querySelector(".error-popover .error-item-msg")`, { timeout: 5000 });
-const warnText = await c.evaluate(
-  `document.querySelector(".error-popover").innerText`,
-);
+const warnText = await c.evaluate(`document.querySelector(".error-popover").innerText`);
 check(
   "警告弹窗给出可行动提示（英文族名 + 额外字体目录）",
   warnText.includes("Microsoft YaHei") && warnText.includes("额外字体目录"),
@@ -1166,9 +1290,21 @@ check(
   JSON.stringify(notes.headings),
 );
 check("说明里不再出现 `###` 原文", !notes.text.includes("###"), notes.text.slice(0, 60));
-check("说明里不再出现 `**` 原文（粗体渲染成 strong）", !notes.text.includes("**") && notes.strongs.length > 0, JSON.stringify(notes.strongs));
-check("行内代码渲染成 code 元素", notes.codes.some((t) => t.includes("font-warnings.ts")), JSON.stringify(notes.codes));
-check("列表渲染成 li，且两空格缩进形成嵌套列表", notes.bullets >= 3 && notes.nested >= 1, `li=${notes.bullets} nested=${notes.nested}`);
+check(
+  "说明里不再出现 `**` 原文（粗体渲染成 strong）",
+  !notes.text.includes("**") && notes.strongs.length > 0,
+  JSON.stringify(notes.strongs),
+);
+check(
+  "行内代码渲染成 code 元素",
+  notes.codes.some((t) => t.includes("font-warnings.ts")),
+  JSON.stringify(notes.codes),
+);
+check(
+  "列表渲染成 li，且两空格缩进形成嵌套列表",
+  notes.bullets >= 3 && notes.nested >= 1,
+  `li=${notes.bullets} nested=${notes.nested}`,
+);
 check(
   "说明里的 HTML 只当文本显示（转义，不注入元素）",
   notes.imgs === 0 && notes.text.includes("<img"),
@@ -1353,11 +1489,7 @@ check(
   Math.abs((delayed.saved ?? 0) - 1.3) < 0.001 && Math.abs((delayed.engine ?? 0) - 1.3) < 0.011,
   JSON.stringify(delayed),
 );
-check(
-  "慢引擎不误报「未生效」",
-  !delayed.status.includes("未生效"),
-  JSON.stringify(delayed.status),
-);
+check("慢引擎不误报「未生效」", !delayed.status.includes("未生效"), JSON.stringify(delayed.status));
 
 // E) **宽度判据瞎了、只有 dpr 跟随的机器**（`&zoomwidthstuck=1`，2026-09-16 用户第六轮反馈
 // 「改变窗口大小的时候会动缩放；用 Ctrl + 滚轮 会回退」）：桩让 `clientWidth` 永远等于 100% 基准、
@@ -1369,7 +1501,8 @@ await wheelOverEditor(-100, 3);
 const widthStuck = await c.evaluate(zoomProbe2);
 check(
   "宽度判据读不出缩放、但 dpr 判据看得见的机器：档位照旧落在请求值（不再被弹回 120%）",
-  Math.abs((widthStuck.saved ?? 0) - 1.3) < 0.001 && Math.abs((widthStuck.engine ?? 0) - 1.3) < 0.011,
+  Math.abs((widthStuck.saved ?? 0) - 1.3) < 0.001 &&
+    Math.abs((widthStuck.engine ?? 0) - 1.3) < 0.011,
   JSON.stringify(widthStuck),
 );
 check(
@@ -1510,14 +1643,26 @@ const singleLineHeight = beforeWrap.lineHeight;
 await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 1 });
 await new Promise((r) => setTimeout(r, 400));
 const wrapped = await c.evaluate(wrapProbe);
-check("Alt+Z 打开自动换行（cm-lineWrapping 生效）", wrapped.wrapping === true, JSON.stringify(wrapped));
+check(
+  "Alt+Z 打开自动换行（cm-lineWrapping 生效）",
+  wrapped.wrapping === true,
+  JSON.stringify(wrapped),
+);
 check(
   "长行折行显示、横向溢出消失",
   wrapped.overflowX <= 2 && wrapped.lineHeight > singleLineHeight + 10,
   `溢出 ${wrapped.overflowX}px，行高 ${singleLineHeight} → ${wrapped.lineHeight}`,
 );
-check("状态栏说明开关状态", wrapped.status.includes("自动换行：开"), JSON.stringify(wrapped.status));
-check("换行开关写进存档（下次启动仍是开的）", wrapped.saved === true, JSON.stringify(wrapped.saved));
+check(
+  "状态栏说明开关状态",
+  wrapped.status.includes("自动换行：开"),
+  JSON.stringify(wrapped.status),
+);
+check(
+  "换行开关写进存档（下次启动仍是开的）",
+  wrapped.saved === true,
+  JSON.stringify(wrapped.saved),
+);
 await c.screenshot(SHOT("wysiwyg-29-wrap-on"));
 
 // 刷新后仍然折行（持久化真的生效，而不只是内存里的一次重配）
@@ -1709,12 +1854,16 @@ check(
 );
 check(
   "150%：预览里的字物理上变大了（预览跟着界面缩放一起变大，没被重排吃掉）",
-  zoom150.textPhysPx !== null && base.textPhysPx !== null && zoom150.textPhysPx / base.textPhysPx > 1.3,
+  zoom150.textPhysPx !== null &&
+    base.textPhysPx !== null &&
+    zoom150.textPhysPx / base.textPhysPx > 1.3,
   `字高 物理 ${base.textPhysPx}px → ${zoom150.textPhysPx}px（比 ${(zoom150.textPhysPx / base.textPhysPx).toFixed(3)}）`,
 );
 check(
   "150%：纸张宽度 = 栏宽（重排的必然：恒铺满栏宽，物理宽度不随缩放变；变大的是字不是纸张越界）",
-  zoom150.canvasCss !== null && zoom150.container !== null && Math.abs(zoom150.canvasCss - zoom150.container) <= 2,
+  zoom150.canvasCss !== null &&
+    zoom150.container !== null &&
+    Math.abs(zoom150.canvasCss - zoom150.container) <= 2,
   `画布 CSS ${zoom150.canvasCss} vs 栏宽 ${zoom150.container}（物理都 ≈ 窗口的一半栏宽）`,
 );
 check(
@@ -1793,12 +1942,20 @@ const cmText = `document.querySelector(".cm-content").innerText`;
 await c.type("$");
 await new Promise((r) => setTimeout(r, 300));
 const scaffold = await c.evaluate(cmText);
-check("空行输入 $ 自动补出 `$  $`（行间公式脚手架）", scaffold === "$  $", JSON.stringify(scaffold));
+check(
+  "空行输入 $ 自动补出 `$  $`（行间公式脚手架）",
+  scaffold === "$  $",
+  JSON.stringify(scaffold),
+);
 
 await c.type("x");
 await new Promise((r) => setTimeout(r, 300));
 const scaffoldTyped = await c.evaluate(cmText);
-check("光标在中间：接着敲字直接得到 `$ x $`", scaffoldTyped === "$ x $", JSON.stringify(scaffoldTyped));
+check(
+  "光标在中间：接着敲字直接得到 `$ x $`",
+  scaffoldTyped === "$ x $",
+  JSON.stringify(scaffoldTyped),
+);
 
 // 光标移开（End 之后还要换行：光标停在公式末端时算"碰到公式"，按设计仍展开源码）看渲染
 await c.key("End", { code: "End", keyCode: 35 });
@@ -1829,7 +1986,11 @@ await c.type("$");
 await c.type("y");
 await new Promise((r) => setTimeout(r, 400));
 const inlineTyped = await c.evaluate(cmText);
-check("行内有别的字时补的是行内配对，敲字得到 `前文 $y$`", inlineTyped === "前文 $y$", JSON.stringify(inlineTyped));
+check(
+  "行内有别的字时补的是行内配对，敲字得到 `前文 $y$`",
+  inlineTyped === "前文 $y$",
+  JSON.stringify(inlineTyped),
+);
 
 // ③ 连按两下 `$`：右侧已有闭合符 → 跳过，不插垃圾
 await c.selectAll();
@@ -1852,7 +2013,11 @@ await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await c.type("$");
 await new Promise((r) => setTimeout(r, 300));
 const beforePairDelete = await c.evaluate(cmText);
-check("重来一次仍是 `$  $`（脚手架与光标位置稳定）", beforePairDelete === "$  $", JSON.stringify(beforePairDelete));
+check(
+  "重来一次仍是 `$  $`（脚手架与光标位置稳定）",
+  beforePairDelete === "$  $",
+  JSON.stringify(beforePairDelete),
+);
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await new Promise((r) => setTimeout(r, 300));
 const afterBackspace = await c.evaluate(cmText);
@@ -2407,7 +2572,11 @@ const reopened = await c.evaluate(`(() => {
     .find(e => (e.textContent || "").includes("启动时恢复上次内容"));
   return { checked: row.querySelector("input").checked };
 })()`);
-check("重新打开设置：那一勾回到原状（Esc 没有偷偷保存）", reopened.checked === true, JSON.stringify(reopened));
+check(
+  "重新打开设置：那一勾回到原状（Esc 没有偷偷保存）",
+  reopened.checked === true,
+  JSON.stringify(reopened),
+);
 await c.key("Escape", { code: "Escape", keyCode: 27 });
 await new Promise((r) => setTimeout(r, 300));
 
@@ -2776,7 +2945,9 @@ check(
 
 // ③ 有未保存内容时 Ctrl+N：先确认。浏览器验收里的 confirm 桩固定返回 false（= 用户点「取消」），
 //    所以这里验的是"取消分支"：内容与存档都必须原样留着。
-const beforeNew = await c.evaluate(`({ content: ${savedContent}, chars: (document.querySelector(".cm-content").innerText || "").length })`);
+const beforeNew = await c.evaluate(
+  `({ content: ${savedContent}, chars: (document.querySelector(".cm-content").innerText || "").length })`,
+);
 await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 600));
 const afterNewAttempt = await c.evaluate(`({
@@ -2894,8 +3065,7 @@ await new Promise((r) => setTimeout(r, 500));
 const zReset = await c.evaluate(zoomProbe);
 check(
   "菜单「视图 → 重置缩放」回到 100%，徽标消失（缩放的三条入口共用同一套状态）",
-  Math.abs((zReset.requested ?? 0) - 1) < 0.001 &&
-    !zReset.tags.some((t) => t.includes("缩放")),
+  Math.abs((zReset.requested ?? 0) - 1) < 0.001 && !zReset.tags.some((t) => t.includes("缩放")),
   JSON.stringify({ requested: zReset.requested, tags: zReset.tags }),
 );
 
@@ -3251,7 +3421,9 @@ await pop43ClearDoc();
 await c.evaluate(`document.querySelector(".cm-content").focus()`);
 await c.type('第一行内容\n#set text(font: "微软雅黑")');
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
-await c.waitFor(`document.querySelector(".statusbar").innerText.includes("源码")`, { timeout: 5000 });
+await c.waitFor(`document.querySelector(".statusbar").innerText.includes("源码")`, {
+  timeout: 5000,
+});
 await c.waitFor(`!!document.querySelector(".warning-badge.clickable")`, { timeout: 8000 });
 await new Promise((r) => setTimeout(r, 400));
 
@@ -3481,7 +3653,9 @@ await copy44ClearDoc();
 await c.evaluate(`document.querySelector(".cm-content").focus()`);
 await c.type("第一行内容\nDIAG-ERROR-MARKER");
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 }); // 源码模式：状态栏显示行列
-await c.waitFor(`document.querySelector(".statusbar").innerText.includes("源码")`, { timeout: 5000 });
+await c.waitFor(`document.querySelector(".statusbar").innerText.includes("源码")`, {
+  timeout: 5000,
+});
 await c.waitFor(`!!document.querySelector(".cm-diag-wavy")`, { timeout: 8000 });
 await new Promise((r) => setTimeout(r, 500));
 await c.evaluate(COPY44_ERR_BADGE);
@@ -3528,8 +3702,7 @@ check(
   "点「复制全部」→ 首行是浮层标题、其后每条一行",
   copy44All.copied !== null &&
     copy44All.copied.length === 2 &&
-    copy44All.last ===
-      "编译错误（1 处）\n行 2, 列 1：模拟编译错误：这一行是为了验收红波浪线",
+    copy44All.last === "编译错误（1 处）\n行 2, 列 1：模拟编译错误：这一行是为了验收红波浪线",
   JSON.stringify(copy44All.last),
 );
 
@@ -3578,7 +3751,9 @@ await c.send("Emulation.setDeviceMetricsOverride", {
 });
 await new Promise((r) => setTimeout(r, 400));
 
-console.log("31b) 选中整个公式不展开（用户要求「选中整个公式请不展开」）：完整盖住 → 保持渲染 + 淡色底");
+console.log(
+  "31b) 选中整个公式不展开（用户要求「选中整个公式请不展开」）：完整盖住 → 保持渲染 + 淡色底",
+);
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
@@ -3615,7 +3790,11 @@ async function retypeDoc(text, after = 900) {
 await retypeDoc("前文 $x^2$ 后文\n");
 await c.waitFor(`document.querySelectorAll(".cm-math-widget").length === 1`, { timeout: 8000 });
 const selInlineBefore = await c.evaluate(MATH_SELECT_PROBE);
-check("行内公式已渲染（初始）", selInlineBefore.widgets === 1 && !selInlineBefore.inner.includes("$x^2$"), JSON.stringify(selInlineBefore));
+check(
+  "行内公式已渲染（初始）",
+  selInlineBefore.widgets === 1 && !selInlineBefore.inner.includes("$x^2$"),
+  JSON.stringify(selInlineBefore),
+);
 await c.evaluate(`(() => {
   const v = document.querySelector(".cm-content").cmTile.root.view;
   const d = v.state.doc.toString();
@@ -3631,8 +3810,16 @@ check(
   selInlineCovered.widgets === 1 && !selInlineCovered.inner.includes("$x^2$"),
   JSON.stringify(selInlineCovered),
 );
-check("整段盖住时挂了淡色底（.cm-math-selected）", selInlineCovered.tinted === 1, JSON.stringify(selInlineCovered));
-check("选中的内容仍然是源码（Ctrl+C 会复制到 `$x^2$`）", selInlineCovered.selText === "$x^2$", JSON.stringify(selInlineCovered.selText));
+check(
+  "整段盖住时挂了淡色底（.cm-math-selected）",
+  selInlineCovered.tinted === 1,
+  JSON.stringify(selInlineCovered),
+);
+check(
+  "选中的内容仍然是源码（Ctrl+C 会复制到 `$x^2$`）",
+  selInlineCovered.selText === "$x^2$",
+  JSON.stringify(selInlineCovered.selText),
+);
 
 // ② 只盖住一部分 → 照旧展开源码（半个公式要能精确高亮）
 await c.evaluate(`(() => {
@@ -3682,7 +3869,9 @@ await new Promise((r) => setTimeout(r, 400));
 const selBlockCovered = await c.evaluate(MATH_SELECT_PROBE);
 check(
   "整行公式被完整盖住 → 仍是渲染形态 + 淡色底",
-  selBlockCovered.blocks === 1 && selBlockCovered.tinted === 1 && !selBlockCovered.inner.includes("$ x^2 $"),
+  selBlockCovered.blocks === 1 &&
+    selBlockCovered.tinted === 1 &&
+    !selBlockCovered.inner.includes("$ x^2 $"),
   JSON.stringify(selBlockCovered),
 );
 await c.type("z");
@@ -3790,7 +3979,9 @@ const about45 = {
 };
 check(
   "深色主题下关于弹窗也是白底（共用 .modal 那条规则）",
-  about45.bg === PANEL45_BG && about45.title === "rgb(11, 107, 181)" && about45.note === "rgb(107, 107, 107)",
+  about45.bg === PANEL45_BG &&
+    about45.title === "rgb(11, 107, 181)" &&
+    about45.note === "rgb(107, 107, 107)",
   JSON.stringify(about45),
 );
 await c.screenshot(SHOT("wysiwyg-45-about-white-dark"));
@@ -3882,7 +4073,8 @@ await c.waitFor(`!!document.querySelector(".context-menu")`, { timeout: 5000 });
 const ctx45 = {
   bg: await c.evaluate(style45(".context-menu", "backgroundColor")),
   // 逐个条目读：空文档上「剪切 / 复制」是 disabled（灰字），别拿第一条当代表
-  items: await c.evaluate(`Array.from(document.querySelectorAll(".context-menu .menu-item")).map((e) => ({
+  items:
+    await c.evaluate(`Array.from(document.querySelectorAll(".context-menu .menu-item")).map((e) => ({
     text: e.textContent.trim(),
     color: getComputedStyle(e).color,
     disabled: e.disabled,
@@ -3913,5 +4105,4 @@ await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 400));
 
-console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
-c.close();
+finish(`通过 ${state.passed} 项检查；截图：${SHOT("wysiwyg-*")}`);

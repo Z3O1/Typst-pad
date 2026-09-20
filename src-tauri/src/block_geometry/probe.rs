@@ -77,20 +77,28 @@ pub fn probe_blocks(
 ) -> ProbeReport {
     // 与预览同一套版心参数：A4 宽度下的默认页边距按比例缩放，页高随内容（单张长页，无分页）
     let margin = page_width_pt * (70.87 / 595.28);
-    let injected = format!(
-        "#set page(width: {page_width_pt:.2}pt, height: auto, margin: {margin:.2}pt)\n"
-    );
+    let injected =
+        format!("#set page(width: {page_width_pt:.2}pt, height: auto, margin: {margin:.2}pt)\n");
     let compiled_src = format!("{injected}{src}");
     let injected_len = injected.len();
 
     let t0 = Instant::now();
     let world = TypstWorld::new(compiled_src, document_path, fonts_dir, font_config);
     let document = match typst::compile::<PagedDocument>(&world) {
-        typst::diag::Warned { output: Ok(doc), .. } => doc,
-        typst::diag::Warned { output: Err(errors), .. } => {
+        typst::diag::Warned {
+            output: Ok(doc), ..
+        } => doc,
+        typst::diag::Warned {
+            output: Err(errors),
+            ..
+        } => {
             return ProbeReport {
                 ok: false,
-                error: Some(format!("编译失败：{} 处错误（{}）", errors.len(), errors[0].message)),
+                error: Some(format!(
+                    "编译失败：{} 处错误（{}）",
+                    errors.len(),
+                    errors[0].message
+                )),
                 pages: 0,
                 page_width_pt,
                 compile_ms: t0.elapsed().as_secs_f64() * 1000.0,
@@ -140,7 +148,10 @@ pub fn probe_blocks(
         let injected_range = (block.range.start + injected_len)..(block.range.end + injected_len);
         let geom = geometry_for_range(&items, injected_range);
         let (line, _) = offset_to_line_column(&src, block.range.start);
-        let (end_line, _) = offset_to_line_column(&src, block.range.end.saturating_sub(1).max(block.range.start));
+        let (end_line, _) = offset_to_line_column(
+            &src,
+            block.range.end.saturating_sub(1).max(block.range.start),
+        );
         let mut render_ms = 0.0;
         if let Some(g) = &geom {
             if let Some(page) = document.pages().get(g.page.saturating_sub(1)) {
@@ -163,8 +174,14 @@ pub fn probe_blocks(
             pages: geom.as_ref().map(|g| g.pages).unwrap_or(0),
             x: geom.as_ref().map(|g| g.rect.min.x.to_pt()).unwrap_or(0.0),
             y: geom.as_ref().map(|g| g.rect.min.y.to_pt()).unwrap_or(0.0),
-            w: geom.as_ref().map(|g| g.rect.size().x.to_pt()).unwrap_or(0.0),
-            h: geom.as_ref().map(|g| g.rect.size().y.to_pt()).unwrap_or(0.0),
+            w: geom
+                .as_ref()
+                .map(|g| g.rect.size().x.to_pt())
+                .unwrap_or(0.0),
+            h: geom
+                .as_ref()
+                .map(|g| g.rect.size().y.to_pt())
+                .unwrap_or(0.0),
             bands: geom.as_ref().map(|g| g.bands).unwrap_or(0),
             render_ms,
         });
@@ -176,7 +193,11 @@ pub fn probe_blocks(
         .filter_map(|i| {
             let s = i.range.start.saturating_sub(injected_len);
             let e = i.range.end.saturating_sub(injected_len).min(src.len());
-            if s < e { Some((s, e)) } else { None }
+            if s < e {
+                Some((s, e))
+            } else {
+                None
+            }
         })
         .collect();
     intervals.sort_unstable();
@@ -205,7 +226,11 @@ pub fn probe_blocks(
             .filter_map(|i| {
                 let s = i.range.start.saturating_sub(injected_len);
                 let e = i.range.end.saturating_sub(injected_len).min(src.len());
-                if s < e { Some((s, e)) } else { None }
+                if s < e {
+                    Some((s, e))
+                } else {
+                    None
+                }
             })
             .collect(),
     );
@@ -223,9 +248,14 @@ pub fn probe_blocks(
     }
 
     while line_start <= src.len() {
-        let line_end = src[line_start..].find('\n').map(|i| line_start + i).unwrap_or(src.len());
+        let line_end = src[line_start..]
+            .find('\n')
+            .map(|i| line_start + i)
+            .unwrap_or(src.len());
         if !src[line_start..line_end].trim().is_empty()
-            && !covered_ranges.iter().any(|(s, e)| *s < line_end && *e > line_start)
+            && !covered_ranges
+                .iter()
+                .any(|(s, e)| *s < line_end && *e > line_start)
             && uncovered_lines.len() < 40
         {
             uncovered_lines.push(line_no);
@@ -257,7 +287,7 @@ pub fn probe_blocks(
         }
         prev_bottom = Some(b.y + b.h);
     }
-    if !found.is_empty() && min_gap.is_finite() == false {
+    if !found.is_empty() && !min_gap.is_finite() {
         min_gap = 0.0;
     }
     if max_gap == f64::NEG_INFINITY {
@@ -318,4 +348,3 @@ fn offset_to_line_column(text: &str, offset: usize) -> (u32, u32) {
     }
     (line, (offset - line_start) as u32 + 1)
 }
-

@@ -53,9 +53,7 @@ describe("renderUpdateNotes", () => {
   });
 
   it("连续普通行合成一段，空行分段", () => {
-    expect(renderUpdateNotes("第一行\n第二行\n\n第三行")).toBe(
-      "<p>第一行 第二行</p><p>第三行</p>",
-    );
+    expect(renderUpdateNotes("第一行\n第二行\n\n第三行")).toBe("<p>第一行 第二行</p><p>第三行</p>");
   });
 
   it("分隔线 → hr", () => {

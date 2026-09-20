@@ -43,7 +43,12 @@ function harness(over: Partial<ZoomControllerHooks> = {}, manualSleep = false): 
   let timerSeq = 0;
   const timers = new Map<number, { at: number; fn: () => void }>();
   const sleepers: (() => void)[] = [];
-  const calls = { sets: [] as number[], status: [] as string[], logs: [] as string[], levels: [] as number[] };
+  const calls = {
+    sets: [] as number[],
+    status: [] as string[],
+    logs: [] as string[],
+    levels: [] as number[],
+  };
 
   const hooks: ZoomControllerHooks = {
     enabled: () => true,
@@ -182,7 +187,9 @@ describe("apply：校准 + 确认 + 收敛", () => {
       },
     });
     await expect(h.c.apply(1.5)).resolves.toBeUndefined();
-    expect(h.calls.logs.some((l) => l.includes("校准失败") || l.includes("setZoom failed"))).toBe(true);
+    expect(h.calls.logs.some((l) => l.includes("校准失败") || l.includes("setZoom failed"))).toBe(
+      true,
+    );
   });
 });
 

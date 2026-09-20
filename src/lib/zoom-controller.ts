@@ -323,7 +323,14 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
     },
 
     debugState() {
-      return { appliedZoom, baseline100, dprAt100, verifyInFlight: stepInFlight, settlingUntil, wheelEvents };
+      return {
+        appliedZoom,
+        baseline100,
+        dprAt100,
+        verifyInFlight: stepInFlight,
+        settlingUntil,
+        wheelEvents,
+      };
     },
   };
 }

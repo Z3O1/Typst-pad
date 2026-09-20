@@ -294,8 +294,7 @@ export function applyBlockSelection(
   const touches = (cover: BlockCover, sel: { from: number; to: number }): boolean => {
     if (sel.from === sel.to) {
       return (
-        sel.from >= cover.coverFrom &&
-        (sel.from < cover.coverTo || cover.coverTo === docLength)
+        sel.from >= cover.coverFrom && (sel.from < cover.coverTo || cover.coverTo === docLength)
       );
     }
     return sel.from < cover.coverTo && sel.to > cover.coverFrom;
@@ -486,11 +485,21 @@ export function remapBlocksThroughEdit(
         (b.from < span.to && b.to > span.from);
   // 退回源码：`found: false`（不可渲染）+ **清掉 noOutput** —— 这是"旧坐标/编译失败"的兜底，
   // 与"引擎说这块没输出"是两回事：误隐藏会让用户刚打的字凭空消失，宁可显示源码。
-  const revealed = (b: Block): Block => ({ ...b, found: false, noOutput: false, svg: "", heightPt: 0 });
+  const revealed = (b: Block): Block => ({
+    ...b,
+    found: false,
+    noOutput: false,
+    svg: "",
+    heightPt: 0,
+  });
   for (const b of blocks) {
     if (revealedBy(b)) {
       const after = b.from >= span.to;
-      const from = after ? b.from + span.delta : b.from < span.to && b.to > span.from ? Math.min(b.from, span.from) : b.from;
+      const from = after
+        ? b.from + span.delta
+        : b.from < span.to && b.to > span.from
+          ? Math.min(b.from, span.from)
+          : b.from;
       const to = after
         ? b.to + span.delta
         : b.from < span.to && b.to > span.from
@@ -521,17 +530,17 @@ export function remapBlocksThroughEdit(
  * `delta` = 新长度 − 旧长度（旧文本里 `>= to` 的位置，在新文本里都要 +delta）。
  * 代价 O(n)，不做逐字符 diff —— 我们只需要"哪些块完全没被碰过"，粗糙一点反而更保守。
  */
-export function changedSpan(before: string, after: string): { from: number; to: number; delta: number } {
+export function changedSpan(
+  before: string,
+  after: string,
+): { from: number; to: number; delta: number } {
   const max = Math.min(before.length, after.length);
   let p = 0;
   while (p < max && before[p] === after[p]) p++;
   // 代理对不能被切开（emoji 的一半会让位置落在字符中间）
   if (p > 0 && isLowSurrogate(after[p]) && isHighSurrogate(after[p - 1])) p--;
   let s = 0;
-  while (
-    s < max - p &&
-    before[before.length - 1 - s] === after[after.length - 1 - s]
-  ) {
+  while (s < max - p && before[before.length - 1 - s] === after[after.length - 1 - s]) {
     s++;
   }
   if (s > 0 && isLowSurrogate(before[before.length - s])) s--;
@@ -574,16 +583,4 @@ export function revealBlocksWithDiagnostics(
     revealed++;
   }
   return revealed;
-}
-
-/**
- * 块表是否仍然对应当前文档（供调试与"落后多少"的日志使用）。
- *
- * **注意**：块表过期时我们仍然沿用旧表（不做位置映射）。理由：编辑只发生在已展开的那一格
- * 里，其它格的覆盖区间首尾都落在空白处（块的源码终点 / 上一块的源码终点），偏一两个字符
- * 既不会露出来也不会吃掉正文；而"过期就整篇退回源码"会让每敲一个字都闪一次源码。
- * 编译结果回来后（数十毫秒）整表替换。
- */
-export function isBlockTableFresh(table: BlockTable | null, doc: string): boolean {
-  return table !== null && table.doc === doc;
 }

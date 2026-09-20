@@ -34,7 +34,11 @@ export function planWrap(
   }
   // 选区两侧紧邻已有定界符（如选中 `*粗*` 里的"粗"）→ 一并去掉，避免 `**粗**`
   const outerFrom = from - before.length;
-  if (outerFrom >= 0 && doc.slice(outerFrom, from) === before && doc.slice(to, to + after.length) === after) {
+  if (
+    outerFrom >= 0 &&
+    doc.slice(outerFrom, from) === before &&
+    doc.slice(to, to + after.length) === after
+  ) {
     return {
       from: outerFrom,
       to: to + after.length,
@@ -111,7 +115,13 @@ function planLineBlock(
   if (to > from) {
     const body = doc.slice(from, to);
     const { insert, anchorOffset } = make(body);
-    return { from, to, insert, anchor: from + anchorOffset, head: from + anchorOffset + body.length };
+    return {
+      from,
+      to,
+      insert,
+      anchor: from + anchorOffset,
+      head: from + anchorOffset + body.length,
+    };
   }
   const line = lineRangeAt(doc, from);
   const body = doc.slice(line.from, line.to);
@@ -185,7 +195,12 @@ export type WriteCommand =
  * 块级动作（公式块 / 代码块 / 引用）的选区语义见 planLineBlock：无选区时整行、
  * 有选区时只替换选区。
  */
-export function planForCommand(doc: string, from: number, to: number, command: WriteCommand): EditPlan {
+export function planForCommand(
+  doc: string,
+  from: number,
+  to: number,
+  command: WriteCommand,
+): EditPlan {
   switch (command) {
     case "bold":
       return planWrap(doc, from, to, "*");
