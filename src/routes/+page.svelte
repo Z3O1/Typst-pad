@@ -45,7 +45,8 @@
   import { decideAppKey, runAppKeyAction, topModal } from "$lib/app-keys";
   import type { AppModal } from "$lib/app-keys";
   import { isEffectiveDirty, ensureTrailingNewline } from "$lib/doc-utils";
-  import { failureStatus } from "$lib/failure-text";
+  // 文件流程（打开/保存/重读/新建/导出 PDF）的编排：file-flow.ts（依赖注入 + 单测）
+  import { createFileFlow, UNTITLED_TITLE } from "$lib/file-flow";
   import { installEditorFonts, loadBundledFont } from "$lib/editor-font";
   import MenuBar from "$lib/MenuBar.svelte";
   import type { MenuGroup } from "$lib/MenuBar.svelte";
@@ -590,7 +591,7 @@
   /** 关闭弹窗：保存后关闭 */
   async function onClosePromptSave() {
     showClosePrompt = false;
-    const saved = await handleSave();
+    const saved = await files.save();
     if (saved) getCurrentWindow().destroy(); // destroy 不再次触发 close-requested
   }
 
@@ -799,105 +800,84 @@
     blocksVersion++;
   }
 
-  /** 有未保存修改时请求确认（打开/拖放/关联打开/重新读取/新建前） */
-  async function confirmDiscard(
-    message = "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？",
-    title = "未保存的修改",
-  ): Promise<boolean> {
-    if (isTauri()) {
-      return await confirm(message, {
-        title,
-        kind: "warning",
-      });
-    }
-    return window.confirm(message);
+  /** 前缀代码（补尾随换行）：未启用时是空串。编译源与块级渲染的字节偏移都要用它 */
+  function prefixSource(): string {
+    return prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
   }
 
-  /** 按路径加载 .typ 文件到编辑器（供打开对话框/拖放/关联打开复用） */
-  async function openPath(path: string): Promise<boolean> {
-    // 有未保存修改就必须确认——**包括打开的就是当前这个文件**：此前用 `filePath !== path`
-    // 放行同路径，拖放/关联打开同一个文件（Windows 上把 .typ 拖进窗口很常见）会静默用磁盘内容
-    // 覆盖未保存的输入，表现为"内容退回上次保存时的版本"。
-    if (isEffectiveDirty(dirty, doc)) {
-      const same = filePath === path;
-      const ok = await confirmDiscard(
-        same
-          ? `「${fileTitle}」有未保存的修改，重新打开将丢弃这些修改。仍要打开吗？`
-          : "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？",
-      );
-      if (!ok) return false;
-    }
-    try {
-      const opened = await readTypFile(path);
-      doc = opened.content;
-      filePath = opened.path;
-      fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
+  /**
+   * 编译源 = 前缀 + 文档。前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档
+   * 首行合并成一行。整页编译、块级编译、PDF 导出三处共用这一份拼法。
+   */
+  function compileSource(): string {
+    return prefixSource() + doc;
+  }
+
+  /**
+   * 文件流程（打开/保存/重读/新建/导出 PDF）的编排在 file-flow.ts：那边是纯逻辑 + 依赖注入，
+   * 28 项单测钉住「打开/重读/新建前先确认」「同路径重开也要确认」「空文档直接写空」
+   * 「清会话存档只由主窗口做」「新建不写存档」这几条容易踩回去的规则。
+   * 这里只提供页面这一侧的东西：状态快照、真正的读写、以及"文档被换掉之后"的落地动作。
+   */
+  const files = createFileFlow({
+    snapshot: () => ({
+      // 空文档不算未保存（输入过又删光时 dirty 仍为 true，见 doc-utils.isEffectiveDirty）
+      dirty: isEffectiveDirty(dirty, doc),
+      doc,
+      path: filePath,
+      title: fileTitle,
+    }),
+    // 桌面版走 Tauri 的 confirm（原生样子），浏览器预览退回 window.confirm
+    confirm: async (message, title) =>
+      isTauri() ? await confirm(message, { title, kind: "warning" }) : window.confirm(message),
+    read: readTypFile,
+    // 全工程唯一的 .typ 写入口（见 file-ops.saveTypFile）；没有自动保存
+    write: saveTypFile,
+    pickPath: openTypFile,
+    exportPdf: ({ source, documentPath, suggestedName, fonts }) =>
+      compileToPdf(source, documentPath, suggestedName, fonts),
+    compileSource,
+    fontArgs,
+    // 打开/重读成功：doc 与 editorDoc **一起换**（镜像同步，见 editorDoc 声明处），
+    // 缓存作废、排一次编译、写存档
+    applyOpenedDocument: ({ content, path, title }) => {
+      doc = content;
+      filePath = path;
+      fileTitle = title;
       dirty = false;
-      editorDoc = opened.content; // 触发编辑器替换全文
+      editorDoc = content;
       resetMathCache();
       resetBlocks();
       scheduleCompile();
       schedulePersist();
-      statusText = "已打开";
-      return true;
-    } catch (e) {
-      // 带上 Rust 侧的原因（`仅支持 .typ 文件` / `目录无效` …）：光写「打开失败」用户不知道能改什么
-      statusText = failureStatus("打开失败", e);
-      return false;
-    }
-  }
-
-  async function handleOpen() {
-    const path = await openTypFile();
-    if (!path) return;
-    await openPath(path);
-  }
-
-  async function handleSave(): Promise<string | null> {
-    // 2026-09-18 用户要求删掉「保存空文档」那个确认窗（截图见 PR 记录）：
-    // 空文档保存进已有文件时**直接写**，不再问。原先那道确认是 0.8.0 为「唯一能把磁盘
-    // 文件变空」的路径补的（判定函数 `needsBlankOverwriteConfirm` 已随之删除）。
-    // 前提没变：全工程只有 `saveTypFile` 一个 `.typ` 写入口，只挂在显式保存上 ——
-    // 不按保存，磁盘上的文件一个字节也不会动。
-    try {
-      const saved = await saveTypFile(filePath, doc);
-      if (!saved) return null;
-      filePath = saved;
-      fileTitle = saved.split(/[\\/]/).pop() ?? saved;
+    },
+    afterSave: (path) => {
+      filePath = path;
+      fileTitle = path.split(/[\\/]/).pop() ?? path;
       dirty = false;
       schedulePersist();
-      return saved;
-    } catch (e) {
-      statusText = failureStatus("保存失败", e);
-      return null;
-    }
-  }
-
-  /** Ctrl+R：从磁盘重新读取当前文件到编辑器（未命名文档忽略；有未保存修改先确认） */
-  async function reloadFile() {
-    if (!filePath) return; // 未命名文档：忽略
-    if (isEffectiveDirty(dirty, doc)) {
-      const ok = await confirmDiscard(
-        "当前文档有未保存的修改，重新读取将丢失这些修改。仍要重新读取吗？",
-      );
-      if (!ok) return;
-    }
-    try {
-      const opened = await readTypFile(filePath);
-      doc = opened.content;
-      filePath = opened.path;
-      fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
+    },
+    /** 新建的落地动作：置空 + 缓存作废 + 排编译（**不写存档**，清存档由 clearSession 负责） */
+    resetDocument: () => {
+      doc = "";
+      editorDoc = "";
+      filePath = null;
+      fileTitle = UNTITLED_TITLE;
       dirty = false;
-      editorDoc = opened.content; // 触发编辑器替换全文
       resetMathCache();
       resetBlocks();
       scheduleCompile();
-      schedulePersist();
-      statusText = "已重新读取";
-    } catch (e) {
-      statusText = failureStatus("重新读取失败", e);
-    }
-  }
+    },
+    clearSession: clearState,
+    isSecondaryWindow: () => isSecondaryWindow,
+    setStatus: (text) => {
+      statusText = text;
+    },
+    setPreviewError: (message) => {
+      previewStatus = "error";
+      previewError = message;
+    },
+  });
 
   /**
    * 窗口级右键处理：
@@ -959,13 +939,13 @@
           },
         };
       case "save":
-        return { type: "item", label, disabled, onClick: () => handleSave() };
+        return { type: "item", label, disabled, onClick: () => files.save() };
       case "export-pdf":
-        return { type: "item", label, disabled, onClick: () => handleExportPdf() };
+        return { type: "item", label, disabled, onClick: () => files.exportPdf() };
       case "settings":
         return { type: "item", label, disabled, onClick: () => openSettings() };
       case "open":
-        return { type: "item", label, disabled, onClick: () => handleOpen() };
+        return { type: "item", label, disabled, onClick: () => files.openViaDialog() };
       default:
         return { type: "item", label, disabled };
     }
@@ -983,36 +963,6 @@
   }
 
   /**
-   * 新建：清空文档并清除持久化的上次内容。
-   *
-   * **有未保存内容时先确认**（2026-09-16 补）：这是全应用唯一"不问就丢内容"的路 ——
-   * 它把编辑器清空、`filePath` 置空，还顺手 `clearState()` 清掉会话存档，连"启动恢复上次内容"
-   * 那条后路一起断了；而「打开…」「Ctrl+R」都早有确认（`confirmDiscard`）。用户问过
-   * 「编辑器会清空文件吗」之后把这道确认补齐。
-   * （磁盘文件不受影响：`filePath` 被置空，紧接着按 Ctrl+S 走的是"另存为"，覆盖不到原文件。）
-   */
-  async function handleNew() {
-    if (isEffectiveDirty(dirty, doc)) {
-      const ok = await confirmDiscard(
-        "当前文档有未保存的修改，新建将丢弃这些修改。仍要新建吗？",
-      );
-      if (!ok) return;
-    }
-    doc = "";
-    editorDoc = "";
-    filePath = null;
-    fileTitle = "未命名.typ";
-    dirty = false;
-    // 清存档**只由主窗口做**：这份会话是主窗口的，副窗口里点"新建"不该把主窗口的未保存内容
-    // 从存档里抹掉（副窗口自己的内容是空的，后面 schedulePersist 也只写设置）
-    if (!isSecondaryWindow) clearState();
-    resetMathCache();
-    resetBlocks();
-    scheduleCompile();
-    statusText = "已新建";
-  }
-
-  /**
    * 菜单表：结构由 menu-model.ts 的 buildMenuGroups 纯函数产出（快捷键 → 命令映射、勾选态
    * 都有单测，见 menu-model.test.ts）；这里只把当前状态与命令回调喂进去。
    */
@@ -1023,12 +973,12 @@
       editorWrap,
       uiZoom,
       theme,
-      onNew: handleNew,
+      onNew: files.createNew,
       onNewWindow: openNewWindow,
-      onOpen: handleOpen,
-      onSave: handleSave,
+      onOpen: files.openViaDialog,
+      onSave: files.save,
       onOpenSettings: openSettings,
-      onExportPdf: handleExportPdf,
+      onExportPdf: files.exportPdf,
       runFormat,
       onToggleViewMode: toggleViewMode,
       onTogglePreview: () => (showPreview = !showPreview),
@@ -1073,30 +1023,6 @@
       theme === "system" ? "dark" : theme === "dark" ? "light" : "system";
   }
 
-  async function handleExportPdf() {
-    statusText = "导出 PDF…";
-    try {
-      // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行
-      const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
-      // 导出流程：推导默认文件名 → 弹系统"另存为"对话框 → Rust 侧编译并直接落盘
-      // （typst-engine.compileToPdf；不再经前端出 PDF 字节 + write_binary）
-      const result = await compileToPdf(source, filePath, fileTitle, fontArgs());
-      if (result.ok) {
-        statusText = "已导出 PDF";
-      } else if (result.cancelled) {
-        statusText = "已取消导出";
-      } else {
-        statusText = failureStatus("导出失败", result.error);
-        previewStatus = "error";
-        previewError = result.error;
-      }
-    } catch (e) {
-      statusText = failureStatus("导出失败", e);
-      previewStatus = "error";
-      previewError = e instanceof Error ? e.message : String(e);
-    }
-  }
-
   /**
    * 所见即所得：编辑器请求渲染公式（视口内出现未缓存的公式时触发）。
    * 去重（已缓存 / 已在队列的 key 跳过）后进队，120ms 防抖再批量交给 Rust 侧编译——
@@ -1134,7 +1060,7 @@
     mathQueue = [];
     if (batch.length === 0) return;
     // 仅前缀的兜底上下文：文档内定义本身有错、或与前缀重名时，至少还能渲染不依赖它们的公式
-    const prefixOnly = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
+    const prefixOnly = prefixSource();
     for (const req of batch) {
       // 用请求自带的上下文编译（与生成缓存键时一致，见 MathRequest.context 的说明）
       // 字号也来自请求（与生成缓存键时用的那个一致，见 MathRequest.sizePt 的说明）：
@@ -1449,7 +1375,7 @@
     // 编译期间保留旧预览，完成后直接替换（不做 loading 遮罩）
     // 拼接编译源：前缀补尾随换行（非空且未以 \n 结尾时），避免前缀末行与用户文档首行合并成一行；
     // documentPath 传当前文档绝对路径（未保存为 null），Rust 侧以其所在目录解析 include
-    const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
+    const source = compileSource();
     // 首次编译可能早于 ResizeObserver 的第一次回调：这里补算一次页宽，避免启动时多编译一遍
     const previewBody = previewPaneRef?.body();
     if (previewPageWidthRequest === 0 && previewBody) {
@@ -1475,7 +1401,7 @@
       const requestDoc = doc;
       const blocksResult = await compileBlocks(
         source,
-        utf8Length(prefixEnabled ? ensureTrailingNewline(prefixCode) : ""),
+        utf8Length(prefixSource()),
         filePath,
         writingWidthPt > 0 ? writingWidthPt : DEFAULT_WRITING_WIDTH_PT,
         fontArgs(),
@@ -1755,7 +1681,7 @@
   async function claimOpenFileOnBroadcast(path: string) {
     if (await currentIsFocused()) {
       void claimPendingFile(); // 清掉队列 = 告诉主窗口"已经有人接了"
-      await openPath(path);
+      await files.openPath(path);
       return;
     }
     if (isSecondaryWindow) return; // 副窗口没焦点就不抢：交给主窗口兜底
@@ -1763,7 +1689,7 @@
     pendingOpenTimer = setTimeout(() => {
       pendingOpenTimer = null;
       void claimPendingFile().then((unclaimed) => {
-        if (unclaimed) void openPath(unclaimed);
+        if (unclaimed) void files.openPath(unclaimed);
       });
     }, OPEN_FILE_FALLBACK_DELAY_MS);
   }
@@ -1815,8 +1741,8 @@
         // Ctrl+Shift+= / Ctrl+Shift+-：±1 格（走和滚轮同一条 setUiZoom → 引擎改档 → 复核）。
         // 必须 preventDefault（runAppKeyAction 统一做了）：否则引擎自己那套缩放会一并插手。
         zoom: zoomBySteps,
-        // reloadFile 只在有文件时才会走到（没文件时 decideAppKey 返回 null，放行给浏览器刷新）
-        reloadFile,
+        // files.reload 只在有文件时才会走到（没文件时 decideAppKey 返回 null，放行给浏览器刷新）
+        reloadFile: files.reload,
         openNewWindow,
         closeWindow: () => void closeCurrentWindow(),
         dismissModal,
@@ -1992,7 +1918,7 @@
             dragActive = false;
             const path = pickTypPath(event.payload.paths);
             if (path) {
-              openPath(path);
+              files.openPath(path);
             } else if (event.payload.paths.length > 0) {
               statusText = "仅支持打开 .typ 文件";
             }
@@ -2013,7 +1939,7 @@
         // **只由主窗口取**：副窗口是草稿窗口，不该被启动参数里带的文件顶掉内容。
         if (isSecondaryWindow) return;
         void claimPendingFile().then((path) => {
-          if (path) void openPath(path);
+          if (path) void files.openPath(path);
         });
       });
     }
