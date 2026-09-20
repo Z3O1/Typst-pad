@@ -10,7 +10,7 @@
 /** A4 宽（pt） */
 export const PAGE_WIDTH = 595.28;
 /** A4 高（pt） */
-export const PAGE_HEIGHT = 841.89;
+const PAGE_HEIGHT = 841.89;
 /** 页边距（pt） */
 export const MARGIN = 70;
 /** 行高（pt） */
@@ -18,7 +18,9 @@ export const LINE_HEIGHT = 22;
 const FONT_SIZE = 12;
 const MAX_COLUMNS = 32; // 超出按 CJK 双宽折行
 
-/** XML 转义（假 SVG 的文本要转义；`fakeBlocks` 里那份行内版与它同义） */
+/** XML 文本转义（拼进 SVG 前调用；**不要对已转义结果二次调用**）。
+ *  `fake-blocks.ts` 里那份行内版只转 `&<>` 三个实体（它只用在文本节点里），
+ *  这里连引号一起转（5 个）—— 两者各自够用，但**不是同一件事**，别互相替换。 */
 export function escapeXml(text: string): string {
   return text
     .replace(/&/g, "&amp;")

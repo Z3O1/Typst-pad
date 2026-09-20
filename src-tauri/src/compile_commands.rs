@@ -1,5 +1,9 @@
-// 编译 / 导出 / 点击定位命令：**同一条编译通道**（一把进程内互斥锁 + `spawn_blocking`）上的
-// 五个命令。`CompileState` 与 `in_compile_channel` 在这里，`paths` 只提供写盘校验。
+// 编译 / 导出 / 点击定位命令。`CompileState` 与 `in_compile_channel` 在这里，`paths` 只提供写盘校验。
+//
+// **谁占编译通道**：`compile_doc` / `compile_blocks` / `compile_math` / `export_pdf` 四个走
+// `in_compile_channel`（一把进程内互斥锁 + `spawn_blocking`，一次只跑一个编译）；
+// `block_hit_test` **故意不走** —— 它读上一次编译留下的几何缓存，是微秒级的纯计算，占锁反而
+// 会跟正在进行的编译排队（见该命令自己的说明）。
 use std::fs;
 use std::path::Path;
 
@@ -27,9 +31,10 @@ impl CompileState {
 /// `list_font_families`）原来各抄一遍这五步。顺序有讲究，**别调换**：
 /// `FontConfig::new` 在**拿锁之前**执行（它只做字符串/路径整理，不该占着编译通道）。
 ///
-/// 返回 `Err(())` = 任务本身异常终止（panic / runtime 关闭）。**收口方式各命令不同**
-/// （`compile_blocks` 变成 invoke 的 Err，其余折成"内部错误"结构），所以这里不替调用方
-/// 决定文案与形状。
+/// 返回 `Err(())` = 任务本身异常终止（panic / runtime 关闭）。**收口方式各命令不同**，所以这里
+/// 不替调用方决定文案与形状：`compile_blocks` 把它变成 invoke 的 Err；`compile_doc` / `compile_math`
+/// / `export_pdf` 折成带 `error` 的"内部错误"结构（仍然 `Ok`）；`list_font_families` 折成空列表
+/// （见 `font_commands.rs`）。
 pub(crate) async fn in_compile_channel<T, F>(
     state: &CompileState,
     font_families: Option<Vec<String>>,

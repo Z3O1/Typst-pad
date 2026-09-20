@@ -1,6 +1,7 @@
 // **常用标记装饰**（标题/粗体/斜体/行内代码/链接/列表符号）：只把标记隐藏或改样式，不渲染排版。
 // 范围来自 `markup-ranges.ts` 的纯函数扫描（`scanMarkupDecorations`）。
 import { Decoration } from "@codemirror/view";
+import { insideCovered } from "./covered";
 import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import { scanMarkupDecorations } from "../markup-ranges";
@@ -9,11 +10,10 @@ import type { Region } from "../typst-lex";
 import { TextWidget } from "./widgets";
 import type { MathRange } from "../math-ranges";
 import { selectionTouchesRange } from "../math-ranges";
-import { insideCovered } from "./block-decorations";
 import { CodeBlockWidget } from "./widgets";
 
 /** markup 装饰对应的 CSS 类（样式见 livePreviewTheme） */
-export const MARKUP_CLASS: Record<MarkupKind, string> = {
+const MARKUP_CLASS: Record<MarkupKind, string> = {
   heading: "cm-markup-heading",
   strong: "cm-markup-strong",
   emph: "cm-markup-emph",

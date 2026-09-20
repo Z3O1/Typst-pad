@@ -1,11 +1,11 @@
 // **公式装饰**：行内/行间公式的 widget 替换与"选区进出展开"。
 // 范围来自 `math-ranges.ts`（`$` 配对扫描），渲染结果来自父组件经 `opts` 注入的缓存。
 import { Decoration } from "@codemirror/view";
+import { insideCovered } from "./covered";
 import type { Range } from "@codemirror/state";
 import type { EditorState, Text } from "@codemirror/state";
 import { mathCacheKey, mathRevealDecision } from "../math-ranges";
 import type { MathRange } from "../math-ranges";
-import { insideCovered } from "./block-decorations";
 import type { LivePreviewOptions } from "./options";
 import { MathBlockWidget, MathWidget } from "./widgets";
 import { MATH_TEXT_PT } from "../typst-engine";

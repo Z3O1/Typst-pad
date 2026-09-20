@@ -11,18 +11,11 @@ import { Decoration, EditorView, ViewPlugin, keymap } from "@codemirror/view";
 import type { DecorationSet, ViewUpdate } from "@codemirror/view";
 import { EditorSelection, Prec, StateField } from "@codemirror/state";
 import type { EditorState, Extension } from "@codemirror/state";
-import {
-  mathCacheKey,
-  mathRevealDecision,
-  scanMathRanges,
-  selectionTouchesRange,
-} from "./math-ranges";
+import { mathCacheKey, mathRevealDecision, scanMathRanges } from "./math-ranges";
 import { scanNonMarkupRegions } from "./typst-lex";
 import { buildMathContext } from "./math-context";
 import {
-  applyBlockSelection,
   crossesCollapsedCover,
-  planBlockCovers,
   revealBlocksWithDiagnostics,
   sourceVerticalTarget,
 } from "./block-plan";
@@ -37,9 +30,9 @@ import {
   buildBlockCropDecorations,
   buildFenceHidingDecorations,
   buildHiddenBlockDecorations,
-  insideCovered,
   notifyBlocksNeeded,
 } from "./live-preview/block-decorations";
+import { insideCovered } from "./live-preview/covered";
 import { buildMarkupDecorations } from "./live-preview/markup-decorations";
 import { blockRangeFor, buildMathDecorations } from "./live-preview/math-decorations";
 import { PREFETCH_MARGIN, refreshLivePreview } from "./live-preview/options";

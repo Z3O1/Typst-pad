@@ -4,6 +4,7 @@
 // 边界都取自 `block-plan.planBlockCovers` 铺满全文、首尾相接的格子 —— 所以这些 replace 区间
 // 互不重叠（CodeMirror 拒绝重叠的替换装饰，会直接抛异常）。
 import { Decoration } from "@codemirror/view";
+import { insideCovered } from "./covered";
 import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import { planBlockCovers } from "../block-plan";
@@ -73,24 +74,6 @@ export function notifyBlocksNeeded(
       return;
     }
   }
-}
-
-/** 区间是否落在某个"已被块 widget 盖住"的格子里（covered 已按 from 递增且不重叠） */
-export function insideCovered(
-  from: number,
-  to: number,
-  covered: readonly { from: number; to: number }[],
-): boolean {
-  let lo = 0;
-  let hi = covered.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const c = covered[mid];
-    if (to <= c.from) hi = mid - 1;
-    else if (from >= c.to) lo = mid + 1;
-    else return true;
-  }
-  return false;
 }
 
 /**
