@@ -66,7 +66,16 @@ describe("createFontList", () => {
 
     defaultValues = [];
     await list.refresh([]);
+    expect(listedDirs).toHaveLength(2); // 第二趟真的扫了（不是被短路/缓存跳过）
     expect(defaults).toEqual(["Libertinus Serif", "Noto Serif CJK SC"]);
+  });
+
+  it("refresh：启动时还没取到默认族（初值空数组）也不会被空列表碰上——页面初值就是这种情况", async () => {
+    defaults = [];
+    defaultValues = [];
+    const list = make();
+    await list.refresh([]);
+    expect(defaults).toEqual([]); // 仍然是空（没有被写坏，也没有编造默认值）
   });
 
   it("refresh：Rust 扫描抛错时 loading 仍然复位（下拉不能永远转圈），错误继续抛给全局兜底", async () => {
@@ -99,12 +108,13 @@ describe("createFontList", () => {
     expect(listedDirs).toEqual([["/fonts/a"], ["/fonts/a", "/fonts/b"]]);
   });
 
-  it("removeDir：从草稿里删掉那个目录 → 用剩下的列表重新扫描（同步返回，不 await）", async () => {
+  it("removeDir：从草稿里删掉那个目录 → 用剩下的列表重新扫描（同步返回，不等扫描落地）", async () => {
     dirs = ["/fonts/a", "/fonts/b"];
     const list = make();
     list.removeDir("/fonts/a");
     expect(dirs).toEqual(["/fonts/b"]);
-    await vi.waitFor(() => expect(listedDirs).toEqual([["/fonts/b"]]));
+    expect(listedDirs).toEqual([["/fonts/b"]]); // 扫描是同步发起的（不等它落地）
+    await vi.waitFor(() => expect(loading).toEqual([true, false])); // 落地后 loading 复位
   });
 
   it("removeDir：目录不存在时列表原样（不误删别人的目录）", async () => {
@@ -112,6 +122,7 @@ describe("createFontList", () => {
     const list = make();
     list.removeDir("/fonts/zzz");
     expect(dirs).toEqual(["/fonts/a"]);
-    await vi.waitFor(() => expect(listedDirs).toEqual([["/fonts/a"]]));
+    expect(listedDirs).toEqual([["/fonts/a"]]);
+    await vi.waitFor(() => expect(loading).toEqual([true, false]));
   });
 });

@@ -24,11 +24,7 @@
   import { carryOverCrops, remapBlocksThroughEdit, toBlockTable } from "$lib/core/block-plan";
   import { clampHitOffset } from "$lib/core/block-hit";
   import type { Block } from "$lib/core/block-plan";
-  import {
-    buildFontFamilies,
-    FONT_CHOICE_DEFAULT,
-    normalizeFontDirs,
-  } from "$lib/core/font-settings";
+  import { buildFontFamilies, normalizeFontDirs } from "$lib/core/font-settings";
   import {
     copySettings,
     defaultSettings,
@@ -289,8 +285,11 @@
   }
   // 设置弹窗组件句柄（bind:this）：错误落在前缀代码内时用它定位到对应行（见 focusPrefixLine）
   let settingsDialogRef = $state<{ focusPrefixLine(line: number): void } | null>(null);
-  let prefixEnabled = $state(false); // 编译/导出前是否自动插入前缀
-  let prefixCode = $state(""); // 前缀代码（插入到用户代码之前）
+  // 默认值只有一份（`core/app-settings.ts` 的 `defaultSettings()`）：生效配置的初值、草稿的初值、
+  // 以及"存档里没有这个字段"时的兜底都用它；草稿那份另外拷一层，别与这里的数组共享引用。
+  const SETTINGS_DEFAULTS = defaultSettings();
+  let prefixEnabled = $state(SETTINGS_DEFAULTS.prefixEnabled); // 编译/导出前是否自动插入前缀
+  let prefixCode = $state(SETTINGS_DEFAULTS.prefixCode); // 前缀代码（插入到用户代码之前）
   /**
    * 界面模式（两套 UI）：
    * - "write"  写作模式（仿 Typora，默认）：整页纸张、衬线正文、无行号，公式与标记就地排版；
@@ -500,7 +499,7 @@
   // 设置弹窗里的**草稿**（点“保存”才写回并持久化）：一个 `$state` 对象，
   // 打开时用 `copySettings` 从生效配置拷一份 —— 见 core/app-settings.ts 的三条理由。
   // 模板里用 `bind:xxx={settingsDraft.xxx}` 绑进它的成员（SettingsDialog 的 props 形状没变）。
-  let settingsDraft = $state<AppSettings>(defaultSettings());
+  let settingsDraft = $state<AppSettings>(copySettings(SETTINGS_DEFAULTS));
   // ---------------------------------------------------------------------------
   // 字体设置（见 font-settings.ts / font-warnings.ts 的模块注释）
   // 起因：typst 默认正文是 Libertinus Serif（无汉字），不指定字体时中文全走自动回退，
@@ -508,22 +507,22 @@
   // 终结了这件事，这里只是把用户的选择与"额外字体目录"传下去。
   // ---------------------------------------------------------------------------
   /** 正文字体（中文）：空串 = 内置默认（思源宋体优先 + 系统宋体兜底） */
-  let chineseFont = $state(FONT_CHOICE_DEFAULT);
+  let chineseFont = $state(SETTINGS_DEFAULTS.chineseFont);
   /** 额外字体目录（对齐 typst CLI 的 --font-path） */
-  let fontDirs = $state<string[]>([]);
+  let fontDirs = $state<string[]>([...SETTINGS_DEFAULTS.fontDirs]);
   /** 可用字体族（设置里下拉的数据源，打开设置时从 Rust 取一次） */
   let availableFonts = $state<string[]>([]);
   /** Rust 内置默认字体族（拼"选中项 + 其余兜底"用；启动时取一次） */
   let defaultFonts = $state<string[]>([]);
   let fontsLoading = $state(false);
   // 启动时恢复上次未保存的内容（设置弹窗里的开关，默认开；关掉即回到"每次全新开始"）
-  let restoreSession = $state(true);
+  let restoreSession = $state(SETTINGS_DEFAULTS.restoreSession);
 
   // ---------------------------------------------------------------------------
   // 自动更新（tauri-plugin-updater；端点与签名公钥在 tauri.conf.json 的 plugins.updater）
   // ---------------------------------------------------------------------------
   /** 启动时自动检查更新（设置弹窗开关，默认开）。只影响自动检查，菜单里的手动检查始终可用 */
-  let autoCheckUpdates = $state(true);
+  let autoCheckUpdates = $state(SETTINGS_DEFAULTS.autoCheckUpdates);
 
   // 更新流程状态机：类型与语义见 update-utils.ts 的 UpdateFlow（刻意做成单个可判别联合，
   // 而不是若干布尔量——理由写在那边的注释里）
@@ -1098,7 +1097,6 @@
     };
   }
 
-  /** 取可用字体族（下拉数据源）与内置默认列表；打开设置、增删字体目录后调用 */
   // 字体下拉的数据源（扫描 / 添加目录 / 移除目录）在 `$lib/core/font-list`：
   // 这里只注入页面状态与三个 Rust 调用，"归一化目录"和"默认族不许被空列表覆盖"两条规则在那边。
   const fontList = createFontList({
@@ -1199,7 +1197,11 @@
     };
   }
 
-  /** **唯一**把生效配置写回 `$state` 的地方（字段清单与 `AppSettings` 一一对应） */
+  /**
+   * 设置弹窗**保存**这条路上唯一把生效配置写回 `$state` 的地方（字段清单与 `AppSettings` 一一对应）。
+   * 注意别处还有两份同一批字段的清单，加字段时要一起同步：① 启动恢复（`loadState` 那段）、
+   * ② `schedulePersist` 的快照。漏一处就是"设置了但没持久化 / 没恢复"。
+   */
   function applySettings(next: AppSettings) {
     prefixEnabled = next.prefixEnabled;
     prefixCode = next.prefixCode;
@@ -1728,10 +1730,10 @@
     if (saved.theme === "system" || saved.theme === "dark" || saved.theme === "light") {
       theme = saved.theme;
     }
-    prefixEnabled = saved.prefixEnabled ?? false;
-    prefixCode = saved.prefixCode ?? "";
-    chineseFont = saved.chineseFont ?? FONT_CHOICE_DEFAULT;
-    fontDirs = normalizeFontDirs(saved.fontDirs ?? []);
+    prefixEnabled = saved.prefixEnabled ?? SETTINGS_DEFAULTS.prefixEnabled;
+    prefixCode = saved.prefixCode ?? SETTINGS_DEFAULTS.prefixCode;
+    chineseFont = saved.chineseFont ?? SETTINGS_DEFAULTS.chineseFont;
+    fontDirs = normalizeFontDirs(saved.fontDirs ?? SETTINGS_DEFAULTS.fontDirs);
 
     // 旧存档迁移：只有 livePreview 字段时，按其值推断模式
     viewMode = saved.viewMode ?? (saved.livePreview === false ? "source" : "write");
@@ -1739,8 +1741,8 @@
     showPreview = saved.showPreview ?? viewMode === "source";
     // 源码模式自动换行（旧存档没有）：默认关，保持"高亮一格不折行"的原有观感
     editorWrap = saved.editorWrap ?? false;
-    restoreSession = saved.restoreSession ?? true;
-    autoCheckUpdates = saved.autoCheckUpdates ?? true;
+    restoreSession = saved.restoreSession ?? SETTINGS_DEFAULTS.restoreSession;
+    autoCheckUpdates = saved.autoCheckUpdates ?? SETTINGS_DEFAULTS.autoCheckUpdates;
     // 上次检查时间只用于显示/诊断，读回来原样存回去即可（启动检查不再看它）
     lastUpdateCheckAt =
       typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
