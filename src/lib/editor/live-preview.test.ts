@@ -84,9 +84,6 @@ describe("livePreview 扩展", () => {
     host.remove();
   });
 
-  // 回归：空正文的标记构造（`== ` 还没写标题文字、`**` 还没写内容）曾让 CM6 抛
-  // `Mark decorations may not be empty` —— 异常冒泡进事务会让编辑区卡死
-  // （用户报过"输入 `= 1 = 2` 后无法再输入任何东西" / "输入 `==` 所有标题都被展开"）
   // `requests.ts` 的 update 里那道闸门是 `docChanged || viewportChanged || selectionSet || refreshed`；
   // **只有 `refreshed` 这一条**不是 CodeMirror 自己会产生的 —— 它靠的就是这个 effect。少了它，
   // 父组件把渲染结果塞进缓存后没人重新规划，公式会一直停在源码（浏览器验收里表现为"刚打开开关
@@ -97,8 +94,12 @@ describe("livePreview 扩展", () => {
     requests.length = 0;
     view.dispatch({ effects: refreshLivePreview.of(null) });
     expect(requests.length).toBeGreaterThan(0);
+    expect(requests[0].body).toBe("x^2"); // 重新规划的是同一个公式，不是别的什么请求
   });
 
+  // 回归：空正文的标记构造（`== ` 还没写标题文字、`**` 还没写内容）曾让 CM6 抛
+  // `Mark decorations may not be empty` —— 异常冒泡进事务会让编辑区卡死
+  // （用户报过"输入 `= 1 = 2` 后无法再输入任何东西" / "输入 `==` 所有标题都被展开"）
   it("空正文的标题（`== `）不抛异常，且后续输入照常生效", () => {
     mount("= 标题\n正文\n== ");
     expect(() =>
@@ -939,6 +940,11 @@ describe("livePreview 块级切片", () => {
   // jsdom 没有真实几何，`view.moveVertically` 量不到坐标（默认会原地不动，于是"没跨过切片"
   // 那条早退分支吃掉一切）。所以**把这个默认走法换成"跳到文档开头"**（等价于"默认把切片当空气
   // 直接跨过去"），正是我们要拦的那种情形 —— 断言光标落在**上一行**，而不是第一块的行首。
+  //
+  // 前提（改这块时注意）：本用例**依赖 `view.moveVertically` 这个接缝**来伪造"默认走法"，
+  // 换掉默认落点的求法就会假红；只覆盖 ArrowUp（ArrowDown / Shift 变体同源同分支）。
+  // 列校正分支（`coordsAtPos` 有真实几何才有意义）不在单测范围，见
+  // `scripts/browser-check/writing-blocks.mjs` 的竖直移动那组。
   it("跨块竖直移动：默认走法跨过切片时按**源码行走一行**（不是跨一整块）", () => {
     mount("aaa\n\nbbb\n\nccc\n", [crop(0, 3), crop(5, 8), crop(10, 13)], 5);
     // 默认走法（被替换）：直接跳到第一块的行首 —— 就是"跨一整块"的坏行为
