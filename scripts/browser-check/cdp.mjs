@@ -2,7 +2,7 @@
 //
 // 用途：在无显示器的环境下验证本仓库的「浏览器开发模式」页面
 // （`npm run dev -- --host 0.0.0.0` + `http://localhost:1420/?browserdev=1`，见
-// src/lib/browser-dev-stub.ts），由 headless Chrome 驱动真实输入与选区，并对 DOM 断言、
+// src/lib/dev/browser-dev-stub.ts），由 headless Chrome 驱动真实输入与选区，并对 DOM 断言、
 // 截图取证。
 //
 // 运行环境：WSL 里通过 Windows 的 chrome.exe（WSL 互通）启动 headless Chrome，
