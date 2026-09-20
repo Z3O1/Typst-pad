@@ -22,6 +22,17 @@ export function isEffectiveDirty(dirty: boolean, doc: string): boolean {
   return dirty && !isBlankDoc(doc);
 }
 
+/** 未命名文档的标题（页面 `fileTitle` 的初值、"新建"、以及"存档里没路径时"都用它） */
+export const UNTITLED_TITLE = "未命名.typ";
+
+/**
+ * 从路径取文件名（`C:\Users\me\论文.typ` 与 `/home/me/论文.typ` 都要认，两种分隔符都切）；
+ * 取不到分隔符就原样返回。窗口标题、拖放确认文案、存档恢复的标题都用它。
+ */
+export function fileNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
 /**
  * 规范化编译前缀：非空前缀且未以 `\n` 结尾时在末尾补一个换行，其余情况原样返回。
  *

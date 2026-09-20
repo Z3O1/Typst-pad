@@ -15,21 +15,13 @@
 // 4. **新建要连会话存档一起清**：它是全应用唯一"不问就丢内容"的路（清空编辑器 + `filePath` 置空
 //    + `clearState()`）；确认框是这个洞唯一的闸门。清存档**只由主窗口做**，页面用注入的
 //    `clearSession` 自己判断副窗口。
-import { isEffectiveDirty } from "./doc-utils";
+import { fileNameOf, isEffectiveDirty, UNTITLED_TITLE } from "./doc-utils";
 import { failureStatus } from "./failure-text";
 import type { OpenedFile } from "./file-ops";
 
 /** 未保存修改的默认确认文案（打开另一份文件时用；同路径与新建/重读各有自己的文案） */
 const DISCARD_OPEN_MESSAGE = "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？";
 const DISCARD_TITLE = "未保存的修改";
-/** 未命名文档的标题（页面 `fileTitle` 的初值与"新建"都用它） */
-export const UNTITLED_TITLE = "未命名.typ";
-
-/** 从路径取文件名（`C:\a\b.typ` 与 `/a/b.typ` 都要认）；取不到分隔符就原样返回 */
-export function fileNameOf(path: string): string {
-  return path.split(/[\\/]/).pop() ?? path;
-}
-
 /**
  * 文档状态的**完整**形状：页面把这五个字段分别写回自己的 `$state`。
  *

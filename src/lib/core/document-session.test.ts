@@ -7,23 +7,9 @@
 // （顺序有意义：`applyNew → clearSession → afterNew`；取消时"一个副作用都没有"靠空数组钉住）。
 // 加/删 hook 时同步更新这里的期望串。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createDocumentSession,
-  fileNameOf,
-  loadedState,
-  newState,
-  savedState,
-  UNTITLED_TITLE,
-} from "./document-session";
+import { createDocumentSession, loadedState, newState, savedState } from "./document-session";
+import { fileNameOf, UNTITLED_TITLE } from "./doc-utils";
 import type { DocumentSessionHooks } from "./document-session";
-
-describe("fileNameOf", () => {
-  it("Windows / Unix 路径都取最后一段；没有分隔符就原样返回", () => {
-    expect(fileNameOf("C:\\Users\\me\\论文.typ")).toBe("论文.typ");
-    expect(fileNameOf("/home/me/论文.typ")).toBe("论文.typ");
-    expect(fileNameOf("未命名.typ")).toBe("未命名.typ");
-  });
-});
 
 describe("状态迁移纯函数", () => {
   it("loadedState：`doc` 与 `editorDoc` 同源（落后一次就丢未保存内容），标题跟路径走、脏标记清掉", () => {
