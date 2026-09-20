@@ -51,6 +51,7 @@
   import { decideAppKey, runAppKeyAction, topModal } from "$lib/editor/app-keys";
   import type { AppModal } from "$lib/editor/app-keys";
   import { isEffectiveDirty, ensureTrailingNewline } from "$lib/core/doc-utils";
+  import { createDocumentSession, fileNameOf } from "$lib/core/document-session";
   import { failureStatus } from "$lib/core/failure-text";
   import { installEditorFonts, loadBundledFont } from "$lib/editor/editor-font";
   import MenuBar from "$lib/ui/MenuBar.svelte";
@@ -608,7 +609,7 @@
   /** 关闭弹窗：保存后关闭 */
   async function onClosePromptSave() {
     showClosePrompt = false;
-    const saved = await handleSave();
+    const saved = await docSession.save();
     if (saved) getCurrentWindow().destroy(); // destroy 不再次触发 close-requested
   }
 
@@ -817,105 +818,62 @@
     blocksVersion++;
   }
 
-  /** 有未保存修改时请求确认（打开/拖放/关联打开/重新读取/新建前） */
-  async function confirmDiscard(
-    message = "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？",
-    title = "未保存的修改",
-  ): Promise<boolean> {
-    if (isTauri()) {
-      return await confirm(message, {
-        title,
-        kind: "warning",
-      });
-    }
-    return window.confirm(message);
-  }
-
-  /** 按路径加载 .typ 文件到编辑器（供打开对话框/拖放/关联打开复用） */
-  async function openPath(path: string): Promise<boolean> {
-    // 有未保存修改就必须确认——**包括打开的就是当前这个文件**：此前用 `filePath !== path`
-    // 放行同路径，拖放/关联打开同一个文件（Windows 上把 .typ 拖进窗口很常见）会静默用磁盘内容
-    // 覆盖未保存的输入，表现为"内容退回上次保存时的版本"。
-    if (isEffectiveDirty(dirty, doc)) {
-      const same = filePath === path;
-      const ok = await confirmDiscard(
-        same
-          ? `「${fileTitle}」有未保存的修改，重新打开将丢弃这些修改。仍要打开吗？`
-          : "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？",
-      );
-      if (!ok) return false;
-    }
-    try {
-      const opened = await readTypFile(path);
-      doc = opened.content;
-      filePath = opened.path;
-      fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
+  // ---------------------------------------------------------------------------
+  // 文档生命周期（打开 / 保存 / 重新读取 / 新建）在 `$lib/core/document-session`
+  // ---------------------------------------------------------------------------
+  // 这里只注入页面状态与文件读写；四条契约（脏文档必问、写盘唯一入口、`applyLoaded` 只此一份、
+  // 新建连会话存档一起清）的完整说明在那边。注意 hook 里的取值与赋值都要**在调用时**发生，
+  // 所以这里全是箭头函数 —— 别改成创建时快照（`filePath` / `dirty` / `doc` 每次都不同）。
+  const docSession = createDocumentSession({
+    doc: () => doc,
+    filePath: () => filePath,
+    fileTitle: () => fileTitle,
+    dirty: () => dirty,
+    applyLoaded: (content, path) => {
+      doc = content;
+      editorDoc = content; // 触发编辑器替换全文（**实时镜像**红线，见 editorDoc 声明处）
+      filePath = path;
+      fileTitle = fileNameOf(path);
       dirty = false;
-      editorDoc = opened.content; // 触发编辑器替换全文
+    },
+    applySaved: (path) => {
+      filePath = path;
+      fileTitle = fileNameOf(path);
+      dirty = false;
+    },
+    applyNew: () => {
+      doc = "";
+      editorDoc = "";
+      filePath = null;
+      fileTitle = "未命名.typ";
+      dirty = false;
+    },
+    afterLoad: () => {
       resetMathCache();
       resetBlocks();
       scheduleCompile();
       schedulePersist();
-      statusText = "已打开";
-      return true;
-    } catch (e) {
-      // 带上 Rust 侧的原因（`仅支持 .typ 文件` / `目录无效` …）：光写「打开失败」用户不知道能改什么
-      statusText = failureStatus("打开失败", e);
-      return false;
-    }
-  }
-
-  async function handleOpen() {
-    const path = await openTypFile();
-    if (!path) return;
-    await openPath(path);
-  }
-
-  async function handleSave(): Promise<string | null> {
-    // 2026-09-18 用户要求删掉「保存空文档」那个确认窗（截图见 PR 记录）：
-    // 空文档保存进已有文件时**直接写**，不再问。原先那道确认是 0.8.0 为「唯一能把磁盘
-    // 文件变空」的路径补的（判定函数 `needsBlankOverwriteConfirm` 已随之删除）。
-    // 前提没变：全工程只有 `saveTypFile` 一个 `.typ` 写入口，只挂在显式保存上 ——
-    // 不按保存，磁盘上的文件一个字节也不会动。
-    try {
-      const saved = await saveTypFile(filePath, doc);
-      if (!saved) return null;
-      filePath = saved;
-      fileTitle = saved.split(/[\\/]/).pop() ?? saved;
-      dirty = false;
-      schedulePersist();
-      return saved;
-    } catch (e) {
-      statusText = failureStatus("保存失败", e);
-      return null;
-    }
-  }
-
-  /** Ctrl+R：从磁盘重新读取当前文件到编辑器（未命名文档忽略；有未保存修改先确认） */
-  async function reloadFile() {
-    if (!filePath) return; // 未命名文档：忽略
-    if (isEffectiveDirty(dirty, doc)) {
-      const ok = await confirmDiscard(
-        "当前文档有未保存的修改，重新读取将丢失这些修改。仍要重新读取吗？",
-      );
-      if (!ok) return;
-    }
-    try {
-      const opened = await readTypFile(filePath);
-      doc = opened.content;
-      filePath = opened.path;
-      fileTitle = opened.path.split(/[\\/]/).pop() ?? opened.path;
-      dirty = false;
-      editorDoc = opened.content; // 触发编辑器替换全文
+    },
+    afterSave: () => schedulePersist(),
+    afterNew: () => {
       resetMathCache();
       resetBlocks();
       scheduleCompile();
-      schedulePersist();
-      statusText = "已重新读取";
-    } catch (e) {
-      statusText = failureStatus("重新读取失败", e);
-    }
-  }
+    },
+    // 清存档**只由主窗口做**：这份会话是主窗口的，副窗口里点"新建"不该把主窗口的未保存内容
+    // 从存档里抹掉（副窗口自己的内容是空的，后面 schedulePersist 也只写设置）
+    clearSession: () => {
+      if (!isSecondaryWindow) clearState();
+    },
+    setStatus: (text) => {
+      statusText = text;
+    },
+    isDesktop: isTauri,
+    confirmNative: (message, title) => confirm(message, { title, kind: "warning" }),
+    readFile: readTypFile,
+    writeFile: saveTypFile,
+    pickFile: openTypFile,
+  });
 
   /**
    * 窗口级右键处理：
@@ -977,13 +935,13 @@
           },
         };
       case "save":
-        return { type: "item", label, disabled, onClick: () => handleSave() };
+        return { type: "item", label, disabled, onClick: () => void docSession.save() };
       case "export-pdf":
         return { type: "item", label, disabled, onClick: () => handleExportPdf() };
       case "settings":
         return { type: "item", label, disabled, onClick: () => openSettings() };
       case "open":
-        return { type: "item", label, disabled, onClick: () => handleOpen() };
+        return { type: "item", label, disabled, onClick: () => void docSession.open() };
       default:
         return { type: "item", label, disabled };
     }
@@ -1001,34 +959,6 @@
   }
 
   /**
-   * 新建：清空文档并清除持久化的上次内容。
-   *
-   * **有未保存内容时先确认**（2026-09-16 补）：这是全应用唯一"不问就丢内容"的路 ——
-   * 它把编辑器清空、`filePath` 置空，还顺手 `clearState()` 清掉会话存档，连"启动恢复上次内容"
-   * 那条后路一起断了；而「打开…」「Ctrl+R」都早有确认（`confirmDiscard`）。用户问过
-   * 「编辑器会清空文件吗」之后把这道确认补齐。
-   * （磁盘文件不受影响：`filePath` 被置空，紧接着按 Ctrl+S 走的是"另存为"，覆盖不到原文件。）
-   */
-  async function handleNew() {
-    if (isEffectiveDirty(dirty, doc)) {
-      const ok = await confirmDiscard("当前文档有未保存的修改，新建将丢弃这些修改。仍要新建吗？");
-      if (!ok) return;
-    }
-    doc = "";
-    editorDoc = "";
-    filePath = null;
-    fileTitle = "未命名.typ";
-    dirty = false;
-    // 清存档**只由主窗口做**：这份会话是主窗口的，副窗口里点"新建"不该把主窗口的未保存内容
-    // 从存档里抹掉（副窗口自己的内容是空的，后面 schedulePersist 也只写设置）
-    if (!isSecondaryWindow) clearState();
-    resetMathCache();
-    resetBlocks();
-    scheduleCompile();
-    statusText = "已新建";
-  }
-
-  /**
    * 菜单表：结构由 menu-model.ts 的 buildMenuGroups 纯函数产出（快捷键 → 命令映射、勾选态
    * 都有单测，见 menu-model.test.ts）；这里只把当前状态与命令回调喂进去。
    */
@@ -1039,10 +969,10 @@
       editorWrap,
       uiZoom,
       theme,
-      onNew: handleNew,
+      onNew: () => void docSession.createNew(),
       onNewWindow: openNewWindow,
-      onOpen: handleOpen,
-      onSave: handleSave,
+      onOpen: () => void docSession.open(),
+      onSave: () => void docSession.save(),
       onOpenSettings: openSettings,
       onExportPdf: handleExportPdf,
       runFormat,
@@ -1707,7 +1637,7 @@
   async function claimOpenFileOnBroadcast(path: string) {
     if (await currentIsFocused()) {
       void claimPendingFile(); // 清掉队列 = 告诉主窗口"已经有人接了"
-      await openPath(path);
+      await docSession.openPath(path);
       return;
     }
     if (isSecondaryWindow) return; // 副窗口没焦点就不抢：交给主窗口兜底
@@ -1715,7 +1645,7 @@
     pendingOpenTimer = setTimeout(() => {
       pendingOpenTimer = null;
       void claimPendingFile().then((unclaimed) => {
-        if (unclaimed) void openPath(unclaimed);
+        if (unclaimed) void docSession.openPath(unclaimed);
       });
     }, OPEN_FILE_FALLBACK_DELAY_MS);
   }
@@ -1768,7 +1698,7 @@
         // 必须 preventDefault（runAppKeyAction 统一做了）：否则引擎自己那套缩放会一并插手。
         zoom: zoomBySteps,
         // reloadFile 只在有文件时才会走到（没文件时 decideAppKey 返回 null，放行给浏览器刷新）
-        reloadFile,
+        reloadFile: () => void docSession.reload(),
         openNewWindow,
         closeWindow: () => void closeCurrentWindow(),
         dismissModal,
@@ -1820,7 +1750,7 @@
       editorDoc = saved.content; // 镜像同步，见 editorDoc 声明处
       if (saved.filePath) {
         filePath = saved.filePath;
-        fileTitle = saved.fileTitle ?? saved.filePath.split(/[\\/]/).pop() ?? "未命名.typ";
+        fileTitle = saved.fileTitle ?? fileNameOf(saved.filePath);
       }
       // 未保存标记原样恢复：存过盘又没再改的文档恢复出来不该带"未保存"圆点
       dirty = saved.dirty ?? false;
@@ -1950,7 +1880,7 @@
             dragActive = false;
             const path = pickTypPath(event.payload.paths);
             if (path) {
-              openPath(path);
+              void docSession.openPath(path);
             } else if (event.payload.paths.length > 0) {
               statusText = "仅支持打开 .typ 文件";
             }
@@ -1971,7 +1901,7 @@
         // **只由主窗口取**：副窗口是草稿窗口，不该被启动参数里带的文件顶掉内容。
         if (isSecondaryWindow) return;
         void claimPendingFile().then((path) => {
-          if (path) void openPath(path);
+          if (path) void docSession.openPath(path);
         });
       });
     }
