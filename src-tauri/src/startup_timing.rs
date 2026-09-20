@@ -12,17 +12,17 @@ static WEBVIEW_CREATED: OnceLock<Instant> = OnceLock::new();
 /// RunEvent::Ready 时刻：前端页面加载完成（事件循环首次迭代）
 static READY: OnceLock<Instant> = OnceLock::new();
 
-pub fn set_setup_entry() {
+pub(crate) fn set_setup_entry() {
     let _ = SETUP_ENTRY.set(Instant::now());
 }
 
-pub fn set_webview_created() {
+pub(crate) fn set_webview_created() {
     let _ = WEBVIEW_CREATED.set(Instant::now());
 }
 
 /// 记录 Ready 并输出各阶段相对 setup 入口的耗时
 /// （多窗口场景下以首次到达为准：OnceLock 只接受第一个值）
-pub fn set_ready_and_report() {
+pub(crate) fn set_ready_and_report() {
     let _ = READY.set(Instant::now());
     let Some(t0) = SETUP_ENTRY.get() else { return };
     let ms = |name: &str, t: Option<&Instant>| {
