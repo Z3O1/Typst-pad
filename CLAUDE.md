@@ -42,7 +42,7 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-
 9. **绝不阻塞等 workflow**：推 main / 打 tag / 后续命令一律不等 CI、Release；不挂轮询任务；状态最多**单查**一次 `gh run list`；不要加"别在 CI 运行中 push main"这类限制。
 10. 签名密钥不许动：Secrets 删了就构建不了、换了就再也发不出更新。
 11. 发版权在用户手里：改版本号 / CHANGELOG 版本段 / 打 tag / 建发 Release，只在他说"发 X.Y.Z"之后做。
-12. **五道格式/静态检查门不许摘**（都在 CI 的 `test` job 里，摘一道就等于没有）：`npm run check`、`npm test`、`npm run format:check`、`cargo fmt -- --check`、`cargo clippy --all-targets -- -D warnings`，另有 `cargo test`。改完先本地跑齐；`cargo check` 那一步已被 `clippy --all-targets` 取代（两步都跑等于同一份代码编两遍）。
+12. **五道格式/静态检查门不许摘**（都在 CI 的 `test` job 里，摘一道就等于没有）：`npm run check`、`npm test`、`npm run format:check`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`，另有 `cargo test --manifest-path src-tauri/Cargo.toml`。改完先本地跑齐；`cargo check` 那一步已被 `clippy --all-targets` 取代（两步都跑等于同一份代码编两遍）。
 
 ## 细则红线（一句话版；展开与理由见对应分册）
 
@@ -76,7 +76,7 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-
 ## 环境备忘（本机 WSL）
 
 - push 22 端口被掐走 443：`GIT_SSH_COMMAND="ssh -p 443 -o StrictHostKeyChecking=accept-new" git push git@ssh.github.com:Z3O1/Typst-pad.git HEAD:main`（`accept-new` 不可省）；fetch 同理显式 443 URL + tracking ref。
-- 1420 = Vite，9333 = CDP；查占用 `ss -ltnp | grep :1420` / Windows `netstat.exe -ano | findstr :1420`。`gh` 用 Windows 版（`--repo Z3O1/Typst-pad`）。
+- 1420 = Vite，CDP 默认 9333（单跑套件）/ 9335（`npm run verify:browser`）；查占用 `ss -ltnp | grep :1420` / Windows `netstat.exe -ano | findstr :1420`。`gh` 用 Windows 版（`--repo Z3O1/Typst-pad`）。
 - headless Chromium 用 Windows Chrome（镜像网络下 WSL 才能连 9333）或 WSL Playwright 的 `chromium_headless_shell-*`；**用托管后台任务起**，收尾按记下的 job/端口关。
 
 ## 文档地图（改哪块，先读哪册）

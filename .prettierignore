@@ -17,3 +17,6 @@ docs/
 
 # 锁文件：格式化只产生噪音 diff
 package-lock.json
+
+# 更新签名私钥（已 gitignore，但盘上可能存在）：不该被任何工具读进内存
+/.updater-keys/

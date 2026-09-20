@@ -45,6 +45,8 @@ const SUITES = [
   ["computed-style.mjs", 17],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
+/** 实际进入循环的套件数：用来发现 `ONLY=` 写错（一个都没匹配上却报"全部通过"） */
+let ran = 0;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const children = [];
@@ -56,9 +58,15 @@ function launch(label, cmd, args) {
   children.push(child);
   return child;
 }
-/** 收尾：按**进程组**杀（`npm run dev` 会再起一个 vite 子进程，只杀 npm 会留下孤儿） */
+/**
+ * 收尾：按**进程组**杀（`npm run dev` 会再起一个 vite 子进程，只杀 npm 会留下孤儿）。
+ * 两道保险都必要：① 已经退出的子进程不再 kill —— 它的 PID 可能已经被系统回收成**别人的**
+ * 进程组组长，那时 `kill(-pid)` 就误杀无关进程了；② 只动 `children` 里记着的对象，用户自己
+ * 起的 dev server / Chromium（`SKIP_DEV=1` 或复用 CDP 时）从来不在这个数组里。
+ */
 function cleanup() {
   for (const child of children) {
+    if (child.exitCode !== null || child.signalCode !== null) continue;
     try {
       process.kill(-child.pid, "SIGTERM");
     } catch {
@@ -120,10 +128,14 @@ function runStep(name, cmd, args) {
 
 console.log(`浏览器验收：dev ${APP_URL} / CDP ${CDP_PORT}`);
 process.on("exit", cleanup);
-process.on("SIGINT", () => {
+// SIGTERM 也要收（`timeout`、上层 job 管理器、kill 默认信号都发它）：子进程是 detached 的
+// 独立会话，不主动杀就会变成孤儿继续占着 1425 / 9335。
+const onSignal = (code) => () => {
   cleanup();
-  process.exit(130);
-});
+  process.exit(code);
+};
+process.on("SIGINT", onSignal(130));
+process.on("SIGTERM", onSignal(143));
 
 if (!SKIP_DEV) {
   launch("dev", "npm", ["run", "dev", "--", "--port", PORT, "--host", "0.0.0.0"]);
@@ -167,6 +179,7 @@ if (!SKIP_FIXTURES) {
 
 for (const [file, expectCount] of SUITES) {
   if (only && !only.has(file)) continue;
+  ran += 1;
   const full = join(HERE, file);
   if (!existsSync(full)) {
     record(file, false, "脚本不存在");
@@ -181,13 +194,30 @@ for (const [file, expectCount] of SUITES) {
   const m = text.match(/通过 (\d+) 项检查/);
   const count = m ? Number(m[1]) : null;
   if (res.status !== 0) record(file, false, `${tail}；详情见 ${logFile}`);
-  else if (count !== null && count !== expectCount)
+  else if (count === null)
+    // **fail-closed**：读不到摘要行就当失败。以前这里把"没有摘要"记成通过，只要有人改了
+    // `finish()` 的措辞（或摘要被 `process.exit` 截断），期望项数这道守卫就静默失效了。
+    record(
+      file,
+      false,
+      `退出码 0 但读不到「通过 N 项检查」摘要（改过 finish 的措辞？）；详情见 ${logFile}`,
+    );
+  else if (count !== expectCount)
     record(
       file,
       false,
       `${count} 项 ≠ 期望 ${expectCount} 项（计数变了就同步改 run-all.mjs 的 SUITES）`,
     );
-  else record(file, true, count !== null ? `${count} 项` : tail);
+  else record(file, true, `${count} 项`);
+}
+
+// ONLY 写错（少写 `.mjs`、拼错名字）会让循环一次都不进 —— 那时绝不能报"全部通过"
+if (only && ran === 0) {
+  record(
+    `ONLY=${process.env.ONLY}`,
+    false,
+    `没有匹配到任何套件；可选：${SUITES.map(([f]) => f).join(", ")}`,
+  );
 }
 
 console.log("\n===== 汇总 =====");

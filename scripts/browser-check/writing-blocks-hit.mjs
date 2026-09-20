@@ -53,8 +53,9 @@ console.log(
 );
 
 const c = await connect();
-// runtime: true —— 后面要读控制台事件
-await boot(c, URL_BLOCKS, { blockFixtures: fixtures, runtime: true, settleMs: 600 });
+// 这里**不需要** `Runtime.enable`：本套件不读 `c.events`（只有 writing-blocks.mjs 与 probe.mjs 读）。
+// 拆分前那份代码顺手开了它，但没有任何断言用到；清掉免得后来人以为这里在查控制台。
+await boot(c, URL_BLOCKS, { blockFixtures: fixtures, settleMs: 600 });
 
 /** 点击点 → 页面坐标 → 视口坐标（照探针点的定义反算） */
 async function probePoint(blockFrom, block, probe) {
