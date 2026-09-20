@@ -99,10 +99,7 @@ for (const fx of fixtures) {
     check(`每块高度与真实排版一致（最大偏差 ${worst.toFixed(2)}px）`, worst <= 2.5);
     let worstGap = 0;
     for (let i = 1; i < m.crops.length; i++) {
-      worstGap = Math.max(
-        worstGap,
-        Math.abs(m.crops[i].y - (m.crops[i - 1].y + m.crops[i - 1].h)),
-      );
+      worstGap = Math.max(worstGap, Math.abs(m.crops[i].y - (m.crops[i - 1].y + m.crops[i - 1].h)));
     }
     check(`相邻切片首尾相接（最大缝 ${worstGap.toFixed(2)}px）`, worstGap <= 2.5);
   }
@@ -149,11 +146,19 @@ if (!headings) {
   const h1 = await measureHeading("一级标题", 1);
   const h2 = await measureHeading("二级标题", 2);
   const h3 = await measureHeading("三级标题", 3);
-  check("三级标题都能量到（切片展开成了源码）", !!h1 && !!h2 && !!h3, JSON.stringify({ h1, h2, h3 }));
+  check(
+    "三级标题都能量到（切片展开成了源码）",
+    !!h1 && !!h2 && !!h3,
+    JSON.stringify({ h1, h2, h3 }),
+  );
   // 前置不成立时**不能静默跳过**下面 5 条断言（那样只是总数少 5 项、退出码仍是 0，
   // 读日志的人看不出少的是哪一组）；这里再记一次失败，把跳过的那组写出来
   if (!h1 || !h2 || !h3) {
-    check("标题字号断言的前提不成立（缺 h1/h2/h3）→ 后面 5 条断言未执行", false, JSON.stringify({ h1, h2, h3 }));
+    check(
+      "标题字号断言的前提不成立（缺 h1/h2/h3）→ 后面 5 条断言未执行",
+      false,
+      JSON.stringify({ h1, h2, h3 }),
+    );
   } else {
     // ① 梯度本身（与正文基准无关，只看各级之间的比例）：必须正好是 typst 的 1.4 / 1.2 / 1.0
     check(
@@ -169,7 +174,11 @@ if (!headings) {
     // ② 与切片里的绝对字号**必须一致**：源码透镜的字号基准已经改成"文档实际字号"
     //（Rust 侧 textPt → --write-doc-px），所以这里应当是 1.000 —— 差一点点都会让用户看到
     // "光标一进那块字就变大"（用户：「不要光标在哪里哪里就变大了」）
-    for (const [name, m] of [["h1", h1], ["h2", h2], ["h3", h3]]) {
+    for (const [name, m] of [
+      ["h1", h1],
+      ["h2", h2],
+      ["h3", h3],
+    ]) {
       const ratio = m.sourcePx / m.typstPx;
       check(
         `${name} 与切片字号之比 ${ratio.toFixed(3)}（1.0 ± 0.02，与引擎排版一致）`,
@@ -288,7 +297,11 @@ if (!setDoc) {
   })()`);
   await new Promise((r) => setTimeout(r, 400));
   const b = await c.evaluate(`document.querySelector(".cm-content").innerText`);
-  check("光标进那一行 → 展开成源码（可编辑）", b.includes("#set text(size: 12pt)"), JSON.stringify(b.slice(0, 60)));
+  check(
+    "光标进那一行 → 展开成源码（可编辑）",
+    b.includes("#set text(size: 12pt)"),
+    JSON.stringify(b.slice(0, 60)),
+  );
   // 回到正文：又藏起来（可逆）
   await c.evaluate(`(() => {
     const v = document.querySelector(".cm-content").cmTile.root.view;
@@ -300,7 +313,6 @@ if (!setDoc) {
   const back = await c.evaluate(`document.querySelector(".cm-content").innerText`);
   check("光标离开后又藏起来（可逆）", !back.includes("#set"), JSON.stringify(back.slice(0, 60)));
 }
-
 
 console.log("\n=== 对照：文档级 #set 是否真的进到切片里");
 const plain = fixtures.find((f) => f.name === "文档级设置（默认字号）");
@@ -330,10 +342,16 @@ check(
 );
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 700));
-check("Ctrl+/ 切到源码模式：切片消失", (await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`)) === 0);
+check(
+  "Ctrl+/ 切到源码模式：切片消失",
+  (await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`)) === 0,
+);
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
-check("切回写作模式：切片回来", (await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`)) >= 1);
+check(
+  "切回写作模式：切片回来",
+  (await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`)) >= 1,
+);
 
 console.log("\n场景汇总：");
 console.table(summary);

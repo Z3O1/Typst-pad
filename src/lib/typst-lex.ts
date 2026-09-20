@@ -189,7 +189,11 @@ function hashSpanEnd(src: string, hash: number): number {
  * 返回 code / markup 片段；调用方只把 code 片段登记为不可见区域，
  * markup 片段留给后续扫描（于是 `#show x: it => [*粗*]` 里的粗体仍可识别）。
  */
-function splitCodeSpan(src: string, from: number, to: number): { kind: "code" | "markup"; from: number; to: number }[] {
+function splitCodeSpan(
+  src: string,
+  from: number,
+  to: number,
+): { kind: "code" | "markup"; from: number; to: number }[] {
   const parts: { kind: "code" | "markup"; from: number; to: number }[] = [];
   let seg = from;
   let i = from;

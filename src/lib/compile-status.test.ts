@@ -126,7 +126,10 @@ describe("失败：有定位错误", () => {
 
 describe("失败：只有非定位错误", () => {
   it("状态栏带原因（包不存在这类），并单独记进 lastNonPosError", () => {
-    const patch = reduceCompileStatus({ ok: false, error: "包不存在：@preview/foo:1.0.0", errors: [] }, 8);
+    const patch = reduceCompileStatus(
+      { ok: false, error: "包不存在：@preview/foo:1.0.0", errors: [] },
+      8,
+    );
     expect(patch).toEqual({
       ok: false,
       editorDiagnostics: [],

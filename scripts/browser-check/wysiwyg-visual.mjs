@@ -105,7 +105,11 @@ const measured = await c.evaluate(`(() => {
 })()`);
 
 check("5 个行内公式都渲染出来", measured.length === 5, JSON.stringify(measured.map((m) => m.body)));
-check("每个公式都匹配到真实夹具（不是桩的假 SVG）", measured.every((m) => m.body !== "(未知)"), JSON.stringify(measured.map((m) => m.body)));
+check(
+  "每个公式都匹配到真实夹具（不是桩的假 SVG）",
+  measured.every((m) => m.body !== "(未知)"),
+  JSON.stringify(measured.map((m) => m.body)),
+);
 
 const sizeErrors = measured
   .filter((m) => m.expectedWidthPx !== null)
@@ -124,7 +128,9 @@ const withFixture = measured.filter((m) => m.delta !== null);
 check(
   "行内公式基线与同行文字基线齐平（误差 < 1px）",
   withFixture.every((m) => m.delta < 1),
-  JSON.stringify(withFixture.map((m) => ({ body: m.body, delta: Math.round(m.delta * 100) / 100 }))),
+  JSON.stringify(
+    withFixture.map((m) => ({ body: m.body, delta: Math.round(m.delta * 100) / 100 })),
+  ),
 );
 // 有下沉部分的公式（积分）必须真的往下沉：vertical-align 为负、且盒底低于基线
 const integral = measured.find((m) => m.body.startsWith("integral"));
@@ -251,7 +257,11 @@ const dark = await c.evaluate(`(() => {
   };
 })()`);
 check("暗色主题下 widget 带反色类", dark.hasDarkClass, JSON.stringify(dark));
-check("SVG 应用了 invert 滤镜（黑字在深底上可见）", dark.filter.includes("invert"), JSON.stringify(dark));
+check(
+  "SVG 应用了 invert 滤镜（黑字在深底上可见）",
+  dark.filter.includes("invert"),
+  JSON.stringify(dark),
+);
 check(
   "编辑器背景确实是深色（亮度低于 0x60）",
   dark.bg.length > 0 &&

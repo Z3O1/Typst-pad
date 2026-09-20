@@ -30,9 +30,7 @@ export function byteOffsetsToPositions(text: string, byteOffsets: number[]): num
   const out = new Array<number>(byteOffsets.length).fill(0);
   if (byteOffsets.length === 0) return out;
   // 按下标排序后再扫，保证一趟走完；结果写回原下标
-  const order = byteOffsets
-    .map((b, i) => [Math.max(0, b), i] as const)
-    .sort((a, b) => a[0] - b[0]);
+  const order = byteOffsets.map((b, i) => [Math.max(0, b), i] as const).sort((a, b) => a[0] - b[0]);
 
   let bytes = 0; // 已扫过的 UTF-8 字节数
   let units = 0; // 已扫过的 UTF-16 码元数（= 该字符的起始位置）
@@ -70,9 +68,7 @@ export function byteOffsetsToPositions(text: string, byteOffsets: number[]): num
 export function positionsToByteOffsets(text: string, positions: number[]): number[] {
   const out = new Array<number>(positions.length).fill(0);
   if (positions.length === 0) return out;
-  const order = positions
-    .map((p, i) => [Math.max(0, p), i] as const)
-    .sort((a, b) => a[0] - b[0]);
+  const order = positions.map((p, i) => [Math.max(0, p), i] as const).sort((a, b) => a[0] - b[0]);
 
   let bytes = 0;
   let units = 0;

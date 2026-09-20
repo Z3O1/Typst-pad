@@ -182,17 +182,19 @@ describe("planForCommand 命令映射", () => {
 
   it("无选区时块级命令取当前行内容（不丢已写的内容）", () => {
     // 光标在第 1 行行首，无选区
-    expect(apply("x^2 + y^2\n后文", planForCommand("x^2 + y^2\n后文", 0, 0, "math-block")).doc).toBe(
-      "$\n  x^2 + y^2\n$\n\n后文",
-    );
-    expect(apply("前\nlet a = 1\n", planForCommand("前\nlet a = 1\n", 3, 3, "code-block")).doc).toBe(
-      "前\n```typ\nlet a = 1\n```\n\n",
-    );
+    expect(
+      apply("x^2 + y^2\n后文", planForCommand("x^2 + y^2\n后文", 0, 0, "math-block")).doc,
+    ).toBe("$\n  x^2 + y^2\n$\n\n后文");
+    expect(
+      apply("前\nlet a = 1\n", planForCommand("前\nlet a = 1\n", 3, 3, "code-block")).doc,
+    ).toBe("前\n```typ\nlet a = 1\n```\n\n");
   });
 
   it("有选区时块级命令只替换选区（行内其它文字保留）", () => {
     const doc = "前 frac(a,b) 后";
-    expect(apply(doc, planForCommand(doc, 2, 11, "math-block")).doc).toBe("前 $\n  frac(a,b)\n$\n 后");
+    expect(apply(doc, planForCommand(doc, 2, 11, "math-block")).doc).toBe(
+      "前 $\n  frac(a,b)\n$\n 后",
+    );
   });
 });
 

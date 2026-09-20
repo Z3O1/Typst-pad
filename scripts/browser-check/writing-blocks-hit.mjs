@@ -124,14 +124,17 @@ async function caret() {
   })()`);
 }
 
-const byteToPos = (doc, bytes) => new TextDecoder().decode(new TextEncoder().encode(doc).slice(0, bytes)).length;
+const byteToPos = (doc, bytes) =>
+  new TextDecoder().decode(new TextEncoder().encode(doc).slice(0, bytes)).length;
 
 let totalClicks = 0;
 let totalMatched = 0;
 let totalSkipped = 0;
 
 for (const fx of withProbes) {
-  const picked = PROBE_PICK ? fx.hitProbes.filter((_, i) => PROBE_PICK.includes(i % 15)) : fx.hitProbes;
+  const picked = PROBE_PICK
+    ? fx.hitProbes.filter((_, i) => PROBE_PICK.includes(i % 15))
+    : fx.hitProbes;
   console.log(`\n=== ${fx.name}（${fx.blocks.length} 块 / ${picked.length} 个探针点）`);
   // 逐篇输入同一份文档（桩按文档原文命中夹具）
   await c.click(400, 300);
@@ -142,7 +145,9 @@ for (const fx of withProbes) {
   await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
   // 等切片真的出来：既有编译**去抖 150ms**，而首篇还会赶上"启动时恢复的长文档"那一轮编译，
   // 不显式等就会偶发"所有探针都找不到切片"（实测踩过三次，都发生在首篇）
-  await c.waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 }).catch(() => {});
+  await c
+    .waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 })
+    .catch(() => {});
   await new Promise((r) => setTimeout(r, 350));
 
   // 按块分组（每块若干探针），轮转下单：点完一块它就变源码，所以下一次点**另一块**

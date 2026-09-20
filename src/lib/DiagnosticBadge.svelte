@@ -7,7 +7,12 @@
   // （浮层的开合状态仍在页面手里：那里还有"点条目跳转就顺手收起"这条路。）
   import { tick } from "svelte";
   import { clampPopoverRect } from "./popover-utils";
-  import { formatErrorLoc, hasErrorToShow, type ErrorListItem, type LocatedErrorItem } from "./error-list";
+  import {
+    formatErrorLoc,
+    hasErrorToShow,
+    type ErrorListItem,
+    type LocatedErrorItem,
+  } from "./error-list";
   import {
     badgePopoverStyle,
     errorPopoverVisible,
@@ -175,10 +180,12 @@
         <!-- 复制整份列表（首行是这段标题原文，其后每条一行，路径在行列前面） -->
         <button
           class="error-copy-all"
-          title={isErrors ? "复制全部错误信息（含文件路径与行列）" : "复制全部警告信息（含文件路径与行列）"}
+          title={isErrors
+            ? "复制全部错误信息（含文件路径与行列）"
+            : "复制全部警告信息（含文件路径与行列）"}
           aria-label={isErrors ? "复制全部错误信息" : "复制全部警告信息"}
-          onclick={onCopyAll}
-        >复制全部</button>
+          onclick={onCopyAll}>复制全部</button
+        >
       </div>
       <div class="error-list">
         {#each items as item}
@@ -200,10 +207,12 @@
             {/if}
             <button
               class="error-item-copy"
-              title={isErrors ? "复制这条错误信息（含文件路径与行列）" : "复制这条警告信息（含文件路径与行列）"}
+              title={isErrors
+                ? "复制这条错误信息（含文件路径与行列）"
+                : "复制这条警告信息（含文件路径与行列）"}
               aria-label={isErrors ? "复制这条错误信息" : "复制这条警告信息"}
-              onclick={() => onCopyOne(item)}
-            >复制</button>
+              onclick={() => onCopyOne(item)}>复制</button
+            >
           </div>
         {/each}
       </div>

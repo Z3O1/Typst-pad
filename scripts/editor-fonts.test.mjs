@@ -61,7 +61,10 @@ describe("写作模式的打包字体（Rust 白名单 ↔ 前端 @font-face ↔
 
   it("字体栈里的族名顺序与 typst 默认族一致（拉丁 Libertinus 在中文之前）", () => {
     const defaults = rustList("DEFAULT_FONT_FAMILIES");
-    const stack = ts.slice(ts.indexOf("export const WRITE_FONT_STACK"), ts.indexOf(";", ts.indexOf("export const WRITE_FONT_STACK")));
+    const stack = ts.slice(
+      ts.indexOf("export const WRITE_FONT_STACK"),
+      ts.indexOf(";", ts.indexOf("export const WRITE_FONT_STACK")),
+    );
     const positions = defaults
       .filter((family) => stack.includes(`"${family}"`))
       .map((family) => [family, stack.indexOf(`"${family}"`)]);

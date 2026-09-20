@@ -78,7 +78,11 @@ describe("随机文档鲁棒性", () => {
 
       const opaque = scanNonMarkupRegions(doc);
       const markup = scanMarkupRegions(doc);
-      assertOrdered([...opaque].sort((a, b) => a.from - b.from), doc.length, "opaque");
+      assertOrdered(
+        [...opaque].sort((a, b) => a.from - b.from),
+        doc.length,
+        "opaque",
+      );
 
       // opaque 与 markup 互补且拼起来覆盖全文
       const merged = [...opaque, ...markup].sort((a, b) => a.from - b.from);

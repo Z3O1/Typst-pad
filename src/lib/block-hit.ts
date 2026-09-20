@@ -90,10 +90,7 @@ export function cropPagePoint(
  * 单位是**字节偏移**（与 `block_hit_test` 的出入参一致）。传入 null / 非法值 → null
  * （调用方退回"光标落到块首"的老行为）。
  */
-export function clampHitOffset(
-  offset: number | null | undefined,
-  block: ByteRange,
-): number | null {
+export function clampHitOffset(offset: number | null | undefined, block: ByteRange): number | null {
   if (typeof offset !== "number" || !Number.isFinite(offset)) return null;
   const value = Math.round(offset);
   if (value < block.fromByte) return block.fromByte;

@@ -50,7 +50,11 @@ function nextDollarOnLine(doc: string, pos: number): number {
 }
 
 /** 光标是否落在已有公式**内部**（`$a + |b$`）——那里的 `$` 是"闭合公式"，不该再补一对 */
-function insideMath(doc: string, pos: number, opaque: ReturnType<typeof scanNonMarkupRegions>): boolean {
+function insideMath(
+  doc: string,
+  pos: number,
+  opaque: ReturnType<typeof scanNonMarkupRegions>,
+): boolean {
   return scanMathRanges(doc, opaque).some((r) => pos > r.from && pos < r.to);
 }
 

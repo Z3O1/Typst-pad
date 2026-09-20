@@ -14,12 +14,20 @@ const crop = {
 
 describe("cropPagePoint：切片上的点 → 页面坐标（pt）", () => {
   it("左上角 → 带的原点", () => {
-    const p = cropPagePoint({ left: 200, top: 100, width: 495, height: 80 }, { x: 200, y: 100 }, crop);
+    const p = cropPagePoint(
+      { left: 200, top: 100, width: 495, height: 80 },
+      { x: 200, y: 100 },
+      crop,
+    );
     expect(p).toEqual({ page: 1, xPt: 58.01, yPt: 55.93 });
   });
 
   it("右下角 → 带的右下角（换算只依赖 DOM 实测矩形，与缩放比例无关）", () => {
-    const p = cropPagePoint({ left: 200, top: 100, width: 495, height: 80 }, { x: 695, y: 180 }, crop);
+    const p = cropPagePoint(
+      { left: 200, top: 100, width: 495, height: 80 },
+      { x: 695, y: 180 },
+      crop,
+    );
     expect(p!.xPt).toBeCloseTo(58.01 + 371.25, 6);
     expect(p!.yPt).toBeCloseTo(55.93 + 60, 6);
   });
@@ -37,7 +45,11 @@ describe("cropPagePoint：切片上的点 → 页面坐标（pt）", () => {
   it("缩放变化不影响结果：同一相对位置 → 同一页面坐标", () => {
     // 同一块在两种显示宽度下（例如界面缩放 100% / 150%）
     const a = cropPagePoint({ left: 0, top: 0, width: 500, height: 80 }, { x: 250, y: 40 }, crop);
-    const b = cropPagePoint({ left: 30, top: 10, width: 750, height: 120 }, { x: 405, y: 70 }, crop);
+    const b = cropPagePoint(
+      { left: 30, top: 10, width: 750, height: 120 },
+      { x: 405, y: 70 },
+      crop,
+    );
     expect(b!.xPt).toBeCloseTo(a!.xPt, 6);
     expect(b!.yPt).toBeCloseTo(a!.yPt, 6);
   });
@@ -58,10 +70,14 @@ describe("cropPagePoint：切片上的点 → 页面坐标（pt）", () => {
   });
 
   it("page 跟着块走（多页文档里命中测试只在该页找）", () => {
-    const p = cropPagePoint({ left: 0, top: 0, width: 10, height: 10 }, { x: 0, y: 0 }, {
-      ...crop,
-      page: 3,
-    });
+    const p = cropPagePoint(
+      { left: 0, top: 0, width: 10, height: 10 },
+      { x: 0, y: 0 },
+      {
+        ...crop,
+        page: 3,
+      },
+    );
     expect(p!.page).toBe(3);
   });
 });

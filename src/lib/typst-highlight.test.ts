@@ -33,7 +33,10 @@ describe("标题高亮覆盖（压掉默认高亮给标题加的下划线）", (
   // 取值一律用 text-decoration **简写**：jsdom 没实现 text-decoration-line 长写（恒为 none）。
   it("两个类同在时算出来是 none", () => {
     mountStyles([rulesOf(defaultHighlightStyle), rulesOf(typstHeadingHighlightStyle)]);
-    const el = headingElement([classNameOf(defaultHighlightStyle), classNameOf(typstHeadingHighlightStyle)]);
+    const el = headingElement([
+      classNameOf(defaultHighlightStyle),
+      classNameOf(typstHeadingHighlightStyle),
+    ]);
     expect(getComputedStyle(el).textDecoration).toBe("none");
   });
 

@@ -214,7 +214,12 @@ describe("applyBlockSelection", () => {
     applyBlockSelection(covers, [{ from: 5, to: 8, head: 8 }], doc.length);
     expect(covers.map((c) => c.selected)).toEqual([false, true, false]);
     expect(covers.map((c) => c.revealed)).toEqual([false, true, false]);
-    const again = planBlockCovers(three().covers[0].block ? toBlockTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]).blocks : [], Text.of(doc.split("\n")));
+    const again = planBlockCovers(
+      three().covers[0].block
+        ? toBlockTable(doc, [crop(0, 3), crop(5, 8), crop(10, 13)]).blocks
+        : [],
+      Text.of(doc.split("\n")),
+    );
     applyBlockSelection(again, [{ from: 5, to: 8, head: 12 }], doc.length);
     expect(again.map((c) => c.selected)).toEqual([false, true, false]);
     expect(again.map((c) => c.revealed)).toEqual([false, false, true]);
@@ -257,14 +262,24 @@ describe("carryOverCrops（窗口化：窗口外的块沿用上一轮切片）",
     const out = carryOverCrops(prev, next, doc);
     expect(out.carried).toBe(2);
     expect(out.missing).toBe(0);
-    expect(out.blocks.map((b) => b.svg)).toEqual(["<svg>aaa</svg>", "<svg>bbb</svg>", "<svg>ccc</svg>"]);
+    expect(out.blocks.map((b) => b.svg)).toEqual([
+      "<svg>aaa</svg>",
+      "<svg>bbb</svg>",
+      "<svg>ccc</svg>",
+    ]);
   });
 
   it("文本改过的块不沿用（宁可先显示源码，也不显示旧排版）", () => {
     const before = "aaa\n\nbbb\n";
-    const prev = table(before, [crop(0, 3, { svg: "<svg>aaa</svg>" }), crop(5, 8, { svg: "<svg>bbb</svg>" })]).blocks;
+    const prev = table(before, [
+      crop(0, 3, { svg: "<svg>aaa</svg>" }),
+      crop(5, 8, { svg: "<svg>bbb</svg>" }),
+    ]).blocks;
     const after = "aaa\n\nbbbx\n"; // 第二块变了，且本轮没渲
-    const next = table(after, [crop(0, 3, { svg: "<svg>aaa</svg>" }), crop(5, 9, { svg: "" })]).blocks;
+    const next = table(after, [
+      crop(0, 3, { svg: "<svg>aaa</svg>" }),
+      crop(5, 9, { svg: "" }),
+    ]).blocks;
     const out = carryOverCrops(prev, next, after);
     expect(out.carried).toBe(0);
     expect(out.missing).toBe(1);
@@ -575,7 +590,10 @@ describe("编辑后的增量平移：改动不许落进旧切片里（修「块�
             off += line.length + 1;
           }
           for (const c of covers) {
-            if (!lineStarts.has(c.coverFrom) || (c.coverTo !== next.length && !lineStarts.has(c.coverTo))) {
+            if (
+              !lineStarts.has(c.coverFrom) ||
+              (c.coverTo !== next.length && !lineStarts.has(c.coverTo))
+            ) {
               throw new Error(
                 `pos=${pos} 插入 ${JSON.stringify(insert)}：格子边界不在行首 [${c.coverFrom},${c.coverTo})`,
               );
@@ -651,10 +669,7 @@ describe("isSafeHref（链接热区的 href 白名单）", () => {
 // （格子边界不变）但不可渲染，保持源码显示。
 describe("skipped 的块不可渲染", () => {
   it("found=true 但 svg 为空且 skipped=true → renderable=false（而且不算 noOutput）", () => {
-    const table = toBlockTable("正文", [
-      { ...crop(0, 6), svg: "", skipped: true },
-      crop(6, 12),
-    ]);
+    const table = toBlockTable("正文", [{ ...crop(0, 6), svg: "", skipped: true }, crop(6, 12)]);
     expect(table.blocks[0].skipped).toBe(true);
     const covers = planBlockCovers(table.blocks, Text.of(["正文正文"]));
     const first = covers.find((c) => c.block.from === 0)!;

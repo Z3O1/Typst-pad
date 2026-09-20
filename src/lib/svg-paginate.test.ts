@@ -54,7 +54,7 @@ describe("paginateSvg", () => {
     expect(paginateSvg(bad)).toBe(bad);
   });
 
-  it("分隔线类名不干扰 pageCount 正则统计（class=\"typst-page\"）", () => {
+  it('分隔线类名不干扰 pageCount 正则统计（class="typst-page"）', () => {
     const out = paginateSvg(pageSvg(3));
     const pageCount = (out.match(/class="typst-page"/g) ?? []).length;
     expect(pageCount).toBe(3);

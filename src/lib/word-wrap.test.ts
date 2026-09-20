@@ -3,7 +3,10 @@ import { describe, it, expect } from "vitest";
 import { WRAP_SOURCE_ONLY_NOTICE, isWrapToggleKey, wrapNotice } from "./word-wrap";
 
 /** 构造按键事件：只写关心字段，修饰键默认全 false */
-const key = (k: string, mods: Partial<Record<"ctrlKey" | "metaKey" | "altKey" | "shiftKey", boolean>> = {}) => ({
+const key = (
+  k: string,
+  mods: Partial<Record<"ctrlKey" | "metaKey" | "altKey" | "shiftKey", boolean>> = {},
+) => ({
   key: k,
   ctrlKey: false,
   metaKey: false,

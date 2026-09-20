@@ -26,7 +26,12 @@ const bindingExtensions = [basicSetup, editorKeymap, indentUnit.of(INDENT_UNIT)]
 const commentTokensData = EditorState.languageData.of(() => [
   { commentTokens: { block: { open: "/*", close: "*/" }, line: "//" } },
 ]);
-const behaviorExtensions = [basicSetup, editorKeymap, indentUnit.of(INDENT_UNIT), commentTokensData];
+const behaviorExtensions = [
+  basicSetup,
+  editorKeymap,
+  indentUnit.of(INDENT_UNIT),
+  commentTokensData,
+];
 
 /** 按优先级展平后的全部键位绑定（facet 值按 Prec 优先级排列） */
 function allBindings() {

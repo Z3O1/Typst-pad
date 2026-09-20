@@ -81,25 +81,77 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({ theme: "light", content: "x", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, editorWrap: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, updateDismissedAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
+    saveState({
+      theme: "light",
+      content: "x",
+      filePath: null,
+      fileTitle: null,
+      prefixEnabled: false,
+      prefixCode: "",
+      viewMode: "write",
+      showPreview: false,
+      editorWrap: false,
+      dirty: false,
+      restoreSession: true,
+      autoCheckUpdates: true,
+      lastUpdateCheckAt: null,
+      updateDismissedAt: null,
+      uiZoom: 1,
+      chineseFont: "",
+      fontDirs: [],
+    });
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({ theme: "system", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false, editorWrap: false, dirty: false, restoreSession: true, autoCheckUpdates: true, lastUpdateCheckAt: null, updateDismissedAt: null, uiZoom: 1, chineseFont: "", fontDirs: [] });
+    saveState({
+      theme: "system",
+      content: "",
+      filePath: null,
+      fileTitle: null,
+      prefixEnabled: false,
+      prefixCode: "",
+      viewMode: "write",
+      showPreview: false,
+      editorWrap: false,
+      dirty: false,
+      restoreSession: true,
+      autoCheckUpdates: true,
+      lastUpdateCheckAt: null,
+      updateDismissedAt: null,
+      uiZoom: 1,
+      chineseFont: "",
+      fontDirs: [],
+    });
     expect(loadState().theme).toBe("system");
   });
 
   it("旧存档（无 showPreview 字段）跟随模式：写作 → 单栏，源码 → 双栏", () => {
     localStorage.setItem(
       "typst-pad:state",
-      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write" }),
+      JSON.stringify({
+        theme: "dark",
+        content: "",
+        filePath: null,
+        fileTitle: null,
+        prefixEnabled: false,
+        prefixCode: "",
+        viewMode: "write",
+      }),
     );
     expect(loadState().showPreview).toBe(false);
     localStorage.setItem(
       "typst-pad:state",
-      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "source" }),
+      JSON.stringify({
+        theme: "dark",
+        content: "",
+        filePath: null,
+        fileTitle: null,
+        prefixEnabled: false,
+        prefixCode: "",
+        viewMode: "source",
+      }),
     );
     expect(loadState().showPreview).toBe(true);
   });
@@ -107,12 +159,28 @@ describe("persistence", () => {
   it("旧存档（只有 livePreview 布尔）迁移到 viewMode", () => {
     localStorage.setItem(
       "typst-pad:state",
-      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: false }),
+      JSON.stringify({
+        theme: "dark",
+        content: "",
+        filePath: null,
+        fileTitle: null,
+        prefixEnabled: false,
+        prefixCode: "",
+        livePreview: false,
+      }),
     );
     expect(loadState().viewMode).toBe("source");
     localStorage.setItem(
       "typst-pad:state",
-      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", livePreview: true }),
+      JSON.stringify({
+        theme: "dark",
+        content: "",
+        filePath: null,
+        fileTitle: null,
+        prefixEnabled: false,
+        prefixCode: "",
+        livePreview: true,
+      }),
     );
     expect(loadState().viewMode).toBe("write");
   });
@@ -120,7 +188,16 @@ describe("persistence", () => {
   it("旧存档（无 editorWrap）自动换行默认关", () => {
     localStorage.setItem(
       "typst-pad:state",
-      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "source", showPreview: true }),
+      JSON.stringify({
+        theme: "dark",
+        content: "",
+        filePath: null,
+        fileTitle: null,
+        prefixEnabled: false,
+        prefixCode: "",
+        viewMode: "source",
+        showPreview: true,
+      }),
     );
     expect(loadState().editorWrap).toBe(false);
   });
@@ -128,7 +205,14 @@ describe("persistence", () => {
   it("全新存档（无任何模式字段）默认写作模式", () => {
     localStorage.setItem(
       "typst-pad:state",
-      JSON.stringify({ theme: "dark", content: "", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "" }),
+      JSON.stringify({
+        theme: "dark",
+        content: "",
+        filePath: null,
+        fileTitle: null,
+        prefixEnabled: false,
+        prefixCode: "",
+      }),
     );
     expect(loadState().viewMode).toBe("write");
   });
@@ -136,7 +220,16 @@ describe("persistence", () => {
   it("旧存档（无 restoreSession/dirty）默认：恢复会话开启、脏标记为否", () => {
     localStorage.setItem(
       "typst-pad:state",
-      JSON.stringify({ theme: "dark", content: "旧内容", filePath: null, fileTitle: null, prefixEnabled: false, prefixCode: "", viewMode: "write", showPreview: false }),
+      JSON.stringify({
+        theme: "dark",
+        content: "旧内容",
+        filePath: null,
+        fileTitle: null,
+        prefixEnabled: false,
+        prefixCode: "",
+        viewMode: "write",
+        showPreview: false,
+      }),
     );
     const state = loadState();
     expect(state.restoreSession).toBe(true);
@@ -177,31 +270,28 @@ describe("persistence", () => {
   });
 
   it("lastUpdateCheckAt 损坏（字符串/NaN 之类）时不写进状态（它现在只是记录，别再被当成判定依据）", () => {
-    localStorage.setItem(
-      "typst-pad:state",
-      JSON.stringify({ lastUpdateCheckAt: "刚刚" }),
-    );
+    localStorage.setItem("typst-pad:state", JSON.stringify({ lastUpdateCheckAt: "刚刚" }));
     expect(loadState().lastUpdateCheckAt).toBeNull();
   });
 
   it("updateDismissedAt 损坏时不写进状态（否则一个坏值会让更新弹窗永远不再出现）", () => {
-    localStorage.setItem(
-      "typst-pad:state",
-      JSON.stringify({ updateDismissedAt: "刚刚" }),
-    );
+    localStorage.setItem("typst-pad:state", JSON.stringify({ updateDismissedAt: "刚刚" }));
     expect(loadState().updateDismissedAt).toBeNull();
   });
 });
 
 describe("多窗口：副窗口（新建窗口）只写设置，不动主窗口的会话", () => {
   it("mergeSessionFields 用 previous 的会话字段覆盖 next", () => {
-    const merged = mergeSessionFields(fullState({ content: "副窗口的空文档", dirty: true, uiZoom: 1.4 }), {
-      content: "主窗口的未保存内容",
-      filePath: "D:\\doc.typ",
-      fileTitle: "doc.typ",
-      dirty: true,
-      uiZoom: 1,
-    });
+    const merged = mergeSessionFields(
+      fullState({ content: "副窗口的空文档", dirty: true, uiZoom: 1.4 }),
+      {
+        content: "主窗口的未保存内容",
+        filePath: "D:\\doc.typ",
+        fileTitle: "doc.typ",
+        dirty: true,
+        uiZoom: 1,
+      },
+    );
     // 会话字段来自 previous
     expect(merged.content).toBe("主窗口的未保存内容");
     expect(merged.filePath).toBe("D:\\doc.typ");
@@ -220,7 +310,14 @@ describe("多窗口：副窗口（新建窗口）只写设置，不动主窗口�
   });
 
   it("saveState({ session: false }) 保留存档里已有的会话（副窗口改设置后主窗口内容还在）", () => {
-    saveState(fullState({ content: "主窗口的未保存内容", filePath: "D:\\doc.typ", fileTitle: "doc.typ", dirty: true }));
+    saveState(
+      fullState({
+        content: "主窗口的未保存内容",
+        filePath: "D:\\doc.typ",
+        fileTitle: "doc.typ",
+        dirty: true,
+      }),
+    );
     // 副窗口：空文档 + 改了自己的界面缩放
     saveState(fullState({ content: "", uiZoom: 1.5 }), { session: false });
     const saved = loadState();

@@ -109,8 +109,7 @@
         // Tab / 方向键左右：循环切换选中的分类
         e.preventDefault();
         const cur = selectedIndex ?? 0;
-        selectedIndex =
-          (cur + (decision.type === "next" ? 1 : -1) + groups.length) % groups.length;
+        selectedIndex = (cur + (decision.type === "next" ? 1 : -1) + groups.length) % groups.length;
         openIndex = null;
         return;
       }
@@ -174,7 +173,8 @@
           if (openIndex !== null) openIndex = i; // 已展开时悬停切换
         }}
       >
-        {group.label}{#if group.accessKey} (<span class="access-key">{group.accessKey}</span>){/if}
+        {group.label}{#if group.accessKey}
+          (<span class="access-key">{group.accessKey}</span>){/if}
       </button>
       {#if openIndex === i}
         <div class="menu-dropdown" role="menu">

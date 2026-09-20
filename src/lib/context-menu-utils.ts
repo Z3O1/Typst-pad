@@ -13,14 +13,7 @@ export type ContextZone = "editor" | "preview" | "chrome" | "other";
 
 /** 菜单项对应的命令（由调用方映射到具体执行函数，避免纯逻辑依赖 DOM 与异步操作） */
 export type ContextMenuCommand =
-  | "cut"
-  | "copy"
-  | "paste"
-  | "select-all"
-  | "save"
-  | "export-pdf"
-  | "settings"
-  | "open";
+  "cut" | "copy" | "paste" | "select-all" | "save" | "export-pdf" | "settings" | "open";
 
 /** 菜单项描述：不含 onClick，enabled 已按区域与选区状态算好 */
 export interface ContextMenuItemSpec {

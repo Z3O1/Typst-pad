@@ -25,11 +25,7 @@ export type DocMappedPos = { kind: "prefix" } | { kind: "user"; line: number; co
  * - 前缀不以换行结尾时，最后一行与用户第 1 行拼接在同一行——以列区分归属
  *   （列 ≤ 前缀尾行长度 → 前缀；否则属于用户第 1 行，列需减去前缀尾行长度）。
  */
-export function mapCompiledPosToDoc(
-  line: number,
-  col: number,
-  prefixCode: string,
-): DocMappedPos {
+export function mapCompiledPosToDoc(line: number, col: number, prefixCode: string): DocMappedPos {
   const newlineCount = (prefixCode.match(/\n/g) ?? []).length;
   const tail = prefixCode.slice(prefixCode.lastIndexOf("\n") + 1);
   const docStartLine = newlineCount + 1;

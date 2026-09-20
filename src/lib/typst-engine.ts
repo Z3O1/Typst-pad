@@ -163,9 +163,7 @@ export function diagnosticToLocation(d: Diagnostic): CompileErrorLocation {
 
 /** 全部 error 级诊断 → 编辑器错误位置列表（warning 级不参与波浪线/错误计数） */
 export function errorLocations(diagnostics: Diagnostic[]): CompileErrorLocation[] {
-  return diagnostics
-    .filter((d) => d.severity === "error")
-    .map(diagnosticToLocation);
+  return diagnostics.filter((d) => d.severity === "error").map(diagnosticToLocation);
 }
 
 /** 诊断消息格式化（带位置后缀；供无法定位的错误作为状态栏/弹窗文案） */

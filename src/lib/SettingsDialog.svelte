@@ -73,8 +73,7 @@
       bind:value={prefixCode}
       bind:this={prefixTextarea}
       placeholder="#set page(margin: 2cm)"
-      spellcheck="false"
-    ></textarea>
+      spellcheck="false"></textarea>
     <label class="settings-row settings-row-font">
       <span>正文字体（中文）</span>
       <select class="settings-select" bind:value={chineseFont}>
@@ -98,7 +97,9 @@
         </div>
       {/each}
       <div class="settings-dir-actions">
-        <button class="modal-btn" onclick={onAddFontDir} disabled={fontsLoading}>添加字体目录…</button>
+        <button class="modal-btn" onclick={onAddFontDir} disabled={fontsLoading}
+          >添加字体目录…</button
+        >
         {#if fontsLoading}
           <span class="settings-hint">正在读取字体…</span>
         {:else if availableFonts.length > 0}

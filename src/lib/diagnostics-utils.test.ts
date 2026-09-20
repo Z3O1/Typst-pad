@@ -100,7 +100,9 @@ describe("squiggleRanges（编辑器波浪线区间）", () => {
   });
 
   it("空文档：无法构成区间，返回空", () => {
-    expect(squiggleRanges(Text.empty, [err({ line: 1, col: 1, endLine: 1, endCol: 1 })])).toEqual([]);
+    expect(squiggleRanges(Text.empty, [err({ line: 1, col: 1, endLine: 1, endCol: 1 })])).toEqual(
+      [],
+    );
   });
 
   it("非主源文件（本地库）的错误：不为主文档画波浪线", () => {
@@ -143,18 +145,14 @@ describe("squiggleRanges（编辑器波浪线区间）", () => {
 
   it("前缀启用：错误行号按编译源映射回用户文档", () => {
     // 前缀 "A\n" 一行，用户第 1 行 = 编译源第 2 行；实测 "#set ...\n#let a = b" → "1:9-1:10"
-    const ranges = squiggleRanges(doc, [
-      err({ line: 2, col: 10, endLine: 2, endCol: 11 }),
-    ], "A\n");
+    const ranges = squiggleRanges(doc, [err({ line: 2, col: 10, endLine: 2, endCol: 11 })], "A\n");
     expect(ranges).toHaveLength(1);
     expect(ranges[0].from).toBe(9); // 用户文档第 1 行的 "b"
     expect(ranges[0].to).toBe(10);
   });
 
   it("前缀启用：错误落在前缀代码内 → 不画波浪线", () => {
-    const ranges = squiggleRanges(doc, [
-      err({ line: 1, col: 3, endLine: 1, endCol: 4 }),
-    ], "A\n");
+    const ranges = squiggleRanges(doc, [err({ line: 1, col: 3, endLine: 1, endCol: 4 })], "A\n");
     expect(ranges).toEqual([]);
   });
 
@@ -170,9 +168,7 @@ describe("squiggleRanges（编辑器波浪线区间）", () => {
   });
 
   it("跨行区间（起点在用户第 1 行、终点在第 2 行）", () => {
-    const ranges = squiggleRanges(doc, [
-      err({ line: 1, col: 10, endLine: 2, endCol: 4 }),
-    ]);
+    const ranges = squiggleRanges(doc, [err({ line: 1, col: 10, endLine: 2, endCol: 4 })]);
     expect(ranges).toHaveLength(1);
     expect(ranges[0].from).toBe(9);
     expect(ranges[0].to).toBe(14); // 覆盖 "b"、换行符与第 2 行 "hel"

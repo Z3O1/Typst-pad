@@ -43,7 +43,11 @@ describe("installEditorFonts（把打包字体装进 webview）", () => {
     const h = deps();
     const families = await installEditorFonts(h.d);
     expect(h.added).toHaveLength(3);
-    expect(h.made).toEqual(["Libertinus Serif@400", "Libertinus Serif@700", "Noto Serif CJK SC@400"]);
+    expect(h.made).toEqual([
+      "Libertinus Serif@400",
+      "Libertinus Serif@700",
+      "Noto Serif CJK SC@400",
+    ]);
     expect(families).toEqual(["Libertinus Serif", "Noto Serif CJK SC"]);
   });
 

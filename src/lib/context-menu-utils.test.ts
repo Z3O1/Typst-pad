@@ -31,9 +31,7 @@ function itemFor(
 
 describe("resolveContextZone 区域判定", () => {
   it("target 为 .cm-content 内部元素 → editor", () => {
-    const content = makeElement(
-      `<div class="cm-content"><span class="cm-line">abc</span></div>`,
-    );
+    const content = makeElement(`<div class="cm-content"><span class="cm-line">abc</span></div>`);
     const line = content.querySelector(".cm-line")!;
     expect(resolveContextZone(line)).toBe("editor");
   });
@@ -107,22 +105,12 @@ describe("previewSelectionHasContent 预览选区判定", () => {
 
   it("选区锚点落在预览容器内且非空 → true", () => {
     const anchor = host.querySelector("text")!;
-    expect(
-      previewSelectionHasContent(
-        { isCollapsed: false, anchorNode: anchor },
-        host,
-      ),
-    ).toBe(true);
+    expect(previewSelectionHasContent({ isCollapsed: false, anchorNode: anchor }, host)).toBe(true);
   });
 
   it("空选区（isCollapsed）→ false", () => {
     const anchor = host.querySelector("text")!;
-    expect(
-      previewSelectionHasContent(
-        { isCollapsed: true, anchorNode: anchor },
-        host,
-      ),
-    ).toBe(false);
+    expect(previewSelectionHasContent({ isCollapsed: true, anchorNode: anchor }, host)).toBe(false);
   });
 
   it("选区锚点在预览容器外（如编辑器内）→ false", () => {
@@ -137,9 +125,7 @@ describe("previewSelectionHasContent 预览选区判定", () => {
 
   it("null 选区 / null 容器 → false", () => {
     expect(previewSelectionHasContent(null, host)).toBe(false);
-    expect(
-      previewSelectionHasContent({ isCollapsed: false, anchorNode: host }, null),
-    ).toBe(false);
+    expect(previewSelectionHasContent({ isCollapsed: false, anchorNode: host }, null)).toBe(false);
   });
 });
 

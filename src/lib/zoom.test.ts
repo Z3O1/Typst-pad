@@ -357,31 +357,27 @@ describe("zoomUnobservedNotice（状态栏文案：只说明「没观察到」�
 
 describe("shouldRebaselineZoom（这次 resize 要不要重校 100% 基准）", () => {
   it("沉降窗口内 → 不校（缩放自己引发的 resize；一校就把基准压低成新宽度）", () => {
-    expect(
-      shouldRebaselineZoom({ now: 1000, settlingUntil: 3000, verifyInFlight: false }),
-    ).toBe(false);
+    expect(shouldRebaselineZoom({ now: 1000, settlingUntil: 3000, verifyInFlight: false })).toBe(
+      false,
+    );
     // 窗口刚过（now == settlingUntil）就算结束
-    expect(
-      shouldRebaselineZoom({ now: 3000, settlingUntil: 3000, verifyInFlight: false }),
-    ).toBe(true);
+    expect(shouldRebaselineZoom({ now: 3000, settlingUntil: 3000, verifyInFlight: false })).toBe(
+      true,
+    );
   });
 
   it("复核在跑 → 一律不校（测量期间任何重校都会带偏读数）", () => {
-    expect(
-      shouldRebaselineZoom({ now: 9000, settlingUntil: 0, verifyInFlight: true }),
-    ).toBe(false);
-    expect(
-      shouldRebaselineZoom({ now: 9000, settlingUntil: 8000, verifyInFlight: true }),
-    ).toBe(false);
+    expect(shouldRebaselineZoom({ now: 9000, settlingUntil: 0, verifyInFlight: true })).toBe(false);
+    expect(shouldRebaselineZoom({ now: 9000, settlingUntil: 8000, verifyInFlight: true })).toBe(
+      false,
+    );
   });
 
   it("窗口外、也没复核在跑 → 该校（用户拖窗口就是这条路径）", () => {
-    expect(
-      shouldRebaselineZoom({ now: 5000, settlingUntil: 3000, verifyInFlight: false }),
-    ).toBe(true);
-    expect(
-      shouldRebaselineZoom({ now: 5000, settlingUntil: 0, verifyInFlight: false }),
-    ).toBe(true);
+    expect(shouldRebaselineZoom({ now: 5000, settlingUntil: 3000, verifyInFlight: false })).toBe(
+      true,
+    );
+    expect(shouldRebaselineZoom({ now: 5000, settlingUntil: 0, verifyInFlight: false })).toBe(true);
   });
 
   it("沉降窗口是兜底长度（复核正常 1s 内收尾，窗口给 2s 足够）", () => {

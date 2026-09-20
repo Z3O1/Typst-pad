@@ -30,7 +30,8 @@ const args = process.argv.slice(2);
 const keep = args.includes("--keep");
 const wantVersion = args.find((a) => !a.startsWith("--"));
 const version =
-  wantVersion ?? JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+  wantVersion ??
+  JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 const manifestUrl = `https://github.com/${REPO}/releases/latest/download/latest.json`;
 const lines = [];
@@ -45,14 +46,20 @@ say(`匿名验收 ${REPO} v${version}`);
 const res = await fetch(manifestUrl, { redirect: "follow" });
 if (!res.ok) {
   say(`❌ latest.json HTTP ${res.status} —— 自动更新拿不到清单。`);
-  say(`   先查草稿：gh release view v${version} --repo ${REPO} --json isDraft（草稿资产对匿名不可见）`);
+  say(
+    `   先查草稿：gh release view v${version} --repo ${REPO} --json isDraft（草稿资产对匿名不可见）`,
+  );
   process.exit(1);
 }
 const manifest = await res.json();
 say(`✅ latest.json HTTP 200`);
 
 // ② 版本号 + 安装包
-say(manifest.version === version ? `✅ version ${manifest.version}` : `❌ version 是 ${manifest.version}，期望 ${version}`);
+say(
+  manifest.version === version
+    ? `✅ version ${manifest.version}`
+    : `❌ version 是 ${manifest.version}，期望 ${version}`,
+);
 const platform = manifest.platforms?.["windows-x86_64"];
 if (!platform) {
   say(`❌ 清单里没有 windows-x86_64 平台`);
@@ -61,7 +68,10 @@ if (!platform) {
 const installerUrl = platform.url;
 const installerName = installerUrl.split("/").pop();
 const dir = mkdtempSync(join(tmpdir(), "verify-release-"));
-const installerPath = join(keep ? new URL("../.browser-check", import.meta.url).pathname : dir, installerName);
+const installerPath = join(
+  keep ? new URL("../.browser-check", import.meta.url).pathname : dir,
+  installerName,
+);
 const instRes = await fetch(installerUrl, { redirect: "follow" });
 if (!instRes.ok) {
   say(`❌ 安装包 HTTP ${instRes.status}（${installerName}）`);
@@ -74,7 +84,10 @@ say(`✅ 安装包 ${installerName} HTTP 200，${bytes.length} 字节`);
 // ③ 签名验签
 const sigText = Buffer.from(platform.signature, "base64").toString("utf8");
 let blob = null;
-for (const line of sigText.split("\n").map((l) => l.trim()).filter(Boolean)) {
+for (const line of sigText
+  .split("\n")
+  .map((l) => l.trim())
+  .filter(Boolean)) {
   const decoded = Buffer.from(line, "base64");
   if (decoded.length === 74) {
     blob = decoded;
@@ -92,7 +105,11 @@ const pubkeyB64 = JSON.parse(
   readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
 ).plugins.updater.pubkey;
 const pubkeyRaw = Buffer.from(
-  Buffer.from(pubkeyB64, "base64").toString("utf8").split("\n").map((l) => l.trim()).filter(Boolean)[1],
+  Buffer.from(pubkeyB64, "base64")
+    .toString("utf8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)[1],
   "base64",
 ).subarray(10, 42);
 const key = createPublicKey({

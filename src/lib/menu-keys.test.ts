@@ -39,7 +39,10 @@ function press(init: Partial<MenuKeyEvent> & { key: string }): MenuKeyEvent {
   };
 }
 
-function state(selectedIndex: number | null): { selectedIndex: number | null; groups: MenuGroupLike[] } {
+function state(selectedIndex: number | null): {
+  selectedIndex: number | null;
+  groups: MenuGroupLike[];
+} {
   return { selectedIndex, groups };
 }
 
@@ -178,7 +181,9 @@ describe("decideMenuKey：#3 Ctrl/Meta 组合键", () => {
   });
 
   it("未命中任何菜单项的组合键 → ignored，不退出选择", () => {
-    expect(decideMenuKey(press({ key: "k", ctrlKey: true }), state(1))).toEqual({ type: "ignored" });
+    expect(decideMenuKey(press({ key: "k", ctrlKey: true }), state(1))).toEqual({
+      type: "ignored",
+    });
     expect(decideMenuKey(press({ key: "k", ctrlKey: true }), state(null))).toEqual({
       type: "ignored",
     });

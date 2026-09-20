@@ -81,9 +81,10 @@ describe("previewCanvasWidth（画布显示宽度）", () => {
   });
 
   it("宽容器：画布宽度 = 页宽 × 自然系数（A4 约 568px）", () => {
-    expect(
-      previewCanvasWidth({ containerWidth: 1200, pageWidthPt: A4_WIDTH_PT }),
-    ).toBeCloseTo(A4_WIDTH_PT * naturalScale(EDITOR_FONT_PX), 10);
+    expect(previewCanvasWidth({ containerWidth: 1200, pageWidthPt: A4_WIDTH_PT })).toBeCloseTo(
+      A4_WIDTH_PT * naturalScale(EDITOR_FONT_PX),
+      10,
+    );
   });
 
   it("测量失败：返回 NaN", () => {
@@ -111,7 +112,9 @@ describe("界面缩放（uiZoom）：预览必须跟着变大，但永不超出�
       uiZoom: 1.5,
     });
     // 不传 uiZoom 会缩回 331（这就是"预览没变"的现场）；传了之后**也不许超过栏宽**
-    expect(previewCanvasWidth({ containerWidth: zoomedContainer, pageWidthPt: A4_WIDTH_PT })).toBeCloseTo(331, 10);
+    expect(
+      previewCanvasWidth({ containerWidth: zoomedContainer, pageWidthPt: A4_WIDTH_PT }),
+    ).toBeCloseTo(331, 10);
     expect(zoomed).toBeCloseTo(zoomedContainer, 10);
     // 但物理尺寸（CSS × 缩放）与 100% 时基本一致 —— 所以"跟着变大"这件事没有丢
     expect((zoomed * 1.5) / at100).toBeGreaterThan(0.95);
@@ -133,7 +136,11 @@ describe("界面缩放（uiZoom）：预览必须跟着变大，但永不超出�
   it("任何缩放档位下画布都不超过栏宽（永不横滚的硬保证）", () => {
     for (const zoom of [0.5, 0.8, 1, 1.2, 1.5, 2, 2.5]) {
       for (const containerWidth of [180, 264, 451, 685, 1200]) {
-        const width = previewCanvasWidth({ containerWidth, pageWidthPt: A4_WIDTH_PT, uiZoom: zoom });
+        const width = previewCanvasWidth({
+          containerWidth,
+          pageWidthPt: A4_WIDTH_PT,
+          uiZoom: zoom,
+        });
         expect(width).toBeLessThanOrEqual(containerWidth + 1e-9);
       }
     }
@@ -163,10 +170,9 @@ describe("界面缩放（uiZoom）：预览必须跟着变大，但永不超出�
   it("uiZoom 缺省 / 非法值：按 1 处理（老调用方行为不变）", () => {
     const base = previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT });
     for (const uiZoom of [undefined, 0, -1, NaN, Infinity]) {
-      expect(previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT, uiZoom })).toBeCloseTo(
-        base,
-        10,
-      );
+      expect(
+        previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT, uiZoom }),
+      ).toBeCloseTo(base, 10);
     }
   });
 

@@ -89,7 +89,8 @@
   <!-- 状态文字：占满剩余空间、单行省略（可伸缩项，见 .status-text 的样式） -->
   <span class="status-text">{statusText}</span>
   {#if updateNotice}
-    <button class="status-update" title="打开更新窗口" onclick={onOpenUpdate}>{updateNotice}</button>
+    <button class="status-update" title="打开更新窗口" onclick={onOpenUpdate}>{updateNotice}</button
+    >
   {/if}
   <span class="spacer"></span>
   <span class="mode-tag">{viewMode === "write" ? "写作" : "源码"}</span>

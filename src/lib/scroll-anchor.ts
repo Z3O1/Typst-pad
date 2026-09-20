@@ -56,13 +56,7 @@ export function anchorPosEffect(
   try {
     const scroller = view.scrollDOM;
     const box = scroller.getBoundingClientRect();
-    const yMargin = anchorYMargin(
-      targetClientY,
-      box.top,
-      box.height,
-      view.defaultLineHeight,
-      mode,
-    );
+    const yMargin = anchorYMargin(targetClientY, box.top, box.height, view.defaultLineHeight, mode);
     return EditorView.scrollIntoView(EditorSelection.cursor(pos), { y: "start", yMargin });
   } catch {
     return null;

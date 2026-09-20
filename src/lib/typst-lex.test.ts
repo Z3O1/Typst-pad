@@ -8,13 +8,7 @@ describe("typst-lex 区域扫描", () => {
   it("识别行注释 / 块注释（含嵌套）/ 原始文本 / 字符串 / 代码表达式", () => {
     const doc = 'a // 注释\nb /* 外 /* 内 */ 尾 */ c `raw` d "str" e #text(x)[y] f';
     const regions = scanNonMarkupRegions(doc);
-    expect(regions.map((r) => r.kind)).toEqual([
-      "comment",
-      "comment",
-      "raw",
-      "string",
-      "code",
-    ]);
+    expect(regions.map((r) => r.kind)).toEqual(["comment", "comment", "raw", "string", "code"]);
     // 切片校验（防止只对类别不对位置）
     expect(regions.map((r) => doc.slice(r.from, r.to))).toEqual([
       "// 注释",
@@ -122,7 +116,9 @@ describe("mathCacheKey / selectionTouchesRange", () => {
   it("缓存键区分风格与前缀，但不区分公式出现位置", () => {
     expect(mathCacheKey("x", false, "")).toBe(mathCacheKey("x", false, ""));
     expect(mathCacheKey("x", false, "")).not.toBe(mathCacheKey("x", true, ""));
-    expect(mathCacheKey("x", false, "")).not.toBe(mathCacheKey("x", false, "#set text(size: 20pt)"));
+    expect(mathCacheKey("x", false, "")).not.toBe(
+      mathCacheKey("x", false, "#set text(size: 20pt)"),
+    );
   });
 
   it("光标落在范围内（含两端）→ 展开源码", () => {
@@ -142,6 +138,11 @@ describe("mathCacheKey / selectionTouchesRange", () => {
     expect(selectionTouchesRange(range, [{ from: 7, to: 9 }])).toBe(true);
     expect(selectionTouchesRange(range, [{ from: 8, to: 9 }])).toBe(false);
     // 多光标：任一命中即展开
-    expect(selectionTouchesRange(range, [{ from: 0, to: 1 }, { from: 4, to: 4 }])).toBe(true);
+    expect(
+      selectionTouchesRange(range, [
+        { from: 0, to: 1 },
+        { from: 4, to: 4 },
+      ]),
+    ).toBe(true);
   });
 });

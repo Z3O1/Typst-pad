@@ -169,7 +169,10 @@ export function extractChangelogSection(markdown, version) {
       break;
     }
   }
-  return lines.slice(start + 1, end).join("\n").trim();
+  return lines
+    .slice(start + 1, end)
+    .join("\n")
+    .trim();
 }
 
 /**

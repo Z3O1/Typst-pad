@@ -107,7 +107,9 @@ export function formatDiagnosticListForClipboard(
   fallbackPath: string | null = null,
 ): string {
   if (items.length === 0) return "";
-  return [title, ...items.map((item) => formatDiagnosticForClipboard(item, fallbackPath))].join("\n");
+  return [title, ...items.map((item) => formatDiagnosticForClipboard(item, fallbackPath))].join(
+    "\n",
+  );
 }
 
 /**

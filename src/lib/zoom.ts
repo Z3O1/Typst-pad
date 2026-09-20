@@ -201,8 +201,6 @@ export function zoomApplied(target: number, observed: number | null, tolerance =
   return Math.abs(observed - target) <= tolerance;
 }
 
-
-
 // ---------------------------------------------------------------------------
 // 复核的等待节奏（2026-09-14 用户第四次反馈「缩放会无效」+ 状态栏「引擎把 150% 限制在 100%」）
 //

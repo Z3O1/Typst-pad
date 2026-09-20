@@ -92,10 +92,14 @@ for (const fx of fixtures) {
   // pt → px 换算因子：由切片实测宽度 / 夹具列宽推出（夹具在 371.25pt 下编译，
   // 浏览器里按 100% 列宽渲染 —— 不假设窗口尺寸，自己算比例）
   const factor = measured.crops[0].w / fx.contentWidthPt;
-  check(`切片铺满正文列宽（±2px）`, Math.abs(measured.crops[0].w - measured.columnWidth) <= 2, JSON.stringify({
-    crop: measured.crops[0].w,
-    column: measured.columnWidth,
-  }));
+  check(
+    `切片铺满正文列宽（±2px）`,
+    Math.abs(measured.crops[0].w - measured.columnWidth) <= 2,
+    JSON.stringify({
+      crop: measured.crops[0].w,
+      column: measured.columnWidth,
+    }),
+  );
 
   // ① 每块高度 = 夹具高度 × 因子（切片按真实排版切出来，且没有被拉伸）
   let worstHeight = 0;
@@ -113,7 +117,10 @@ for (const fx of fixtures) {
     worstHeight <= 2.5,
     `最大偏差 ${worstHeight.toFixed(2)}px`,
   );
-  check(`切片没有被拉伸（高宽比与产物一致，最大偏差 ${(worstRatio * 100).toFixed(1)}%）`, worstRatio <= 0.02);
+  check(
+    `切片没有被拉伸（高宽比与产物一致，最大偏差 ${(worstRatio * 100).toFixed(1)}%）`,
+    worstRatio <= 0.02,
+  );
 
   // ② 相邻切片首尾相接（真实版式里各块按 y 序中点切带 ⇒ 摞起来不留缝、不重叠）
   let worstGap = 0;
@@ -121,7 +128,11 @@ for (const fx of fixtures) {
     const gap = measured.crops[i].y - (measured.crops[i - 1].y + measured.crops[i - 1].h);
     worstGap = Math.max(worstGap, Math.abs(gap));
   }
-  check(`相邻切片首尾相接（最大缝/重叠 ${worstGap.toFixed(2)}px）`, worstGap <= 2.5, `${worstGap.toFixed(2)}px`);
+  check(
+    `相邻切片首尾相接（最大缝/重叠 ${worstGap.toFixed(2)}px）`,
+    worstGap <= 2.5,
+    `${worstGap.toFixed(2)}px`,
+  );
 
   // ③ 首尾跨度 = 夹具首块顶 → 末块底（切片摞起来的高度总和 == 原版式的纵向跨度）
   const spanPt = found[found.length - 2].yPt + found[found.length - 2].heightPt - found[0].yPt;
@@ -223,7 +234,11 @@ for (const fx of fixtures) {
         Array.isArray(opened) && opened.includes(target.href),
         JSON.stringify({ opened }),
       );
-      check(`${fx.name}：点热区不会挪动光标`, headAfter === headBefore, JSON.stringify({ headBefore, headAfter }));
+      check(
+        `${fx.name}：点热区不会挪动光标`,
+        headAfter === headBefore,
+        JSON.stringify({ headBefore, headAfter }),
+      );
       // **点完链接还得能打字**：热区的 mousedown 不 preventDefault 的话，浏览器会把焦点给这个
       // `<a>`，编辑区随之失焦（Windows WebView2 / Chromium 上都这样）——用户点完链接回来
       // 一个字都打不进去（PR #60 审查的第 6 条）。所以断言焦点仍在编辑区里。
