@@ -2,8 +2,8 @@
 // 重点锁两条**顺序敏感**的判定：① Esc 只关弹窗；② Ctrl+Shift+N（新建窗口）绝不能被
 // Shift 格式表吞掉 —— 后者正是 2026-09-14 用户报「Ctrl+Shift+N 新建窗口」没反应的根因。
 import { describe, it, expect, vi } from "vitest";
-import { SHIFT_FORMAT_COMMANDS, decideAppKey, runAppKeyAction, topModal } from "./app-keys";
-import type { AppKeyAction, AppKeyHandlers, AppKeyState } from "./app-keys";
+import { SHIFT_FORMAT_COMMANDS, decideAppKey, runAppKeyAction, topModal } from "../editor/app-keys";
+import type { AppKeyAction, AppKeyHandlers, AppKeyState } from "../editor/app-keys";
 
 /** 构造按键事件：只写关心字段，修饰键默认全 false；`code` 用于物理键判定（可选） */
 const key = (

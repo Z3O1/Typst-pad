@@ -4,9 +4,9 @@
 // 看到效果。这里把四条分支的用户可见结果全部钉住：
 //   成功无警告 / 成功带警告（原样 + 截断 + 字体族中文化）/ 失败有定位错误 / 失败只有非定位错误。
 import { describe, it, expect } from "vitest";
-import { reduceCompileStatus, type CompileStatusSource } from "./compile-status";
-import { formatCompileFailMessage } from "../ui/error-list";
-import type { CompileErrorLocation, Diagnostic } from "./typst-engine";
+import { reduceCompileStatus, type CompileStatusSource } from "../ui/compile-status";
+import { formatCompileFailMessage } from "./error-list";
+import type { CompileErrorLocation, Diagnostic } from "../core/typst-engine";
 
 const error = (over: Partial<CompileErrorLocation> = {}): CompileErrorLocation => ({
   message: "示例错误",

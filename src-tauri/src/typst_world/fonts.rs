@@ -19,7 +19,7 @@ pub const DEFAULT_FONT_FAMILIES: &[&str] = &[
     "Microsoft YaHei",
 ];
 
-/// **写作模式的源码透镜要用的打包字体**（前端 `@font-face` 的名单；`src/lib/editor-font.ts`
+/// **写作模式的源码透镜要用的打包字体**（前端 `@font-face` 的名单；`src/lib/editor/editor-font.ts`
 /// 是它的镜像，`scripts/editor-fonts.test.mjs` 静态对齐两边）。
 ///
 /// 为什么前端要拿到这几份：写作模式是"非光标块显示引擎切片 + 光标所在块展开成源码"。字号

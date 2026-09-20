@@ -100,10 +100,14 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 ```
 src/
 ├── routes/+page.svelte     # 主界面：菜单栏 / 双栏 / 状态栏，立即编译调度（代次令牌丢弃过期结果）
-├── lib/Editor.svelte       # CodeMirror 6 封装（Typst 语法、主题、外部 doc 同步）
-├── lib/typst-engine.ts     # 编译引擎：Tauri invoke 包装（compile_doc / compile_blocks / compile_math / block_hit_test / export_pdf）+ 结构化诊断
-├── lib/block-plan.ts       # 写作模式块级渲染的规划（块表 → 哪几格被切片覆盖 / 哪一块展开源码 / 编辑后重映射，纯函数）
-└── lib/file-ops.ts         # 打开/保存文件（Tauri dialog + invoke）
+└── lib/                    # 前端模块按层分四个目录（依赖只向内：editor/ui/dev → core）
+    ├── core/               # 底层：纯逻辑 + 引擎 + 叶子工具（不 import 其它三层）
+    │   ├── typst-engine.ts #   编译引擎：Tauri invoke 包装（compile_doc / compile_blocks / compile_math / block_hit_test / export_pdf）+ 结构化诊断
+    │   ├── block-plan.ts   #   写作模式块级渲染的规划（块表 → 哪几格被切片覆盖 / 哪一块展开源码 / 编辑后重映射，纯函数）
+    │   └── file-ops.ts     #   打开/保存文件（Tauri dialog + invoke）
+    ├── editor/             # CodeMirror 视图层：Editor.svelte / live-preview / 键位 / 字体 / 滚动锚定
+    ├── ui/                 # Svelte 组件 + 它们的纯模型（菜单 / 弹窗 / 状态栏 / 浮层 / 错误列表）
+    └── dev/                # 只在 ?browserdev=1 时由 app.html 动态加载的浏览器开发桩
 src-tauri/
 ├── src/lib.rs              # Rust 壳：read_file / write_file / compile_doc / compile_blocks / block_hit_test / export_pdf / bundled_font 等命令 + dialog/opener 插件
 ├── src/block_geometry/     # 写作模式的块级渲染：blocks 源块划分 / collect 帧遍历（字形 → 源字节）/ render 切带 SVG / crops 切片 / hit 点击命中 / probe 探针

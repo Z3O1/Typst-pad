@@ -7,9 +7,9 @@
 // 「Ctrl+Shift+N 新建窗口」没反应就是这个。**判定顺序本身就是行为的一部分**，所以顺序写死在
 // decideAppKey 里，并用单测锁住："新窗口必须排在格式表前面"。
 
-import type { WrapKeyEvent } from "../editor/word-wrap";
-import { isWrapToggleKey } from "../editor/word-wrap";
-import type { WriteCommand } from "./write-commands";
+import type { WrapKeyEvent } from "./word-wrap";
+import { isWrapToggleKey } from "./word-wrap";
+import type { WriteCommand } from "../core/write-commands";
 
 /** 打开中的弹窗（Esc 的收件人） */
 export type AppModal = "close-prompt" | "update" | "settings" | "about";

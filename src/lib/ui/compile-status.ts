@@ -9,10 +9,10 @@
 // - 失败：**不动页数与字符数**（保留上一次成功预览），只把错误与状态栏换掉。
 // - 失败时警告清空：错误优先，避免两套提示打架（Rust 失败时本来也不返回 warnings）。
 
-import { formatCompileFailMessage } from "../ui/error-list";
-import { describeCompileWarning } from "./font-warnings";
-import { truncateStatus } from "../ui/status-view";
-import type { CompileErrorLocation, Diagnostic } from "./typst-engine";
+import { formatCompileFailMessage } from "./error-list";
+import { describeCompileWarning } from "../core/font-warnings";
+import { truncateStatus } from "./status-view";
+import type { CompileErrorLocation, Diagnostic } from "../core/typst-engine";
 
 /**
  * 两条编译路径共同的结果子集：整页 `CompileOk` / 块级 `BlocksOk` 都满足成功那一支，

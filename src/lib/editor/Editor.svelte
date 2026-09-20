@@ -26,9 +26,9 @@
   import type { MathRequest } from "./live-preview";
   import { planForCommand } from "../core/write-commands";
   import type { WriteCommand } from "../core/write-commands";
-  import { mark } from "../dev/startup-timing";
+  import { mark } from "../core/startup-timing";
   import { WRITE_FONT_STACK } from "./editor-font";
-  import { dbg } from "../dev/debug";
+  import { dbg } from "../core/debug";
 
   interface Props {
     initialDoc?: string;

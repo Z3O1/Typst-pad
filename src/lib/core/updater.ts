@@ -10,7 +10,7 @@
 // 3. Update 句柄持有 Rust 侧资源（rid），换版本时必须 close()，否则泄漏。
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { isTauri } from "./file-ops";
-import { dbg } from "../dev/debug";
+import { dbg } from "./debug";
 import { describeUpdateError, progressFrom, type DownloadProgress } from "./update-utils";
 
 /** 可用的新版本（handle 是 plugin 的 Update 句柄，下载/安装都靠它） */

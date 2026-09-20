@@ -49,8 +49,8 @@
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { loadState, saveState } from "$lib/core/persistence";
-  import { decideAppKey, runAppKeyAction, topModal } from "$lib/core/app-keys";
-  import type { AppModal } from "$lib/core/app-keys";
+  import { decideAppKey, runAppKeyAction, topModal } from "$lib/editor/app-keys";
+  import type { AppModal } from "$lib/editor/app-keys";
   import { isEffectiveDirty, ensureTrailingNewline } from "$lib/core/doc-utils";
   import { failureStatus } from "$lib/core/failure-text";
   import { installEditorFonts, loadBundledFont } from "$lib/editor/editor-font";
@@ -91,15 +91,15 @@
     diagnosticListTitle,
     truncateStatus,
   } from "$lib/ui/status-view";
-  import { reduceCompileStatus, type CompileStatusSource } from "$lib/core/compile-status";
+  import { reduceCompileStatus, type CompileStatusSource } from "$lib/ui/compile-status";
   import {
     isBenignScriptError,
     scriptErrorMessage,
     scriptErrorStatus,
   } from "$lib/core/script-errors";
   import { copyPlainText } from "$lib/core/clipboard";
-  import { mark, reportStartup } from "$lib/dev/startup-timing";
-  import { dbg, setCliDebug } from "$lib/dev/debug";
+  import { mark, reportStartup } from "$lib/core/startup-timing";
+  import { dbg, setCliDebug } from "$lib/core/debug";
   import {
     TYPST_DEFAULT_TEXT_PT,
     isReflowApplied,

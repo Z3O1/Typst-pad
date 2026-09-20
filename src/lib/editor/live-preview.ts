@@ -22,7 +22,7 @@ import {
 import type { BlockCover } from "../core/block-plan";
 import { cropPagePoint } from "../core/block-hit";
 import { anchorPosEffect } from "./scroll-anchor";
-import { dbg } from "../dev/debug";
+import { dbg } from "../core/debug";
 import { MATH_TEXT_PT } from "../core/typst-engine";
 // 拆出去的模块（本文件只做**组装**：把 StateField / 拖选 / 竖直移动 / 请求插件拼成一个 Extension）
 import {
