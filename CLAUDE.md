@@ -14,7 +14,7 @@ Typst-pad = 仿 Typora 的 Typst 桌面编辑器，两套 UI：「写作模式�
 ```bash
 npm run tauri dev    # 桌面应用（Vite 固定 1420；WSL 可跑，libEGL 警告正常）
 npm run check        # svelte-check（0 errors / 0 warnings）
-npm test             # 单测（48 文件 / 879 项）；npm test -- <文件> 跑单个
+npm test             # 单测（49 文件 / 899 项）；npm test -- <文件> 跑单个
 npm run format:check # prettier（`npm run format` 是对称的写入版）
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check                  # rustfmt（默认风格，无 rustfmt.toml）
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

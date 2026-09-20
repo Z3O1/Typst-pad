@@ -1,4 +1,8 @@
-// doc-utils：文档内容工具（纯函数，独立模块便于单测）
+// doc-utils：文档层纯函数（独立模块便于单测）。三类：
+// - 内容判定：isBlankDoc / isEffectiveDirty
+// - 名字：fileNameOf / UNTITLED_TITLE
+// - 编译前缀：ensureTrailingNewline
+// 名字类只有这两个、合计十来行，先放一起；**再往这里加名字类函数就该拆 `doc-names.ts`**。
 
 /**
  * 判断文档是否为"空文档"（无有效内容，可直接关闭、无需保存确认）：
@@ -20,6 +24,17 @@ export function isBlankDoc(doc: string): boolean {
  */
 export function isEffectiveDirty(dirty: boolean, doc: string): boolean {
   return dirty && !isBlankDoc(doc);
+}
+
+/** 未命名文档的标题（页面 `fileTitle` 的初值、"新建"、以及"存档里没路径时"都用它） */
+export const UNTITLED_TITLE = "未命名.typ";
+
+/**
+ * 从路径取文件名（`C:\Users\me\论文.typ` 与 `/home/me/论文.typ` 都要认，两种分隔符都切）；
+ * 取不到分隔符就原样返回。窗口标题、拖放确认文案、存档恢复的标题都用它。
+ */
+export function fileNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
 }
 
 /**

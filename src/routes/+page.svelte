@@ -34,6 +34,7 @@
   } from "$lib/core/app-settings";
   import type { AppSettings } from "$lib/core/app-settings";
   import { createFontList } from "$lib/core/font-list";
+  import { planRestore } from "$lib/core/session-restore";
   import { createMathQueue } from "$lib/editor/math-queue";
   import type { WriteCommand } from "$lib/core/write-commands";
   import {
@@ -55,14 +56,12 @@
   import { loadState, saveState } from "$lib/core/persistence";
   import { decideAppKey, runAppKeyAction, topModal } from "$lib/editor/app-keys";
   import type { AppModal } from "$lib/editor/app-keys";
-  import { isEffectiveDirty, ensureTrailingNewline } from "$lib/core/doc-utils";
+  import { isEffectiveDirty, ensureTrailingNewline, UNTITLED_TITLE } from "$lib/core/doc-utils";
   import {
     createDocumentSession,
-    fileNameOf,
     loadedState,
     newState,
     savedState,
-    UNTITLED_TITLE,
   } from "$lib/core/document-session";
   import type { DocumentState } from "$lib/core/document-session";
   import { failureStatus } from "$lib/core/failure-text";
@@ -1198,9 +1197,11 @@
   }
 
   /**
-   * 设置弹窗**保存**这条路上唯一把生效配置写回 `$state` 的地方（字段清单与 `AppSettings` 一一对应）。
-   * 注意别处还有两份同一批字段的清单，加字段时要一起同步：① 启动恢复（`loadState` 那段）、
-   * ② `schedulePersist` 的快照。漏一处就是"设置了但没持久化 / 没恢复"。
+   * 把生效配置写回 `$state` 的唯一入口：设置弹窗保存走它，启动恢复（`planRestore`）也走它。
+   * 但 `AppSettings` 的字段清单**别处还有三份**要跟着改：① `currentSettings()`（读页面状态）、
+   * ② `core/session-restore.ts` 的 `planRestore`（存档 → 设置）、③ `schedulePersist` 的快照
+   * （设置 → 存档）。漏一处就是"设置了但没恢复 / 没持久化"——加字段时
+   * `app-settings.test.ts` 的"字段清单绊线"会红，提醒回来把这几处对齐。
    */
   function applySettings(next: AppSettings) {
     prefixEnabled = next.prefixEnabled;
@@ -1724,49 +1725,25 @@
     // 浏览器 gate：非 Tauri 环境（提示页）不初始化应用逻辑——编译走 Tauri 进程内命令，浏览器不可用
     if (!isDesktopApp) return;
     mark("mount-start");
-    // 启动恢复：主题/前缀/界面模式总是恢复；**上次未保存的内容**按设置决定（默认恢复，
+    // 启动恢复：主题/前缀/模式/字体/缩放总是恢复，**上次未保存的内容**按设置决定（默认恢复，
     // 见设置弹窗"启动时恢复上次内容"）——这是"内容丢了"的最后一道安全网。
-    const saved = loadState();
-    if (saved.theme === "system" || saved.theme === "dark" || saved.theme === "light") {
-      theme = saved.theme;
-    }
-    prefixEnabled = saved.prefixEnabled ?? SETTINGS_DEFAULTS.prefixEnabled;
-    prefixCode = saved.prefixCode ?? SETTINGS_DEFAULTS.prefixCode;
-    chineseFont = saved.chineseFont ?? SETTINGS_DEFAULTS.chineseFont;
-    fontDirs = normalizeFontDirs(saved.fontDirs ?? SETTINGS_DEFAULTS.fontDirs);
-
-    // 旧存档迁移：只有 livePreview 字段时，按其值推断模式
-    viewMode = saved.viewMode ?? (saved.livePreview === false ? "source" : "write");
-    // 旧存档没有 showPreview：单栏与否跟随模式（写作模式单栏，源码模式双栏对照）
-    showPreview = saved.showPreview ?? viewMode === "source";
-    // 源码模式自动换行（旧存档没有）：默认关，保持"高亮一格不折行"的原有观感
-    editorWrap = saved.editorWrap ?? false;
-    restoreSession = saved.restoreSession ?? SETTINGS_DEFAULTS.restoreSession;
-    autoCheckUpdates = saved.autoCheckUpdates ?? SETTINGS_DEFAULTS.autoCheckUpdates;
-    // 上次检查时间只用于显示/诊断，读回来原样存回去即可（启动检查不再看它）
-    lastUpdateCheckAt =
-      typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null;
-    // "点过稍后 = 别再自动弹窗"（旧存档没有这个字段 → null = 照常弹窗）
-    updateDismissedAt =
-      typeof saved.updateDismissedAt === "number" ? saved.updateDismissedAt : null;
-    // 界面缩放：旧存档没有该字段 → 100%；越界/脏数据由 clampZoom 收敛（随后由 $effect 应用）
-    uiZoom = clampZoom(saved.uiZoom);
-    // **副窗口（Ctrl+Shift+N 新建的窗口）一律不恢复**：它是空白草稿窗口，恢复出主窗口的文档
-    // 会让人以为"新窗口把我正在写的文章带过来了"，而那个窗口的内容改动又不会记进存档。
-    if (
-      !isSecondaryWindow &&
-      restoreSession &&
-      typeof saved.content === "string" &&
-      saved.content.trim() !== ""
-    ) {
-      doc = saved.content;
-      editorDoc = saved.content; // 镜像同步，见 editorDoc 声明处
-      if (saved.filePath) {
-        filePath = saved.filePath;
-        fileTitle = saved.fileTitle ?? fileNameOf(saved.filePath);
-      }
-      // 未保存标记原样恢复：存过盘又没再改的文档恢复出来不该带"未保存"圆点
-      dirty = saved.dirty ?? false;
+    // 五条规则（主题只认合法值、副窗口不恢复内容、空白内容不算上次内容、开关关掉只恢复偏好、
+    // 标题优先用存档里那份）都在 `core/session-restore.ts`，这里只把计划落到状态上。
+    const plan = planRestore(loadState(), { isSecondaryWindow });
+    theme = plan.theme;
+    applySettings(plan.settings); // 前缀 / 字体 / 两个开关（与设置弹窗保存走同一条落状态的路）
+    viewMode = plan.viewMode;
+    showPreview = plan.showPreview;
+    editorWrap = plan.editorWrap;
+    uiZoom = plan.uiZoom;
+    lastUpdateCheckAt = plan.lastUpdateCheckAt;
+    updateDismissedAt = plan.updateDismissedAt;
+    if (plan.content) {
+      doc = plan.content.text;
+      editorDoc = plan.content.text; // 镜像同步，见 editorDoc 声明处
+      filePath = plan.content.filePath;
+      fileTitle = plan.content.fileTitle;
+      dirty = plan.content.dirty;
       statusText = "已恢复上次内容";
     }
     mark("persist-restore");
