@@ -15,7 +15,6 @@
     BlocksOk,
     CompileErrorLocation,
     Diagnostic,
-    MathRender,
   } from "$lib/core/typst-engine";
   import {
     byteOffsetsToPositions,
@@ -30,7 +29,7 @@
     FONT_CHOICE_DEFAULT,
     normalizeFontDirs,
   } from "$lib/core/font-settings";
-  import type { MathRequest } from "$lib/editor/live-preview";
+  import { createMathQueue } from "$lib/editor/math-queue";
   import type { WriteCommand } from "$lib/core/write-commands";
   import {
     openTypFile,
@@ -332,16 +331,21 @@
     clearTimer: (id) => clearTimeout(id),
     log: (msg) => dbg.log("zoom", msg),
   });
-  // 公式渲染缓存：key = mathCacheKey(body, display, context)（见 math-ranges.ts）；
-  // Map 本身不需要响应式（变更后靠 mathVersion 代次通知编辑器重整装饰）
-  const mathCache = new Map<string, MathRender>();
-  // 已排队待渲染的 key（防止同一公式重复入队）；队列与定时器同理不需要响应式
-  const mathPending = new Set<string>();
-  let mathQueue: MathRequest[] = [];
-  let mathTimer: ReturnType<typeof setTimeout> | undefined;
-  let mathVersion = $state(0); // 渲染结果代次（自增即触发编辑器重整装饰）
-  /** 公式渲染缓存条数上限（超出按插入顺序淘汰最早的） */
-  const MATH_CACHE_LIMIT = 500;
+  // 公式渲染的**队列与缓存**在 `$lib/editor/math-queue`（可单测：依赖全注入 + 假时钟）。
+  // 这里只留一个**响应式代次**：队列每渲染成功一个公式就自增一次，编辑器据此重整装饰
+  // （`Map` 本身不需要响应式，见那边的说明）。
+  let mathVersion = $state(0);
+  const mathQueue = createMathQueue({
+    compile: (req, context) =>
+      // 上下文字号都取自请求本身（必须与生成缓存键时用的一致，见 MathRequest 的说明）
+      compileMath(req.body, req.display, context, filePath, req.sizePt, fontArgs()),
+    fallbackContext: () => (prefixEnabled ? ensureTrailingNewline(prefixCode) : ""),
+    onRendered: (ok) => {
+      if (ok) mathVersion++;
+    },
+    deferBlockCompile: deferPendingBlockCompile,
+    log: (message) => dbg.log("live-preview", message),
+  });
   // ---------------------------------------------------------------------------
   // 写作模式的块级渲染（阶段 1）：整篇编译一次 → 每个源块切一张真实排版切片
   // 见 docs/文档模式渲染保真-调研.md。后端没有 compile_blocks（浏览器开发桩 / 旧版本）
@@ -401,7 +405,7 @@
    * 视口内出现了"能渲染但还没有切片"的块 → 去抖 150ms 后按**新的视口窗口**重编译一次。
    *
    * 窗口化渲染的正常中间态：滚动到没渲过的区域，那几块先是源码，这一轮回来后变成切片。
-   * 与公式渲染请求（handleMathRequest）同一套思路，只是这里整篇编译一次即含所有可见块。
+   * 与公式渲染请求（math-queue 的 handleRequest）同一套思路，只是这里整篇编译一次即含所有可见块。
    */
   function handleBlocksNeeded() {
     if (viewMode !== "write") return;
@@ -1104,91 +1108,23 @@
   }
 
   /**
-   * 所见即所得：编辑器请求渲染公式（视口内出现未缓存的公式时触发）。
-   * 去重（已缓存 / 已在队列的 key 跳过）后进队，120ms 防抖再批量交给 Rust 侧编译——
-   * 连续输入时不会每个按键都排队，停手后一次性补齐。
+   * 有公式要渲时**把挂着的块编译往后推**：两者共用 Rust 侧同一把编译锁，公式是小活
+   * （几毫秒）、整篇块编译是几十~几百毫秒，不让路就会出现"打完公式半天不显示"
+   * （实测慢编译桩下版面对齐要等 338ms）。比公式自身的 120ms 去抖稍晚一点触发。
    */
-  function handleMathRequest(requests: MathRequest[]) {
-    let added = false;
-    for (const req of requests) {
-      if (mathCache.has(req.key) || mathPending.has(req.key)) continue;
-      mathPending.add(req.key);
-      mathQueue.push(req);
-      added = true;
-    }
-    if (!added) return;
-    clearTimeout(mathTimer);
-    // 公式是小活（几毫秒），而写作模式的整篇编译是几十~几百毫秒，两者共用一把编译锁
-    // （见 Rust 侧命令层互斥锁）。所以**有公式要渲时，把挂着的块编译往后推**：
-    // 让公式先拿到锁 —— 否则"打完公式半天不显示"（实测慢编译桩下，版面对齐要等 338ms）。
-    if (viewMode === "write" && writeCompileTimer !== undefined) {
-      clearTimeout(writeCompileTimer);
-      writeCompileTimer = setTimeout(() => {
-        writeCompileTimer = undefined;
-        void runCompile();
-      }, MATH_COMPILE_HEADSTART_MS);
-    }
-    mathTimer = setTimeout(drainMathQueue, 120);
-  }
-
-  /** 公式渲染先跑：把挂着的块编译推到这个时刻（比公式自身的 120ms 去抖稍晚一点） */
   const MATH_COMPILE_HEADSTART_MS = 240;
-
-  /** 逐个渲染队列中的公式（Rust 侧编译本身串行），每完成一个就刷新装饰 */
-  async function drainMathQueue() {
-    const batch = mathQueue;
-    mathQueue = [];
-    if (batch.length === 0) return;
-    // 仅前缀的兜底上下文：文档内定义本身有错、或与前缀重名时，至少还能渲染不依赖它们的公式
-    const prefixOnly = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
-    for (const req of batch) {
-      // 用请求自带的上下文编译（与生成缓存键时一致，见 MathRequest.context 的说明）
-      // 字号也来自请求（与生成缓存键时用的那个一致，见 MathRequest.sizePt 的说明）：
-      // 写作模式跟着文档字号走，源码模式 10.5pt
-      let render = await compileMath(
-        req.body,
-        req.display,
-        req.context,
-        filePath,
-        req.sizePt,
-        fontArgs(),
-      );
-      if (!render.ok && prefixOnly !== req.context) {
-        const fallback = await compileMath(
-          req.body,
-          req.display,
-          prefixOnly,
-          filePath,
-          req.sizePt,
-          fontArgs(),
-        );
-        if (fallback.ok) render = fallback;
-      }
-      mathCache.set(req.key, render);
-      // 缓存上限：键按公式文本累积，长会话里可能堆很多（每条含一份 SVG）。
-      // 超限按插入顺序淘汰最早的条目；若它仍在视口内，编辑器会重新请求并渲染。
-      while (mathCache.size > MATH_CACHE_LIMIT) {
-        const oldest = mathCache.keys().next().value;
-        if (oldest === undefined) break;
-        mathCache.delete(oldest);
-      }
-      mathPending.delete(req.key);
-      // 只有渲染成功才需要重整装饰：失败的结果同样进缓存（避免反复重试），
-      // 但装饰集不变（仍显示源码），自增版本号只会白跑一次全量重建
-      if (render.ok) mathVersion++;
-      dbg.log(
-        "live-preview",
-        `math ${render.ok ? "ok" : "fail"} ${req.display ? "display" : "inline"} ${JSON.stringify(req.body)}`,
-      );
-    }
+  function deferPendingBlockCompile() {
+    if (viewMode !== "write" || writeCompileTimer === undefined) return;
+    clearTimeout(writeCompileTimer);
+    writeCompileTimer = setTimeout(() => {
+      writeCompileTimer = undefined;
+      void runCompile();
+    }, MATH_COMPILE_HEADSTART_MS);
   }
 
-  /** 文档切换（打开/新建/重读）：公式缓存作废（include 根与上下文都可能变） */
+  /** 文档切换（打开/新建/重读）：公式缓存作废（include 根与上下文都可能变），并让装饰重建一次 */
   function resetMathCache() {
-    mathCache.clear();
-    mathPending.clear();
-    mathQueue = [];
-    clearTimeout(mathTimer);
+    mathQueue.reset();
     mathVersion++;
   }
 
@@ -1258,7 +1194,7 @@
   const WRITE_COMPILE_DEBOUNCE_MS = 150;
   /**
    * 挂着的写作模式编译定时器（去抖）。
-   * **跑完要置回 undefined**：它同时被当成"有没有挂着的编译"的判据（见 handleMathRequest：
+   * **跑完要置回 undefined**：它同时被当成"有没有挂着的编译"的判据（见 math-queue 的 deferBlockCompile：
    * 有挂着的块编译才把公式优先级提前）。不置回的话，每一个公式请求都会在 240ms 后再排一次
    * 整篇编译 —— 公式多的文档接近双倍编译量（PR #60 审查的第 8 条）。
    */
@@ -1303,7 +1239,7 @@
     if (viewMode === "write") {
       clearTimeout(writeCompileTimer);
       // **跑完必须置回 undefined**（`let` 声明处有说明）：这个变量同时是"有没有挂着的编译"
-      // 的判据 —— handleMathRequest 只在有挂着的编译时才把块编译往后推。
+      // 的判据 —— math-queue 的 deferBlockCompile 只在有挂着的编译时才把块编译往后推。
       writeCompileTimer = setTimeout(() => {
         writeCompileTimer = undefined;
         void runCompile();
@@ -2064,7 +2000,7 @@
       if (previewScaleFrame !== 0) cancelAnimationFrame(previewScaleFrame);
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
-      clearTimeout(mathTimer); // 停止在途公式渲染批次
+      mathQueue.reset(); // 停止在途公式渲染批次（清缓存 + 取消定时器）
       clearTimeout(previewReflowTimer); // 停止在途的预览重排（避免卸载后还发起编译）
       clearTimeout(startupCheckTimer); // 关窗时取消还没发起的自动更新检查
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
@@ -2100,8 +2036,8 @@
             onDocChange={handleDocChange}
             mode={viewMode}
             wrap={viewMode === "source" ? editorWrap : true}
-            lookupMath={(key) => mathCache.get(key)}
-            onMathRequest={handleMathRequest}
+            lookupMath={mathQueue.lookup}
+            onMathRequest={mathQueue.handleRequest}
             {mathVersion}
             blocks={writingBlocks}
             {blocksVersion}
