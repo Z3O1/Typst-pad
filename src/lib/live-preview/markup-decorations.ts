@@ -1,0 +1,90 @@
+// **常用标记装饰**（标题/粗体/斜体/行内代码/链接/列表符号）：只把标记隐藏或改样式，不渲染排版。
+// 范围来自 `markup-ranges.ts` 的纯函数扫描（`scanMarkupDecorations`）。
+import { Decoration } from "@codemirror/view";
+import type { Range } from "@codemirror/state";
+import type { EditorState } from "@codemirror/state";
+import { scanMarkupDecorations } from "../markup-ranges";
+import type { MarkupKind } from "../markup-ranges";
+import type { Region } from "../typst-lex";
+import { TextWidget } from "./widgets";
+import type { MathRange } from "../math-ranges";
+import { selectionTouchesRange } from "../math-ranges";
+import { insideCovered } from "./block-decorations";
+import { CodeBlockWidget } from "./widgets";
+
+/** markup 装饰对应的 CSS 类（样式见 livePreviewTheme） */
+export const MARKUP_CLASS: Record<MarkupKind, string> = {
+  heading: "cm-markup-heading",
+  strong: "cm-markup-strong",
+  emph: "cm-markup-emph",
+  "raw-inline": "cm-markup-raw",
+  "list-marker": "cm-markup-list",
+  link: "cm-markup-link",
+  "raw-block": "cm-markup-raw", // 块级代码块由 widget 呈现，样式类仅作兜底
+};
+
+/**
+ * 常用标记的装饰（标题 / 粗体 / 斜体 / 行内代码 / 列表符号）：
+ * - 样式（mark）**始终**应用；
+ * - 标记符号（`= `、`*`、`` ` ``）只在选区不触碰该构造时隐藏——Typora 式「光标进去就露出源码」；
+ * - 无序列表符号替换成圆点。
+ */
+export function buildMarkupDecorations(
+  state: EditorState,
+  scan: { opaque: Region[]; math: MathRange[] },
+  covered: readonly { from: number; to: number }[] = [],
+): Range<Decoration>[] {
+  const doc = state.doc.toString();
+  const marks = scanMarkupDecorations(doc, scan);
+  const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
+  const decorations: Range<Decoration>[] = [];
+  for (const item of marks) {
+    // 块级结构（代码块）：整段替换为 widget；光标/选区进入即整段回到源码
+    if (item.block) {
+      if (insideCovered(item.block.from, item.block.to, covered)) continue;
+      const reveal = selectionTouchesRange(item.block, selections);
+      if (!reveal) {
+        decorations.push(
+          Decoration.replace({
+            widget: new CodeBlockWidget(item.block.code, item.block),
+            block: true,
+          }).range(item.block.from, item.block.to),
+        );
+      }
+      continue;
+    }
+    // 「整个构造」= 标记 + 正文的并集。标题与列表只有**前导**标记：若只取标记范围
+    // （如 `= ` 的 [0,2)），光标落在正文里就判不出"在构造内"，`= ` 不会露出（实测踩过）；
+    // 粗体/斜体/行内代码的标记分列两侧，取并集同样正确。
+    const from = Math.min(item.content.from, ...item.markers.map((m) => m.from));
+    const to = Math.max(item.content.to, ...item.markers.map((m) => m.to));
+    if (insideCovered(from, to, covered)) continue; // 整块已由切片呈现，别再叠标记隐藏
+    // 选区进入整个构造（含标记）→ 露出标记符号，便于编辑源码
+    const reveal = selectionTouchesRange({ from, to }, selections);
+    // 标题额外带级别类（字号按级别递增，见 livePreviewTheme）
+    const cls =
+      item.kind === "heading"
+        ? `${MARKUP_CLASS.heading} cm-markup-heading-${item.level ?? 1}`
+        : MARKUP_CLASS[item.kind];
+    // **空正文不能建 mark 装饰**：正文长度为 0 时（刚敲下 `== ` 还没写标题文字、`**` 还没写内容）
+    // CM6 会抛 `RangeError: Mark decorations may not be empty`——异常冒泡进 StateField 的事务会让
+    // 编辑区直接卡死（用户报过"输入 `= 1 = 2` 后无法再输入"），装了 try/catch 兜底后则表现为
+    // "所有标题都被展开成源码"（整套装饰被丢弃）。这里按"没有正文就不加样式"处理。
+    if (item.content.to > item.content.from) {
+      decorations.push(Decoration.mark({ class: cls }).range(item.content.from, item.content.to));
+    }
+    if (reveal) continue;
+    for (const marker of item.markers) {
+      if (marker.from >= marker.to) continue;
+      decorations.push(
+        marker.text !== undefined
+          ? Decoration.replace({ widget: new TextWidget(marker.text) }).range(
+              marker.from,
+              marker.to,
+            )
+          : Decoration.replace({}).range(marker.from, marker.to),
+      );
+    }
+  }
+  return decorations;
+}
