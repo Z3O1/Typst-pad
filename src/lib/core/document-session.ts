@@ -20,13 +20,57 @@ import { failureStatus } from "./failure-text";
 import type { OpenedFile } from "./file-ops";
 
 /** 未保存修改的默认确认文案（打开另一份文件时用；同路径与新建/重读各有自己的文案） */
-export const DISCARD_OPEN_MESSAGE =
-  "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？";
-export const DISCARD_TITLE = "未保存的修改";
+const DISCARD_OPEN_MESSAGE = "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？";
+const DISCARD_TITLE = "未保存的修改";
+/** 未命名文档的标题（页面 `fileTitle` 的初值与"新建"都用它） */
+export const UNTITLED_TITLE = "未命名.typ";
 
 /** 从路径取文件名（`C:\a\b.typ` 与 `/a/b.typ` 都要认）；取不到分隔符就原样返回 */
 export function fileNameOf(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
+}
+
+/**
+ * 文档状态的**完整**形状：页面把这五个字段分别写回自己的 `$state`。
+ *
+ * 为什么要有这组纯函数：契约 3（`doc` 与 `editorDoc` 必须同源）与"保存不改内容"这两条，
+ * 在页面的 hook 里只是几行赋值，**单测够不着**（`?browserdev=1` 里打开对话框返回 null，
+ * 浏览器验收也走不到真打开）。把"迁移后的状态长什么样"提到这里之后，红线就有了能跑红的断言。
+ */
+export interface DocumentState {
+  doc: string;
+  /** 编辑器内容的实时镜像（见页面 `editorDoc` 声明处：落后一次就丢未保存内容） */
+  editorDoc: string;
+  filePath: string | null;
+  fileTitle: string;
+  dirty: boolean;
+}
+
+/** 载入（打开 / 重新读取）之后的状态：`doc` 与 `editorDoc` **必须同源**（契约 3） */
+export function loadedState(content: string, path: string): DocumentState {
+  return {
+    doc: content,
+    editorDoc: content,
+    filePath: path,
+    fileTitle: fileNameOf(path),
+    dirty: false,
+  };
+}
+
+/** 保存成功之后的状态：**内容一个字节都不变**（把当前 `doc` 两处镜像原样带回去），只换路径/标题、清脏标记 */
+export function savedState(path: string, doc: string): DocumentState {
+  return {
+    doc,
+    editorDoc: doc,
+    filePath: path,
+    fileTitle: fileNameOf(path),
+    dirty: false,
+  };
+}
+
+/** 新建（清空）之后的状态：内容两处都空、路径置空、标题回到「未命名.typ」、脏标记复位 */
+export function newState(): DocumentState {
+  return { doc: "", editorDoc: "", filePath: null, fileTitle: UNTITLED_TITLE, dirty: false };
 }
 
 export interface DocumentSessionHooks {
@@ -61,8 +105,6 @@ export interface DocumentSessionHooks {
 }
 
 export interface DocumentSession {
-  /** 有未保存修改时请求确认（打开 / 重新读取 / 新建前的统一入口） */
-  confirmDiscard(message?: string, title?: string): Promise<boolean>;
   /** 按路径加载 .typ（打开对话框 / 拖放 / 关联打开 / 单实例转发都走这里） */
   openPath(path: string): Promise<boolean>;
   /** 打开对话框 → `openPath` */
@@ -161,5 +203,5 @@ export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSess
     hooks.setStatus("已新建");
   }
 
-  return { confirmDiscard, openPath, open, save, reload, createNew };
+  return { openPath, open, save, reload, createNew };
 }

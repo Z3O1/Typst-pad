@@ -51,7 +51,15 @@
   import { decideAppKey, runAppKeyAction, topModal } from "$lib/editor/app-keys";
   import type { AppModal } from "$lib/editor/app-keys";
   import { isEffectiveDirty, ensureTrailingNewline } from "$lib/core/doc-utils";
-  import { createDocumentSession, fileNameOf } from "$lib/core/document-session";
+  import {
+    createDocumentSession,
+    fileNameOf,
+    loadedState,
+    newState,
+    savedState,
+    UNTITLED_TITLE,
+  } from "$lib/core/document-session";
+  import type { DocumentState } from "$lib/core/document-session";
   import { failureStatus } from "$lib/core/failure-text";
   import { installEditorFonts, loadBundledFont } from "$lib/editor/editor-font";
   import MenuBar from "$lib/ui/MenuBar.svelte";
@@ -189,7 +197,7 @@
     closeMenus(): void;
   }
 
-  let fileTitle = $state("未命名.typ");
+  let fileTitle = $state(UNTITLED_TITLE);
   let dirty = $state(false);
   let cursorLine = $state(1);
   let cursorCol = $state(1);
@@ -822,32 +830,29 @@
   // 文档生命周期（打开 / 保存 / 重新读取 / 新建）在 `$lib/core/document-session`
   // ---------------------------------------------------------------------------
   // 这里只注入页面状态与文件读写；四条契约（脏文档必问、写盘唯一入口、`applyLoaded` 只此一份、
-  // 新建连会话存档一起清）的完整说明在那边。注意 hook 里的取值与赋值都要**在调用时**发生，
-  // 所以这里全是箭头函数 —— 别改成创建时快照（`filePath` / `dirty` / `doc` 每次都不同）。
+  // 新建连会话存档一起清）的完整说明在那边。**读页面状态的 hook 全是箭头函数**，在调用时取值 ——
+  // 别改成创建时快照（`filePath` / `dirty` / `doc` 每次都不同）；`isDesktop` / `readFile` /
+  // `writeFile` / `pickFile` 直接引用 import 进来的纯函数，它们不读 `$state`。
+  //
+  // **唯一**把文档状态写回 `$state` 的地方：字段清单与"迁移后该长什么样"都在
+  // `core/document-session.ts` 的三个纯函数里（`loadedState` / `savedState` / `newState`），
+  // 这里只负责赋值。`editorDoc` 放**最后**落 —— 它是编辑器内容的实时镜像（见其声明处）。
+  function applyDocState(next: DocumentState) {
+    doc = next.doc;
+    filePath = next.filePath;
+    fileTitle = next.fileTitle;
+    dirty = next.dirty;
+    editorDoc = next.editorDoc;
+  }
+
   const docSession = createDocumentSession({
     doc: () => doc,
     filePath: () => filePath,
     fileTitle: () => fileTitle,
     dirty: () => dirty,
-    applyLoaded: (content, path) => {
-      doc = content;
-      editorDoc = content; // 触发编辑器替换全文（**实时镜像**红线，见 editorDoc 声明处）
-      filePath = path;
-      fileTitle = fileNameOf(path);
-      dirty = false;
-    },
-    applySaved: (path) => {
-      filePath = path;
-      fileTitle = fileNameOf(path);
-      dirty = false;
-    },
-    applyNew: () => {
-      doc = "";
-      editorDoc = "";
-      filePath = null;
-      fileTitle = "未命名.typ";
-      dirty = false;
-    },
+    applyLoaded: (content, path) => applyDocState(loadedState(content, path)),
+    applySaved: (path) => applyDocState(savedState(path, doc)),
+    applyNew: () => applyDocState(newState()),
     afterLoad: () => {
       resetMathCache();
       resetBlocks();

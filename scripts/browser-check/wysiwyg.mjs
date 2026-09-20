@@ -2871,7 +2871,8 @@ check("Esc 关掉关于弹窗", !afterEscAbout.open, JSON.stringify(afterEscAbou
 // localStorage，不是文件）。所以"应用自己把文件清空"这条路是堵住的，这一组把它钉死。
 //
 // 会丢内容/写空的只有两条，各配一道防护：
-// ① 「新建」——它清空编辑器 + 置空 filePath + 清掉会话存档，所以先 `confirmDiscard`（本组钉住）；
+// ① 「新建」——它清空编辑器 + 置空 filePath + 清掉会话存档，所以先确认（`core/document-session.ts`
+//    的 `confirmDiscard`，由 `createNew()` 调用；本组钉住）；
 // ② 「空文档 + 已有文件 + 按保存」——唯一能把磁盘文件写成空的组合。**这道确认窗 2026-09-18 被
 //    用户要求删掉了**（就是标题为「保存空文档」的那个原生对话框：「…的内容是空的（只有空白字符），
 //    保存会把磁盘上的文件也清空。仍要保存吗？」），现在是**直接写空、不再问**，别再"顺手加回来"。
@@ -2891,7 +2892,7 @@ const statusProbe = `document.querySelector(".statusbar").innerText`;
 //  · `.cm-content` 的 innerText 对空文档返回的是 `"\n"`（1 个字符），不是 `""`（实测踩到，写检查时踩过一次）；
 //  · 存档会先被 `clearState()` 清掉（实测 +120ms 时还是 null），约 300ms 后又被一次设置持久化
 //    写回"空会话"（content 空 + dirty false），所以"存档为 null"这种瞬时状态不能当判据。
-// dirty 从 true 变 false 只有 handleNew（本组里没有保存/打开）能做到：确认一发就会被桩取消、
+// dirty 从 true 变 false 只有 `docSession.createNew()`（本组里没有保存/打开）能做到：确认一发就会被桩取消、
 // dirty 会留在 true，所以它正好能区分"弹了但被取消"和"没弹、直接新建"。
 await c.click(400, 300);
 await c.type("先随便写点，再删光，制造「空文档」这种状态\n");
