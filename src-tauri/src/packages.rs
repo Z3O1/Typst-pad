@@ -147,9 +147,9 @@ fn download_and_extract(
 
     // 临时目录与最终目标同父目录（同文件系统，重命名原子）；
     // pid 后缀防多实例冲突，编译互斥串行 + 先清理残留，无并发覆盖风险
-    let base = cache_dir.parent().ok_or_else(|| {
-        FileError::Package(PackageError::Other(Some("包缓存目录无效".into())))
-    })?;
+    let base = cache_dir
+        .parent()
+        .ok_or_else(|| FileError::Package(PackageError::Other(Some("包缓存目录无效".into()))))?;
     fs::create_dir_all(base).map_err(write_err)?;
     let tmp = base.join(format!(".tmp-{}-{}", spec.version, std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
@@ -213,9 +213,7 @@ fn fetch_from_packages_org(url: &str) -> Result<Vec<u8>, FetchError> {
 
 /// 归档解析/解压失败 → MalformedArchive 诊断
 fn malformed_err(err: std::io::Error) -> FileError {
-    FileError::Package(PackageError::MalformedArchive(Some(
-        err.to_string().into(),
-    )))
+    FileError::Package(PackageError::MalformedArchive(Some(err.to_string().into())))
 }
 
 /// 内容异常（如路径穿越）→ MalformedArchive 诊断
@@ -362,7 +360,10 @@ mod tests {
             "local",
             "mypkg",
             "1.0.0",
-            &[("typst.toml", "[package]\nname = \"mypkg\"\n"), ("lib.typ", "#let hello = [你好]\n")],
+            &[
+                ("typst.toml", "[package]\nname = \"mypkg\"\n"),
+                ("lib.typ", "#let hello = [你好]\n"),
+            ],
         );
         let path = resolve_package_path_in(
             &spec("@local/mypkg:1.0.0"),
@@ -412,7 +413,10 @@ mod tests {
             "preview",
             "pkg",
             "0.2.0",
-            &[("typst.toml", "[package]\nname = \"pkg\"\n"), ("lib.typ", "#let v = 42\n")],
+            &[
+                ("typst.toml", "[package]\nname = \"pkg\"\n"),
+                ("lib.typ", "#let v = 42\n"),
+            ],
         );
         let path = resolve_package_path_in(
             &spec("@preview/pkg:0.2.0"),
@@ -430,7 +434,10 @@ mod tests {
     fn preview_miss_downloads_and_caches() {
         let dirs = Dirs::temp("preview-miss");
         let tarball = make_tarball(&[
-            ("typst.toml", b"[package]\nname = \"pkg\"\nversion = \"0.2.0\"\n"),
+            (
+                "typst.toml",
+                b"[package]\nname = \"pkg\"\nversion = \"0.2.0\"\n",
+            ),
             ("lib.typ", b"#let v = 42\n"),
             ("src/helper.typ", b"#let helper = [h]\n"),
         ]);

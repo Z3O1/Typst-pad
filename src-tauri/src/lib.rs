@@ -105,7 +105,13 @@ async fn compile_doc(
     let fonts = typst_world::FontConfig::new(font_families, font_dirs);
     Ok(tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        typst_world::compile_with_page_width(src, document_path, &fonts_dir, &fonts, preview_width_pt)
+        typst_world::compile_with_page_width(
+            src,
+            document_path,
+            &fonts_dir,
+            &fonts,
+            preview_width_pt,
+        )
     })
     .await
     .unwrap_or_else(|_| typst_world::CompileOutput::internal_error("编译任务异常终止")))

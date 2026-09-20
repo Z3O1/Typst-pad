@@ -154,9 +154,7 @@ impl TypstWorld {
         match id.root() {
             VirtualRoot::Project => {
                 let root = self.root.as_deref().ok_or_else(|| {
-                    FileError::Other(Some(
-                        "文档未保存，无法解析相对路径（请先保存文档）".into(),
-                    ))
+                    FileError::Other(Some("文档未保存，无法解析相对路径（请先保存文档）".into()))
                 })?;
                 id.vpath().realize(root).map_err(Into::into)
             }

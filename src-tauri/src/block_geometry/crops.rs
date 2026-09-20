@@ -180,9 +180,8 @@ pub fn compile_blocks(
     // 页宽反推：正文列宽 = 页宽 ×(1 - 2×页边距比例)
     let page_width_pt = content_width_pt / (1.0 - 2.0 * PAGE_MARGIN_RATIO);
     let margin_pt = page_width_pt * PAGE_MARGIN_RATIO;
-    let injected = format!(
-        "#set page(width: {page_width_pt:.2}pt, height: auto, margin: {margin_pt:.2}pt)\n"
-    );
+    let injected =
+        format!("#set page(width: {page_width_pt:.2}pt, height: auto, margin: {margin_pt:.2}pt)\n");
     let compiled_src = format!("{injected}{src}");
     // 编译源里的"用户文档起点"：注入行 + 前缀
     let doc_start = injected.len() + doc_offset;
@@ -191,8 +190,14 @@ pub fn compile_blocks(
     // `main_line_offset = 1`：注入的 `#set page(...)` 占了一行，主源诊断的行号要减回去
     // （与 compile_with_page_width 同一口径；前缀行仍留在行号里，由前端 mapCompiledPosToDoc 处理）
     let (document, raw_warnings) = match typst::compile::<PagedDocument>(&world) {
-        typst::diag::Warned { output: Ok(doc), warnings } => (doc, warnings),
-        typst::diag::Warned { output: Err(errors), .. } => {
+        typst::diag::Warned {
+            output: Ok(doc),
+            warnings,
+        } => (doc, warnings),
+        typst::diag::Warned {
+            output: Err(errors),
+            ..
+        } => {
             let diags = crate::typst_world::collect_diagnostics(&world, errors, 1);
             return BlocksOutput::fail(diags, page_width_pt);
         }
@@ -269,8 +274,16 @@ pub fn compile_blocks(
     crops.resize_with(blocks.len(), || None);
     for (pos, idx) in order.iter().enumerate() {
         let g = geoms[*idx].as_ref().unwrap();
-        let prev = if pos > 0 { geoms[order[pos - 1]].as_ref() } else { None };
-        let next = if pos + 1 < order.len() { geoms[order[pos + 1]].as_ref() } else { None };
+        let prev = if pos > 0 {
+            geoms[order[pos - 1]].as_ref()
+        } else {
+            None
+        };
+        let next = if pos + 1 < order.len() {
+            geoms[order[pos + 1]].as_ref()
+        } else {
+            None
+        };
         // 相邻块必须同页才能取中点（跨页之间没有"间距"可言）
         let band_top = match prev.filter(|p| p.page == g.page) {
             Some(p) => (p.bottom + g.top) / 2.0,
@@ -288,7 +301,10 @@ pub fn compile_blocks(
         // 按墨迹切会把它们挤掉。
         let rect = Rect::new(
             Point::new(Abs::pt(margin_pt), Abs::pt(band_top)),
-            Point::new(Abs::pt(page_width_pt - margin_pt), Abs::pt(band_top + height)),
+            Point::new(
+                Abs::pt(page_width_pt - margin_pt),
+                Abs::pt(band_top + height),
+            ),
         );
         // 只渲"窗口内"的块：窗口外的块只回几何（前端沿用上一轮切片或先显示源码）
         // 窗口与返回的块区间**同一坐标系**（用户文档字节偏移，不含注入行与前缀）
@@ -303,7 +319,10 @@ pub fn compile_blocks(
             _ => true,
         };
         // 单块太大 → 只回几何、不渲图（见 MAX_CROP_SOURCE_BYTES 的说明）
-        let src_bytes = blocks[*idx].range.end.saturating_sub(blocks[*idx].range.start);
+        let src_bytes = blocks[*idx]
+            .range
+            .end
+            .saturating_sub(blocks[*idx].range.start);
         let skipped = in_window && src_bytes > MAX_CROP_SOURCE_BYTES;
         let svg = if in_window && !skipped {
             match document.pages().get(g.page.saturating_sub(1)) {
@@ -322,10 +341,18 @@ pub fn compile_blocks(
                 // 夹到带内：链接方框有时比"块的墨迹包围盒"略高一点（行高 vs 墨迹），
                 // 直接给前端会让热区溢出切片一两像素 —— 夹紧后前端按百分比铺出来必然在界内。
                 .filter_map(|l| {
-                    let x0 = (l.rect.min.x - rect.min.x).to_pt().clamp(0.0, rect.size().x.to_pt());
-                    let y0 = (l.rect.min.y - rect.min.y).to_pt().clamp(0.0, rect.size().y.to_pt());
-                    let x1 = (l.rect.max.x - rect.min.x).to_pt().clamp(0.0, rect.size().x.to_pt());
-                    let y1 = (l.rect.max.y - rect.min.y).to_pt().clamp(0.0, rect.size().y.to_pt());
+                    let x0 = (l.rect.min.x - rect.min.x)
+                        .to_pt()
+                        .clamp(0.0, rect.size().x.to_pt());
+                    let y0 = (l.rect.min.y - rect.min.y)
+                        .to_pt()
+                        .clamp(0.0, rect.size().y.to_pt());
+                    let x1 = (l.rect.max.x - rect.min.x)
+                        .to_pt()
+                        .clamp(0.0, rect.size().x.to_pt());
+                    let y1 = (l.rect.max.y - rect.min.y)
+                        .to_pt()
+                        .clamp(0.0, rect.size().y.to_pt());
                     (x1 - x0 > 0.5 && y1 - y0 > 0.5).then(|| CropLink {
                         x_pt: x0,
                         y_pt: y0,

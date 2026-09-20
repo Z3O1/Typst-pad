@@ -35,7 +35,15 @@ fn editor_font_files_exist_and_are_whitelisted() {
 /// 尺寸与 SVG 根属性一致（前端按 pt 原样显示，契约不能漂）
 #[test]
 fn compile_math_inline_ok() {
-    let out = compile_math("x^2", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+    let out = compile_math(
+        "x^2",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
     assert!(out.ok, "行内公式应渲染成功: {:?}", out.error);
     assert!(out.svg.contains("<svg"), "产物应是 SVG");
     assert!(out.width_pt > 0.0 && out.height_pt > 0.0, "尺寸应为正");
@@ -47,7 +55,8 @@ fn compile_math_inline_ok() {
     );
     // 贴边：SVG 的 width/height 与返回的 pt 尺寸一致（前端直接按 pt 显示，不再缩放）
     assert!(
-        out.svg.contains(&format!("width=\"{:.4}pt\"", out.width_pt))
+        out.svg
+            .contains(&format!("width=\"{:.4}pt\"", out.width_pt))
             || out.svg.contains(&format!("width=\"{}pt\"", out.width_pt)),
         "SVG 宽度应与 width_pt 一致：{} vs {}",
         out.svg.chars().take(160).collect::<String>(),
@@ -60,8 +69,24 @@ fn compile_math_inline_ok() {
 /// 公式渲染：行间（display 风格）公式明显高于行内风格（分式由 a/b 变为竖排）
 #[test]
 fn compile_math_display_taller_than_inline() {
-    let inline = compile_math("frac(a,b)", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
-    let display = compile_math("frac(a,b)", true, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+    let inline = compile_math(
+        "frac(a,b)",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
+    let display = compile_math(
+        "frac(a,b)",
+        true,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
     assert!(inline.ok && display.ok);
     // 画布高度已经含"墨迹余量"（见 ink_bounds_of_frame），所以比值不再是 2 倍上下；
     // 真正要锁的是"行间分式明显比行内高"
@@ -83,14 +108,30 @@ fn compile_math_display_taller_than_inline() {
 /// 这条锁住「两页探针」测得的基线（若退回 page.frame.baseline()，depth 会恒为 0）。
 #[test]
 fn compile_math_baseline_measures_depth() {
-    let integral = compile_math("integral_0^1 f(x) dif x", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+    let integral = compile_math(
+        "integral_0^1 f(x) dif x",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
     assert!(integral.ok);
     let depth = integral.height_pt - integral.baseline_pt;
     assert!(depth > 0.3, "积分应有下沉深度，实际 {depth}");
 
     // x^2 的墨迹全在基线上方：画布只该给字体的 descender 留一点余量（≈0.2em），
     // 不该像积分那样留出大块下沉空间
-    let sup = compile_math("x^2", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+    let sup = compile_math(
+        "x^2",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
     assert!(sup.ok);
     let sup_depth = sup.height_pt - sup.baseline_pt;
     assert!(
@@ -113,7 +154,15 @@ fn compile_math_baseline_measures_depth() {
 /// 返回的 height_pt 一致（不一致就说明还有墨迹落在视口外）。
 #[test]
 fn compile_math_script_ink_inside_canvas() {
-    let out = compile_math("a_0", false, "", None, &fonts_dir(), &FontConfig::default(), 12.0);
+    let out = compile_math(
+        "a_0",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        12.0,
+    );
     assert!(out.ok, "公式应渲染成功: {:?}", out.error);
     // 下标基线实测在 11.16pt（数字 0 的墨迹全在它自己基线上方），画布只要超过它就是安全
     assert!(
@@ -134,7 +183,10 @@ fn compile_math_script_ink_inside_canvas() {
         out.height_pt
     );
     // 下标墨迹（基线 11.16 + 自己的 descender）也要落在视口内
-    assert!(vb_h > 11.2, "视口高 {vb_h} 必须超过下标基线，否则下标会被裁");
+    assert!(
+        vb_h > 11.2,
+        "视口高 {vb_h} 必须超过下标基线，否则下标会被裁"
+    );
 }
 
 /// 从 SVG 头部取 viewBox 的高度
@@ -159,7 +211,13 @@ fn compile_with_page_width_reflows_preview() {
     let body = "中文测试内容，用于验证按栏宽重新排版。".repeat(120);
     let src = format!("= 标题\n\n{body}\n");
 
-    let wide = compile_with_page_width(src.clone(), None, &fonts_dir(), &FontConfig::default(), None);
+    let wide = compile_with_page_width(
+        src.clone(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        None,
+    );
     assert!(wide.ok, "A4 编译应成功: {:?}", wide.diagnostics);
     let wide_pt = view_box_width(&wide.pages[0]).expect("应有 viewBox");
     assert!(
@@ -167,8 +225,13 @@ fn compile_with_page_width_reflows_preview() {
         "不传页宽时应是文档默认的 A4（实测 {wide_pt}pt）"
     );
 
-    let narrow =
-        compile_with_page_width(src.clone(), None, &fonts_dir(), &FontConfig::default(), Some(300.0));
+    let narrow = compile_with_page_width(
+        src.clone(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        Some(300.0),
+    );
     assert!(narrow.ok, "窄页编译应成功: {:?}", narrow.diagnostics);
     let narrow_pt = view_box_width(&narrow.pages[0]).expect("应有 viewBox");
     assert!(
@@ -196,7 +259,13 @@ fn compile_with_page_width_reflows_preview() {
 #[test]
 fn compile_with_page_width_keeps_diagnostic_lines() {
     let src = "= 标题\n#不存在的函数()\n".to_string();
-    let plain = compile_with_page_width(src.clone(), None, &fonts_dir(), &FontConfig::default(), None);
+    let plain = compile_with_page_width(
+        src.clone(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        None,
+    );
     let with_setup =
         compile_with_page_width(src, None, &fonts_dir(), &FontConfig::default(), Some(300.0));
     assert!(!plain.ok && !with_setup.ok, "两者都应编译失败");
@@ -217,13 +286,37 @@ fn compile_with_page_width_keeps_diagnostic_lines() {
 #[test]
 fn compile_math_context_applies_without_changing_size() {
     // 前缀定义的宏在公式里可用（#myX）
-    let with_let = compile_math("#myX", false, "#let myX = 42", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+    let with_let = compile_math(
+        "#myX",
+        false,
+        "#let myX = 42",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
     assert!(with_let.ok, "前缀宏应可用: {:?}", with_let.error);
     assert!(with_let.width_pt > 0.0);
 
     // 前缀把正文设成 30pt：公式仍按 MATH_TEXT_PT 渲染（#set 在 30pt 之后生效）
-    let plain = compile_math("x", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
-    let with_big_prefix = compile_math("x", false, "#set text(size: 30pt)", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+    let plain = compile_math(
+        "x",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
+    let with_big_prefix = compile_math(
+        "x",
+        false,
+        "#set text(size: 30pt)",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
     assert!(plain.ok && with_big_prefix.ok);
     assert!(
         (plain.width_pt - with_big_prefix.width_pt).abs() < 0.1,
@@ -236,11 +329,23 @@ fn compile_math_context_applies_without_changing_size() {
 /// 跨行公式（行间公式多行书写）：仍能渲染成贴边 SVG（前端整行替换为块级 widget）
 #[test]
 fn compile_math_multiline_body() {
-    let out = compile_math("a + b \\ = c", true, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+    let out = compile_math(
+        "a + b \\ = c",
+        true,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
     assert!(out.ok, "跨行公式应渲染成功: {:?}", out.error);
     assert!(out.width_pt > 0.0 && out.height_pt > 0.0);
     // 行间公式的盒应明显高于单行行内公式（19pt 量级 vs 7pt 量级）
-    assert!(out.height_pt > 12.0, "行间公式应更高，实际 {}", out.height_pt);
+    assert!(
+        out.height_pt > 12.0,
+        "行间公式应更高，实际 {}",
+        out.height_pt
+    );
 }
 
 /// 按需运行的真实公式产物导出（浏览器端视觉验证用）：
@@ -275,7 +380,15 @@ fn dump_math_fixtures() {
     ];
     for (body, display) in cases {
         for size_pt in [crate::block_geometry::DEFAULT_TEXT_PT, 12.0, MATH_TEXT_PT] {
-            let out = compile_math(body, display, "", None, &fonts_dir(), &FontConfig::default(), size_pt);
+            let out = compile_math(
+                body,
+                display,
+                "",
+                None,
+                &fonts_dir(),
+                &FontConfig::default(),
+                size_pt,
+            );
             assert!(out.ok, "夹具公式应渲染成功: {body} / {:?}", out.error);
             let json = serde_json::json!({
                 "body": body,
@@ -295,8 +408,24 @@ fn dump_math_fixtures() {
 /// （曾经的 bug：正文 16px 而公式仍按 10.5pt 编译 → 公式比正文小一圈）
 #[test]
 fn compile_math_size_matches_editor_font() {
-    let small = compile_math("x", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
-    let big = compile_math("x", false, "", None, &fonts_dir(), &FontConfig::default(), 12.0);
+    let small = compile_math(
+        "x",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
+    let big = compile_math(
+        "x",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        12.0,
+    );
     assert!(small.ok && big.ok);
     let ratio = big.width_pt / small.width_pt;
     assert!(
@@ -305,7 +434,15 @@ fn compile_math_size_matches_editor_font() {
         12.0 / MATH_TEXT_PT
     );
     // 越界/NaN 退回默认，不 panic
-    let bad = compile_math("x", false, "", None, &fonts_dir(), &FontConfig::default(), f64::NAN);
+    let bad = compile_math(
+        "x",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        f64::NAN,
+    );
     assert!(bad.ok);
     assert!((bad.width_pt - small.width_pt).abs() < 0.001);
 }
@@ -313,7 +450,15 @@ fn compile_math_size_matches_editor_font() {
 /// 公式语法错误：ok=false 且带消息（前端据此保持源码显示，不显示空 widget）
 #[test]
 fn compile_math_syntax_error() {
-    let out = compile_math("frac(a", false, "", None, &fonts_dir(), &FontConfig::default(), MATH_TEXT_PT);
+    let out = compile_math(
+        "frac(a",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
     assert!(!out.ok, "非法公式应失败");
     assert!(out.svg.is_empty(), "失败时不应有产物");
     assert!(
@@ -321,7 +466,6 @@ fn compile_math_syntax_error() {
         "失败应带错误消息"
     );
 }
-
 
 /// 端到端：中文 + 数学公式文档编译成功，pages 非空且每页含 <svg>
 #[test]
@@ -337,7 +481,10 @@ $ a^2 + b^2 = c^2 $
     assert!(!out.pages.is_empty(), "应至少有一页");
     assert!(out.pages[0].contains("<svg"), "每页应是完整 SVG");
     // 中文字体（思源宋体）与数学字体（NewCM）必须加载成功
-    assert!(font_count() >= 7, "src-tauri/fonts 下 7 个字体文件应全部注册");
+    assert!(
+        font_count() >= 7,
+        "src-tauri/fonts 下 7 个字体文件应全部注册"
+    );
 }
 
 /// 字体加载：`src-tauri/fonts` 下 7 个打包字体全部注册成功（数学 NewCM、中文思源宋体、
@@ -434,7 +581,12 @@ fn relative_include_ok() {
 
     let src = fs::read_to_string(dir.join("main.typ")).unwrap();
     let doc_path = dir.join("main.typ").to_string_lossy().to_string();
-    let out = compile(src, Some(doc_path.clone()), &fonts_dir(), &FontConfig::default());
+    let out = compile(
+        src,
+        Some(doc_path.clone()),
+        &fonts_dir(),
+        &FontConfig::default(),
+    );
     assert!(out.ok, "include 应成功，实际诊断: {:?}", out.diagnostics);
     assert!(!out.pages.is_empty());
 
@@ -454,8 +606,7 @@ fn relative_include_ok() {
 /// 相对 include：不存在的文件报错且诊断带 path（include 文件路径）
 #[test]
 fn relative_include_missing_file() {
-    let dir =
-        std::env::temp_dir().join(format!("typst-pad-test-{}-missing", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("typst-pad-test-{}-missing", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(
@@ -483,8 +634,7 @@ fn relative_include_missing_file() {
 /// 与 @preview/@local 包），所以 import 这条分支坏了也没人拦。
 #[test]
 fn relative_import_same_dir_ok() {
-    let dir =
-        std::env::temp_dir().join(format!("typst-pad-test-{}-imp-same", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("typst-pad-test-{}-imp-same", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("t.typ"), "#let hello() = [来自子模块]\n").unwrap();
@@ -520,8 +670,7 @@ fn relative_import_same_dir_ok() {
 /// 根得放宽到能一次容纳两层引用。
 #[test]
 fn relative_import_parent_dir_ok() {
-    let base =
-        std::env::temp_dir().join(format!("typst-pad-test-{}-imp-up", std::process::id()));
+    let base = std::env::temp_dir().join(format!("typst-pad-test-{}-imp-up", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     let docs = base.join("2026.6.3-随机化和近似算法");
     let lib = base.join("touying");
@@ -581,8 +730,7 @@ fn needed_levels_matches_typst_semantics() {
 /// 必须按 `..` 的层数算（否则 `base/notes` 里的 `sub/head.typ` 写 `../../x` 仍会越界）。
 #[test]
 fn project_root_widening_rules() {
-    let base =
-        std::env::temp_dir().join(format!("typst-pad-test-{}-root", std::process::id()));
+    let base = std::env::temp_dir().join(format!("typst-pad-test-{}-root", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     let notes = base.join("notes");
     let sub = notes.join("sub");
@@ -613,8 +761,8 @@ fn project_root_widening_rules() {
         resolve_project_root("#import \"../touying/z.typ\": hi\n", &doc_s).expect("能解析出根");
     assert_eq!(up.root, canon_base, "引用上一层目录应放宽到公共祖先");
 
-    let nested = resolve_project_root("#import \"sub/head.typ\": hi\n", &doc_s)
-        .expect("能解析出根");
+    let nested =
+        resolve_project_root("#import \"sub/head.typ\": hi\n", &doc_s).expect("能解析出根");
     assert_eq!(
         nested.root, canon_base,
         "被引用文件自己的 `../../` 也要落在根内（要递归看它引用了什么）"
@@ -627,8 +775,7 @@ fn project_root_widening_rules() {
 /// 放宽是纯词法的，所以"文档目录之外"本身不再构成错误。
 #[test]
 fn relative_import_missing_target_reports_not_found() {
-    let base =
-        std::env::temp_dir().join(format!("typst-pad-test-{}-imp-gone", std::process::id()));
+    let base = std::env::temp_dir().join(format!("typst-pad-test-{}-imp-gone", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     let docs = base.join("week2");
     fs::create_dir_all(&docs).unwrap();
@@ -646,7 +793,9 @@ fn relative_import_missing_target_reports_not_found() {
     let out = compile(src, Some(doc_path), &fonts_dir(), &FontConfig::default());
     assert!(!out.ok, "目标不存在当然编译失败");
     assert!(
-        out.diagnostics.iter().all(|d| !d.message.contains("escape")),
+        out.diagnostics
+            .iter()
+            .all(|d| !d.message.contains("escape")),
         "不该再报越界（放宽是纯词法的），实际: {:?}",
         out.diagnostics
     );
@@ -718,7 +867,10 @@ fn diagnostic_path_key_omitted_for_main_source() {
         ..main
     };
     let json = serde_json::to_string(&other).unwrap();
-    assert!(json.contains(r#""path":"sub/a.typ""#), "子文件诊断要带 path: {json}");
+    assert!(
+        json.contains(r#""path":"sub/a.typ""#),
+        "子文件诊断要带 path: {json}"
+    );
 
     // 真实编译结果（主源语法错误）整包 JSON 里也不该出现 path
     let out = compile(
@@ -776,20 +928,32 @@ fn default_font_families_apply() {
         format!("#set text(font: \"Noto Serif CJK SC\")\n{body}"),
         None,
         &dir,
-        &FontConfig { families: Vec::new(), dirs: Vec::new() },
+        &FontConfig {
+            families: Vec::new(),
+            dirs: Vec::new(),
+        },
     );
     let fallback = compile(
         body.to_string(),
         None,
         &dir,
-        &FontConfig { families: Vec::new(), dirs: Vec::new() },
+        &FontConfig {
+            families: Vec::new(),
+            dirs: Vec::new(),
+        },
     );
-    assert!(injected.ok && explicit.ok && fallback.ok, "三个文档都应编译成功");
+    assert!(
+        injected.ok && explicit.ok && fallback.ok,
+        "三个文档都应编译成功"
+    );
     assert_eq!(
         injected.pages, explicit.pages,
         "注入默认字体族应与文档里显式 #set text(font:) 等价"
     );
-    assert_ne!(injected.pages, fallback.pages, "不注入时应走回退，结果不应与注入相同");
+    assert_ne!(
+        injected.pages, fallback.pages,
+        "不注入时应走回退，结果不应与注入相同"
+    );
 }
 
 /// 把单 face 的 sfnt 包成 `faces` 个 face 的 **.ttc 集合**（测试用）。
@@ -810,7 +974,8 @@ fn wrap_as_ttc(sfnt: &[u8], faces: usize) -> Vec<u8> {
     let num_tables = u16::from_be_bytes([font[4], font[5]]) as usize;
     for i in 0..num_tables {
         let rec = 12 + i * 16; // tag(4) + checksum(4) + offset(4) + length(4)
-        let off = u32::from_be_bytes([font[rec + 8], font[rec + 9], font[rec + 10], font[rec + 11]]);
+        let off =
+            u32::from_be_bytes([font[rec + 8], font[rec + 9], font[rec + 10], font[rec + 11]]);
         let shifted = (off + base as u32).to_be_bytes();
         font[rec + 8..rec + 12].copy_from_slice(&shifted);
     }
@@ -831,8 +996,15 @@ fn font_collection_registers_every_face() {
     // ① 两个 face 的集合：应注册出 2 个字体、同一个族
     fs::write(dir.join("pair.ttc"), wrap_as_ttc(&single, 2)).unwrap();
     let (book, fonts) = load_fonts(&dir);
-    assert_eq!(fonts.len(), 2, "集合里的两个 face 都应注册（旧代码只会注册 0 个）");
-    assert!(book.contains_family("libertinus serif"), "集合里的字体族应进 FontBook");
+    assert_eq!(
+        fonts.len(),
+        2,
+        "集合里的两个 face 都应注册（旧代码只会注册 0 个）"
+    );
+    assert!(
+        book.contains_family("libertinus serif"),
+        "集合里的字体族应进 FontBook"
+    );
     // 下拉列表（用户看到的那份）也要有它
     let families = list_font_families(&dir, &[]);
     assert!(
@@ -847,7 +1019,11 @@ fn font_collection_registers_every_face() {
     fs::create_dir_all(&broken_dir).unwrap();
     fs::write(broken_dir.join("broken.ttc"), broken).unwrap();
     let (_, broken_fonts) = load_fonts(&broken_dir);
-    assert_eq!(broken_fonts.len(), 0, "坏集合头应静默跳过，不 panic 也不误注册");
+    assert_eq!(
+        broken_fonts.len(),
+        0,
+        "坏集合头应静默跳过，不 panic 也不误注册"
+    );
 
     // ③ 非字体扩展名仍然不收（防把 .txt 读进来）
     fs::write(dir.join("readme.txt"), &single).unwrap();
@@ -867,7 +1043,10 @@ fn font_families_listing_includes_bundled() {
         "DejaVu Sans Mono",
         "New Computer Modern Math",
     ] {
-        assert!(families.iter().any(|f| f == want), "字体族列表应包含 {want}");
+        assert!(
+            families.iter().any(|f| f == want),
+            "字体族列表应包含 {want}"
+        );
     }
 }
 
@@ -875,7 +1054,10 @@ fn font_families_listing_includes_bundled() {
 #[test]
 fn missing_extra_font_dir_is_ignored() {
     let bogus = std::env::temp_dir().join("typst-pad-no-such-fonts-dir");
-    let cfg = FontConfig { families: Vec::new(), dirs: vec![bogus] };
+    let cfg = FontConfig {
+        families: Vec::new(),
+        dirs: vec![bogus],
+    };
     let out = compile("中文可编译\n".to_string(), None, &fonts_dir(), &cfg);
     assert!(out.ok, "额外字体目录不存在时仍应正常编译");
 }
@@ -939,9 +1121,11 @@ fn make_pkg(root: &std::path::Path, ns: &str, name: &str, version: &str, files: 
 /// 端到端 @local：未保存文档也能导入本地包（TYPST_PACKAGE_PATH 注入临时目录，不触用户目录）
 #[test]
 fn package_import_local_end_to_end() {
-    let _guard = crate::packages::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let root = std::env::temp_dir()
-        .join(format!("typst-pad-test-{}-pkg-local", std::process::id()));
+    let _guard = crate::packages::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root =
+        std::env::temp_dir().join(format!("typst-pad-test-{}-pkg-local", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     std::env::set_var("TYPST_PACKAGE_PATH", &root);
@@ -952,14 +1136,21 @@ fn package_import_local_end_to_end() {
         "mypkg",
         "1.0.0",
         &[
-            ("typst.toml", "[package]\nname = \"mypkg\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n"),
+            (
+                "typst.toml",
+                "[package]\nname = \"mypkg\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n",
+            ),
             ("lib.typ", "#let hello = [来自本地包的问候]\n"),
         ],
     );
 
     let src = "#import \"@local/mypkg:1.0.0\": hello\n\n#hello\n".to_string();
     let out = compile(src, None, &fonts_dir(), &FontConfig::default());
-    assert!(out.ok, "@local 导入应编译成功，实际诊断: {:?}", out.diagnostics);
+    assert!(
+        out.ok,
+        "@local 导入应编译成功，实际诊断: {:?}",
+        out.diagnostics
+    );
     // SVG 文本按字形渲染（<use> 引用字形路径），8 个汉字对应 8 个字形
     assert!(
         out.pages[0].matches("<use").count() >= 8,
@@ -973,9 +1164,11 @@ fn package_import_local_end_to_end() {
 /// 端到端 @preview：缓存命中（预置伪造包目录）即可离线编译，不发网络请求
 #[test]
 fn package_import_preview_cache_end_to_end() {
-    let _guard = crate::packages::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let root = std::env::temp_dir()
-        .join(format!("typst-pad-test-{}-pkg-preview", std::process::id()));
+    let _guard = crate::packages::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root =
+        std::env::temp_dir().join(format!("typst-pad-test-{}-pkg-preview", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     std::env::remove_var("TYPST_PACKAGE_PATH");
@@ -986,14 +1179,21 @@ fn package_import_preview_cache_end_to_end() {
         "pkg",
         "0.2.0",
         &[
-            ("typst.toml", "[package]\nname = \"pkg\"\nversion = \"0.2.0\"\nentrypoint = \"lib.typ\"\n"),
+            (
+                "typst.toml",
+                "[package]\nname = \"pkg\"\nversion = \"0.2.0\"\nentrypoint = \"lib.typ\"\n",
+            ),
             ("lib.typ", "#let v = 42\n"),
         ],
     );
 
     let src = "#import \"@preview/pkg:0.2.0\": v\n\n#v\n".to_string();
     let out = compile(src, None, &fonts_dir(), &FontConfig::default());
-    assert!(out.ok, "@preview 缓存命中应编译成功，实际诊断: {:?}", out.diagnostics);
+    assert!(
+        out.ok,
+        "@preview 缓存命中应编译成功，实际诊断: {:?}",
+        out.diagnostics
+    );
     // SVG 文本按字形渲染：数字 42 对应 2 个字形
     assert!(
         out.pages[0].matches("<use").count() >= 2,
@@ -1007,9 +1207,11 @@ fn package_import_preview_cache_end_to_end() {
 /// 端到端诊断：@local 包不存在时给出"package not found"诊断（编译失败路径，用户可读）
 #[test]
 fn package_import_missing_reports_diagnostic() {
-    let _guard = crate::packages::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let root = std::env::temp_dir()
-        .join(format!("typst-pad-test-{}-pkg-missing", std::process::id()));
+    let _guard = crate::packages::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root =
+        std::env::temp_dir().join(format!("typst-pad-test-{}-pkg-missing", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     // 空目录：@local 必然 miss（@local 不下载，不发网络请求）

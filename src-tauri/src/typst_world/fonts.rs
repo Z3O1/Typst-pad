@@ -67,7 +67,10 @@ impl FontConfig {
     pub fn new(families: Option<Vec<String>>, dirs: Option<Vec<String>>) -> Self {
         Self {
             families: match families {
-                None => DEFAULT_FONT_FAMILIES.iter().map(|s| s.to_string()).collect(),
+                None => DEFAULT_FONT_FAMILIES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
                 Some(v) => v,
             },
             dirs: dirs
@@ -115,7 +118,10 @@ pub(crate) fn load_fonts(dir: &Path) -> (FontBook, Vec<Font>) {
 /// 与 typst CLI 字体集对齐：CLI 默认加载系统全部字体，typst-pad 此前只加载打包的
 /// 7 个字体，同一文档在两边的字体解析结果可能不一致。目录不存在/不可读时静默跳过。
 /// `extra_dirs` 是用户在设置里添加的额外字体目录（同样静默跳过不存在的）。
-pub(crate) fn load_fonts_with_system(bundled_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBook, Vec<Font>) {
+pub(crate) fn load_fonts_with_system(
+    bundled_dir: &Path,
+    extra_dirs: &[PathBuf],
+) -> (FontBook, Vec<Font>) {
     let (mut book, mut fonts) = load_fonts(bundled_dir);
     for dir in system_font_dirs() {
         load_fonts_from_dir(&dir, &mut book, &mut fonts);
@@ -136,11 +142,13 @@ pub(crate) fn load_fonts_from_dir(dir: &Path, book: &mut FontBook, fonts: &mut V
     for entry in entries.flatten() {
         let path = entry.path();
         // metadata 跟随符号链接：broken symlink 会 Err 而跳过
-        let Ok(meta) = fs::metadata(&path) else { continue };
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
         if meta.is_dir() {
             // 符号链接目录一律不递归（防环）
-            let is_symlink = fs::symlink_metadata(&path)
-                .is_ok_and(|sm| sm.file_type().is_symlink());
+            let is_symlink =
+                fs::symlink_metadata(&path).is_ok_and(|sm| sm.file_type().is_symlink());
             if is_symlink {
                 continue;
             }
@@ -219,7 +227,10 @@ fn system_font_dirs() -> Vec<PathBuf> {
             dirs.push(PathBuf::from(home).join(".fonts"));
         }
         // XDG 优先：$XDG_DATA_HOME/fonts；未设置时退回 $HOME/.local/share/fonts
-        match std::env::var("XDG_DATA_HOME").ok().filter(|s| !s.is_empty()) {
+        match std::env::var("XDG_DATA_HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
             Some(xdg) => dirs.push(PathBuf::from(xdg).join("fonts")),
             None => {
                 if let Some(home) = std::env::var_os("HOME") {
@@ -256,7 +267,10 @@ pub(crate) fn cached_fonts(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBoo
 /// warning 就静默回退到楷体，见模块文档）。
 pub fn list_font_families(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> Vec<String> {
     let (book, _) = cached_fonts(fonts_dir, extra_dirs);
-    let mut names: Vec<String> = book.families().map(|(family, _)| family.to_string()).collect();
+    let mut names: Vec<String> = book
+        .families()
+        .map(|(family, _)| family.to_string())
+        .collect();
     names.sort_unstable();
     names.dedup();
     names

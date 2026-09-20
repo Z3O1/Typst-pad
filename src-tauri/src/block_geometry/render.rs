@@ -52,4 +52,3 @@ fn item_box(pos: Point, item: &FrameItem) -> Rect {
 pub(crate) fn rects_intersect(a: Rect, b: Rect) -> bool {
     a.min.x <= b.max.x && a.max.x >= b.min.x && a.min.y <= b.max.y && a.max.y >= b.min.y
 }
-
