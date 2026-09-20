@@ -25,14 +25,9 @@
   // 公式渲染队列（去重/去抖/缓存上限/前缀兜底）：math-queue.ts（依赖注入 + 单测）
   import { createMathQueue } from "$lib/math-queue";
   import type { WriteCommand } from "$lib/write-commands";
-  import {
-    openTypFile,
-    saveTypFile,
-    readTypFile,
-    pickTypPath,
-    pickFontDir,
-    isTauri,
-  } from "$lib/file-ops";
+  import { openTypFile, saveTypFile, readTypFile, pickFontDir, isTauri } from "$lib/file-ops";
+  // 窗口级流程（多窗口 / open-file 广播认领 / 拖放）：window-flow.ts（依赖注入 + 单测）
+  import { createWindowFlow } from "$lib/window-flow";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
@@ -151,12 +146,6 @@
   /** 副窗口首屏编译落地后写在状态栏的一句说明（见 onMount 末尾） */
   const NEW_WINDOW_NOTICE = "新窗口：这里的修改不会记进「上次内容」";
 
-  /** 窗口 label 前缀：新窗口的 label 必须唯一（重名会创建失败），前缀要与 capabilities 里的 `editor-*` 一致 */
-  const NEW_WINDOW_LABEL_PREFIX = "editor-";
-
-  /** open-file 广播的兜底延迟：等有焦点的窗口先接（见 claimOpenFileOnBroadcast） */
-  const OPEN_FILE_FALLBACK_DELAY_MS = 250;
-
   // 启动打点：组件脚本求值时刻（JS chunk 加载后的首个可测点）
   mark("page-module-eval");
 
@@ -221,8 +210,6 @@
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
-  /** open-file 广播的兜底定时器（多窗口：没窗口有焦点时由主窗口延迟接，见 claimOpenFileOnBroadcast） */
-  let pendingOpenTimer: ReturnType<typeof setTimeout> | null = null;
   let showAbout = $state(false);
   /** 关于弹窗里的「项目主页」地址（开源仓库；关于弹窗与打开失败文案共用） */
   const PROJECT_URL = "https://github.com/Z3O1/Typst-pad";
@@ -967,7 +954,7 @@
       uiZoom,
       theme,
       onNew: files.createNew,
-      onNewWindow: openNewWindow,
+      onNewWindow: windows.openNewWindow,
       onOpen: files.openViaDialog,
       onSave: files.save,
       onOpenSettings: openSettings,
@@ -1537,93 +1524,50 @@
   }
 
   /**
-   * 新建窗口（`Ctrl+Shift+N` / 菜单「文件 → 新建窗口」）。新窗口是**空白草稿窗口**：
-   * 起来不恢复上次内容、写存档只写设置（见 isSecondaryWindow 的说明）。
+   * 窗口级流程（多窗口 / open-file 广播认领 / 窗口级拖放）在 window-flow.ts：那边 25 项单测
+   * 钉住「有焦点的窗口接广播、都没焦点时只有主窗口延迟兜底」「副窗口不抢」「新建窗口 label
+   * 必须唯一且带 `editor-` 前缀（ACL 靠它对上）」「拖放只认 .typ」这几条。
    *
-   * label 用时间戳保证唯一（Tauri 要求 label 唯一，重名会创建失败），前缀 `editor-` 必须与
-   * capabilities/default.json 的 `windows: ["main", "editor-*"]` 对得上 —— 否则新窗口里的
-   * 文件读写会在 ACL 层被拒（0.2.x 踩过，见提交 b187118）。
-   *
-   * **另外还得有 create 的权限**：`new WebviewWindow()` 走的是 `plugin:webview|create_webview_window`，
-   * 需要在 capabilities/default.json 里显式写 `core:webview:allow-create-webview-window` ——
-   * `core:webview:default`（我们引的 `core:default` 里含它）**没有**这一条，缺了就在**运行时**被拒：
-   * 状态栏原文「新建窗口失败：Command plugin:webview|create_webview_window not allowed by ACL」
-   * （0.7.9 就是这样发出去的）。这类 ACL 拒绝浏览器验收碰不到，所以另加了
-   * `scripts/capabilities.test.mjs` 做静态体检：改这里的 Tauri 调用后，去那张表里补一行。
+   * 与 Tauri 有关的两条硬约束（原文见 docs/实现细则/05-窗口与更新.md）：
+   * `new WebviewWindow()` 走的是 `plugin:webview|create_webview_window`，capabilities 里必须显式
+   * 写 `core:webview:allow-create-webview-window`（`core:default` 里**没有**这一条），缺了就在运行时
+   * 被拒（0.7.9 就是这样发出去的）；新窗口 label 前缀 `editor-` 也要与 capabilities 的
+   * `windows: ["main", "editor-*"]` 对上。这类 ACL 拒绝浏览器验收碰不到，所以另加了
+   * scripts/capabilities.test.mjs 做静态体检：**改这里的 Tauri 调用后，去那张表里补一行**。
    */
-  function openNewWindow() {
-    if (!isTauri()) return; // 浏览器预览没有多窗口（应用本身也只在桌面版渲染）
-    try {
-      const win = new WebviewWindow(`${NEW_WINDOW_LABEL_PREFIX}${Date.now()}`, {
+  const windows = createWindowFlow({
+    isTauri,
+    createWindow: (label, title, onAsyncError) => {
+      const win = new WebviewWindow(label, {
         url: "/",
-        title: "未命名.typ - Typst-pad",
+        title,
         width: 1280,
         height: 800,
         minWidth: 800,
         minHeight: 600,
         center: true,
       });
-      // 创建失败（label 撞车 / 系统拒绝）在发布版里是看不见的（没有 devtools），报到状态栏
       void win.once("tauri://error", (e) => {
-        const detail = (e as { payload?: unknown }).payload;
-        statusText = `新建窗口失败：${typeof detail === "string" ? detail : String(detail ?? "")}`;
-        dbg.log("window", "new-window error", detail);
+        onAsyncError((e as { payload?: unknown }).payload);
       });
-    } catch (e) {
-      statusText = `新建窗口失败：${e instanceof Error ? e.message : String(e)}`;
-    }
-  }
-
-  /** 关闭当前窗口（Ctrl+W）：与标题栏关闭走同一条路（未保存修改会先弹确认，见 onCloseRequested） */
-  function closeCurrentWindow() {
-    if (!isTauri()) return;
-    void getCurrentWindow().close();
-  }
-
-  /** 当前窗口是否有焦点（多窗口下决定 open-file 广播由谁接）；查询失败按"没有焦点"处理 */
-  async function currentIsFocused(): Promise<boolean> {
-    try {
-      return (await getCurrentWindow().isFocused()) === true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * 取走待打开队列里的最后一个路径（并清空队列）。多窗口下它同时是**"这个文件已被某窗口接走"
-   * 的记号**：都从 Rust 侧这份队列里取，取到空 = 别人先接了（见 claimOpenFileOnBroadcast）。
-   */
-  async function claimPendingFile(): Promise<string | null> {
-    try {
-      const paths = await invoke<string[]>("take_pending_files");
-      return paths.length > 0 ? paths[paths.length - 1] : null;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * `open-file` 广播的接球人（关联双击 / 跨实例转发打开）。
-   * Rust 侧是 `app.emit`，**所有窗口都会收到**，必须挑一个窗口接，否则两个窗口会同时切到同一个
-   * 文件、各自未保存的内容都可能被顶掉。规则：**有焦点的窗口接**（用户看得见文件开在哪）；
-   * 一个窗口都没焦点时（应用在后台/最小化）由主窗口延迟一拍兜底，兜底前先看队列——队列空说明
-   * 已经有窗口接走了，就放手（主窗口自己的会话不会被别人的双击顶掉）。
-   */
-  async function claimOpenFileOnBroadcast(path: string) {
-    if (await currentIsFocused()) {
-      void claimPendingFile(); // 清掉队列 = 告诉主窗口"已经有人接了"
-      await files.openPath(path);
-      return;
-    }
-    if (isSecondaryWindow) return; // 副窗口没焦点就不抢：交给主窗口兜底
-    if (pendingOpenTimer !== null) clearTimeout(pendingOpenTimer);
-    pendingOpenTimer = setTimeout(() => {
-      pendingOpenTimer = null;
-      void claimPendingFile().then((unclaimed) => {
-        if (unclaimed) void files.openPath(unclaimed);
-      });
-    }, OPEN_FILE_FALLBACK_DELAY_MS);
-  }
+    },
+    // 与标题栏关闭走同一条路（未保存修改会先弹确认，见 onCloseRequested）
+    closeWindow: () => void getCurrentWindow().close(),
+    isFocused: () => getCurrentWindow().isFocused(),
+    takePendingFiles: () => invoke<string[]>("take_pending_files"),
+    openPath: files.openPath,
+    isSecondaryWindow: () => isSecondaryWindow,
+    setDragActive: (active) => {
+      dragActive = active;
+    },
+    setStatus: (text) => {
+      statusText = text;
+    },
+    logCreateFailure: (detail) => dbg.log("window", "new-window error", detail),
+    now: () => Date.now(),
+    setTimer: (fn, ms) => setTimeout(fn, ms) as unknown as number,
+    clearTimer: (id) => clearTimeout(id),
+  });
 
   /** Esc 关掉最上层的弹窗（顺序见 app-keys.topModal）；每种都取**破坏性最小**的那个"关闭"语义 */
   function dismissModal(modal: AppModal) {
@@ -1674,8 +1618,8 @@
         zoom: zoomBySteps,
         // files.reload 只在有文件时才会走到（没文件时 decideAppKey 返回 null，放行给浏览器刷新）
         reloadFile: files.reload,
-        openNewWindow,
-        closeWindow: () => void closeCurrentWindow(),
+        openNewWindow: windows.openNewWindow,
+        closeWindow: windows.closeCurrentWindow,
         dismissModal,
       },
       () => e.preventDefault(),
@@ -1843,36 +1787,20 @@
       // 窗口级拖放：把 .typ 文件拖到窗口内自动打开
       keepUnlisten(
         getCurrentWindow().onDragDropEvent((event) => {
-          if (event.payload.type === "over" || event.payload.type === "enter") {
-            dragActive = true;
-          } else if (event.payload.type === "drop") {
-            dragActive = false;
-            const path = pickTypPath(event.payload.paths);
-            if (path) {
-              files.openPath(path);
-            } else if (event.payload.paths.length > 0) {
-              statusText = "仅支持打开 .typ 文件";
-            }
-          } else {
-            dragActive = false;
-          }
+          // "over"/"leave" 事件在 Tauri 的类型里没有 paths（只有 enter/drop 带），先取出来再传
+          const payload = event.payload;
+          windows.handleDragDrop(payload.type, "paths" in payload ? payload.paths : []);
         }),
       );
       // 应用已运行时再次打开文件（single-instance 转发）：先注册监听再取队列，
       // 避免转发事件落在两者之间而丢失。**多窗口下这条是广播**，要挑一个窗口接，见
       // claimOpenFileOnBroadcast（有焦点的窗口接，都没焦点时主窗口延迟兜底）。
       const unlistenOpen = listen<string>("open-file", (e) => {
-        if (e.payload) void claimOpenFileOnBroadcast(e.payload);
+        if (e.payload) void windows.claimOpenFileOnBroadcast(e.payload);
       });
+      // 先注册监听再取队列，避免转发事件落在两者之间而丢失
       keepUnlisten(unlistenOpen);
-      unlistenOpen.then(() => {
-        // 首次启动/跨实例转发的待打开文件（关联双击）：就绪后取走（取最后一个，即最新请求）。
-        // **只由主窗口取**：副窗口是草稿窗口，不该被启动参数里带的文件顶掉内容。
-        if (isSecondaryWindow) return;
-        void claimPendingFile().then((path) => {
-          if (path) void files.openPath(path);
-        });
-      });
+      unlistenOpen.then(() => void windows.claimPendingFileOnStartup());
     }
     mark("mount-listeners-done");
 
@@ -1896,7 +1824,7 @@
       window.removeEventListener("focus", reapplyZoomOnReturn);
       document.removeEventListener("visibilitychange", reapplyZoomOnReturn);
       zoom.dispose(); // 取消还没落地的"缩放再确认一次"
-      if (pendingOpenTimer !== null) clearTimeout(pendingOpenTimer); // 关窗时取消还没落地的兜底打开
+      windows.dispose(); // 关窗时取消还没落地的兜底打开（open-file 广播）
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
       previewResizeObserver?.disconnect();
