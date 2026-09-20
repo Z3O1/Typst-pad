@@ -1,4 +1,4 @@
-// 公式渲染队列：编辑器请求渲染 → 去重 → 防抖批量 → 逐个 invoke Rust → 结果进缓存。
+// 公式渲染队列：编辑器请求渲染 → 去重 → 防抖批量 → 逐个交给注入的 `compile` → 结果进缓存。
 //
 // 从 `+page.svelte` 搬出来（原来散在页面里 ~90 行，和文件/编译/弹窗的状态混在一起）。
 // 依赖全部由 hooks 注入（**照着 `zoom-controller.ts` 的先例**），所以单测里可以用假时钟、
@@ -13,7 +13,11 @@
 // 2. **只有成功才通知代次**：失败时装饰集不变（仍显示源码），自增代次只会白跑一次全量重建。
 // 3. **有公式要渲时把挂着的块编译往后推**（`deferBlockCompile`）：两者共用 Rust 侧同一把编译锁，
 //    公式是小活、整篇块编译是几十~几百毫秒，不让路就会出现"打完公式半天不显示"。
-import type { MathRequest } from "./live-preview";
+// 4. **`reset()` 连在途批次一起作废**（`generation` 代次，与 `zoom-controller` 的 `verifySeq` 同思路）：
+//    文档切换 / 改字体时缓存整体作废，此时可能还有一批正卡在 `await compile` 里 —— 它的结果
+//    **不许再写回缓存**，否则会以旧文档的上下文 / 旧字体的渲染冒充新结果，而缓存键里
+//    既没有文档路径也没有字体（于是编辑器永远命中这条脏数据，见契约 1 与 `MathRequest` 的说明）。
+import type { MathRequest } from "./live-preview/options";
 import type { MathRender } from "../core/typst-engine";
 
 /** 公式渲染去抖：连续输入时不是每个按键都排队，停手后一次性补齐 */
@@ -29,12 +33,12 @@ export interface MathQueueHooks {
   compile: (req: MathRequest, context: string) => Promise<MathRender>;
   /** 仅前缀的兜底上下文（文档内定义有错、或与前缀重名时，至少还能渲染不依赖它们的公式） */
   fallbackContext: () => string;
-  /** 一个公式渲染完了（`ok` = 成功）。页面据此自增装饰代次；失败不通知 */
-  onRendered: (ok: boolean) => void;
+  /** 一个公式**渲染成功**时调用（失败不调用，见文件头契约 2）。页面据此自增装饰代次 */
+  onRendered: () => void;
   /** 有公式入队时调用：把挂着的块编译往后推（见文件头第 3 条契约） */
   deferBlockCompile: () => void;
   log: (message: string) => void;
-  /** 缓存上限（单测用小值；缺省 `MATH_CACHE_LIMIT`） */
+  /** 缓存上限（单测用小值；缺省 `MATH_CACHE_LIMIT`）。**必须 ≥ 1**：传 0 等于关缓存 */
   cacheLimit?: number;
 }
 
@@ -43,7 +47,10 @@ export interface MathQueue {
   handleRequest: (requests: MathRequest[]) => void;
   /** 取已渲染结果（未命中返回 undefined → 编辑器保持源码显示） */
   lookup: (key: string) => MathRender | undefined;
-  /** 文档切换（打开/新建/重读）：缓存作废（include 根与上下文都可能变），队列与定时器一起清掉 */
+  /**
+   * 文档切换（打开/新建/重读）/ 改字体：缓存作废（include 根、上下文、字体都可能变），
+   * 队列与定时器一起清掉，**在途的那一批也作废**（见文件头契约 4）
+   */
   reset: () => void;
   /** 仅诊断/测试：当前排队等待渲染的公式数 */
   queued: () => number;
@@ -56,6 +63,8 @@ export function createMathQueue(hooks: MathQueueHooks): MathQueue {
   const pending = new Set<string>();
   let queue: MathRequest[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
+  /** 批次代次：`reset()` 自增，用来把**已经跑起来的**那一批的晚到结果丢掉（契约 4） */
+  let generation = 0;
   const limit = hooks.cacheLimit ?? MATH_CACHE_LIMIT;
 
   /** 逐个渲染队列中的公式（Rust 侧编译本身串行），每完成一个就报一次代次 */
@@ -63,12 +72,16 @@ export function createMathQueue(hooks: MathQueueHooks): MathQueue {
     const batch = queue;
     queue = [];
     if (batch.length === 0) return;
+    // 这一批属于哪一代：`reset()` 一自增，下面每个 await 之后都要重新确认（契约 4）
+    const myGeneration = generation;
     const fallback = hooks.fallbackContext();
     for (const req of batch) {
       // 用请求自带的上下文与字号：它们**必须**与生成缓存键时用的一致（见 MathRequest 的说明）
       let render = await hooks.compile(req, req.context);
+      if (myGeneration !== generation) return; // 等待期间文档切了/字体改了 → 整批丢掉
       if (!render.ok && fallback !== req.context) {
         const retry = await hooks.compile(req, fallback);
+        if (myGeneration !== generation) return;
         if (retry.ok) render = retry;
       }
       cache.set(req.key, render);
@@ -79,7 +92,7 @@ export function createMathQueue(hooks: MathQueueHooks): MathQueue {
         cache.delete(oldest);
       }
       pending.delete(req.key);
-      if (render.ok) hooks.onRendered(true);
+      if (render.ok) hooks.onRendered();
       hooks.log(
         `math ${render.ok ? "ok" : "fail"} ${req.display ? "display" : "inline"} ${JSON.stringify(req.body)}`,
       );
@@ -102,6 +115,7 @@ export function createMathQueue(hooks: MathQueueHooks): MathQueue {
   }
 
   function reset(): void {
+    generation++; // 在途批次作废：它返回时 myGeneration 已经不等于 generation
     cache.clear();
     pending.clear();
     queue = [];

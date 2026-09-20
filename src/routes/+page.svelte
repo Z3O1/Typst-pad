@@ -340,8 +340,9 @@
       // 上下文字号都取自请求本身（必须与生成缓存键时用的一致，见 MathRequest 的说明）
       compileMath(req.body, req.display, context, filePath, req.sizePt, fontArgs()),
     fallbackContext: () => (prefixEnabled ? ensureTrailingNewline(prefixCode) : ""),
-    onRendered: (ok) => {
-      if (ok) mathVersion++;
+    // 队列只在**渲染成功**时回调（失败的结果也进缓存，但装饰集没变、自增代次是白跑）
+    onRendered: () => {
+      mathVersion++;
     },
     deferBlockCompile: deferPendingBlockCompile,
     log: (message) => dbg.log("live-preview", message),
@@ -1107,12 +1108,15 @@
     }
   }
 
+  /** 挂着的块编译被公式推到这个时刻（比公式自身的 120ms 去抖稍晚一点） */
+  const MATH_COMPILE_HEADSTART_MS = 240;
+
   /**
    * 有公式要渲时**把挂着的块编译往后推**：两者共用 Rust 侧同一把编译锁，公式是小活
    * （几毫秒）、整篇块编译是几十~几百毫秒，不让路就会出现"打完公式半天不显示"
-   * （实测慢编译桩下版面对齐要等 338ms）。比公式自身的 120ms 去抖稍晚一点触发。
+   * （实测慢编译桩下版面对齐要等 338ms）。判据用 `writeCompileTimer === undefined`
+   * 表示"没有挂着的编译"（见 `scheduleCompile` 里"跑完必须置回 undefined"的说明）。
    */
-  const MATH_COMPILE_HEADSTART_MS = 240;
   function deferPendingBlockCompile() {
     if (viewMode !== "write" || writeCompileTimer === undefined) return;
     clearTimeout(writeCompileTimer);
@@ -2000,7 +2004,7 @@
       if (previewScaleFrame !== 0) cancelAnimationFrame(previewScaleFrame);
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
-      mathQueue.reset(); // 停止在途公式渲染批次（清缓存 + 取消定时器）
+      mathQueue.reset(); // 作废公式队列：清缓存 + 取消定时器 + 丢掉已发出请求的结果
       clearTimeout(previewReflowTimer); // 停止在途的预览重排（避免卸载后还发起编译）
       clearTimeout(startupCheckTimer); // 关窗时取消还没发起的自动更新检查
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
