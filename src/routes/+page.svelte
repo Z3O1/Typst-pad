@@ -18,7 +18,14 @@
     Diagnostic,
   } from "$lib/typst-engine";
   import { byteOffsetsToPositions, positionRangeToByteRange, utf8Length } from "$lib/block-offsets";
-  import { carryOverCrops, remapBlocksThroughEdit, toBlockTable } from "$lib/block-plan";
+  // 块表这份派生状态的落地（编译结果 → 新块表 / 编辑期间平移 / 渲染窗口）：block-state.ts
+  import {
+    blockWindowBytes,
+    landBlocksResult,
+    remapBlocksOnEdit,
+    type BlocksPatch,
+    type BlocksSnapshot,
+  } from "$lib/block-state";
   import { clampHitOffset } from "$lib/block-hit";
   import type { Block } from "$lib/block-plan";
   import { buildFontFamilies, FONT_CHOICE_DEFAULT, normalizeFontDirs } from "$lib/font-settings";
@@ -428,18 +435,29 @@
   }
 
   /**
-   * 块级渲染窗口（**文档坐标的字节偏移**）：视口范围 → 字节 + 前后各留一段预取。
-   * 取不到视口（编辑器未挂载）或文档很短（≤ 2×预取）时返回 null = 整篇都渲。
+   * 块级渲染窗口（文档坐标的**字节**偏移；null = 整篇都渲）。换算在 block-state.ts（有单测）：
+   * 短文档整篇、长文档按视口前后各留 4000 字符预取、取不到视口时从文档开头起一段。
    */
-  const BLOCK_WINDOW_MARGIN = 4000; // 字符
   function writingWindowBytes(): { from: number; to: number } | null {
-    if (doc.length <= BLOCK_WINDOW_MARGIN * 2) return null; // 短文档：全渲，省一次换算
-    // 编辑器还没挂载（首帧编译）→ 从文档开头起一段：光标在启动时本来就在开头，
-    // 而"取不到视口就整篇渲"在长文档下会一次性渲出十几 MB（实测 58 字节/字符）。
-    const visible = editorRef?.visibleRange() ?? { from: 0, to: 0 };
-    const from = Math.max(0, visible.from - BLOCK_WINDOW_MARGIN);
-    const to = Math.min(doc.length, visible.to + BLOCK_WINDOW_MARGIN);
-    return positionRangeToByteRange(doc, from, to);
+    return blockWindowBytes(doc, editorRef?.visibleRange() ?? null);
+  }
+
+  /** 块表这份派生状态的快照 / 一次落地的写回（block-state.ts 的输入与输出） */
+  function blocksSnapshot(): BlocksSnapshot {
+    return {
+      blocks: writingBlocks,
+      doc: writingBlocksDoc,
+      geometryId: writingGeometryId,
+      textPt: writingTextPt,
+    };
+  }
+  function applyBlocksPatch(patch: BlocksPatch): void {
+    writingBlocks = patch.blocks;
+    writingBlocksDoc = patch.doc;
+    writingBlocksExact = patch.exact;
+    writingGeometryId = patch.geometryId;
+    writingTextPt = patch.textPt;
+    blocksVersion++; // 自增即让编辑器按新表重建装饰（不然这一帧渲染出来的还是旧表的格子）
   }
 
   // 设置弹窗中的临时值（点“保存”才写回并持久化）
@@ -771,13 +789,9 @@
    * 所以点击精确定位的闸门（`writingBlocksExact`）在这里置回 false，等编译回来再打开。
    */
   function remapBlocksForEdit(newDoc: string) {
-    if (!writingBlocks || writingBlocks.length === 0) return;
-    if (writingBlocksDoc === newDoc) return;
-    const remap = remapBlocksThroughEdit(writingBlocks, writingBlocksDoc, newDoc);
-    writingBlocks = remap.blocks;
-    writingBlocksDoc = newDoc;
-    writingBlocksExact = false;
-    blocksVersion++;
+    // null = 没有块表 / 文档没变：什么都不用做（判定在 block-state.ts，有单测）
+    const patch = remapBlocksOnEdit(blocksSnapshot(), newDoc);
+    if (patch) applyBlocksPatch(patch);
   }
 
   /** 前缀代码（补尾随换行）：未启用时是空串。编译源与块级渲染的字节偏移都要用它 */
@@ -1383,62 +1397,18 @@
   }
 
   /**
-   * 写作模式块级编译的结果落地：成功 → 换上新切片；失败 → **块切片作废**（旧表的区间
-   * 已经对不上新文档），编辑器退回源码 + 波浪线，状态栏照旧显示错误数。
-   *
-   * 与整页预览路径的差别只有一处：整页预览在编译失败时**保留上一次成功产物**，而块切片
-   * 必须立刻撤掉 —— 位置对不上的 widget 会盖住错的正文。
+   * 写作模式块级编译的结果落地：**成功 → 换上新切片；失败 → 只把被改动的那块退回源码**
+   * （不是整篇作废：整页预览在失败时保留上一次成功产物，块切片则用前后缀差分把没被碰到的块
+   * 原样平移）。"编译结果 → 新块表"的判定全在 block-state.ts（17 项单测）；这里只做两件事：
+   * 写回那几个值 + 把状态栏/波浪线交给 applyCompileStatus。
    */
   function applyBlocksResult(result: BlocksOk | BlocksFail, t0: number) {
-    if (result.ok) {
-      // 字节偏移 → CodeMirror 位置（只在这里做一次，编辑器侧直接用位置）
-      const table = toBlockTable(doc, result.blocks);
-      // 窗口化渲染：窗口外的块这轮没有 SVG，按"块类型 + 源码文本相同"沿用上一轮结果
-      const carried = carryOverCrops(writingBlocks, table.blocks, doc);
-      writingBlocks = carried.blocks;
-      // 这一批切片与这份文档、这份几何（Rust 侧 HIT_CACHE 也是同一次编译）严格对应
-      writingBlocksDoc = doc;
-      writingBlocksExact = true;
-      writingGeometryId = result.geometryId;
-      blocksVersion++;
-      // 文档正文实际字号（源码透镜的字号基准，见 writingTextPt 的说明）
-      if (result.textPt > 0 && Math.abs(result.textPt - writingTextPt) > 0.01) {
-        writingTextPt = result.textPt;
-      }
-      if (carried.carried > 0 || carried.missing > 0) {
-        dbg.log(
-          "compile",
-          `切片窗口：新渲 ${result.blocks.filter((b) => b.svg).length} / 沿用 ${carried.carried} / 待渲 ${carried.missing}`,
-        );
-      }
-      applyCompileStatus(result, doc.length);
-      dbg.log(
-        "compile",
-        `blocks ok blocks:${result.blocks.length} 页宽:${result.pageWidthPt.toFixed(1)}pt t:${(
-          performance.now() - t0
-        ).toFixed(1)}ms`,
-      );
-      return;
-    }
-    // 失败：**不整篇作废**，只把"被改动到的那一块"退回源码（阶段 2）。
-    // 旧表是上一次成功编译的产物（区间 + 切片成套），而块切片一旦丢掉，写作模式会整篇退回
-    // 源码 —— 敲错一个字符就看到整篇源码闪一下，改好才回来。用前后缀差分把没被碰到的块
-    // 原样留下/整体平移（见 block-plan.remapBlocksThroughEdit，含两条"别盖住正文"的约束）。
-    const remap = writingBlocks
-      ? remapBlocksThroughEdit(writingBlocks, writingBlocksDoc, doc)
-      : { blocks: [] as Block[], kept: 0 };
-    // 区间是**估算**的（平移过的），点击精确定位据此退出（见 writingBlocksExact 的说明）
-    writingBlocks = remap.blocks.length > 0 ? remap.blocks : null;
-    writingBlocksDoc = doc;
-    writingBlocksExact = false;
-    blocksVersion++;
+    const elapsed = (performance.now() - t0).toFixed(1);
+    const patch = landBlocksResult(blocksSnapshot(), doc, result);
+    applyBlocksPatch(patch);
     applyCompileStatus(result, doc.length);
-    dbg.log(
-      "compile",
-      `blocks fail errors:${result.errors.length} 保留切片:${remap.kept}/${remap.blocks.length} t:${(
-        performance.now() - t0
-      ).toFixed(1)}ms`,
-    );
+    if (patch.detail !== null) dbg.log("compile", patch.detail);
+    dbg.log("compile", `${patch.log} t:${elapsed}ms`);
   }
 
   /**
