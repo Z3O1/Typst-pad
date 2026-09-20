@@ -45,15 +45,6 @@ export function resolveContextZone(target: EventTarget | null): ContextZone {
 }
 
 /**
- * 编辑器是否存在非空选区。
- * 入参为 CodeMirror 的 selection 主选区（{ empty }）：基于 CM6 state 而非原生
- * selection，多光标/编辑器未聚焦时依然准确。
- */
-export function editorSelectionHasContent(sel: { empty: boolean } | null): boolean {
-  return sel !== null && !sel.empty;
-}
-
-/**
  * 预览区是否存在非空选区：选区必须落在预览容器内。
  * 编辑器持有时原生 selection 也在页面上，若不限定容器会把编辑器的选区误算进预览。
  */

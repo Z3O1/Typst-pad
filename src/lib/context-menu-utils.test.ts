@@ -1,12 +1,12 @@
 // 自定义右键菜单纯逻辑模块的单测：
 // 区域判定（resolveContextZone，含 #48「菜单栏/状态栏右键无效果」的守卫）、
-// 选区判定（editor/preview）、菜单项 enabled 计算。
+// 预览选区判定、菜单项 enabled 计算。
 // 注：computeMenuPosition 的收边用例已移除——它是 3 行 clamp，失败在界面上立即可见，
 // 且更复杂的分支（含限宽）由 popover-utils.test.ts 覆盖（#46 的回归守卫）。
+// 注：编辑器的选区判定不走这里（用 Editor 的 `hasSelection()` 句柄，见 +page.svelte）。
 import { describe, it, expect } from "vitest";
 import {
   resolveContextZone,
-  editorSelectionHasContent,
   previewSelectionHasContent,
   buildContextMenuItems,
   type ContextMenuItemSpec,
@@ -83,20 +83,6 @@ describe("resolveContextZone 区域判定", () => {
   it("null 与非 Node target → other（防御）", () => {
     expect(resolveContextZone(null)).toBe("other");
     expect(resolveContextZone({} as EventTarget)).toBe("other");
-  });
-});
-
-describe("editorSelectionHasContent 编辑器选区判定", () => {
-  it("空选区 → false", () => {
-    expect(editorSelectionHasContent({ empty: true })).toBe(false);
-  });
-
-  it("非空选区 → true", () => {
-    expect(editorSelectionHasContent({ empty: false })).toBe(true);
-  });
-
-  it("null（编辑器不可用）→ false", () => {
-    expect(editorSelectionHasContent(null)).toBe(false);
   });
 });
 

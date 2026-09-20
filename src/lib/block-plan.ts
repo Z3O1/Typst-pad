@@ -584,15 +584,3 @@ export function revealBlocksWithDiagnostics(
   }
   return revealed;
 }
-
-/**
- * 块表是否仍然对应当前文档（供调试与"落后多少"的日志使用）。
- *
- * **注意**：块表过期时我们仍然沿用旧表（不做位置映射）。理由：编辑只发生在已展开的那一格
- * 里，其它格的覆盖区间首尾都落在空白处（块的源码终点 / 上一块的源码终点），偏一两个字符
- * 既不会露出来也不会吃掉正文；而"过期就整篇退回源码"会让每敲一个字都闪一次源码。
- * 编译结果回来后（数十毫秒）整表替换。
- */
-export function isBlockTableFresh(table: BlockTable | null, doc: string): boolean {
-  return table !== null && table.doc === doc;
-}

@@ -10,31 +10,13 @@
 // 因此这里验证的是**编辑器的装饰/选区/开关链路**；公式的真实排版由 Rust 单测覆盖
 // （cargo test compile_math）。
 import { connect, DEV_URL } from "./cdp.mjs";
+import { boot, createChecker, finish, shotPath as SHOT } from "./harness.mjs";
 
-// 截图写到仓库内（.browser-check/，见 .gitignore）：沙箱只允许写工作区，
-// 而 Chrome 需要 Windows 路径 —— 故用 CDP 取 base64 后由 Node 落到仓库里。
-const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
-
-/** 断言 + 计数 */
-let passed = 0;
-function check(name, ok, detail = "") {
-  if (ok) {
-    passed++;
-    console.log(`  ✓ ${name}`);
-  } else {
-    console.log(`  ✗ ${name} ${detail}`);
-    process.exitCode = 1;
-  }
-}
+// 断言 + 计数、截图路径、启动序列、收尾都来自 harness.mjs（六套件共用一份）
+const { check, state } = createChecker();
 
 const c = await connect();
-await c.goto(DEV_URL);
-// 清掉上一轮遗留的界面模式 / 主题，保证从默认态（写作模式）开始：
-// 否则上一轮若停在源码模式，页面加载后不渲染任何公式，第一条断言就会莫名超时（实测踩过）
-await c.evaluate(`localStorage.clear()`);
-await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 800));
+await boot(c, DEV_URL);
 
 /** 编辑器内的可见文本（widget 已替换的部分不出现，除非有 title/aria） */
 const editorText = `document.querySelector(".cm-content").innerText`;
@@ -4123,5 +4105,4 @@ await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 400));
 
-console.log(`\n通过 ${passed} 项检查；截图：${SHOT("wysiwyg-*")}`);
-c.close();
+finish(`通过 ${state.passed} 项检查；截图：${SHOT("wysiwyg-*")}`);

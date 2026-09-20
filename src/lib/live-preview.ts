@@ -431,10 +431,8 @@ function buildBlockCovers(
  * 那几块先是源码，等这一轮窗口编译回来就变成切片。
  */
 function notifyBlocksNeeded(
-  state: EditorState,
   opts: LivePreviewOptions,
   visible: readonly { from: number; to: number }[],
-  _doc: string,
 ): void {
   if (!opts.enabled() || !opts.onBlocksNeeded) return;
   // **直接看块表，不要走 buildBlockCovers**：那条路会把"能渲染但还没有切片"的块标成
@@ -1451,7 +1449,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         if (visible.length === 0) visible = [{ from: 0, to: view.state.doc.length }];
         const doc = view.state.doc.toString();
         collectRequests(view.state, visible, buildMathContext(opts.prefix(), doc));
-        notifyBlocksNeeded(view.state, opts, visible, doc);
+        notifyBlocksNeeded(opts, visible);
       }
 
       update(update: ViewUpdate) {
@@ -1470,7 +1468,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
           update.view.visibleRanges,
           buildMathContext(opts.prefix(), doc),
         );
-        notifyBlocksNeeded(update.state, opts, update.view.visibleRanges, doc);
+        notifyBlocksNeeded(opts, update.view.visibleRanges);
       }
     },
   );

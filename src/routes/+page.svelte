@@ -11,7 +11,6 @@
     defaultFontFamilies,
   } from "$lib/typst-engine";
   import type {
-    BlockCrop,
     BlocksFail,
     BlocksOk,
     CompileErrorLocation,
@@ -65,7 +64,6 @@
     resolveContextZone,
     previewSelectionHasContent,
     buildContextMenuItems,
-    type ContextZone,
     type ContextMenuItemSpec,
   } from "$lib/context-menu-utils";
   import { clearState } from "$lib/persistence";
@@ -1068,10 +1066,6 @@
     resolveTheme();
     schedulePersist();
   });
-
-  function toggleTheme() {
-    theme = theme === "system" ? "dark" : theme === "dark" ? "light" : "system";
-  }
 
   async function handleExportPdf() {
     statusText = "导出 PDF…";

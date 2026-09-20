@@ -14,50 +14,30 @@
 //
 // 前置：`npm run dev -- --port 1425` + 一个 headless Chromium（CDP）。
 // 运行：`CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs`
-import { readFileSync } from "node:fs";
-import { connect, DEV_URL } from "./cdp.mjs";
+import { connect } from "./cdp.mjs";
+import {
+  BLOCKS_URL as URL_BLOCKS,
+  boot,
+  byteToPos,
+  createChecker,
+  finish,
+  loadFixtures,
+  replaceDocument,
+  shotPath as SHOT,
+} from "./harness.mjs";
 
-const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
-const FIXTURES = new URL("../../.browser-check/block-fixtures.json", import.meta.url).pathname;
-const URL_BLOCKS = `${DEV_URL}&blocks=1`;
+const { check, state } = createChecker();
 
-let passed = 0;
-function check(name, ok, detail = "") {
-  if (ok) {
-    passed++;
-    console.log(`  ✓ ${name}`);
-  } else {
-    console.log(`  ✗ ${name} ${detail}`);
-    process.exitCode = 1;
-  }
-}
-
-const fixtures = JSON.parse(readFileSync(FIXTURES, "utf8"));
-// 空夹具 = 0 项断言 + 退出码 0 的假绿（cargo test 命中 0 个用例时退出码仍是 0）⇒ 必须硬失败
-if (fixtures.length === 0) {
-  console.error(`夹具是空的：${FIXTURES}；先跑 npm run fixtures:blocks（别拿空夹具跑验收）`);
-  process.exit(1);
-}
+const fixtures = loadFixtures("block-fixtures.json", { hint: "先跑 npm run fixtures:blocks" });
 console.log(`夹具：${fixtures.length} 篇真实块级切片产物（来自 Rust compile_blocks）`);
 
 const c = await connect();
-await c.send("Page.enable");
-await c.evaluate(`localStorage.clear()`);
-// 必须在导航前注入：桩在 compile_blocks 里优先取这里的产品
-await c.send("Page.addScriptToEvaluateOnNewDocument", {
-  source: `window.__DEV_BLOCK_FIXTURES = ${JSON.stringify(fixtures)};`,
-});
-await c.goto(URL_BLOCKS);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 600));
+await boot(c, URL_BLOCKS, { blockFixtures: fixtures, settleMs: 600 });
 
 for (const fx of fixtures) {
   console.log(`\n=== ${fx.name}（${fx.blocks.length} 块 / 列宽 ${fx.contentWidthPt}pt）`);
   // 逐篇输入同一份文档（桩按文档原文命中夹具）
-  await c.click(400, 300);
-  await c.selectAll();
-  await c.type(fx.doc);
-  await new Promise((r) => setTimeout(r, 700));
+  await replaceDocument(c, fx.doc);
 
   // 量所有切片：宽度、高度、位置（都在同一坐标系里比，不假设窗口宽度）
   const measured = await c.evaluate(`(() => {
@@ -187,8 +167,6 @@ for (const fx of fixtures) {
       }
       return out;
     })()`);
-    const byteToPos = (doc, bytes) =>
-      new TextDecoder().decode(new TextEncoder().encode(doc).slice(0, bytes)).length;
     let worst = 0;
     let matched = 0;
     for (const link of fixtureLinks) {
@@ -263,5 +241,4 @@ for (const fx of fixtures) {
   await c.screenshot(SHOT(`writing-blocks-visual-${fx.name}`));
 }
 
-console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-visual-*.png`);
-process.exit(process.exitCode ?? 0);
+finish(`通过 ${state.passed} 项检查；截图：.browser-check/writing-blocks-visual-*.png`);

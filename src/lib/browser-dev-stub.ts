@@ -16,12 +16,6 @@ import { byteOffsetsToPositions } from "./block-offsets";
 import { MATH_TEXT_PT } from "./typst-engine";
 import type { Diagnostic } from "./typst-engine";
 
-/** 是否以"浏览器开发模式"启动（?browserdev=1） */
-export function isBrowserDev(): boolean {
-  if (typeof window === "undefined") return false;
-  return new URLSearchParams(window.location.search).has("browserdev");
-}
-
 /**
  * 假块级渲染（compile_blocks）的开关：`?browserdev=1&blocks=1` —— **只给验收脚本用**。
  *

@@ -30,7 +30,6 @@
    更新说明（--fg-dim）全都自动跟着变，不用逐个改。 */
 .modal {
   --bg-pane: var(--panel-soft-bg);
-  --bg-toolbar: var(--panel-bg);
   --border: var(--panel-border);
   --fg: var(--panel-fg);
   --fg-dim: var(--panel-fg-dim);

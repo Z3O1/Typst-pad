@@ -16,11 +16,6 @@ export function mark(name: string): number {
   return t;
 }
 
-/** 已记录的打点（测试/调试用，返回副本） */
-export function getMarks(): StartMark[] {
-  return marks.slice();
-}
-
 /** 输出启动报告（仅一次）：阶段表 + 页面加载阶段耗时 */
 export function reportStartup(): void {
   if (reported || marks.length === 0) return;

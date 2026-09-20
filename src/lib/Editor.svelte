@@ -27,7 +27,6 @@
   import { planForCommand } from "./write-commands";
   import type { WriteCommand } from "./write-commands";
   import { mark } from "./startup-timing";
-  import { anchorPosEffect } from "./scroll-anchor";
   import { WRITE_FONT_STACK } from "./editor-font";
   import { dbg } from "./debug";
 

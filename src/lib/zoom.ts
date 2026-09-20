@@ -84,7 +84,7 @@ export function wheelZoomSteps(deltaY: number, deltaX = 0, deltaMode = 0): numbe
 // 用户反馈「Ctrl+滚轮常态是可以的，但是到上限不知道为什么就不可以了」——状态栏还写着
 // 「缩放已是 250%（到边界了）」。真因：一次滚轮的位移可能**不足一档**
 // （他自己那台机器上高倍时每格位移变小；Chromium 在"浏览器→渲染器"之间会按比例缩放滚轮位移，
-// 见 ui/events/blink/blink_event_util.cc 的 ScaleWebMouseWheelEvent），而 `nextZoom` 是
+// 见 ui/events/blink/blink_event_util.cc 的 ScaleWebMouseWheelEvent），而当时那条路径是
 // 「当前档位 + 档数 × 10%」再交给 `clampZoom` **圆整到 10% 的倍数**：
 //     40px 位移 → 0.4 档 → 4% → 圆整回原档 → 界面不动
 // 而且每个事件都是**独立**算的、余数不累积 —— 于是这种滚轮**永远**动不了（两个方向都不动），
@@ -142,23 +142,6 @@ export function wheelPendingNotice(acc: WheelStepAccumulator): string {
   return `滚轮这一格不足一档（攒到 ${pct}%），再滚一下就动`;
 }
 
-/**
- * 滚轮 → 新的缩放系数（已收敛、已圆整）。
- *
- * **只在"一次输入就该走到位"的场合用**（测试、桩、以及任何没有跨事件余量的调用方）：它内部用
- * 一个一次性的累加器，所以 40px 这种不足一档的输入**不会**产生变化（真实滚轮路径必须用
- * `accumulateWheelSteps` 把余量攒起来，见上方注解）。
- */
-export function nextZoom(
-  current: number | null | undefined,
-  deltaY: number,
-  deltaX = 0,
-  deltaMode = 0,
-): number {
-  const steps = accumulateWheelSteps(createWheelAccumulator(), deltaY, deltaX, deltaMode);
-  return clampZoom(clampZoom(current) + steps * ZOOM_STEP);
-}
-
 /** 放大 N 档（菜单项用） */
 export function zoomIn(current: number | null | undefined, times = 1): number {
   return clampZoom(clampZoom(current) + times * ZOOM_STEP);
@@ -210,38 +193,14 @@ export function zoomApplied(target: number, observed: number | null, tolerance =
 //      手势结束时那套处理抹掉，#1022）；设一次立刻量只覆盖"立即生效"这一种引擎。
 //   ② **量不到就再设一遍**：值被丢掉时只有重设才救得回来（立刻重设没用——丢掉发生在之后）。
 // 于是复核变成：设一次 → 按 0 / 250 / 700ms 连量三次 → 还不对就把这一档再设一遍再量一次。
-// 引擎明确给了**别的**档位（比如上限 210%）时不再等（见 zoomProbeVerdict 的 "capped"）——
+// 引擎明确给了**别的**档位（比如上限 210%）时不再等（见 `zoomApplied`：只判"是不是请求值"）——
 // 那种情况等多久都一样，早报早安心。
 // ---------------------------------------------------------------------------
 
 /** 复核量读数的时间点（毫秒，相对第一次 setZoom）：0 = 立刻，后两次是给"迟到"的引擎留的时间 */
 export const ZOOM_VERIFY_WAITS_MS = [0, 250, 700] as const;
-/** 都量不到时最后一次"重设"之前的等待（先让引擎把手势收尾） */
-export const ZOOM_VERIFY_RESET_DELAY_MS = 80;
 /** 一次 setZoom 之后等一帧 + 这段余量再读布局宽度（引擎要重排完才量得准） */
 export const ZOOM_MEASURE_SETTLE_MS = 80;
-
-/** 一次读数的判词（见上方注解） */
-export type ZoomProbeVerdict = "accepted" | "capped" | "retry" | "unknown";
-
-/**
- * 这次读数该怎么处理：
- * - `accepted`：引擎给的正是请求值（容差 2%）；
- * - `capped`：引擎给了**别的**档位（与改档前不同）——典型是它自己的上限，等下去也没用；
- * - `retry`：读数和改档前一模一样——可能只是还没生效（或值被同一档位覆盖），值得再等；
- * - `unknown`：量不到（非法宽度）——不改状态，也谈不上判定（见调用方的 fail-open）。
- */
-export function zoomProbeVerdict(
-  target: number,
-  observed: number | null,
-  previous: number,
-  tolerance = 0.02,
-): ZoomProbeVerdict {
-  if (observed === null || !Number.isFinite(observed)) return "unknown";
-  if (Math.abs(observed - target) <= tolerance) return "accepted";
-  if (Math.abs(observed - previous) > tolerance) return "capped";
-  return "retry";
-}
 
 /**
  * 复核判定"引擎没接受"时的状态栏文案。

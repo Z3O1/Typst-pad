@@ -12,47 +12,28 @@
 //
 // 前置：`npm run dev -- --port 1425` + headless Chromium（CDP）。
 // 运行：`CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-mode-scenes.mjs`
-import { readFileSync } from "node:fs";
-import { connect, DEV_URL } from "./cdp.mjs";
+import { connect } from "./cdp.mjs";
+import {
+  BLOCKS_URL,
+  boot,
+  createChecker,
+  finish,
+  loadFixtures,
+  replaceDocument,
+  shotPath as SHOT,
+} from "./harness.mjs";
 
-const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
-const FIXTURES = new URL("../../.browser-check/block-fixtures.json", import.meta.url).pathname;
+const { check, state } = createChecker();
 
-let passed = 0;
-function check(name, ok, detail = "") {
-  if (ok) {
-    passed++;
-    console.log(`  ✓ ${name}`);
-  } else {
-    console.log(`  ✗ ${name} ${detail}`);
-    process.exitCode = 1;
-  }
-}
-
-const fixtures = JSON.parse(readFileSync(FIXTURES, "utf8"));
-// 空夹具 = 0 项断言 + 退出码 0 的假绿（cargo test 命中 0 个用例时退出码仍是 0）⇒ 必须硬失败
-if (fixtures.length === 0) {
-  console.error(`夹具是空的：${FIXTURES}；先跑 npm run fixtures:blocks（别拿空夹具跑验收）`);
-  process.exit(1);
-}
+const fixtures = loadFixtures("block-fixtures.json", { hint: "先跑 npm run fixtures:blocks" });
 console.log(`场景夹具：${fixtures.length} 篇（来自 Rust compile_blocks 的真实产物）`);
 
 const c = await connect();
-await c.send("Page.enable");
-await c.evaluate(`localStorage.clear()`);
-await c.send("Page.addScriptToEvaluateOnNewDocument", {
-  source: `window.__DEV_BLOCK_FIXTURES = ${JSON.stringify(fixtures)};`,
-});
-await c.goto(`${DEV_URL}&blocks=1`);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 600));
+await boot(c, BLOCKS_URL, { blockFixtures: fixtures, settleMs: 600 });
 
 /** 输入一篇文档（替换整篇），返回量到的切片几何 */
 async function loadScene(doc) {
-  await c.click(400, 300);
-  await c.selectAll();
-  await c.type(doc);
-  await new Promise((r) => setTimeout(r, 700));
+  await replaceDocument(c, doc);
   return c.evaluate(`(() => {
     const content = document.querySelector(".cm-content");
     const cr = content.getBoundingClientRect();
@@ -355,5 +336,4 @@ check(
 
 console.log("\n场景汇总：");
 console.table(summary);
-console.log(`通过 ${passed} 项检查；截图：.browser-check/scene-*.png`);
-process.exit(process.exitCode ?? 0);
+finish(`通过 ${state.passed} 项检查；截图：.browser-check/scene-*.png`);

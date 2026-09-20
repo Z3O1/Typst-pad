@@ -14,19 +14,20 @@ Typst-pad = 仿 Typora 的 Typst 桌面编辑器，两套 UI：「写作模式�
 ```bash
 npm run tauri dev    # 桌面应用（Vite 固定 1420；WSL 可跑，libEGL 警告正常）
 npm run check        # svelte-check（0 errors / 0 warnings）
-npm test             # 单测（45 文件 / 834 项）；npm test -- <文件> 跑单个
+npm test             # 单测（44 文件 / 815 项）；npm test -- <文件> 跑单个
 npm run format:check # prettier（`npm run format` 是对称的写入版）
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check                  # rustfmt（默认风格，无 rustfmt.toml）
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单测（61 passed / 6 ignored）
 node scripts/check-fonts.mjs
-# 动编辑器 / 装饰 / 布局时才跑浏览器验收（换端口，别跟 tauri dev 抢 1420）
+# 动编辑器 / 装饰 / 布局 / 组件样式时才跑浏览器验收（换端口，别跟 tauri dev 抢 1420）
+npm run verify:browser   # **推荐**：自己起 dev server + headless Chromium + 导夹具 + 跑七套 + 汇总
 npm run dev -- --port 1425
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs                              # 290 项
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs   # 改块级渲染必跑
 ```
 
-打包、发布、其余 5 套验收脚本的命令全文：`docs/实现细则/06-命令与发布.md`。
+打包、发布、全部验收脚本的命令全文：`docs/实现细则/06-命令与发布.md`。
 
 ## 改动前的红线（勿回退）
 
@@ -88,4 +89,4 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-
 | 所见即所得（范围识别 / 公式 / 标记 / 两套 UI / 缩放 / 状态栏） | `docs/实现细则/04-所见即所得.md`＋`docs/WYSIWYG-调研.md` |
 | 按键路由、多窗口与 ACL、自动更新、启动打点 | `docs/实现细则/05-窗口与更新.md` |
 | 全部命令与验收脚本、CI 缓存纪律、签名与发版 | `docs/实现细则/06-命令与发布.md` |
-| 单测范围与坑、五套浏览器验收、PR 审查两条腿 | `docs/实现细则/07-测试与审查.md` |
+| 单测范围与坑、浏览器验收（七套 + 一条命令）、PR 审查两条腿 | `docs/实现细则/07-测试与审查.md` |

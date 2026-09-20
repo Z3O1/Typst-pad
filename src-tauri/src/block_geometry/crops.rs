@@ -425,6 +425,3 @@ pub fn compile_blocks(
         warnings,
     }
 }
-
-/// 切割用不到的尺寸类型再导出一次，避免外部（阶段 1 的命令层）重复 import
-pub type CropSize = Size;

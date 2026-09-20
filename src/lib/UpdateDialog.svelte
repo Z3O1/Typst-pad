@@ -134,8 +134,10 @@
   .update-notes :global(code) {
     padding: 1px 4px;
     border-radius: 3px;
-    background: var(--bg-hover, rgba(128, 128, 128, 0.16));
-    font-family: var(--mono-font, ui-monospace, monospace);
+    /* 这两个值原来是 `var(--bg-hover, …)` / `var(--mono-font, …)`，但那两个自定义属性
+       全仓库都没定义过 ⇒ fallback 一直生效。直接写死，免得读的人以为还有主题开关。 */
+    background: rgba(128, 128, 128, 0.16);
+    font-family: ui-monospace, monospace;
     font-size: 11.5px;
   }
 

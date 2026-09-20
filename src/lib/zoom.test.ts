@@ -7,7 +7,6 @@ import {
   ZOOM_SETTLE_MAX_MS,
   ZOOM_STEP,
   clampZoom,
-  nextZoom,
   accumulateWheelSteps,
   createWheelAccumulator,
   resetWheelAccumulator,
@@ -20,7 +19,6 @@ import {
   zoomPercent,
   zoomFromWidths,
   zoomApplied,
-  zoomProbeVerdict,
   zoomUnobservedNotice,
 } from "./zoom";
 
@@ -158,35 +156,7 @@ describe("accumulateWheelSteps（不足一档的位移要攒起来）", () => {
   });
 });
 
-describe("nextZoom / zoomIn / zoomOut", () => {
-  it("向上滚 5 格：100% → 150%", () => {
-    let z = ZOOM_DEFAULT;
-    for (let i = 0; i < 5; i++) z = nextZoom(z, -100);
-    expect(z).toBe(1.5);
-    expect(zoomLabel(z)).toBe("150%");
-  });
-
-  it("累加不产生浮点毛刺", () => {
-    let z = ZOOM_DEFAULT;
-    for (let i = 0; i < 7; i++) z = nextZoom(z, -100);
-    expect(z).toBe(1.7);
-    expect(z.toString()).toBe("1.7");
-  });
-
-  it("到上下限后不再变化", () => {
-    expect(nextZoom(ZOOM_MAX, -100)).toBe(ZOOM_MAX);
-    expect(nextZoom(ZOOM_MIN, 100)).toBe(ZOOM_MIN);
-  });
-
-  it("起点非法时按 100% 起算", () => {
-    expect(nextZoom(Number.NaN, -100)).toBeCloseTo(ZOOM_DEFAULT + ZOOM_STEP, 6);
-    expect(nextZoom(undefined, -100)).toBeCloseTo(ZOOM_DEFAULT + ZOOM_STEP, 6);
-  });
-
-  it("deltaY 为 0 且没有横向位移时不动", () => {
-    expect(nextZoom(1.3, 0)).toBe(1.3);
-  });
-
+describe("zoomIn / zoomOut（菜单与滚轮路径共用）", () => {
   it("菜单用的 zoomIn / zoomOut 按档步进并夹住", () => {
     expect(zoomIn(1)).toBe(1.1);
     expect(zoomIn(1, 3)).toBe(1.3);
@@ -244,28 +214,6 @@ describe("zoomApplied（引擎接受的档位是不是请求值）", () => {
 
   it("量不到（null）→ false（调用方据此不改状态）", () => {
     expect(zoomApplied(1.5, null)).toBe(false);
-  });
-});
-
-describe("zoomProbeVerdict（这次读数要不要再等）", () => {
-  it("读到请求值 → accepted", () => {
-    expect(zoomProbeVerdict(1.1, 1.1, 1)).toBe("accepted");
-    expect(zoomProbeVerdict(1.1, 1.105, 1)).toBe("accepted");
-  });
-
-  it("引擎给了别的档位（典型是自己的上限）→ capped（等下去也没用）", () => {
-    expect(zoomProbeVerdict(2.2, 2.1, 1)).toBe("capped");
-    expect(zoomProbeVerdict(1.5, 1.2, 1)).toBe("capped");
-  });
-
-  it("读数与改档前一样 → retry（可能只是还没生效）", () => {
-    expect(zoomProbeVerdict(1.5, 1, 1)).toBe("retry");
-    expect(zoomProbeVerdict(1.5, 1.01, 1)).toBe("retry");
-  });
-
-  it("量不到 → unknown（不改状态、也不谈判定）", () => {
-    expect(zoomProbeVerdict(1.5, null, 1)).toBe("unknown");
-    expect(zoomProbeVerdict(1.5, Number.NaN, 1)).toBe("unknown");
   });
 });
 

@@ -14,32 +14,20 @@
 //
 // 注意：这里的切片是**桩产物**（browser-dev-stub 的 fakeBlocks），验的是"链路与交互"；
 // 真实排版几何由 Rust 侧 block_geometry 的测试与真机（tauri dev）负责。
-import { connect, DEV_URL } from "./cdp.mjs";
+import { connect } from "./cdp.mjs";
+import {
+  BLOCKS_URL as URL_BLOCKS,
+  boot,
+  createChecker,
+  finish,
+  shotPath as SHOT,
+} from "./harness.mjs";
 
-const SHOT = (name) => new URL(`../../.browser-check/${name}.png`, import.meta.url).pathname;
-const URL_BLOCKS = `${DEV_URL}&blocks=1`;
-
-let passed = 0;
-function check(name, ok, detail = "") {
-  if (ok) {
-    passed++;
-    console.log(`  ✓ ${name}`);
-  } else {
-    console.log(`  ✗ ${name} ${detail}`);
-    process.exitCode = 1;
-  }
-}
+const { check, state } = createChecker();
 
 const c = await connect();
-await c.send("Page.enable");
-await c.send("Runtime.enable"); // 第 12 组要读控制台（"装饰重建失败 / 插件崩了"）
-// 先导航一次再清存档：冷启动时页面还停在 about:blank，那里读 localStorage 会抛 SecurityError
-await c.goto(URL_BLOCKS);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await c.evaluate(`localStorage.clear()`); // 清掉上一轮验收留下的存档（可能是一篇长文档）
-await c.goto(URL_BLOCKS);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 800));
+// runtime: true —— 第 12 组要读控制台（"装饰重建失败 / 插件崩了"）
+await boot(c, URL_BLOCKS, { runtime: true });
 
 const CONTENT = `document.querySelector(".cm-content").textContent`;
 /**
@@ -974,7 +962,8 @@ for (const ev of c.events.slice(CONSOLE_MARK)) {
   const txt = (ev.params.args ?? []).map((a) => a.value ?? a.description ?? "").join(" ");
   if (/plugin crashed|装饰重建失败|Invalid position/.test(txt)) consoleBad.push(txt.slice(0, 300));
 }
-passed += inputChecks - inputBad;
+// 这一组是逐条手写 ✓/✗（不是走 check()），所以手工把对账结果并进计数
+state.passed += inputChecks - inputBad;
 process.exitCode = inputBad > 0 || consoleBad.length > 0 ? 1 : process.exitCode;
 check(
   `${inputChecks} 种输入动作之后正文都看得见、不丢行、不重复、切片还在`,
@@ -1598,5 +1587,4 @@ check(
 );
 await c.screenshot(SHOT("writing-blocks-shift-click"));
 
-console.log(`\n通过 ${passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
-process.exit(process.exitCode ?? 0);
+finish(`通过 ${state.passed} 项检查；截图：.browser-check/writing-blocks-*.png`);
