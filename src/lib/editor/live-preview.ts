@@ -111,24 +111,6 @@ export function livePreview(opts: LivePreviewOptions): Extension {
     provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
   });
 
-  /**
-   * **切片上的点击与拖选**（阶段 3）：由 CodeMirror 的 `mouseSelectionStyle` 接管鼠标选择。
-   *
-   * 为什么不铺"文字层"（按字形位置放绝对定位的 span、交给浏览器原生选择，pdf.js 那套）：
-   * 它要①把整块字符搬进 DOM（窗口内 8000 字符 ≈ 8000 个 span，而切片本身就是一张图），
-   * ②在 CodeMirror 的内容元素里造出**第二套选区**（复制走浏览器、剪切/改写走 CM，两套会打架）。
-   * 这里换成"**把指针位置翻译成源码位置、再由 CM 落选区**"：选区只有一套，Ctrl+C/X、方向键、
-   * 输入替换、Shift+方向键全都照旧；代价是**复制出来的是源码**（`= 标题` 而不是"标题"）——
-   * 与 Typora 一致（Typora 复制出来也是 markdown 源码）。仍然拿不到的：浏览器 Ctrl+F 查找、
-   * 拼写检查、无障碍，那三样确实要真正的文字层（见 docs/文档模式渲染保真-调研.md 3.4）。
-   *
-   * 位置解析分两种落点（都是"这一点的源码位置"）：
-   *  - 落在**切片**上 → 页面坐标（pt）→ Rust 侧命中测试（图片里没有字符位置）；
-   *  - 落在**源码行**上（拖过已展开的块、或本来就显示源码的块）→ 直接问 CodeMirror 的坐标映射。
-   * 命中是异步的（一次 IPC），所以 `get()` 同步返回"上一次已知"的范围，异步结果回来后再补一次
-   * dispatch —— 一次拖动里最多晚一帧，落点始终收敛到真实几何。
-   */
-
   /** 当前块表（谁被切片盖住）：拖选与竖直移动两个部件共用这一个取数口。
    *  `require: false` 保住原来 `?.covers ?? []` 的兜底语义（字段不在配置里时给空表）。 */
   const getCovers = (state: EditorState): BlockCover[] =>

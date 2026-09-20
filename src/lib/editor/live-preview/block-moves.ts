@@ -19,6 +19,23 @@ export function createBlockMoves({
 }: {
   getCovers: (state: EditorState) => BlockCover[];
 }) {
+  /**
+   * **写作模式的竖直移动 = 代码模式的语义**（用户 2026-09-16：「我希望光标移动和代码模式的光标移动一样」）。
+   *
+   * 规则只有两条（判定全是纯函数，可单测）：
+   *  1. `crossesCollapsedCover` 说"默认走法**没有**跨过未展开的切片" → 一律**交回 CodeMirror 默认**：
+   *     `moveVertically` 逐可见行扫、保留目标列、空行也停 —— 那就是代码模式的行为（写作模式与
+   *     源码模式的差别只剩"没展开的块显示成图片"，移动规则本身不该有差别）；
+   *  2. 跨过了 → 默认把 widget 当空气跳过去了（可能跳一整块，也可能一路扫回文档开头），
+   *     改按**源码行**走：一次一行、列保留；落点在切片里就把那一块展开（"光标进入即展开"）。
+   *
+   * 别退回"一次跨一整块"（0.7.x 那版 `verticalBlockTarget`）：它跳过段落之间那条空行、也丢掉
+   * 目标列 —— 从第二段行首按 ↑ 会落到第一段的**行尾**、从第一段行尾按 ↓ 会直接进第二段，
+   * 都与代码模式不一样（用户就是这么发现的）。
+   *
+   * Shift 变体（扩选）过去**没接管**，于是走到 CM 默认的 `selectLineDown` —— 那个同样会跳过所有
+   * 切片（选中范围会突然跨过一整块）。现在与不带 Shift 的走法完全同源。
+   */
   const blockVerticalMoves = Prec.high(
     keymap.of([
       {
@@ -214,13 +231,5 @@ export function createBlockMoves({
     }
   }
 
-  /**
-   * 收集「视口附近 + 尚未拿到结果」的公式渲染请求（父组件另有去重，重复调用无副作用）。
-   *
-   * **整体 try/catch**（与 StateField 的 collect 同级）：这个函数跑在 CodeMirror 的
-   * ViewPlugin.update 里，抛异常会被 CM 记成 "CodeMirror plugin crashed" 并让这次插件更新作废。
-   * 实测踩过：块表还是旧文档坐标时（文档刚缩短）`planBlockCovers` 内的 `lineAt` 抛 RangeError
-   * —— 现在那条路径已经加了越界过滤，这里再兜一道，绝不让异常冒进 CM 的更新流程。
-   */
   return blockVerticalMoves;
 }
