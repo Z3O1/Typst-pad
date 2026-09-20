@@ -7,7 +7,7 @@
 //   世界，把块渲染默认打开就会整片变红、把回归信号淹掉。所以：
 //     - `wysiwyg.mjs`          → 块渲染**默认关**（走公式/标记路径，回归网原样有效）
 //     - `writing-blocks.mjs`   → 带 `&blocks=1`，专验块级渲染
-//   桩的开关见 src/lib/browser-dev-stub.ts 的 blocksStubEnabled。
+//   桩的开关见 src/lib/dev/browser-dev-stub.ts 的 blocksStubEnabled。
 //
 // 前置：① `npm run dev -- --port 1425`；② 一个指向它的 headless Chromium（CDP）。
 // 运行：`CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks.mjs`

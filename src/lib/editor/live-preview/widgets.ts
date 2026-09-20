@@ -7,9 +7,9 @@
 // 而 `fallbackTextDom` 本身也是这两个动作 —— 给它加兜底等于用同一件事兜自己。
 import { WidgetType } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
-import type { MathRender } from "../typst-engine";
-import type { Block, BlockCover } from "../block-plan";
-import type { MathRange } from "../math-ranges";
+import type { MathRender } from "../../core/typst-engine";
+import type { Block, BlockCover } from "../../core/block-plan";
+import type { MathRange } from "../../core/math-ranges";
 
 /**
  * widget 构造失败的兜底：退回纯文本节点。

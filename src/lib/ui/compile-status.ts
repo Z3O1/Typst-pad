@@ -10,9 +10,9 @@
 // - 失败时警告清空：错误优先，避免两套提示打架（Rust 失败时本来也不返回 warnings）。
 
 import { formatCompileFailMessage } from "./error-list";
-import { describeCompileWarning } from "./font-warnings";
+import { describeCompileWarning } from "../core/font-warnings";
 import { truncateStatus } from "./status-view";
-import type { CompileErrorLocation, Diagnostic } from "./typst-engine";
+import type { CompileErrorLocation, Diagnostic } from "../core/typst-engine";
 
 /**
  * 两条编译路径共同的结果子集：整页 `CompileOk` / 块级 `BlocksOk` 都满足成功那一支，

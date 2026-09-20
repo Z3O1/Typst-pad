@@ -89,7 +89,7 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 
 - **更新源**：`https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json`（配置在 `tauri.conf.json` 的 `plugins.updater.endpoints`）。它是"最新一个**已发布** Release"的资产，所以草稿（draft）Release 里的更新包客户端拿不到——**必须 Publish 之后才生效**。
 - **仓库必须是公开的**：更新检查是**匿名请求**（不带任何 GitHub 凭据），私有仓库对匿名一律 404，结果是"检查更新失败：没有取到更新清单（latest.json）"（插件对非 2xx 只记日志，最后统一报 `Could not fetch a valid release JSON from the remote`）。判断顺序：先看 `gh api repos/Z3O1/Typst-pad --jq .private` 是不是 `false`，再确认 Release 已 Publish，最后才怀疑网络。验证匿名可达性：`curl -sIL -o /dev/null -w '%{http_code}' https://github.com/Z3O1/Typst-pad/releases/latest/download/latest.json` 应为 `200`。
-- **清单内容**：版本号 + 安装包下载地址 + 安装包签名；由 `scripts/generate-latest-json.mjs` 在构建后生成（更新说明默认取 `CHANGELOG.md` 里该版本的正文），与安装包一起作为 Release 资产上传。弹窗里这份说明会**渲染成排版文本**（标题 / 列表 / 粗体 / 行内代码，见 `src/lib/update-notes.ts`——先整体 HTML 转义再生成白名单标签，说明里即使带 HTML 也只当文本显示）。
+- **清单内容**：版本号 + 安装包下载地址 + 安装包签名；由 `scripts/generate-latest-json.mjs` 在构建后生成（更新说明默认取 `CHANGELOG.md` 里该版本的正文），与安装包一起作为 Release 资产上传。弹窗里这份说明会**渲染成排版文本**（标题 / 列表 / 粗体 / 行内代码，见 `src/lib/ui/update-notes.ts`——先整体 HTML 转义再生成白名单标签，说明里即使带 HTML 也只当文本显示）。
 - **签名校验**：安装包由 CI 用私钥签名（生成 `.sig`），客户端用**编译进应用**的公钥（`plugins.updater.pubkey`）校验，签名不符直接拒绝安装——防的是"更新通道被换成别人的安装包"。
 - **密钥管理**：私钥与密码存在仓库 Secrets（`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）。**私钥丢了就再也发不出自动更新**（老用户只能手动下载安装包），pubkey 一旦发布也不要再换。
 - **本机打包**：`createUpdaterArtifacts` 为 true 且配置里有 pubkey 之后，任何 `tauri build` 都必须能拿到私钥（`TAURI_SIGNING_PRIVATE_KEY` 或 `TAURI_SIGNING_PRIVATE_KEY_PATH`），否则打包直接失败（Tauri 的硬约束）。
@@ -100,10 +100,14 @@ npm run tauri build  # 打包桌面安装程序（需要 Rust）
 ```
 src/
 ├── routes/+page.svelte     # 主界面：菜单栏 / 双栏 / 状态栏，立即编译调度（代次令牌丢弃过期结果）
-├── lib/Editor.svelte       # CodeMirror 6 封装（Typst 语法、主题、外部 doc 同步）
-├── lib/typst-engine.ts     # 编译引擎：Tauri invoke 包装（compile_doc / compile_blocks / compile_math / block_hit_test / export_pdf）+ 结构化诊断
-├── lib/block-plan.ts       # 写作模式块级渲染的规划（块表 → 哪几格被切片覆盖 / 哪一块展开源码 / 编辑后重映射，纯函数）
-└── lib/file-ops.ts         # 打开/保存文件（Tauri dialog + invoke）
+└── lib/                    # 前端模块按层分四个目录（依赖只向内：editor/ui/dev → core）
+    ├── core/               # 底层：纯逻辑 + 引擎 + 叶子工具（不 import 其它三层）
+    │   ├── typst-engine.ts #   编译引擎：Tauri invoke 包装（compile_doc / compile_blocks / compile_math / block_hit_test / export_pdf）+ 结构化诊断
+    │   ├── block-plan.ts   #   写作模式块级渲染的规划（块表 → 哪几格被切片覆盖 / 哪一块展开源码 / 编辑后重映射，纯函数）
+    │   └── file-ops.ts     #   打开/保存文件（Tauri dialog + invoke）
+    ├── editor/             # CodeMirror 视图层：Editor.svelte / live-preview / 键位 / 字体 / 滚动锚定
+    ├── ui/                 # Svelte 组件 + 它们的纯模型（菜单 / 弹窗 / 状态栏 / 浮层 / 错误列表）
+    └── dev/                # 只在 ?browserdev=1 时由 app.html 动态加载的浏览器开发桩
 src-tauri/
 ├── src/lib.rs              # Rust 壳：read_file / write_file / compile_doc / compile_blocks / block_hit_test / export_pdf / bundled_font 等命令 + dialog/opener 插件
 ├── src/block_geometry/     # 写作模式的块级渲染：blocks 源块划分 / collect 帧遍历（字形 → 源字节）/ render 切带 SVG / crops 切片 / hit 点击命中 / probe 探针
@@ -130,7 +134,7 @@ src-tauri/
 
 ### 启动耗时观测
 
-`src/lib/startup-timing.ts`：启动关键阶段打点（O(1)，无阻塞），首次编译完成后向控制台输出 `[startup]` 报告（各阶段耗时 + navigation timing 页面加载段）；Rust 侧（仅 debug 构建）另有 `[startup] rust phase:*` 打点（窗口创建 → webview 就绪 → 前端加载完成）。两侧同前缀，便于统一抓取对比。
+`src/lib/dev/startup-timing.ts`：启动关键阶段打点（O(1)，无阻塞），首次编译完成后向控制台输出 `[startup]` 报告（各阶段耗时 + navigation timing 页面加载段）；Rust 侧（仅 debug 构建）另有 `[startup] rust phase:*` 打点（窗口创建 → webview 就绪 → 前端加载完成）。两侧同前缀，便于统一抓取对比。
 
 ## 验证脚本
 

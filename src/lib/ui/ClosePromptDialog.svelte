@@ -1,5 +1,5 @@
 <script lang="ts">
-  // 未保存确认弹窗（原来内联在 +page.svelte）。外壳样式见 src/lib/modal.css；这个弹窗没有特有样式。
+  // 未保存确认弹窗（原来内联在 +page.svelte）。外壳样式见 src/lib/ui/modal.css；这个弹窗没有特有样式。
   let {
     onSave,
     onDiscard,

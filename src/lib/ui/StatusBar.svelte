@@ -5,7 +5,7 @@
   // 见那边文件头的说明），浮层的开合状态仍由页面持有（页面还有"点条目跳转就顺手收起"那条路）。
   // 这里只把状态摆出来 + 把交互回调转给页面。
   import DiagnosticBadge from "./DiagnosticBadge.svelte";
-  import { ZOOM_DEFAULT, zoomLabel } from "./zoom";
+  import { ZOOM_DEFAULT, zoomLabel } from "../core/zoom";
   import type { ErrorListItem, LocatedErrorItem } from "./error-list";
   import type { DiagnosticKind } from "./status-view";
 

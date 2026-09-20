@@ -3,8 +3,8 @@
 // 只在真机上才看得见的约定 —— 主源诊断的路径归一、无定位错误什么时候单独成条、
 // 复制失败统一一句话、浮层标题与「复制全部」首行是同一份原文。
 import { buildErrorListItems, type ErrorListItem } from "./error-list";
-import { describeCompileWarning } from "./font-warnings";
-import type { CompileErrorLocation, Diagnostic } from "./typst-engine";
+import { describeCompileWarning } from "../core/font-warnings";
+import type { CompileErrorLocation, Diagnostic } from "../core/typst-engine";
 
 /** 复制诊断信息失败时的状态栏文案（execCommand 与 navigator.clipboard 两条路都没成） */
 export const COPY_FAILED_NOTICE = "复制失败：剪贴板不可用";

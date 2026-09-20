@@ -4,8 +4,8 @@
 // `live-preview.ts` 会把它们原样再导出，外部（Editor.svelte / +page.svelte）的 import 路径不变。
 import { StateEffect } from "@codemirror/state";
 import type { Text } from "@codemirror/state";
-import type { MathRender } from "../typst-engine";
-import type { Block } from "../block-plan";
+import type { MathRender } from "../../core/typst-engine";
+import type { Block } from "../../core/block-plan";
 
 /** 待渲染的公式（父组件据此调用 Rust 侧 compile_math） */
 export interface MathRequest {

@@ -85,10 +85,10 @@
 
 | 已有能力 | 位置 | 与 WYSIWYG 的关系 |
 |---|---|---|
-| **CM6 装饰管线**（`Compartment` + `StateField` + `Decoration`） | `src/lib/Editor.svelte`（`diagnosticsCompartment` / `diagTheme`，现用于红色波浪线） | "选区进出切表示"与"画波浪线"是**同一套机制**，只是装饰类型从 `mark` 换成 `replace({ widget })` |
-| **位置映射**：编译源（前缀+文档）位置 → 文档位置 | `src/lib/diagnostics-utils.ts`（`mapCompiledPosToDoc`、`squiggleRanges`） | 公式范围坐标换算可直接复用此模式（注意前缀区偏移） |
-| **编译链路** | `src/lib/typst-engine.ts` → `compile_doc`（Rust 侧 `src-tauri/src/typst_world/compile.rs`） | 公式级编译可复用；⚠️ 见下方风险 |
-| **SVG 分页与画布缩放** | `src/lib/svg-paginate.ts`、`src/lib/preview-scale.ts` | 单公式渲染成 SVG 后可直接内联进 widget |
+| **CM6 装饰管线**（`Compartment` + `StateField` + `Decoration`） | `src/lib/editor/Editor.svelte`（`diagnosticsCompartment` / `diagTheme`，现用于红色波浪线） | "选区进出切表示"与"画波浪线"是**同一套机制**，只是装饰类型从 `mark` 换成 `replace({ widget })` |
+| **位置映射**：编译源（前缀+文档）位置 → 文档位置 | `src/lib/core/diagnostics-utils.ts`（`mapCompiledPosToDoc`、`squiggleRanges`） | 公式范围坐标换算可直接复用此模式（注意前缀区偏移） |
+| **编译链路** | `src/lib/core/typst-engine.ts` → `compile_doc`（Rust 侧 `src-tauri/src/typst_world/compile.rs`） | 公式级编译可复用；⚠️ 见下方风险 |
+| **SVG 分页与画布缩放** | `src/lib/svg-paginate.ts`、`src/lib/core/preview-scale.ts` | 单公式渲染成 SVG 后可直接内联进 widget |
 
 ### 3.2 实现要点与风险（待验证的设想，非实测结论）
 
@@ -120,7 +120,7 @@ npm run dev -- --host 0.0.0.0
 http://localhost:1420/?browserdev=1
 ```
 
-- 实现：`src/lib/browser-dev-stub.ts`（假 `__TAURI_INTERNALS__` + 假 `compile_doc`，按文档生成假 SVG 分页），由 `src/app.html` 里一段模块脚本按 `?browserdev=1` 条件加载
+- 实现：`src/lib/dev/browser-dev-stub.ts`（假 `__TAURI_INTERNALS__` + 假 `compile_doc`，按文档生成假 SVG 分页），由 `src/app.html` 里一段模块脚本按 `?browserdev=1` 条件加载
 - **坑（已踩）**：Vite **只对 JS 模块注入 `import.meta.env`**，**HTML 内联脚本一律原样透传**。守卫若写成 `import.meta.env.DEV`，在 `app.html` 里恒为 `undefined` → 桩永不安装（实测：页面停留在"请使用桌面应用版本"）。故改用运行时条件
 - 真实编译 / include / 包解析 / PDF 导出**在此通路不可用**，必须回桌面版验证
 
@@ -174,10 +174,10 @@ http://localhost:1420/?browserdev=1
 
 | 落地内容 | 位置 |
 |---|---|
-| 源码区域扫描（markup / code / raw / comment / string，`[...]` 内容块回到 markup） | `src/lib/typst-lex.ts` |
-| 公式范围识别（`$x$` 行内 / `$ x $` 行间）、缓存键、选区相交判定 | `src/lib/math-ranges.ts` |
-| 常用标记拆解（标题/粗体/斜体/行内代码/列表符号/`#link`） | `src/lib/markup-ranges.ts` |
-| CM6 装饰：公式 replace widget + 标记隐藏/替换 + 渲染请求 | `src/lib/live-preview.ts` |
+| 源码区域扫描（markup / code / raw / comment / string，`[...]` 内容块回到 markup） | `src/lib/core/typst-lex.ts` |
+| 公式范围识别（`$x$` 行内 / `$ x $` 行间）、缓存键、选区相交判定 | `src/lib/core/math-ranges.ts` |
+| 常用标记拆解（标题/粗体/斜体/行内代码/列表符号/`#link`） | `src/lib/core/markup-ranges.ts` |
+| CM6 装饰：公式 replace widget + 标记隐藏/替换 + 渲染请求 | `src/lib/editor/live-preview.ts` |
 | 单公式编译为贴边透明 SVG + pt 尺寸 + 基线 | `compile_math`（`src-tauri/src/typst_world/math.rs`） |
 
 **实测修正了调研中的三处设想**：

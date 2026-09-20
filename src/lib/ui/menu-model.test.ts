@@ -13,8 +13,8 @@ import {
   type MenuModelGroup,
   type MenuModelItem,
 } from "./menu-model";
-import type { WriteCommand } from "./write-commands";
-import { ZOOM_DEFAULT } from "./zoom";
+import type { WriteCommand } from "../core/write-commands";
+import { ZOOM_DEFAULT } from "../core/zoom";
 
 function makeDeps(over: Partial<MenuModelDeps> = {}): MenuModelDeps {
   return {

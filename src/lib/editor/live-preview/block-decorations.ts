@@ -7,12 +7,12 @@ import { Decoration } from "@codemirror/view";
 import { insideCovered } from "./covered";
 import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
-import { planBlockCovers } from "../block-plan";
-import type { BlockCover } from "../block-plan";
+import { planBlockCovers } from "../../core/block-plan";
+import type { BlockCover } from "../../core/block-plan";
 import { PREFETCH_MARGIN } from "./options";
 import type { LivePreviewOptions } from "./options";
 import { BlockCropWidget } from "./widgets";
-import { applyBlockSelection } from "../block-plan";
+import { applyBlockSelection } from "../../core/block-plan";
 
 /**
  * 把块表算成"当前文档下要覆盖哪些区间"（块表已是 CodeMirror 位置，见 block-plan.toBlockTable）。

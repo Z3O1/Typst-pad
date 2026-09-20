@@ -12,7 +12,7 @@ export const PT_TO_PX = 4 / 3;
 /** Typst 默认正文字号（pt）——预览「默认字号」的锚点 */
 export const TYPST_DEFAULT_TEXT_PT = 11;
 
-/** 输入区基准字号（px）：与 src/lib/Editor.svelte 的 .cm-editor font-size 保持一致 */
+/** 输入区基准字号（px）：与 src/lib/editor/Editor.svelte 的 .cm-editor font-size 保持一致 */
 export const EDITOR_FONT_PX = 14;
 
 /** 预览缩放输入：容器宽度、页面物理宽度、期望的预览默认字号 */

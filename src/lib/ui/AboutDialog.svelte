@@ -1,5 +1,5 @@
 <script lang="ts">
-  // 关于弹窗（原来内联在 +page.svelte）。共享外壳样式在 src/lib/modal.css，
+  // 关于弹窗（原来内联在 +page.svelte）。共享外壳样式在 src/lib/ui/modal.css，
   // 这里只有"正文长一点"这两条弹窗特有的规则。
   let {
     version,

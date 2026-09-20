@@ -9,7 +9,7 @@ import {
   diagnosticListTitle,
   truncateStatus,
 } from "./status-view";
-import type { CompileErrorLocation, Diagnostic } from "./typst-engine";
+import type { CompileErrorLocation, Diagnostic } from "../core/typst-engine";
 
 const warning = (over: Partial<Diagnostic> = {}): Diagnostic => ({
   message: "示例警告",

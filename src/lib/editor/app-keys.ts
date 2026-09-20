@@ -9,7 +9,7 @@
 
 import type { WrapKeyEvent } from "./word-wrap";
 import { isWrapToggleKey } from "./word-wrap";
-import type { WriteCommand } from "./write-commands";
+import type { WriteCommand } from "../core/write-commands";
 
 /** 打开中的弹窗（Esc 的收件人） */
 export type AppModal = "close-prompt" | "update" | "settings" | "about";

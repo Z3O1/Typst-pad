@@ -12,9 +12,9 @@
 // 明确不提供的能力：真实 Typst 编译、include/包解析、字体度量、PDF 导出落盘。
 // 这些必须回到桌面版（Windows WebView2）验证 —— 见 CLAUDE.md 与 README。
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { byteOffsetsToPositions } from "./block-offsets";
-import { MATH_TEXT_PT } from "./typst-engine";
-import type { Diagnostic } from "./typst-engine";
+import { byteOffsetsToPositions } from "../core/block-offsets";
+import { MATH_TEXT_PT } from "../core/typst-engine";
+import type { Diagnostic } from "../core/typst-engine";
 // 假产物生成器按职责分在 `browser-dev-stub/` 下（本文件只留：开关 + 命令路由 + 安装）：
 //   fake-layout —— 假整页 SVG（分页/折行/正文字号）
 //   fake-math   —— 假公式 SVG + 注入的真实公式产物

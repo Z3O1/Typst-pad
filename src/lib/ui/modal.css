@@ -4,7 +4,7 @@
  * （AboutDialog / SettingsDialog / UpdateDialog / ClosePromptDialog），而 Svelte 的
  * `<style>` 是**按组件作用域**的 —— 放在页面里就命中不了子组件里的元素（主题覆盖那两条
  * `.app.light .modal-overlay*` 尤其如此）。这份文件不经过 Svelte 的作用域处理，选择器与
- * 拆分前逐字一致，`+page.svelte` 里 `import "$lib/modal.css"` 一次即可。
+ * 拆分前逐字一致，`+page.svelte` 里 `import "$lib/ui/modal.css"` 一次即可。
  *
  * 各弹窗自己的样式（`.about-*` / `.settings-*` / `.update-*`）仍留在各自组件的 `<style>` 里。 */
 
