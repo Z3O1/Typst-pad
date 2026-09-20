@@ -50,9 +50,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
-      # Rust 缓存：cargo check 命中后只做增量检查，避免每次全量编译。
+      # Rust 缓存：命中后只做增量检查/编译，避免每次全量编译。
       # 失败/中断不保存缓存（rust-cache 默认行为）：被 cancel 的 run 保存的半成品
       # 会被后续 run 精确命中且不覆盖，坏缓存永续（踩过坑，勿加 cache-on-failure）
       - name: Cache Rust build
@@ -69,11 +69,27 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      # 格式门：prettier 配置文件在仓库根（`.prettierrc.json` / `.prettierignore`），
+      # 与本地 `npm run format` 完全一致；文档/CI YAML 已在 ignore 里（手写对齐）
+      - name: Format check (prettier)
+        run: npm run format:check
+
       - name: Build frontend
         run: npm run build
 
-      - name: Cargo check (Tauri shell)
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+      # Rust 三门（2026-09-19 补）：此前 CI 只跑 `cargo check`——
+      # ① 61 个 Rust 单测**从来没在 CI 跑过**；② `rustfmt` component 装了却从不调用；
+      # ③ clippy 从不跑（本地有 15 条未处理告警）。
+      # `cargo check` 那一步已被 clippy 取代：`clippy --all-targets` 覆盖同样的编译并把告警升级成错误，
+      # 两步都跑只会让同一份代码用两套 driver 各编译一遍。
+      - name: Rust format check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Rust clippy (warnings are errors)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
   # Windows 安装包构建：main push 或手动触发时构建（PR 不构建，省资源）。
   # 作用有二：1) 验证 Windows 上的真实构建；2) 写入 Rust/npm 缓存，

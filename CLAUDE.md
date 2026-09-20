@@ -15,7 +15,10 @@ Typst-pad = 仿 Typora 的 Typst 桌面编辑器，两套 UI：「写作模式�
 npm run tauri dev    # 桌面应用（Vite 固定 1420；WSL 可跑，libEGL 警告正常）
 npm run check        # svelte-check（0 errors / 0 warnings）
 npm test             # 单测（45 文件 / 834 项）；npm test -- <文件> 跑单个
-cargo test|check --manifest-path src-tauri/Cargo.toml   # Rust（61 passed / 6 ignored）
+npm run format:check # prettier（`npm run format` 是对称的写入版）
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check                  # rustfmt（默认风格，无 rustfmt.toml）
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单测（61 passed / 6 ignored）
 node scripts/check-fonts.mjs
 # 动编辑器 / 装饰 / 布局时才跑浏览器验收（换端口，别跟 tauri dev 抢 1420）
 npm run dev -- --port 1425
@@ -38,6 +41,7 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-
 9. **绝不阻塞等 workflow**：推 main / 打 tag / 后续命令一律不等 CI、Release；不挂轮询任务；状态最多**单查**一次 `gh run list`；不要加"别在 CI 运行中 push main"这类限制。
 10. 签名密钥不许动：Secrets 删了就构建不了、换了就再也发不出更新。
 11. 发版权在用户手里：改版本号 / CHANGELOG 版本段 / 打 tag / 建发 Release，只在他说"发 X.Y.Z"之后做。
+12. **五道格式/静态检查门不许摘**（都在 CI 的 `test` job 里，摘一道就等于没有）：`npm run check`、`npm test`、`npm run format:check`、`cargo fmt -- --check`、`cargo clippy --all-targets -- -D warnings`，另有 `cargo test`。改完先本地跑齐；`cargo check` 那一步已被 `clippy --all-targets` 取代（两步都跑等于同一份代码编两遍）。
 
 ## 细则红线（一句话版；展开与理由见对应分册）
 
