@@ -1,5 +1,5 @@
-// doc-utils：空文档判断 / 实际未保存修改判断 / 前缀规范化纯函数单元测试
-// （关闭确认弹窗的前置判断逻辑 + 编译前缀补尾随换行）
+// doc-utils：空文档判断 / 实际未保存修改判断 / 路径取文件名 / 前缀规范化纯函数单元测试
+// （关闭确认弹窗的前置判断逻辑 + 窗口标题用的文件名 + 编译前缀补尾随换行）
 import { describe, it, expect } from "vitest";
 import { isBlankDoc, isEffectiveDirty, ensureTrailingNewline, fileNameOf } from "./doc-utils";
 
@@ -90,8 +90,15 @@ describe("fileNameOf", () => {
     expect(fileNameOf("未命名.typ")).toBe("未命名.typ");
   });
 
-  it("取不到名字（路径以分隔符结尾）时返回空串，不抛异常", () => {
+  it("取不到名字（路径以分隔符结尾、空串、只有分隔符）时返回空串，不抛异常", () => {
     expect(fileNameOf("/home/me/")).toBe("");
     expect(fileNameOf("C:\\Users\\")).toBe("");
+    expect(fileNameOf("")).toBe("");
+    expect(fileNameOf("/")).toBe("");
+  });
+
+  it("混合分隔符与重复分隔符也取最后一段", () => {
+    expect(fileNameOf("C:/Users\\me/a.typ")).toBe("a.typ");
+    expect(fileNameOf("/a//b.typ")).toBe("b.typ");
   });
 });

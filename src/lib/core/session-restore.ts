@@ -3,6 +3,9 @@
 // 从 `+page.svelte` 的 `onMount` 开头搬出来（原来 ~45 行内联赋值，混着主题校验、旧存档迁移、
 // 内容恢复条件）。这里只算"该恢复成什么"，不碰 Svelte、不碰 DOM —— 页面拿到计划后一次性赋值。
 //
+// **与 `document-session.ts` 的分工**：那边管"**当前这次**会话的文件生命周期"（打开/保存/新建），
+// 这里管"**上次**会话在启动时恢复成什么"。都叫 session，一个向前、一个向后。
+//
 // 为什么值得单测（这几条都是"内容丢了"或"启动形态不对"级别的规则，而浏览器验收只覆盖了
 // "恢复内容 / 关掉开关不恢复"两条）：
 // 1. **主题只认三个合法值**：存档里的脏值（手改过 localStorage / 旧版本字段）不许把界面带成
@@ -11,9 +14,10 @@
 //    "新窗口把我正在写的文章带过来了"，而那个窗口的改动又不会记进存档。
 // 3. **空白内容不算"上次内容"**：只输入过空白字符的存档不恢复（与"有未保存修改"的判据同一套
 //    —— `isBlankDoc`），否则用户会看到一个"空但很脏"的文档，关窗时还要被追问一次。
-// 4. **`restoreSession` 关掉时只恢复偏好**（主题/前缀/模式/字体），不恢复内容。
-// 5. 标题恢复：存档里有 `fileTitle` 就用它（可能与文件当前名字不一致——用户改过磁盘上的文件名），
-//    没有就从路径取文件名。
+// 4. **`restoreSession` 关掉时只恢复偏好**（主题/前缀/模式/字体/缩放），不恢复内容。
+// 5. 标题恢复：**有路径时**优先用存档里的 `fileTitle`（可能与磁盘上文件的当前名字不一致——用户
+//    改过文件名），没有就从路径取；**没有路径**（含空串）时回落「未命名.typ」——与搬出来之前
+//    的行为一致（当时整段只在 `saved.filePath` 为真时才执行）。
 import { defaultSettings, normalizeSettings } from "./app-settings";
 import type { AppSettings } from "./app-settings";
 import { fileNameOf, isBlankDoc, UNTITLED_TITLE } from "./doc-utils";
@@ -73,7 +77,9 @@ export function planRestore(
     saved.viewMode ?? (saved.livePreview === false ? "source" : "write");
 
   return {
-    // 非法主题回落 system（别把界面带进一个不存在的主题）
+    // 非法主题回落 system（别把界面带进一个不存在的主题）。搬出来之前是"非法就**保持当前值**"，
+    // 而页面 `theme` 的初值恒为 `"system"`、恢复是它第一次被写，所以两者等价；将来若初值变了
+    // （或恢复之前有人改过 theme），这里得收一个 `currentTheme` 参数才不会悄悄改语义。
     theme: THEMES.includes(saved.theme as ThemePreference)
       ? (saved.theme as ThemePreference)
       : "system",
@@ -103,7 +109,8 @@ function planContent(
   return {
     text: saved.content,
     filePath,
-    fileTitle: saved.fileTitle ?? (filePath === null ? UNTITLED_TITLE : fileNameOf(filePath)),
+    // 没有路径时**不认**存档里的标题（旧版此时整段跳过、标题保持「未命名.typ」）
+    fileTitle: filePath === null ? UNTITLED_TITLE : (saved.fileTitle ?? fileNameOf(filePath)),
     dirty: saved.dirty ?? false,
   };
 }

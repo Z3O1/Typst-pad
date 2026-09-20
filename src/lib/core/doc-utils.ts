@@ -1,4 +1,8 @@
-// doc-utils：文档内容工具（纯函数，独立模块便于单测）
+// doc-utils：文档层纯函数（独立模块便于单测）。三类：
+// - 内容判定：isBlankDoc / isEffectiveDirty
+// - 名字：fileNameOf / UNTITLED_TITLE
+// - 编译前缀：ensureTrailingNewline
+// 名字类只有这两个、合计十来行，先放一起；**再往这里加名字类函数就该拆 `doc-names.ts`**。
 
 /**
  * 判断文档是否为"空文档"（无有效内容，可直接关闭、无需保存确认）：

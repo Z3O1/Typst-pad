@@ -56,12 +56,7 @@
   import { loadState, saveState } from "$lib/core/persistence";
   import { decideAppKey, runAppKeyAction, topModal } from "$lib/editor/app-keys";
   import type { AppModal } from "$lib/editor/app-keys";
-  import {
-    isEffectiveDirty,
-    ensureTrailingNewline,
-    fileNameOf,
-    UNTITLED_TITLE,
-  } from "$lib/core/doc-utils";
+  import { isEffectiveDirty, ensureTrailingNewline, UNTITLED_TITLE } from "$lib/core/doc-utils";
   import {
     createDocumentSession,
     loadedState,
@@ -1203,8 +1198,10 @@
 
   /**
    * 把生效配置写回 `$state` 的唯一入口：设置弹窗保存走它，启动恢复（`planRestore`）也走它。
-   * 加字段时另外两处也要同步：① `currentSettings()`（读）、② `schedulePersist` 的快照（写存档）
-   * —— 加 `AppSettings` 里的字段时单测有一条"字段清单绊线"会红，提醒回来改这两处。
+   * 但 `AppSettings` 的字段清单**别处还有三份**要跟着改：① `currentSettings()`（读页面状态）、
+   * ② `core/session-restore.ts` 的 `planRestore`（存档 → 设置）、③ `schedulePersist` 的快照
+   * （设置 → 存档）。漏一处就是"设置了但没恢复 / 没持久化"——加字段时
+   * `app-settings.test.ts` 的"字段清单绊线"会红，提醒回来把这几处对齐。
    */
   function applySettings(next: AppSettings) {
     prefixEnabled = next.prefixEnabled;
@@ -1728,7 +1725,7 @@
     // 浏览器 gate：非 Tauri 环境（提示页）不初始化应用逻辑——编译走 Tauri 进程内命令，浏览器不可用
     if (!isDesktopApp) return;
     mark("mount-start");
-    // 启动恢复：主题/前缀/模式/字体总是恢复，**上次未保存的内容**按设置决定（默认恢复，
+    // 启动恢复：主题/前缀/模式/字体/缩放总是恢复，**上次未保存的内容**按设置决定（默认恢复，
     // 见设置弹窗"启动时恢复上次内容"）——这是"内容丢了"的最后一道安全网。
     // 五条规则（主题只认合法值、副窗口不恢复内容、空白内容不算上次内容、开关关掉只恢复偏好、
     // 标题优先用存档里那份）都在 `core/session-restore.ts`，这里只把计划落到状态上。
