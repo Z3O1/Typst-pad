@@ -9,11 +9,11 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import { livePreview } from "./live-preview";
-import type { Block } from "./block-plan";
-import { mathCacheKey } from "./math-ranges";
+import type { Block } from "../core/block-plan";
+import { mathCacheKey } from "../core/math-ranges";
 import type { MathRequest } from "./live-preview";
-import { MATH_TEXT_PT } from "./typst-engine";
-import type { MathRender } from "./typst-engine";
+import { MATH_TEXT_PT } from "../core/typst-engine";
+import type { MathRender } from "../core/typst-engine";
 
 /** 假渲染结果：真实契约里 svg 是 Rust 侧产物，这里只需区分不同公式 */
 function render(body: string): MathRender {

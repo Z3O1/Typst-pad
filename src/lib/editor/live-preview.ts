@@ -11,19 +11,19 @@ import { Decoration, EditorView, ViewPlugin, keymap } from "@codemirror/view";
 import type { DecorationSet, ViewUpdate } from "@codemirror/view";
 import { EditorSelection, Prec, StateField } from "@codemirror/state";
 import type { EditorState, Extension } from "@codemirror/state";
-import { mathCacheKey, mathRevealDecision, scanMathRanges } from "./math-ranges";
-import { scanNonMarkupRegions } from "./typst-lex";
-import { buildMathContext } from "./math-context";
+import { mathCacheKey, mathRevealDecision, scanMathRanges } from "../core/math-ranges";
+import { scanNonMarkupRegions } from "../core/typst-lex";
+import { buildMathContext } from "../core/math-context";
 import {
   crossesCollapsedCover,
   revealBlocksWithDiagnostics,
   sourceVerticalTarget,
-} from "./block-plan";
-import type { BlockCover } from "./block-plan";
-import { cropPagePoint } from "./block-hit";
+} from "../core/block-plan";
+import type { BlockCover } from "../core/block-plan";
+import { cropPagePoint } from "../core/block-hit";
 import { anchorPosEffect } from "./scroll-anchor";
-import { dbg } from "./debug";
-import { MATH_TEXT_PT } from "./typst-engine";
+import { dbg } from "../dev/debug";
+import { MATH_TEXT_PT } from "../core/typst-engine";
 // 拆出去的模块（本文件只做**组装**：把 StateField / 拖选 / 竖直移动 / 请求插件拼成一个 Extension）
 import {
   buildBlockCovers,

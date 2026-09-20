@@ -1,9 +1,9 @@
 <script lang="ts">
-  // 更新弹窗（原来内联在 +page.svelte）。共享外壳样式见 src/lib/modal.css，
+  // 更新弹窗（原来内联在 +page.svelte）。共享外壳样式见 src/lib/ui/modal.css，
   // 这里只有更新说明 / 进度条那几条 `.update-*` 样式。
   //
   // 渲染条件由页面把关：`idle` / `checking` / `latest` 三种状态下页面根本不挂这个组件。
-  import { formatProgress, type UpdateFlow } from "./update-utils";
+  import { formatProgress, type UpdateFlow } from "../core/update-utils";
   import { renderUpdateNotes } from "./update-notes";
 
   let {

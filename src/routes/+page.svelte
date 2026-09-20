@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import Editor from "$lib/Editor.svelte";
+  import Editor from "$lib/editor/Editor.svelte";
   import {
     compileToSvg,
     compileBlocks,
@@ -9,21 +9,29 @@
     hitTestBlock,
     listFontFamilies,
     defaultFontFamilies,
-  } from "$lib/typst-engine";
+  } from "$lib/core/typst-engine";
   import type {
     BlocksFail,
     BlocksOk,
     CompileErrorLocation,
     Diagnostic,
     MathRender,
-  } from "$lib/typst-engine";
-  import { byteOffsetsToPositions, positionRangeToByteRange, utf8Length } from "$lib/block-offsets";
-  import { carryOverCrops, remapBlocksThroughEdit, toBlockTable } from "$lib/block-plan";
-  import { clampHitOffset } from "$lib/block-hit";
-  import type { Block } from "$lib/block-plan";
-  import { buildFontFamilies, FONT_CHOICE_DEFAULT, normalizeFontDirs } from "$lib/font-settings";
-  import type { MathRequest } from "$lib/live-preview";
-  import type { WriteCommand } from "$lib/write-commands";
+  } from "$lib/core/typst-engine";
+  import {
+    byteOffsetsToPositions,
+    positionRangeToByteRange,
+    utf8Length,
+  } from "$lib/core/block-offsets";
+  import { carryOverCrops, remapBlocksThroughEdit, toBlockTable } from "$lib/core/block-plan";
+  import { clampHitOffset } from "$lib/core/block-hit";
+  import type { Block } from "$lib/core/block-plan";
+  import {
+    buildFontFamilies,
+    FONT_CHOICE_DEFAULT,
+    normalizeFontDirs,
+  } from "$lib/core/font-settings";
+  import type { MathRequest } from "$lib/editor/live-preview";
+  import type { WriteCommand } from "$lib/core/write-commands";
   import {
     openTypFile,
     saveTypFile,
@@ -31,7 +39,7 @@
     pickTypPath,
     pickFontDir,
     isTauri,
-  } from "$lib/file-ops";
+  } from "$lib/core/file-ops";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
@@ -40,41 +48,41 @@
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { loadState, saveState } from "$lib/persistence";
-  import { decideAppKey, runAppKeyAction, topModal } from "$lib/app-keys";
-  import type { AppModal } from "$lib/app-keys";
-  import { isEffectiveDirty, ensureTrailingNewline } from "$lib/doc-utils";
-  import { failureStatus } from "$lib/failure-text";
-  import { installEditorFonts, loadBundledFont } from "$lib/editor-font";
-  import MenuBar from "$lib/MenuBar.svelte";
-  import type { MenuGroup } from "$lib/MenuBar.svelte";
-  import { buildMenuGroups } from "$lib/menu-model";
-  import ContextMenu from "$lib/ContextMenu.svelte";
-  import type { ContextMenuItem } from "$lib/ContextMenu.svelte";
-  import AboutDialog from "$lib/AboutDialog.svelte";
-  import ClosePromptDialog from "$lib/ClosePromptDialog.svelte";
-  import StatusBar from "$lib/StatusBar.svelte";
-  import PreviewPane from "$lib/PreviewPane.svelte";
-  import BrowserGate from "$lib/BrowserGate.svelte";
-  import SettingsDialog from "$lib/SettingsDialog.svelte";
-  import UpdateDialog from "$lib/UpdateDialog.svelte";
-  // 弹窗共享外壳样式见 src/lib/modal.css（页面作用域命中不了子组件）
-  import "$lib/modal.css";
+  import { loadState, saveState } from "$lib/core/persistence";
+  import { decideAppKey, runAppKeyAction, topModal } from "$lib/core/app-keys";
+  import type { AppModal } from "$lib/core/app-keys";
+  import { isEffectiveDirty, ensureTrailingNewline } from "$lib/core/doc-utils";
+  import { failureStatus } from "$lib/core/failure-text";
+  import { installEditorFonts, loadBundledFont } from "$lib/editor/editor-font";
+  import MenuBar from "$lib/ui/MenuBar.svelte";
+  import type { MenuGroup } from "$lib/ui/MenuBar.svelte";
+  import { buildMenuGroups } from "$lib/ui/menu-model";
+  import ContextMenu from "$lib/ui/ContextMenu.svelte";
+  import type { ContextMenuItem } from "$lib/ui/ContextMenu.svelte";
+  import AboutDialog from "$lib/ui/AboutDialog.svelte";
+  import ClosePromptDialog from "$lib/ui/ClosePromptDialog.svelte";
+  import StatusBar from "$lib/ui/StatusBar.svelte";
+  import PreviewPane from "$lib/ui/PreviewPane.svelte";
+  import BrowserGate from "$lib/ui/BrowserGate.svelte";
+  import SettingsDialog from "$lib/ui/SettingsDialog.svelte";
+  import UpdateDialog from "$lib/ui/UpdateDialog.svelte";
+  // 弹窗共享外壳样式见 src/lib/ui/modal.css（页面作用域命中不了子组件）
+  import "$lib/ui/modal.css";
   import {
     resolveContextZone,
     previewSelectionHasContent,
     buildContextMenuItems,
     type ContextMenuItemSpec,
-  } from "$lib/context-menu-utils";
-  import { clearState } from "$lib/persistence";
+  } from "$lib/ui/context-menu-utils";
+  import { clearState } from "$lib/core/persistence";
   import {
     isErrorLineInPrefix,
     formatDiagnosticForClipboard,
     formatDiagnosticListForClipboard,
     type ErrorListItem,
     type LocatedErrorItem,
-  } from "$lib/error-list";
-  import { nextBadgePopover, type BadgeKind } from "$lib/badge-popover";
+  } from "$lib/ui/error-list";
+  import { nextBadgePopover, type BadgeKind } from "$lib/ui/badge-popover";
   import {
     buildErrorItems,
     buildWarningItems,
@@ -82,12 +90,16 @@
     diagnosticCopyStatus,
     diagnosticListTitle,
     truncateStatus,
-  } from "$lib/status-view";
-  import { reduceCompileStatus, type CompileStatusSource } from "$lib/compile-status";
-  import { isBenignScriptError, scriptErrorMessage, scriptErrorStatus } from "$lib/script-errors";
-  import { copyPlainText } from "$lib/clipboard";
-  import { mark, reportStartup } from "$lib/startup-timing";
-  import { dbg, setCliDebug } from "$lib/debug";
+  } from "$lib/ui/status-view";
+  import { reduceCompileStatus, type CompileStatusSource } from "$lib/core/compile-status";
+  import {
+    isBenignScriptError,
+    scriptErrorMessage,
+    scriptErrorStatus,
+  } from "$lib/core/script-errors";
+  import { copyPlainText } from "$lib/core/clipboard";
+  import { mark, reportStartup } from "$lib/dev/startup-timing";
+  import { dbg, setCliDebug } from "$lib/dev/debug";
   import {
     TYPST_DEFAULT_TEXT_PT,
     isReflowApplied,
@@ -95,14 +107,14 @@
     previewPageWidthPt,
     reflowCanvasWidth,
     viewBoxWidthPt,
-  } from "$lib/preview-scale";
+  } from "$lib/core/preview-scale";
   import {
     checkForUpdate,
     downloadAndInstallUpdate,
     closeUpdate,
     type AvailableUpdate,
-  } from "$lib/updater";
-  import { AUTO_CHECK_DELAY_MS, type UpdateFlow } from "$lib/update-utils";
+  } from "$lib/core/updater";
+  import { AUTO_CHECK_DELAY_MS, type UpdateFlow } from "$lib/core/update-utils";
   import {
     CHECKING_STATUS,
     planDismiss,
@@ -110,13 +122,13 @@
     planInstallStart,
     planUpdateCheck,
     updateNoticeText,
-  } from "$lib/update-flow";
+  } from "$lib/core/update-flow";
   // zoom.ts 是纯逻辑（档位换算、判据、文案）；"引擎改档 + 复核"的编排在 zoom-controller.ts，
   // 这里只留页面自己用得到的三样：默认档、收敛、档位文案。
-  import { ZOOM_DEFAULT, clampZoom, zoomLabel } from "$lib/zoom";
-  import { createZoomController } from "$lib/zoom-controller";
+  import { ZOOM_DEFAULT, clampZoom, zoomLabel } from "$lib/core/zoom";
+  import { createZoomController } from "$lib/core/zoom-controller";
   // isWrapToggleKey 的判定已挪进 app-keys.decideAppKey（那里统一管按键路由，含它的顺序要求）
-  import { WRAP_SOURCE_ONLY_NOTICE, wrapNotice } from "$lib/word-wrap";
+  import { WRAP_SOURCE_ONLY_NOTICE, wrapNotice } from "$lib/editor/word-wrap";
 
   // 新建时默认空白文档（不再预填示例内容）
   const SAMPLE_DOC = "";

@@ -9,8 +9,8 @@
 // - 行内公式 `$x$`：定界符内侧无空白；
 // - 行间公式 `$ x $`：内侧**两侧都是空白**（display 风格）——所以独占一行时补的是
 //   `$  $`（两个空格）并把光标放在中间，用户敲 `x` 就得到 `$ x $` 这个行间公式。
-import { regionAt, scanNonMarkupRegions } from "./typst-lex";
-import { scanMathRanges } from "./math-ranges";
+import { regionAt, scanNonMarkupRegions } from "../core/typst-lex";
+import { scanMathRanges } from "../core/math-ranges";
 
 /** 行间公式脚手架：`$` + 两个空格 + `$`（光标落在中间第 2 个字符位，敲字即 `$ x $`） */
 const DISPLAY_SCAFFOLD = "$  $";

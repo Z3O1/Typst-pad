@@ -1,6 +1,6 @@
 // error-list 错误列表组装 + 前缀定位纯函数单元测试（状态栏徽标弹窗 / 前缀错误定位）
 import { describe, it, expect } from "vitest";
-import type { CompileErrorLocation } from "./typst-engine";
+import type { CompileErrorLocation } from "../core/typst-engine";
 import {
   buildErrorListItems,
   formatErrorLoc,

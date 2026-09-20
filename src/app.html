@@ -25,7 +25,7 @@
       // 本脚本在文档解析中先于 SvelteKit 的 boot 脚本出现，模块求值同步完成安装，
       // 因此 +page.svelte 顶层 `isTauri()` 判定时桩必定已就位（无竞态）。
       if (new URLSearchParams(location.search).has("browserdev")) {
-        import("/src/lib/browser-dev-stub.ts").then((m) => m.installBrowserDevStub());
+        import("/src/lib/dev/browser-dev-stub.ts").then((m) => m.installBrowserDevStub());
       }
     </script>
     %sveltekit.head%

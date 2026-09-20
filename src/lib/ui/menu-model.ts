@@ -8,8 +8,8 @@
 // 类型定义在这里（而不是从 MenuBar.svelte 反向导入）是照 menu-keys.ts 的 `MenuGroupLike`
 // 的做法来的：.ts 模块不依赖 .svelte 的类型，`MenuBar.svelte` 反过来 extends 它们。
 
-import type { WriteCommand } from "./write-commands";
-import { ZOOM_DEFAULT } from "./zoom";
+import type { WriteCommand } from "../core/write-commands";
+import { ZOOM_DEFAULT } from "../core/zoom";
 
 /** 菜单项（MenuBar.svelte 消费的结构） */
 export interface MenuModelItem {

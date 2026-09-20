@@ -18,17 +18,17 @@
   import { planDollarInput } from "./auto-pair";
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
-  import type { CompileErrorLocation, MathRender } from "./typst-engine";
-  import { MATH_TEXT_PT } from "./typst-engine";
-  import type { Block } from "./block-plan";
-  import { squiggleRanges, offsetAt } from "./diagnostics-utils";
+  import type { CompileErrorLocation, MathRender } from "../core/typst-engine";
+  import { MATH_TEXT_PT } from "../core/typst-engine";
+  import type { Block } from "../core/block-plan";
+  import { squiggleRanges, offsetAt } from "../core/diagnostics-utils";
   import { livePreview, refreshLivePreview } from "./live-preview";
   import type { MathRequest } from "./live-preview";
-  import { planForCommand } from "./write-commands";
-  import type { WriteCommand } from "./write-commands";
-  import { mark } from "./startup-timing";
+  import { planForCommand } from "../core/write-commands";
+  import type { WriteCommand } from "../core/write-commands";
+  import { mark } from "../dev/startup-timing";
   import { WRITE_FONT_STACK } from "./editor-font";
-  import { dbg } from "./debug";
+  import { dbg } from "../dev/debug";
 
   interface Props {
     initialDoc?: string;

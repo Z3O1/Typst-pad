@@ -4,11 +4,11 @@ import { Decoration } from "@codemirror/view";
 import { insideCovered } from "./covered";
 import type { Range } from "@codemirror/state";
 import type { EditorState, Text } from "@codemirror/state";
-import { mathCacheKey, mathRevealDecision } from "../math-ranges";
-import type { MathRange } from "../math-ranges";
+import { mathCacheKey, mathRevealDecision } from "../../core/math-ranges";
+import type { MathRange } from "../../core/math-ranges";
 import type { LivePreviewOptions } from "./options";
 import { MathBlockWidget, MathWidget } from "./widgets";
-import { MATH_TEXT_PT } from "../typst-engine";
+import { MATH_TEXT_PT } from "../../core/typst-engine";
 
 /**
  * 该行间公式是否**独占所在各行**（前后只有空白）。

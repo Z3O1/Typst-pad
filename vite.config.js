@@ -10,7 +10,7 @@ import { existsSync, readFileSync as readFileSyncNode } from "node:fs";
 /**
  * **只给开发/验收用**：把 `src-tauri/fonts/` 里的打包字体借 dev server 暴露出来。
  *
- * 为什么需要：写作模式的源码透镜要装上**打包字体**（与引擎切片同一套字，见 src/lib/editor-font.ts）。
+ * 为什么需要：写作模式的源码透镜要装上**打包字体**（与引擎切片同一套字，见 src/lib/editor/editor-font.ts）。
  * 真机走 Rust 的 `bundled_font` 命令（读 `resources/fonts/`，raw IPC）；浏览器开发模式没有 Rust，
  * 由桩去同一份文件取字节 —— 而 vite 的 dev server 只肯服务 `src/`、`src-tauri/` 在允许清单之外
  * （实测直接请求 `/src-tauri/fonts/x.otf` 是 403），所以这里开一个只读的小口子。

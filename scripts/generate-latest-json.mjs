@@ -15,7 +15,7 @@
 //   node scripts/generate-latest-json.mjs --tag v0.8.0 --out latest.json
 //   node scripts/generate-latest-json.mjs --target windows-x86_64 --notes "手写说明"
 //
-// 本文件带 JSDoc 类型注解：它被 src/lib/update-manifest.test.ts 直接 import，
+// 本文件带 JSDoc 类型注解：它被 scripts/generate-latest-json.test.mjs 直接 import，
 // 因此会进入 svelte-check 的检查范围（tsconfig 开了 checkJs），注解不是装饰而是编译门槛。
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";

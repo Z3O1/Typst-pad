@@ -4,12 +4,12 @@ import { Decoration } from "@codemirror/view";
 import { insideCovered } from "./covered";
 import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
-import { scanMarkupDecorations } from "../markup-ranges";
-import type { MarkupKind } from "../markup-ranges";
-import type { Region } from "../typst-lex";
+import { scanMarkupDecorations } from "../../core/markup-ranges";
+import type { MarkupKind } from "../../core/markup-ranges";
+import type { Region } from "../../core/typst-lex";
 import { TextWidget } from "./widgets";
-import type { MathRange } from "../math-ranges";
-import { selectionTouchesRange } from "../math-ranges";
+import type { MathRange } from "../../core/math-ranges";
+import { selectionTouchesRange } from "../../core/math-ranges";
 import { CodeBlockWidget } from "./widgets";
 
 /** markup 装饰对应的 CSS 类（样式见 livePreviewTheme） */

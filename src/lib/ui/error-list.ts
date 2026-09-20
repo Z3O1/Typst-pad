@@ -1,5 +1,5 @@
 // 编译错误列表与前缀定位的纯函数工具（不依赖 wasm / tauri，可单元测试）。
-import type { CompileErrorLocation } from "./typst-engine";
+import type { CompileErrorLocation } from "../core/typst-engine";
 
 /** 可定位错误条目：点击可跳转编辑器对应行列 */
 export interface LocatedErrorItem {

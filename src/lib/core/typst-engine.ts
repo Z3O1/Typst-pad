@@ -4,7 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { savePdfDialog } from "./file-ops";
 import { pdfFileName } from "./pdf-export";
-import { dbg } from "./debug";
+import { dbg } from "../dev/debug";
 import { TYPST_DEFAULT_TEXT_PT } from "./preview-scale";
 
 // ---------------------------------------------------------------------------

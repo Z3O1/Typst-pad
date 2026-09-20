@@ -1,11 +1,11 @@
 <script lang="ts">
-  // 设置弹窗（原来内联在 +page.svelte）。共享外壳样式见 src/lib/modal.css，
+  // 设置弹窗（原来内联在 +page.svelte）。共享外壳样式见 src/lib/ui/modal.css，
   // 这里只有设置面板特有的 `.settings-*` 样式。
   //
   // 面板里的值全是**草稿**（页面上的 settings* 系列）：打开时从生效值拷一份，点「保存」才生效
   // （见 +page.svelte 的 openSettings / saveSettings），所以用 $bindable 让页面继续持有草稿状态。
   import { prefixLineCharOffset } from "./error-list";
-  import { FONT_CHOICE_DEFAULT } from "./font-settings";
+  import { FONT_CHOICE_DEFAULT } from "../core/font-settings";
 
   let {
     restoreSession = $bindable(),

@@ -2,7 +2,7 @@
 //
 // **为什么要有这一条**：那几份字体要跨四层才对得上 ——
 //   ① `src-tauri/src/typst_world/fonts.rs` 的 `EDITOR_FONT_FILES` 白名单（Rust 只肯读这几个文件名）
-//   ② `src/lib/editor-font.ts` 的 `EDITOR_FONT_FACES`（前端要哪几份、注册成哪个族名）
+//   ② `src/lib/editor/editor-font.ts` 的 `EDITOR_FONT_FACES`（前端要哪几份、注册成哪个族名）
 //   ③ `WRITE_FONT_STACK`（写作模式的字体栈 —— 族名写错就等于"装上了也用不上"）
 //   ④ `src-tauri/fonts/` 里真有这些文件、真的随 `bundle.resources` 分发
 //
@@ -12,7 +12,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const RUST_WORLD = "src-tauri/src/typst_world/fonts.rs";
-const TS_FONTS = "src/lib/editor-font.ts";
+const TS_FONTS = "src/lib/editor/editor-font.ts";
 const TAURI_CONF = "src-tauri/tauri.conf.json";
 
 /** 递归收集 `src-tauri/src` 下的所有 .rs：命令的**定义**可能被拆进任意子模块 */
