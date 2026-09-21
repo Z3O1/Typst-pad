@@ -1616,18 +1616,19 @@
   }
 
   // `open-file` 广播的接球规则（有焦点的窗口接 / 没焦点时主窗口延迟兜底 / 副窗口不抢 /
-  // 启动时就绪后只主窗口取一次）在 `$lib/core/open-file-claim`：这里只注入 Tauri 侧的查询与打开。
+  // 启动时就绪后只主窗口取一次）在 `$lib/core/open-file-claim`：这里只注入 Tauri 侧的
+  // "有没有焦点"、待打开队列，以及文档会话的打开动作。
   const openFileClaim = createOpenFileClaim({
     // 查询失败按"没有焦点"处理这条规则在模块里（`isFocused` 的 try/catch）
     isFocused: () => getCurrentWindow().isFocused(),
     isSecondaryWindow,
+    // Rust 侧那份队列同时是"这个文件已被某窗口接走"的记号（取到空数组 = 别人先接了）；
+    // 取哪一条（最后一个 = 最新请求）由模块的 `lastPending` 决定
     takePending: async () => {
       try {
-        // Rust 侧那份队列同时是"这个文件已被某窗口接走"的记号（取到空 = 别人先接了）
-        const paths = await invoke<string[]>("take_pending_files");
-        return paths.length > 0 ? paths[paths.length - 1] : null;
+        return await invoke<string[]>("take_pending_files");
       } catch {
-        return null;
+        return [];
       }
     },
     openPath: (path) => docSession.openPath(path),

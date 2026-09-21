@@ -13,7 +13,9 @@
 //    （草稿窗口不该被启动参数里的文件顶掉内容）。
 //
 // 这些规则以前只写在注释里、且只有桌面版真机才走得到（多窗口 + 系统"用 Typst-pad 打开"），
-// 所以抽成依赖全注入的工厂，用假定时器把"谁接、谁兜底、兜底前要不要放手"钉进单测。
+// 所以抽成依赖全注入的工厂，用单测把"谁接、谁兜底、兜底前要不要放手"钉住。
+// 定时器直接用全局的（单测定时器用 vitest 的假定时器，与 `math-queue` 同一套路）——
+// 这里只有一个兜底定时器、不依赖真实时钟，不值得像 `zoom-controller` 那样注入。
 /** 兜底延迟：等有焦点的窗口先接（应用在后台时两个窗口都没焦点，主窗口等这一拍再出手） */
 export const OPEN_FILE_FALLBACK_DELAY_MS = 250;
 
@@ -23,32 +25,30 @@ export interface OpenFileClaimHooks {
   /** 本窗口是不是副窗口（草稿窗口） */
   isSecondaryWindow: boolean;
   /**
-   * 取走待打开队列里的最后一个路径并清空队列（同时是"已被某窗口接走"的记号）。
-   * **页面侧要自己吞掉 invoke 失败并返回 `null`**（没有待打开文件），不要往上抛。
+   * 取走待打开队列并**清空**它（同时是"已被某窗口接走"的记号）。**原样返回数组** ——
+   * 取哪一条由本模块的 `lastPending` 决定（Rust 侧 `take_pending_files` 会把队列一起清掉）。
+   * **页面侧要自己吞掉 invoke 失败并返回空数组**，不要往上抛。
    */
-  takePending: () => Promise<string | null>;
+  takePending: () => Promise<readonly string[]>;
   /** 真正打开文件（页面侧就是 `docSession.openPath`，返回值本模块不看） */
-  openPath: (path: string) => unknown | Promise<unknown>;
-  /** 兜底延迟（缺省 `OPEN_FILE_FALLBACK_DELAY_MS`） */
-  fallbackDelayMs?: number;
-  /** 定时器注入，便于单测（缺省全局 `setTimeout` / `clearTimeout`） */
-  setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
-  clearTimer?: (id: ReturnType<typeof setTimeout>) => void;
+  openPath: (path: string) => unknown;
 }
 
 export interface OpenFileClaim {
   /** 收到一条 `open-file` 广播 */
   onBroadcast(path: string): Promise<void>;
-  /** 启动/转发时就绪后取一次队列（只主窗口取）；返回是否真打开了文件 */
+  /** 启动/转发时就绪后取一次队列（只主窗口取）；返回是否从队列里认领到了文件（不看 `openPath` 的结果） */
   claimStartup(): Promise<boolean>;
   /** 卸载：取消还没落地的兜底打开 */
   dispose(): void;
 }
 
+/** 队列里取哪个：**最后一个**（最新一次请求；Rust 侧按发生顺序 push） */
+export function lastPending(paths: readonly string[]): string | null {
+  return paths.length > 0 ? paths[paths.length - 1] : null;
+}
+
 export function createOpenFileClaim(hooks: OpenFileClaimHooks): OpenFileClaim {
-  const delay = hooks.fallbackDelayMs ?? OPEN_FILE_FALLBACK_DELAY_MS;
-  const setTimer = hooks.setTimer ?? setTimeout;
-  const clearTimer = hooks.clearTimer ?? clearTimeout;
   /** 还没落地的兜底定时器（null = 没有挂着的兜底） */
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -69,26 +69,27 @@ export function createOpenFileClaim(hooks: OpenFileClaimHooks): OpenFileClaim {
       return;
     }
     if (hooks.isSecondaryWindow) return; // 副窗口没焦点就不抢：交给主窗口兜底
-    if (timer !== null) clearTimer(timer); // 连着来两条广播时只兜底最后一次
-    timer = setTimer(() => {
+    if (timer !== null) clearTimeout(timer); // 连着来两条广播时只兜底最后一次
+    timer = setTimeout(() => {
       timer = null;
-      void hooks.takePending().then((unclaimed) => {
+      void hooks.takePending().then((paths) => {
         // 队列空 = 已经有窗口接走了 → 放手（照旧不吭声：这不是错误）
+        const unclaimed = lastPending(paths);
         if (unclaimed) void hooks.openPath(unclaimed);
       });
-    }, delay);
+    }, OPEN_FILE_FALLBACK_DELAY_MS);
   }
 
   async function claimStartup(): Promise<boolean> {
     if (hooks.isSecondaryWindow) return false;
-    const path = await hooks.takePending();
+    const path = lastPending(await hooks.takePending());
     if (!path) return false;
     await hooks.openPath(path);
     return true;
   }
 
   function dispose(): void {
-    if (timer !== null) clearTimer(timer);
+    if (timer !== null) clearTimeout(timer);
     timer = null;
   }
 
