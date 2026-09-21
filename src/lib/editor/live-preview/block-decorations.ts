@@ -8,11 +8,65 @@ import { insideCovered } from "./covered";
 import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import { planBlockCovers } from "../../core/block-plan";
-import type { BlockCover } from "../../core/block-plan";
+import type { Block, BlockCover } from "../../core/block-plan";
+import { scanNonMarkupRegions } from "../../core/typst-lex";
+import type { Region } from "../../core/typst-lex";
 import { PREFETCH_MARGIN } from "./options";
 import type { LivePreviewOptions } from "./options";
 import { BlockCropWidget } from "./widgets";
 import { applyBlockSelection } from "../../core/block-plan";
+
+/**
+ * 第一阶段的“可编辑正文”只接管能保守判定为纯 markup 的 Paragraph / Heading。
+ *
+ * `Paragraph` 只是 Typst 顶层分块的兜底类别，里面仍可能混有 `#image(...)`、自定义宏、raw、
+ * 注释等内容；仅按 kind 放开会把这些复杂内容从可靠的引擎切片退回近似源码显示。这里复用
+ * live-preview 已有的 lexer：块内只要出现**代码 / raw / 注释**区域，就继续沿用局部渲染。
+ *
+ * **`string` 区域不算复杂**（2026-09-22 审查发现）：lexer 把 `"` 无条件登记成 string（为了让
+ * `"$5"` 不被当成公式，见 `typst-lex` 的说明），但 markup 里的 `"` 就是 typst 的弯引号、是
+ * 纯 markup —— 一旦把它算作复杂内容，写了一对引号的正文（`他说"你好"，然后走了。`）就会整段
+ * 退回切片，未闭合的引号更会让其后所有段落一起退化，正好违背这条规则本身。真在代码里的字符串
+ * 一定被外层的 `code` 区域包住（`#let s = "x"`、`#image("x.png")`），所以放宽 string
+ * 不会漏掉任何代码。
+ *
+ * 公式不属于 opaque 区域，因此“普通文字 + 行内公式”仍是可编辑正文，公式本身继续由
+ * math decoration 局部替换。粗体 / 斜体也属于 markup，直接作用在真实文本上。
+ */
+export function isDirectlyEditableTextBlock(
+  block: Pick<Block, "from" | "to" | "kind" | "found" | "skipped">,
+  opaque: readonly Region[],
+): boolean {
+  if ((block.kind !== "Paragraph" && block.kind !== "Heading") || !block.found || block.skipped) {
+    return false;
+  }
+  return !overlapsComplexRegion(block.from, block.to, opaque);
+}
+
+/**
+ * 块区间与“复杂区域”（code / raw / comment）相交吗。
+ *
+ * `opaque` 按位置有序且互不重叠 ⇒ 二分找到第一个 `from >= from` 的区域，再往后扫到越过块尾
+ * 为止。**别写成从头线性扫**：那是每个格子一次、每次按键重建装饰一次，即 O(块 × 区域)；
+ * `markup-ranges` 里记过同样的教训（40k 字符实测 47ms/次）。
+ */
+function overlapsComplexRegion(from: number, to: number, opaque: readonly Region[]): boolean {
+  let lo = 0;
+  let hi = opaque.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (opaque[mid].from < from) lo = mid + 1;
+    else hi = mid;
+  }
+  for (let i = Math.max(0, lo - 1); i < opaque.length; i++) {
+    const region = opaque[i];
+    if (region.from >= to) break;
+    // 引号是 markup：见 isDirectlyEditableTextBlock 的说明（只有 code/raw/comment 算复杂）
+    if (region.kind === "string") continue;
+    if (region.to > from && region.from < to) return true;
+  }
+  return false;
+}
 
 /**
  * 把块表算成"当前文档下要覆盖哪些区间"（块表已是 CodeMirror 位置，见 block-plan.toBlockTable）。
@@ -25,7 +79,8 @@ import { applyBlockSelection } from "../../core/block-plan";
 export function buildBlockCovers(
   state: EditorState,
   opts: LivePreviewOptions,
-  _doc: string,
+  doc: string,
+  opaque: readonly Region[] = scanNonMarkupRegions(doc),
 ): BlockCover[] {
   const blocks = opts.blocks?.() ?? null;
   if (!blocks || blocks.length === 0) return [];
@@ -42,6 +97,11 @@ export function buildBlockCovers(
     state.selection.ranges.map((r) => ({ from: r.from, to: r.to, head: r.head })),
     docLength,
   );
+  // 普通正文与标题始终保留为真实文本：光标进出不会再触发整块图片/源码切换。
+  // 复杂 Paragraph / Heading（含代码、raw、注释等）不命中此规则，仍保留原来的可靠退路。
+  for (const cover of covers) {
+    if (isDirectlyEditableTextBlock(cover.block, opaque)) cover.revealed = true;
+  }
   return covers;
 }
 

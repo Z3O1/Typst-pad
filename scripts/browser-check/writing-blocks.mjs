@@ -1,9 +1,9 @@
 // 写作模式「块级渲染」验收（阶段 1，2026-09-15）：真实浏览器 + 真实输入，验的是
-// **非光标块显示成切片、光标所在块展开源码**这条链路。
+// **正文/标题是真实文本、复杂块显示成切片、光标进复杂块才展开源码**这条链路。
 //
 // 为什么要单独一套、而且要 `&blocks=1`：
-//   块切片会把非光标块整块换成图片，于是那块里的 `.cm-markup-heading`、公式 widget 等
-//   **在 DOM 里不复存在**（设计如此）。既有的 `wysiwyg.mjs`（209 项）断言的是"标记装饰"
+//   块切片会把复杂块整块换成图片，于是那块里的 `.cm-markup-heading`、公式 widget 等
+//   **在 DOM 里不复存在**（设计如此）。既有的 `wysiwyg.mjs`（291 项）断言的是"标记装饰"
 //   世界，把块渲染默认打开就会整片变红、把回归信号淹掉。所以：
 //     - `wysiwyg.mjs`          → 块渲染**默认关**（走公式/标记路径，回归网原样有效）
 //     - `writing-blocks.mjs`   → 带 `&blocks=1`，专验块级渲染
@@ -39,37 +39,45 @@ const LINES_TEXT = `Array.from(document.querySelectorAll(".cm-line")).map((el) =
 const CROPS = `document.querySelectorAll(".cm-block-crop").length`;
 const DARK_CROPS = `document.querySelectorAll(".cm-block-crop-dark").length`;
 
-/** 观察用的文档：标题 + 两段正文 + 列表 + 行间公式（覆盖多种块类型） */
+/** 观察用的文档：正文/标题直接编辑；列表等复杂块仍走局部切片。 */
 const DOC =
   "= 章节标题\n" +
   "\n" +
-  "第一段正文，用来当被切片盖住的那一块。\n" +
+  "第一段正文，始终保持可编辑文字。\n" +
   "\n" +
   "第二段正文。\n" +
   "\n" +
+  "- 被切片的列表项一\n" +
+  "\n" +
+  "- 被切片的列表项二\n" +
+  "\n" +
   "$ x^2 + y^2 = z^2 $\n" +
   "\n" +
-  "- 列表项\n";
+  "- 活动列表项\n";
 
-console.log("1) 非光标块显示成切片，光标所在块保持源码");
+console.log("1) 正文/标题持续可编辑，复杂块保留切片");
 await c.click(400, 300);
 await c.selectAll();
 await c.type(DOC);
 await new Promise((r) => setTimeout(r, 600));
-// 光标停在文档末尾（最后一块 = 列表项）→ 它应当是源码，其它块是切片
+// 光标停在文档末尾（最后一块 = 列表项）→ 它应当是源码；前面两个列表项是切片。
 const crops = await c.evaluate(CROPS);
 const linesText = await c.evaluate(LINES_TEXT);
 const contentText = await c.evaluate(CONTENT);
-check("非光标块被替换成切片（≥3 块）", crops >= 3, `实际 ${crops}`);
-check("光标所在块（列表项）保持源码形态", linesText.includes("列表项"), JSON.stringify(linesText));
+check("复杂块（两个列表项）仍有局部切片（≥2 块）", crops >= 2, `实际 ${crops}`);
 check(
-  "被切片盖住的正文不再是源码形态",
-  !linesText.includes("第一段正文"),
+  "光标所在块（活动列表项）保持源码形态",
+  linesText.includes("活动列表项"),
   JSON.stringify(linesText),
 );
-check("被切片盖住的标题不再是源码形态", !linesText.includes("章节标题"), JSON.stringify(linesText));
 check(
-  "标记只在源码形态里出现（标题的 `= ` 已随切片消失）",
+  "普通正文始终是真实文本",
+  linesText.includes("第一段正文") && linesText.includes("第二段正文"),
+  JSON.stringify(linesText),
+);
+check("标题始终是真实文本", linesText.includes("章节标题"), JSON.stringify(linesText));
+check(
+  "光标不在标题标记附近时 `= ` 保持隐藏",
   !contentText.includes("= 章节标题"),
   JSON.stringify(contentText),
 );
@@ -87,7 +95,7 @@ const geom = await c.evaluate(`(() => {
 check("切片铺满正文列宽（±2px）", !!geom && Math.abs(geom.w - geom.cw) <= 2, JSON.stringify(geom));
 check("切片高度为正且内层 SVG 有高度", !!geom && geom.h > 4 && geom.svgH > 4, JSON.stringify(geom));
 
-console.log("3) 点击切片 → 光标落到该块源码起点，该块展开、原活动块变成切片");
+console.log("3) 点击复杂块切片 → 该块展开、原活动复杂块变成切片");
 const firstCropY = await c.evaluate(`(() => {
   const r = document.querySelector(".cm-block-crop").getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -96,16 +104,12 @@ await c.click(firstCropY.x, firstCropY.y);
 await new Promise((r) => setTimeout(r, 400));
 const afterClick = await c.evaluate(LINES_TEXT);
 const cropsAfter = await c.evaluate(CROPS);
-check(
-  "被点的那一块展开了源码（标题可见）",
-  afterClick.includes("章节标题"),
-  JSON.stringify(afterClick),
-);
-check("原来的活动块（列表项）变成切片", !afterClick.includes("列表项"), JSON.stringify(afterClick));
+check("被点的列表块展开了源码", afterClick.includes("被切片的列表项"), JSON.stringify(afterClick));
+check("原来的活动列表项变成切片", !afterClick.includes("活动列表项"), JSON.stringify(afterClick));
 check("切片数量不变（换了一块而已）", cropsAfter === crops, `${crops} → ${cropsAfter}`);
 check(
-  "`= ` 标记重新出现在源码里（展开后能看到标记）",
-  afterClick.includes("= 章节标题"),
+  "点击复杂块不改变标题的局部标记状态",
+  !afterClick.includes("= 章节标题"),
   JSON.stringify(afterClick),
 );
 await c.screenshot(SHOT("writing-blocks-click"));
@@ -164,7 +168,7 @@ await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 const SENTENCE = "这一段用来把文档撑过写作模式块级渲染的窗口化阈值，观察滚动时的补渲行为。";
 // **段落之间要有空行**：没有空行的话整篇就是一个块，光标一进去它整篇都是"活动块"，
 // 切片数会是 0（实测踩过）。
-const longDoc = Array.from({ length: 120 }, (_, i) => `第 ${i} 段。` + SENTENCE.repeat(3)).join(
+const longDoc = Array.from({ length: 120 }, (_, i) => `- 第 ${i} 段。` + SENTENCE.repeat(3)).join(
   "\n\n",
 );
 await c.click(400, 300);
@@ -278,8 +282,10 @@ check(
   JSON.stringify(d2),
 );
 check(
-  `跨到下一块之后，上一块照旧变回切片（标题不在源码形态里）`,
-  !d2.revealed.includes("标题"),
+  // 新规则：正文/标题**始终**是真实文本（跨到下一块也不会变回切片），只有复杂块进/出时才切换形态。
+  // 所以这条改成"复杂块（列表项）仍然保持切片形态"，比原来那条"标题变回切片"更贴合现在的行为。
+  `跨到下一块之后，复杂块（列表项）仍是切片、正文是真实文本`,
+  !d2.revealed.includes("列表项") && d2.revealed.includes("第一段"),
   d2.revealed,
 );
 // ② ↑ 逐行走：第二块行首的上面是那条空行（不是上一块的行尾、更不是文档开头）
@@ -565,7 +571,7 @@ await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
 await c.selectAll();
 await c.type(
-  "第一段正文，用来验证编译失败时的取舍。\n\n第二段正文。\n\n第三段正文。\n\n第四段正文。\n\n第五段正文。\n",
+  "第一段正文，用来验证编译失败时的取舍。// 注\n\n第二段正文。// 注\n\n第三段正文。// 注\n\n第四段正文。// 注\n\n第五段正文。// 注\n",
 );
 await new Promise((r) => setTimeout(r, 900));
 const beforeErr = await c.evaluate(CROPS);
@@ -652,7 +658,11 @@ const consoleMark = c.events.length;
 await c.goto(`${URL_BLOCKS}&blockslow=1`);
 await c.click(400, 300);
 await c.selectAll();
-await c.type("第一段。\n\n第二段。\n\n第三段。\n");
+// 行尾带 `// 注`（= 注释区域 → 复杂块）：普通正文/标题现在是真实文本、不再切片（见 live-preview
+// 的 isDirectlyEditableTextBlock），而这一组验的是"切片会不会被延迟搞坏"，必须有切片在。
+// 用注释而不是列表项：桩把 `- ` 渲染成 `• `，会让下面"每个源码行要么在源码里、要么在切片里"
+// 的探针误判成丢行；注释不被渲染层改写，行文本原样出现在切片里。
+await c.type("第一段。// 注\n\n第二段。// 注\n\n第三段。// 注\n");
 await new Promise((r) => setTimeout(r, 1200)); // 等慢编译落地
 const slowCrops = await c.evaluate(CROPS);
 check("慢编译下切片仍然出来（块级渲染没被延迟搞坏）", slowCrops >= 2, `实际 ${slowCrops}`);
@@ -795,7 +805,8 @@ console.log(
 // 与第 12 组同一套判据（那段"旧表 + 新文档"的窗口），但把**常见编辑动作**逐个走一遍：
 // 每做完一个动作就立刻打一个标记词，然后检查「标记看得见 / 一行都没丢 / 不重复 / 切片还在 / 控制台干净」。
 const CONSOLE_MARK = c.events.length;
-const BASE_DOC = "第一段。\n\n第二段。\n\n第三段。\n";
+// 同样是"行尾注释 = 复杂块"当基线：这一段窗口里要有切片，才验得出"旧表 + 新文档"的错位。
+const BASE_DOC = "第一段。// 注\n\n第二段。// 注\n\n第三段。// 注\n";
 
 const home = () => c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home → 文首
 const end = () => c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 文末
@@ -908,7 +919,7 @@ const SCENARIOS = [
     name: "全选重打（换一份短文档）",
     act: async () => {
       await c.selectAll();
-      await c.type("短。\n\n又一段。\n");
+      await c.type("短。// 注\n\n又一段。// 注\n");
       // CDP 的整段 insertText 替换选区之后，浏览器会把插入的文本重新选中（真实打字是一键一字，
       // 不会遇到）—— 这里显式把光标收到文末，免得后面的标记把它整段替换掉
       await c.key("End", { code: "End", keyCode: 35, modifiers: 2 });
@@ -983,7 +994,7 @@ await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
 await c.selectAll();
-await c.type("第一段文字。\n\n第二段文字。\n\n第三段文字。\n");
+await c.type("第一段文字。// 注\n\n第二段文字。// 注\n\n第三段文字。// 注\n");
 await new Promise((r) => setTimeout(r, 900));
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // 光标回文首（第一块成为活动块）
 await new Promise((r) => setTimeout(r, 400));
@@ -1020,10 +1031,10 @@ if (dragCrops.length >= 2) {
   await c.drag(x1, y1, x2, y2);
   await new Promise((r) => setTimeout(r, 400));
   const sel = await c.evaluate(SELECTION);
-  const firstEnd = first.from + 6; // 第一块正文大致长度（"第一段文字。"= 6 字符）——只用来说明"确实从第一块里起手"
+  // 起手点落在第一张切片里（`- ` 前缀也算块内，所以不比字符偏移的绝对值），终点要压到最后一块
   check(
     `拖出的选区从第一块跨到最后一块（选区 ${sel.from}..${sel.to}，块起点 ${first.from} / ${last.from}）`,
-    sel.from <= firstEnd && sel.to >= last.from && sel.to > sel.from,
+    sel.from < last.from && sel.to >= last.from && sel.to > sel.from,
     JSON.stringify({ sel, first, last }),
   );
   check(
@@ -1071,7 +1082,7 @@ await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
 await c.selectAll();
 await c.type(
-  '#set text(size: 11pt)\n\n开头一段。\n\n```rust\nfn main() {\n    println!("hello");\n}\n```\n\n结尾一段。\n',
+  '#set text(size: 11pt)\n\n开头一段。// 注\n\n```rust\nfn main() {\n    println!("hello");\n}\n```\n\n结尾一段。// 注\n',
 );
 await new Promise((r) => setTimeout(r, 900));
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // 光标回文首 → 代码块是切片
@@ -1239,7 +1250,7 @@ await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
 await c.selectAll();
-await c.type("开头一段文字。\n\n第二段文字。\n\n第三段文字。\n");
+await c.type("开头一段文字。// 注\n\n第二段文字。// 注\n\n第三段文字。// 注\n");
 await new Promise((r) => setTimeout(r, 900));
 
 /** 光标画在哪儿：CM 的实测坐标 + 该位置在 DOM 里落在哪个元素上 */
@@ -1249,14 +1260,18 @@ const CARET_GEO = `(() => {
   const co = v.coordsAtPos(head);
   const host = document.querySelector(".cm-content").getBoundingClientRect();
   let domAt = "?";
+  let inLine = false;
   try {
     const p = v.domAtPos(head);
     const el = p.node.nodeType === 3 ? p.node.parentElement : p.node;
     domAt = el ? el.className || el.tagName : "null";
+    // 判据要往上找到 .cm-line：domAtPos 落在行内的高亮 span（语法高亮用 StyleModule
+    // 生成的类名，如 "ͼo ͼm"）或标记 span 上时，直接元素不是 .cm-line，但**仍在真实文本行里**。
+    inLine = !!(el && el.closest && el.closest(".cm-line"));
   } catch (e) { domAt = "ERR"; }
   return { head, line: JSON.stringify(v.state.doc.lineAt(head).text),
            x: co ? Math.round(co.left) : null, left: Math.round(host.left), right: Math.round(host.right),
-           domAt, crops: document.querySelectorAll(".cm-block-crop").length };
+           domAt, inLine, crops: document.querySelectorAll(".cm-block-crop").length };
 })()`;
 
 // 光标放到第二段行尾（那一段是切片），再按 Enter —— 新空行会落在"上一块切片的结尾"那个位置上
@@ -1288,7 +1303,7 @@ check(
 );
 check(
   "光标那个位置有真实 DOM（不是飘在 widget / 容器上）",
-  /cm-line/.test(afterEnter.domAt),
+  afterEnter.inLine === true,
   JSON.stringify(afterEnter.domAt),
 );
 await c.screenshot(SHOT("writing-blocks-enter-split-caret"));
@@ -1449,7 +1464,7 @@ await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 800));
 await c.click(400, 300);
 await c.selectAll();
-await c.type("第一段正文。\n\n第二段正文。\n\n第三段正文。\n");
+await c.type("第一段正文。// 注\n\n第二段正文。// 注\n\n第三段正文。// 注\n");
 await c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 文档末尾
 await new Promise((r) => setTimeout(r, 500));
 
@@ -1512,7 +1527,7 @@ await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 700));
 await c.click(400, 300);
 await c.selectAll();
-await c.type("第一段正文。\n\n第二段正文。\n\n第三段正文。\n\n第四段正文。\n");
+await c.type("第一段正文。// 注\n\n第二段正文。// 注\n\n第三段正文。// 注\n\n第四段正文。// 注\n");
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home → 第一块
 await new Promise((r) => setTimeout(r, 800));
 

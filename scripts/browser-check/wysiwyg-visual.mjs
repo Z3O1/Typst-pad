@@ -16,7 +16,14 @@
 //   - 行间公式块级 widget 是否居中、是否占据整行
 //   - 暗色主题下公式是否可见（typst 产物是黑字，需反色）
 import { connect, DEV_URL } from "./cdp.mjs";
-import { boot, createChecker, finish, loadFixtures, shotPath as SHOT } from "./harness.mjs";
+import {
+  boot,
+  createChecker,
+  finish,
+  loadFixtures,
+  replaceDocument,
+  shotPath as SHOT,
+} from "./harness.mjs";
 
 const { check, state } = createChecker();
 
@@ -207,9 +214,30 @@ await c.send("Emulation.setEmulatedMedia", {
 // 触发主题重算：应用监听 prefers-color-scheme 变化（仅"自动"态跟随）
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await c.click(400, 300);
-await c.type("暗色下的公式 $x^2 + y^2 = z^2$ 与块级\n\n$ frac(a,b) $\n");
-await c.waitFor(`document.querySelectorAll(".cm-math-widget").length === 1`, { timeout: 15000 });
+// **替换**整篇文档，别用 `c.type` 往光标处追加：页面重载后「启动时恢复上次内容」会把这套件前几组
+// 输入的文档从 localStorage 恢复回来，追加会让 DOM 里留下好几张旧公式 widget（2026-09-22 实测
+// 等到 6 张、`=== 1` 永远不成立）。替换后这组只有 1 张行内公式 widget + 1 张行间块 widget。
+await replaceDocument(c, "暗色下的公式 $x^2 + y^2 = z^2$ 与块级\n\n$ frac(a,b) $\n");
+// 这一组在"整页重新导航 + 切暗色 + 重新输入"之后等第一张行内公式 widget。2026-09-22 排查时
+// 偶发超时（同一条命令重跑就过），所以把超时放宽到 25s，并在超时时把页面现场打出来 ——
+// 只报一句 "waitFor 超时" 时看不出是"没渲染"还是"没输入进去"。
+await c
+  .waitFor(`document.querySelectorAll(".cm-math-widget").length === 1`, { timeout: 25000 })
+  .catch(async () => {
+    const diag = await c.evaluate(`(() => {
+      const el = document.querySelector(".cm-content");
+      const v = el && el.cmTile && el.cmTile.root && el.cmTile.root.view;
+      return {
+        widgets: document.querySelectorAll(".cm-math-widget").length,
+        blocks: document.querySelectorAll(".cm-math-block").length,
+        doc: v ? v.state.doc.toString() : "NO_VIEW",
+        text: el ? el.innerText : "NO_EL",
+        status: document.querySelector(".status-bar")?.innerText ?? "",
+        html: el ? el.innerHTML.slice(0, 200) : "",
+      };
+    })()`);
+    throw new Error(`暗色那组等不到行内公式 widget；现场 ${JSON.stringify(diag)}`);
+  });
 const dark = await c.evaluate(`(() => {
   const el = document.querySelector(".cm-math-widget, .cm-math-block");
   const svg = el.querySelector("svg");

@@ -334,11 +334,23 @@ describe("livePreview 扩展", () => {
     expect(host.querySelector(".cm-markup-raw")).not.toBeNull();
   });
 
-  it("光标进入构造内部 → 标记符号重新露出（可编辑源码）", () => {
+  it("光标在正文内部移动不露标记；只有靠近对应标记时才局部露出", () => {
     mount("= 标题\n正文");
     expect(text()).not.toContain("=");
-    view.dispatch({ selection: { anchor: 3 } }); // 落在"标题"内部
+    view.dispatch({ selection: { anchor: 3 } }); // 标题正文中间：样式不变，前导标记仍隐藏
+    expect(text()).not.toContain("=");
+    view.dispatch({ selection: { anchor: 2 } }); // 紧靠 `= ` 右侧
     expect(text()).toContain("= 标题");
+
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: "*粗体* 尾" },
+      selection: { anchor: 2 },
+    });
+    expect(text()).not.toContain("*"); // 强调正文中间不展开两端标记
+    view.dispatch({ selection: { anchor: 1 } }); // 靠近左标记
+    expect(text().match(/\*/g) ?? []).toHaveLength(1);
+    view.dispatch({ selection: { anchor: 3 } }); // 靠近右标记
+    expect(text().match(/\*/g) ?? []).toHaveLength(1);
   });
 });
 
@@ -395,7 +407,8 @@ describe("livePreview 代码块（``` 围栏）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 块级切片（写作模式的"渲染表面"）：非光标块显示成引擎画的切片，光标所在块保持源码
+// 块级切片（写作模式的"渲染表面"）：纯 markup 的正文/标题始终是真实文本，含代码/raw/注释的
+// 复杂块显示成引擎画的切片、光标进去才展开源码
 // 见 docs/文档模式渲染保真-调研.md 第三节。这里锁的是"装饰层"的行为，
 // 真实排版几何由 Rust 侧 block_geometry 的测试与浏览器验收负责。
 // ---------------------------------------------------------------------------
@@ -408,7 +421,8 @@ describe("livePreview 块级切片", () => {
   const crop = (from: number, to: number, opts: Record<string, unknown> = {}): Block => ({
     from,
     to,
-    kind: "Paragraph",
+    // 块级交互用例默认使用仍走切片的 ListItem；测试普通正文时显式传 Paragraph。
+    kind: "ListItem",
     found: true,
     noOutput: false,
     pages: 1,
@@ -505,14 +519,74 @@ describe("livePreview 块级切片", () => {
   };
   const content = () => host.querySelector(".cm-content")?.textContent ?? "";
 
-  it("非光标所在块被替换为切片，光标所在块保持源码", () => {
-    const doc = "aaa\n\nbbb\n\nccc\n";
-    // 三块：aaa[0,3) bbb[5,8) ccc[10,13)；光标落在 bbb 里
-    mount(doc, [crop(0, 3), crop(5, 8), crop(10, 13)], 6);
-    expect(crops().length).toBe(2); // 第一块与第三块
-    expect(content()).toContain("bbb"); // 光标所在块仍是源码
-    expect(content()).not.toContain("aaa");
-    expect(content()).not.toContain("ccc");
+  it("普通正文与标题始终是真实文本；列表等复杂块仍保留局部切片", () => {
+    const doc = "= 标题\n\n普通正文 *粗体*。\n\n- 列表项\n";
+    const headingTo = doc.indexOf("\n");
+    const paragraphFrom = doc.indexOf("普通正文");
+    const paragraphTo = doc.indexOf("\n", paragraphFrom);
+    const listFrom = doc.indexOf("- 列表项");
+    const listTo = doc.indexOf("\n", listFrom);
+    mount(
+      doc,
+      [
+        crop(0, headingTo, { kind: "Heading" }),
+        crop(paragraphFrom, paragraphTo, { kind: "Paragraph" }),
+        crop(listFrom, listTo, { kind: "ListItem" }),
+      ],
+      paragraphFrom + 3,
+    );
+    expect(crops().length).toBe(1);
+    expect(content()).toContain("标题");
+    expect(content()).toContain("普通正文");
+    expect(content()).not.toContain("列表项");
+    expect(host.querySelector(".cm-markup-heading-1")).not.toBeNull();
+    expect(host.querySelector(".cm-markup-strong")).not.toBeNull();
+
+    const before = content();
+    view.dispatch({ selection: { anchor: paragraphFrom + 1 } });
+    expect(crops().length).toBe(1);
+    expect(content()).toBe(before); // 正文内移动光标不再切换整块显示形态
+    // 光标移到**另一个块**（列表）里：正文块仍是真实文本（列表成为活动块、展开成源码）
+    view.dispatch({ selection: { anchor: listFrom + 2 } });
+    expect(crops().length).toBe(0);
+    expect(content()).toContain("普通正文");
+  });
+
+  it("含代码表达式的 Paragraph 保守保留切片，不误当普通正文", () => {
+    // 真实触发是"行内混了 `#` 表达式"：整行只有 `#image(...)` 时 Rust 侧的分块是 Code
+    // （见 block_geometry 的 LINE_ONLY_KINDS），只有混在段落里才是 kind=Paragraph。
+    const doc = '普通正文里混着 #image("x.png") 与代码。\n\n另一段。\n';
+    const complexTo = doc.indexOf("\n");
+    const secondFrom = doc.indexOf("另一段");
+    const secondTo = doc.indexOf("\n", secondFrom);
+    mount(
+      doc,
+      [
+        crop(0, complexTo, { kind: "Paragraph" }),
+        crop(secondFrom, secondTo, { kind: "Paragraph" }),
+      ],
+      secondFrom + 2,
+    );
+    expect(crops().length).toBe(1);
+    expect(content()).not.toContain("#image");
+    expect(content()).toContain("另一段");
+  });
+
+  it('正文里的直引号是 markup：一对 `"` 不把整段退回切片（审查发现）', () => {
+    // lexer 把 `"` 登记成 string（为了让 `"$5"` 不当公式），但 markup 里的引号是纯 markup；
+    // 若把它算作复杂内容，写了一句 `他说"你好"` 的正文就会整段变回切片。
+    const doc = '他说"你好"，然后走了。\n\n第二段。\n';
+    const firstTo = doc.indexOf("\n");
+    const secondFrom = doc.indexOf("第二段");
+    const secondTo = doc.indexOf("\n", secondFrom);
+    mount(
+      doc,
+      [crop(0, firstTo, { kind: "Paragraph" }), crop(secondFrom, secondTo, { kind: "Paragraph" })],
+      2,
+    );
+    expect(crops().length).toBe(0);
+    expect(content()).toContain("你好");
+    expect(content()).toContain("第二段");
   });
 
   it("blocks 为 null（源码模式 / 后端不支持）时行为与加这个功能前一致：不动装饰", () => {

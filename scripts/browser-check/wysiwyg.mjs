@@ -264,17 +264,26 @@ check(
 );
 await c.screenshot(SHOT("wysiwyg-7-markup"));
 
-console.log("7) 光标进入标题 → 标记符号重新露出（可编辑源码）");
-const headingRect = await c.evaluate(`(() => {
-  const r = document.querySelector(".cm-line").getBoundingClientRect();
-  return { x: r.left + 30, y: r.top + r.height / 2 };
+console.log("7) 标题正文持续保持样式，只在靠近标记时局部露出语法");
+await c.evaluate(`(() => {
+  const view = document.querySelector(".cm-content").cmTile.root.view;
+  view.dispatch({ selection: { anchor: 3 } });
 })()`);
-await c.click(headingRect.x, headingRect.y);
+const headingMiddle = await c.evaluate(`document.querySelectorAll(".cm-line")[0].innerText.trim()`);
+check(
+  "光标在标题正文中间时 `= ` 仍隐藏",
+  !headingMiddle.startsWith("="),
+  JSON.stringify(headingMiddle),
+);
+await c.evaluate(`(() => {
+  const view = document.querySelector(".cm-content").cmTile.root.view;
+  view.dispatch({ selection: { anchor: 2 } });
+})()`);
 await c.waitFor(`document.querySelectorAll(".cm-line")[0].innerText.trim().startsWith("=")`, {
   timeout: 5000,
 });
 const headingText = await c.evaluate(`document.querySelectorAll(".cm-line")[0].innerText.trim()`);
-check("标题行的 `= ` 重新可见", headingText.startsWith("="), JSON.stringify(headingText));
+check("光标靠近标题标记时 `= ` 局部可见", headingText.startsWith("="), JSON.stringify(headingText));
 await c.screenshot(SHOT("wysiwyg-8-markup-caret"));
 
 console.log("8) 链接文字：隐藏 #link(...) 与方括号，文字带链接样式");
@@ -664,10 +673,15 @@ check("Ctrl+B 加粗（插入 Typst 标记）", bold.includes("*要加粗的文�
 await c.key("1", { code: "Digit1", keyCode: 49, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 300));
 const heading = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+const headingDoc = await c.evaluate(
+  `document.querySelector(".cm-content").cmTile.root.view.state.doc.toString()`,
+);
 check(
-  "Ctrl+1 标题（行首加 `= `，写作模式下立刻变大）",
-  heading.trim().startsWith("= "),
-  JSON.stringify(heading),
+  // 新规则（见 live-preview 的 markup-decorations）：命令把 `= ` 写进了文档，但标记只在光标
+  // 触碰它时才露出 —— 所以判据是"文档行首有 `= `、而 innerText 里没有"，不是 innerText 有标记。
+  "Ctrl+1 标题（行首加 `= `，标记按新规则隐藏、正文仍是真实文本）",
+  headingDoc.startsWith("= ") && !heading.trim().startsWith("= "),
+  JSON.stringify({ heading, headingDoc }),
 );
 const headingSize = await c.evaluate(`(() => {
   const el = document.querySelector(".cm-markup-heading");

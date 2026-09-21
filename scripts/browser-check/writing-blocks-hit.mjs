@@ -100,6 +100,9 @@ async function caret() {
 let totalClicks = 0;
 let totalMatched = 0;
 let totalSkipped = 0;
+/** 全场真的出现过多少张切片：**必须无条件断言 > 0** —— 否则"复杂块再也不切片"这种真回归会让
+ *  每篇都走 `clicked === 0` 的分支、两条断言都判绿（计数还是恒定的 3×N，守卫抓不到）。 */
+let sawCrops = 0;
 
 for (const fx of withProbes) {
   const picked = PROBE_PICK
@@ -116,6 +119,10 @@ for (const fx of withProbes) {
     .waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 })
     .catch(() => {});
   await new Promise((r) => setTimeout(r, 350));
+  const initialCrops = await c.evaluate(
+    `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
+  );
+  sawCrops += initialCrops.length;
 
   // 按块分组（每块若干探针），轮转下单：点完一块它就变源码，所以下一次点**另一块**
   const byBlock = new Map();
@@ -191,8 +198,10 @@ for (const fx of withProbes) {
   }
 
   check(
-    `${fx.name}：${clicked} 次点击全部落在真实几何给出的字符上`,
-    clicked > 0 && matched === clicked,
+    clicked > 0
+      ? `${fx.name}：${clicked} 次复杂块点击全部落在真实几何给出的字符上`
+      : `${fx.name}：纯正文/标题没有生成可点击切片`,
+    clicked > 0 ? matched === clicked : initialCrops.length === 0,
     `命中 ${matched}/${clicked}`,
   );
   check(
@@ -207,13 +216,21 @@ for (const fx of withProbes) {
   );
   const activeFrom = byteToPos(fx.doc, fx.blocks[activeIndex].start);
   check(
-    "被点的块回到源码形态、其余块仍是切片",
-    !cropsNow.includes(activeFrom) && cropsNow.length > 0,
+    clicked > 0 ? "被点的复杂块回到源码形态" : "纯正文场景始终保持真实文本",
+    clicked > 0 ? !cropsNow.includes(activeFrom) : cropsNow.length === 0,
     JSON.stringify({ cropsNow, activeFrom }),
   );
 
   await c.screenshot(SHOT(`writing-blocks-hit-${fx.name}`));
 }
+
+// **无条件**的一条：整场至少真的量到过一张切片。没有它，一个"复杂块全都不再切片"的回归会让
+// 上面两条三元断言一起判绿（它们的分支各自算 1 项，计数守卫看不出来）。
+check(
+  "全场至少有一篇夹具真的生成了可点击切片（否则本套等于没验点击定位）",
+  sawCrops > 0,
+  `初始切片合计 ${sawCrops} 张`,
+);
 
 finish(
   `点击合计：命中 ${totalMatched}/${totalClicks}，跳过 ${totalSkipped}（探针点不在视口内）；通过 ${state.passed} 项检查\n` +

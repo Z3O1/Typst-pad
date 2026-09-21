@@ -53,14 +53,10 @@ export function buildMarkupDecorations(
       }
       continue;
     }
-    // 「整个构造」= 标记 + 正文的并集。标题与列表只有**前导**标记：若只取标记范围
-    // （如 `= ` 的 [0,2)），光标落在正文里就判不出"在构造内"，`= ` 不会露出（实测踩过）；
-    // 粗体/斜体/行内代码的标记分列两侧，取并集同样正确。
+    // 「整个构造」= 标记 + 正文的并集，只用于判断它是否已经被块切片覆盖。
     const from = Math.min(item.content.from, ...item.markers.map((m) => m.from));
     const to = Math.max(item.content.to, ...item.markers.map((m) => m.to));
     if (insideCovered(from, to, covered)) continue; // 整块已由切片呈现，别再叠标记隐藏
-    // 选区进入整个构造（含标记）→ 露出标记符号，便于编辑源码
-    const reveal = selectionTouchesRange({ from, to }, selections);
     // 标题额外带级别类（字号按级别递增，见 livePreviewTheme）
     const cls =
       item.kind === "heading"
@@ -73,9 +69,11 @@ export function buildMarkupDecorations(
     if (item.content.to > item.content.from) {
       decorations.push(Decoration.mark({ class: cls }).range(item.content.from, item.content.to));
     }
-    if (reveal) continue;
     for (const marker of item.markers) {
       if (marker.from >= marker.to) continue;
+      // 只在光标/选区真正靠近这一枚标记时显示它。正文内部始终保持排版样式，避免光标
+      // 在标题或强调文字中移动时，两端定界符一起出现、引起可见文字横向跳动。
+      if (selectionTouchesRange(marker, selections)) continue;
       decorations.push(
         marker.text !== undefined
           ? Decoration.replace({ widget: new TextWidget(marker.text) }).range(

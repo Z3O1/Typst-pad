@@ -1,9 +1,9 @@
-// 写作模式「块级切片几何等价」验收：用**真实 typst 产物**断言"切片摞起来 == 原版式"。
+// 写作模式「局部切片几何」验收：正文/标题是真实文本，只有复杂块继续使用真实 typst 切片。
 //
 // 与 `writing-blocks.mjs` 的分工：
 //   * `writing-blocks.mjs`          —— 桩产物，验**交互**（切片出现 / 光标进出 / 点击回源码 / 窗口化补渲）；
 //   * `writing-blocks-visual.mjs`   —— **真实产物**，验**几何**（切片是按真实排版切下来的，
-//                                      摞起来的高度、列宽、首尾相接关系与引擎的版式一致）。
+//                                      列宽、逐块高度、没有被拉伸、纵向位置与引擎的版式一致）。
 //
 // 链路（与 `wysiwyg-visual.mjs` 的公式夹具同款）：
 //   1) `npm run fixtures:blocks` —— Rust 侧 `dump_block_fixtures`（#[ignore] 按需测试）把每篇样例
@@ -34,6 +34,16 @@ console.log(`夹具：${fixtures.length} 篇真实块级切片产物（来自 Ru
 const c = await connect();
 await boot(c, URL_BLOCKS, { blockFixtures: fixtures, settleMs: 600 });
 
+/** 与前端第一阶段同口径：纯 markup 的 Paragraph / Heading 直接编辑；不确定语法保留切片。 */
+const directlyEditable = (fx, block) => {
+  if (!block.found || block.skipped || !["Paragraph", "Heading"].includes(block.kind)) return false;
+  const from = byteToPos(fx.doc, block.start);
+  const to = byteToPos(fx.doc, block.end);
+  // 只有 code / raw / comment 算复杂：markup 里的直引号是 typst 的弯引号（lexer 登记的 string
+  // 区域），不算 —— 见 live-preview/block-decorations.ts 的 isDirectlyEditableTextBlock。
+  return !/(#|`|\/\/|\/\*)/.test(fx.doc.slice(from, to));
+};
+
 for (const fx of fixtures) {
   console.log(`\n=== ${fx.name}（${fx.blocks.length} 块 / 列宽 ${fx.contentWidthPt}pt）`);
   // 逐篇输入同一份文档（桩按文档原文命中夹具）
@@ -47,6 +57,7 @@ for (const fx of fixtures) {
       const r = el.getBoundingClientRect();
       const svg = el.querySelector("svg");
       return {
+        from: Number(el.dataset.blockFrom),
         x: r.left - cr.left,
         y: r.top - cr.top,
         w: r.width,
@@ -60,87 +71,63 @@ for (const fx of fixtures) {
   })()`);
 
   const found = fx.blocks.filter((b) => b.svg && b.heightPt > 0.5);
-  // 光标停在文档末尾 → 最后一块是"活动块"（源码形态），其余都是切片
-  const expectCrops = found.length - 1;
+  const last = fx.blocks.at(-1);
+  const expected = found.filter((b) => b !== last && !directlyEditable(fx, b));
+  const expectedFrom = expected.map((b) => byteToPos(fx.doc, b.start));
+  const actualFrom = measured.crops.map((b) => b.from);
   check(
-    `切片数量 = 可渲染块数 − 1（活动块显示源码）：${measured.crops.length} / 期望 ${expectCrops}`,
-    measured.crops.length === expectCrops,
-    JSON.stringify({ crops: measured.crops.length, expect: expectCrops }),
+    `切片只覆盖复杂块：${measured.crops.length} / 期望 ${expected.length}`,
+    JSON.stringify(actualFrom) === JSON.stringify(expectedFrom),
+    JSON.stringify({ actualFrom, expectedFrom }),
   );
-  if (measured.crops.length === 0) continue;
-
-  // pt → px 换算因子：由切片实测宽度 / 夹具列宽推出（夹具在 371.25pt 下编译，
-  // 浏览器里按 100% 列宽渲染 —— 不假设窗口尺寸，自己算比例）
-  const factor = measured.crops[0].w / fx.contentWidthPt;
+  // pt → px 换算因子由复杂切片宽度推出；没有切片的纯正文场景取 CSS 的 4/3。
+  const factor = measured.crops[0]?.w ? measured.crops[0].w / fx.contentWidthPt : 4 / 3;
   check(
-    `切片铺满正文列宽（±2px）`,
-    Math.abs(measured.crops[0].w - measured.columnWidth) <= 2,
-    JSON.stringify({
-      crop: measured.crops[0].w,
-      column: measured.columnWidth,
-    }),
+    `复杂切片铺满正文列宽（±2px；无切片时不适用）`,
+    measured.crops.every((crop) => Math.abs(crop.w - measured.columnWidth) <= 2),
+    JSON.stringify({ crops: measured.crops.map((x) => x.w), column: measured.columnWidth }),
   );
 
-  // ① 每块高度 = 夹具高度 × 因子（切片按真实排版切出来，且没有被拉伸）
   let worstHeight = 0;
   let worstRatio = 0;
-  for (let i = 0; i < measured.crops.length; i++) {
-    const b = found[i];
-    const expected = b.heightPt * factor;
-    worstHeight = Math.max(worstHeight, Math.abs(measured.crops[i].h - expected));
-    const domRatio = measured.crops[i].h / measured.crops[i].w;
-    const fixtureRatio = b.heightPt / b.widthPt;
-    worstRatio = Math.max(worstRatio, Math.abs(domRatio / fixtureRatio - 1));
+  // 纵向位置：旧版有一条"切片总跨度 = 真实版式跨度"，正文不再切片后它失去前提被删掉；
+  // 这里按"以首张复杂切片为基准的 y 偏移"补回覆盖（y 之前只量不用）。
+  const yBase = expected[0];
+  const yBaseCrop = yBase
+    ? measured.crops.find((crop) => crop.from === byteToPos(fx.doc, yBase.start))
+    : undefined;
+  let worstY = 0;
+  for (const crop of measured.crops) {
+    const block = expected.find((x) => byteToPos(fx.doc, x.start) === crop.from);
+    if (!block) continue;
+    worstHeight = Math.max(worstHeight, Math.abs(crop.h - block.heightPt * factor));
+    worstRatio = Math.max(
+      worstRatio,
+      Math.abs(crop.h / crop.w / (block.heightPt / block.widthPt) - 1),
+    );
+    if (yBase && yBaseCrop) {
+      worstY = Math.max(worstY, Math.abs(crop.y - yBaseCrop.y - (block.yPt - yBase.yPt) * factor));
+    }
   }
+  check(`复杂切片高度与真实排版一致（最大偏差 ${worstHeight.toFixed(2)}px）`, worstHeight <= 2.5);
+  check(`复杂切片没有被拉伸（最大偏差 ${(worstRatio * 100).toFixed(1)}%）`, worstRatio <= 0.02);
+  check(`复杂切片纵向位置与真实排版一致（最大偏差 ${worstY.toFixed(2)}px）`, worstY <= 2.5);
   check(
-    `每块高度与真实排版一致（最大偏差 ${worstHeight.toFixed(2)}px，因子 ${factor.toFixed(3)}）`,
-    worstHeight <= 2.5,
-    `最大偏差 ${worstHeight.toFixed(2)}px`,
-  );
-  check(
-    `切片没有被拉伸（高宽比与产物一致，最大偏差 ${(worstRatio * 100).toFixed(1)}%）`,
-    worstRatio <= 0.02,
-  );
-
-  // ② 相邻切片首尾相接（真实版式里各块按 y 序中点切带 ⇒ 摞起来不留缝、不重叠）
-  let worstGap = 0;
-  for (let i = 1; i < measured.crops.length; i++) {
-    const gap = measured.crops[i].y - (measured.crops[i - 1].y + measured.crops[i - 1].h);
-    worstGap = Math.max(worstGap, Math.abs(gap));
-  }
-  check(
-    `相邻切片首尾相接（最大缝/重叠 ${worstGap.toFixed(2)}px）`,
-    worstGap <= 2.5,
-    `${worstGap.toFixed(2)}px`,
+    "复杂切片左缘对齐正文列左缘（±2px）",
+    measured.crops.every((crop) => Math.abs(crop.x) <= 2),
+    JSON.stringify(measured.crops.map((x) => x.x)),
   );
 
-  // ③ 首尾跨度 = 夹具首块顶 → 末块底（切片摞起来的高度总和 == 原版式的纵向跨度）
-  const spanPt = found[found.length - 2].yPt + found[found.length - 2].heightPt - found[0].yPt;
-  const domSpan =
-    measured.crops[measured.crops.length - 1].y +
-    measured.crops[measured.crops.length - 1].h -
-    measured.crops[0].y;
-  check(
-    `切片总跨度 = 真实版式跨度（DOM ${domSpan.toFixed(1)}px / 期望 ${(spanPt * factor).toFixed(1)}px）`,
-    Math.abs(domSpan - spanPt * factor) <= 3,
-  );
-
-  // ④ 切片左缘对齐正文列（横向切的是"正文列"而不是墨迹 → 列表缩进、居中公式都不丢）
-  check(
-    "切片左缘对齐正文列左缘（±2px）",
-    Math.abs(measured.crops[0].x) <= 2,
-    `左缘偏移 ${measured.crops[0].x.toFixed(2)}px`,
-  );
-
-  // ⑤ 被盖住的块确实不在源码形态里（按 .cm-line 判 —— 切片 SVG 里也有渲染后的文字）
   const linesText = await c.evaluate(
     `Array.from(document.querySelectorAll(".cm-line")).map((el) => el.textContent).join("\\n")`,
   );
-  const covered = found[0];
-  const coveredSrc = fx.doc.slice(covered.start, covered.end);
+  const covered = expected[0];
+  const coveredSrc = covered
+    ? fx.doc.slice(byteToPos(fx.doc, covered.start), byteToPos(fx.doc, covered.end))
+    : "";
   check(
-    "被切片盖住的第一块不是源码形态",
-    !linesText.includes(coveredSrc.replace(/^=+\s*/, "")),
+    covered ? "被切片盖住的复杂块不是源码形态" : "纯正文场景仍有可编辑文本",
+    covered ? !linesText.includes(coveredSrc.replace(/^=+\s*/, "")) : linesText.trim().length > 0,
     JSON.stringify(linesText.slice(0, 80)),
   );
 

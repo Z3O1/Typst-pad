@@ -16,6 +16,7 @@ import { connect } from "./cdp.mjs";
 import {
   BLOCKS_URL,
   boot,
+  byteToPos,
   createChecker,
   finish,
   loadFixtures,
@@ -31,6 +32,15 @@ console.log(`场景夹具：${fixtures.length} 篇（来自 Rust compile_blocks 
 const c = await connect();
 await boot(c, BLOCKS_URL, { blockFixtures: fixtures, settleMs: 600 });
 
+const directlyEditable = (fx, block) => {
+  if (!block.found || block.skipped || !["Paragraph", "Heading"].includes(block.kind)) return false;
+  const from = byteToPos(fx.doc, block.start);
+  const to = byteToPos(fx.doc, block.end);
+  // 与前端同口径：只有 code / raw / comment 算复杂；markup 里的直引号（lexer 登记的 string
+  // 区域）不算（见 live-preview/block-decorations.ts 的 isDirectlyEditableTextBlock）。
+  return !/(#|`|\/\/|\/\*)/.test(fx.doc.slice(from, to));
+};
+
 /** 输入一篇文档（替换整篇），返回量到的切片几何 */
 async function loadScene(doc) {
   await replaceDocument(c, doc);
@@ -41,6 +51,7 @@ async function loadScene(doc) {
       const r = el.getBoundingClientRect();
       const svg = el.querySelector("svg");
       return {
+        from: Number(el.dataset.blockFrom),
         y: r.top - cr.top,
         w: r.width,
         h: r.height,
@@ -63,27 +74,41 @@ for (const fx of fixtures) {
   console.log(`\n=== 场景：${fx.name}`);
   const found = fx.blocks.filter((b) => b.svg && b.heightPt > 0.5);
   const m = await loadScene(fx.doc);
-  const expected = found.length - 1; // 光标停在文末 → 最后一块是活动块（源码形态）
+  const last = fx.blocks.at(-1);
+  const expected = found.filter((b) => b !== last && !directlyEditable(fx, b));
+  const expectedFrom = expected.map((b) => byteToPos(fx.doc, b.start));
+  const actualFrom = m.crops.map((b) => b.from);
   check(
-    `切片数 = 可渲染块 − 1：${m.crops.length}/${expected}`,
-    m.crops.length === expected,
-    JSON.stringify({ crops: m.crops.length, expected }),
+    `复杂切片数与范围正确：${m.crops.length}/${expected.length}`,
+    JSON.stringify(actualFrom) === JSON.stringify(expectedFrom),
+    JSON.stringify({ actualFrom, expectedFrom }),
   );
-  if (m.crops.length > 0) {
-    const factor = m.crops[0].w / fx.contentWidthPt;
-    check("切片铺满正文列宽（±2px）", Math.abs(m.crops[0].w - m.columnWidth) <= 2);
-    // 每块高度与真实排版一致（切片没被拉伸）
-    let worst = 0;
-    for (let i = 0; i < m.crops.length; i++) {
-      worst = Math.max(worst, Math.abs(m.crops[i].h - found[i].heightPt * factor));
-    }
-    check(`每块高度与真实排版一致（最大偏差 ${worst.toFixed(2)}px）`, worst <= 2.5);
-    let worstGap = 0;
-    for (let i = 1; i < m.crops.length; i++) {
-      worstGap = Math.max(worstGap, Math.abs(m.crops[i].y - (m.crops[i - 1].y + m.crops[i - 1].h)));
-    }
-    check(`相邻切片首尾相接（最大缝 ${worstGap.toFixed(2)}px）`, worstGap <= 2.5);
+  // pt → px 换算因子由第一张复杂切片的宽度推出；纯正文场景没有切片，取 CSS 的 4/3（不参与断言）
+  const factor = m.crops[0]?.w ? m.crops[0].w / fx.contentWidthPt : 4 / 3;
+  check(
+    "复杂切片铺满正文列宽（±2px；无切片时不适用）",
+    m.crops.every((crop) => Math.abs(crop.w - m.columnWidth) <= 2),
+  );
+  let worst = 0;
+  for (const crop of m.crops) {
+    const block = expected.find((b) => byteToPos(fx.doc, b.start) === crop.from);
+    if (block) worst = Math.max(worst, Math.abs(crop.h - block.heightPt * factor));
   }
+  check(`复杂切片高度与真实排版一致（最大偏差 ${worst.toFixed(2)}px）`, worst <= 2.5);
+  // 原来这里是「正文/标题不生成整块切片」——它与上一条由同一个谓词互补切分，是恒真断言
+  // （切片集合已经由 `复杂切片数与范围正确` 钉死）。换成纵向位置的断言：补上旧版"切片总跨度
+  // = 真实版式跨度"那条断言随旧前提一起删掉之后留下的缺口（y 一直只是量了没人用）。
+  const yBase = expected[0];
+  const yBaseCrop = yBase
+    ? m.crops.find((crop) => crop.from === byteToPos(fx.doc, yBase.start))
+    : undefined;
+  let worstY = 0;
+  for (const crop of m.crops) {
+    const block = expected.find((b) => byteToPos(fx.doc, b.start) === crop.from);
+    if (!block || !yBase || !yBaseCrop) continue;
+    worstY = Math.max(worstY, Math.abs(crop.y - yBaseCrop.y - (block.yPt - yBase.yPt) * factor));
+  }
+  check(`复杂切片纵向位置与真实排版一致（最大偏差 ${worstY.toFixed(2)}px）`, worstY <= 2.5);
   check("状态栏没有脚本错误", !m.status.includes("脚本错误"), JSON.stringify(m.status));
   await c.screenshot(SHOT(`scene-${fx.name.replace(/[（）()]/g, "")}`));
   summary.push({
@@ -94,6 +119,15 @@ for (const fx of fixtures) {
     活动块行数: m.lineCount,
   });
 }
+
+// 9 篇场景里有 5 篇是纯正文/标题（0 张复杂切片），逐篇的几何断言在空数组上是恒真的。
+// 这条**无条件**的聚合断言把"该有切片却一张都没有"钉住（否则整套几何验收可以静默空转）。
+const totalCrops = summary.reduce((n, s) => n + s.切片, 0);
+check(
+  `至少一个场景真的量到了复杂切片（合计 ${totalCrops} 张）`,
+  totalCrops > 0,
+  `合计 ${totalCrops} 张`,
+);
 
 // 标题字号梯度必须跟 typst 一致（用户报「在标题所在块，标题就会变的很大」）：
 // 切片是引擎画的（h1 = 1.4em、h2 = 1.2em、h3 及以下 = 1.0em，只加粗），光标进标题块时那一块
@@ -264,9 +298,9 @@ if (!setDoc) {
     JSON.stringify(a),
   );
   check(
-    // 标题那一块是切片（图片），它的文字**不会**出现在 innerText 里 —— 只能数切片
-    "正文与标题照常渲染（标题那张切片还在，正文是源码形态）",
-    a.text.includes("这一段用来") && a.crops >= 1,
+    "正文与标题照常显示为可编辑文字，没有退回整块切片",
+    // 标题 `= 设置对照` 在正文里渲染成"设置对照"（标记被隐藏）——别再断言夹具名字
+    a.text.includes("这一段用来") && a.text.includes("设置对照") && a.crops === 0,
     JSON.stringify(a),
   );
   await c.screenshot(SHOT("scene-hidden-set"));
@@ -308,7 +342,7 @@ if (plain && bigger) {
   check("找到 #set 对照的两篇夹具", false, "夹具缺失");
 }
 
-// 最后一个场景上走一遍"编辑 → 重编译 → 切片更新"与模式切换
+// 最后一个场景上走一遍“直接编辑正文”与模式切换
 console.log("\n=== 编辑与模式切换（在最后一个场景上）");
 const before = await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`);
 await c.click(400, 300);
@@ -316,7 +350,18 @@ await c.key("End", { code: "End", keyCode: 35 }); // 光标留在文末的活动
 await c.type("补充一句，观察重编译后切片数量与几何是否稳定。");
 await new Promise((r) => setTimeout(r, 900));
 const after = await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`);
-check(`编辑后切片仍然存在（${before} → ${after}）`, after >= 1);
+const editedText = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+check(
+  `直接编辑正文后仍保持真实文本（切片 ${before} → ${after}）`,
+  // 编辑之后文档不再与夹具逐字相同 → 桩改用 fakeBlocks：那一行 `#set …` 在桩里是"含代码的
+  // Paragraph"（复杂块）因而会被切片，所以这里允许 ≤1 张；判据的关键是**正文与标题都还能在
+  // DOM 里读到**（仍是真实文本、没被切片盖掉）。
+  editedText.includes("补充一句") &&
+    editedText.includes("这一段用来") &&
+    editedText.includes("设置对照") &&
+    after <= 1,
+  JSON.stringify({ before, after, editedText: editedText.slice(-80) }),
+);
 check(
   "编辑没有把页面打坏（无脚本错误）",
   !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"),
@@ -324,14 +369,22 @@ check(
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 700));
 check(
-  "Ctrl+/ 切到源码模式：切片消失",
+  "Ctrl+E 切到源码模式：局部切片全部消失",
   (await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`)) === 0,
 );
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 900));
+const backToWrite = await c.evaluate(`(() => ({
+  crops: document.querySelectorAll(".cm-block-crop").length,
+  text: document.querySelector(".cm-content").innerText,
+}))()`);
 check(
-  "切回写作模式：切片回来",
-  (await c.evaluate(`document.querySelectorAll(".cm-block-crop").length`)) >= 1,
+  "切回写作模式：正文仍是可编辑文字",
+  // 同上：允许 ≤1 张（`#set` 那行在桩里算复杂块），正文文字必须在 DOM 里读得到
+  backToWrite.crops <= 1 &&
+    backToWrite.text.includes("补充一句") &&
+    backToWrite.text.includes("这一段用来"),
+  JSON.stringify(backToWrite),
 );
 
 console.log("\n场景汇总：");

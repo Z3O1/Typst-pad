@@ -35,11 +35,11 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 
 // 套件清单（期望项数写在这里，跑完直接对账；改套件计数时**两处一起改**）
 const SUITES = [
-  ["wysiwyg.mjs", 290],
+  ["wysiwyg.mjs", 291],
   ["writing-blocks.mjs", 133],
-  ["writing-blocks-visual.mjs", 76],
-  ["writing-blocks-hit.mjs", 27],
-  ["writing-mode-scenes.mjs", 64],
+  ["writing-blocks-visual.mjs", 67],
+  ["writing-blocks-hit.mjs", 28],
+  ["writing-mode-scenes.mjs", 65],
   ["wysiwyg-visual.mjs", 20],
   // 计算样式守卫（box-sizing 作用域 / CSS 源序）：两种回归都躲得过交互断言，只能按 computed style 量
   ["computed-style.mjs", 17],
