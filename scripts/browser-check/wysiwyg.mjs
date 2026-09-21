@@ -264,17 +264,26 @@ check(
 );
 await c.screenshot(SHOT("wysiwyg-7-markup"));
 
-console.log("7) 光标进入标题 → 标记符号重新露出（可编辑源码）");
-const headingRect = await c.evaluate(`(() => {
-  const r = document.querySelector(".cm-line").getBoundingClientRect();
-  return { x: r.left + 30, y: r.top + r.height / 2 };
+console.log("7) 标题正文持续保持样式，只在靠近标记时局部露出语法");
+await c.evaluate(`(() => {
+  const view = document.querySelector(".cm-content").cmTile.root.view;
+  view.dispatch({ selection: { anchor: 3 } });
 })()`);
-await c.click(headingRect.x, headingRect.y);
+const headingMiddle = await c.evaluate(`document.querySelectorAll(".cm-line")[0].innerText.trim()`);
+check(
+  "光标在标题正文中间时 `= ` 仍隐藏",
+  !headingMiddle.startsWith("="),
+  JSON.stringify(headingMiddle),
+);
+await c.evaluate(`(() => {
+  const view = document.querySelector(".cm-content").cmTile.root.view;
+  view.dispatch({ selection: { anchor: 2 } });
+})()`);
 await c.waitFor(`document.querySelectorAll(".cm-line")[0].innerText.trim().startsWith("=")`, {
   timeout: 5000,
 });
 const headingText = await c.evaluate(`document.querySelectorAll(".cm-line")[0].innerText.trim()`);
-check("标题行的 `= ` 重新可见", headingText.startsWith("="), JSON.stringify(headingText));
+check("光标靠近标题标记时 `= ` 局部可见", headingText.startsWith("="), JSON.stringify(headingText));
 await c.screenshot(SHOT("wysiwyg-8-markup-caret"));
 
 console.log("8) 链接文字：隐藏 #link(...) 与方括号，文字带链接样式");

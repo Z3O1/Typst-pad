@@ -39,37 +39,43 @@ const LINES_TEXT = `Array.from(document.querySelectorAll(".cm-line")).map((el) =
 const CROPS = `document.querySelectorAll(".cm-block-crop").length`;
 const DARK_CROPS = `document.querySelectorAll(".cm-block-crop-dark").length`;
 
-/** 观察用的文档：标题 + 两段正文 + 列表 + 行间公式（覆盖多种块类型） */
+/** 观察用的文档：正文/标题直接编辑；列表与行间公式仍走局部切片。 */
 const DOC =
   "= 章节标题\n" +
   "\n" +
-  "第一段正文，用来当被切片盖住的那一块。\n" +
+  "第一段正文，始终保持可编辑文字。\n" +
   "\n" +
   "第二段正文。\n" +
   "\n" +
+  "- 被切片的列表项\n" +
+  "\n" +
   "$ x^2 + y^2 = z^2 $\n" +
   "\n" +
-  "- 列表项\n";
+  "- 活动列表项\n";
 
-console.log("1) 非光标块显示成切片，光标所在块保持源码");
+console.log("1) 正文/标题持续可编辑，复杂块保留切片");
 await c.click(400, 300);
 await c.selectAll();
 await c.type(DOC);
 await new Promise((r) => setTimeout(r, 600));
-// 光标停在文档末尾（最后一块 = 列表项）→ 它应当是源码，其它块是切片
+// 光标停在文档末尾（最后一块 = 列表项）→ 它应当是源码；前一列表和公式是切片。
 const crops = await c.evaluate(CROPS);
 const linesText = await c.evaluate(LINES_TEXT);
 const contentText = await c.evaluate(CONTENT);
-check("非光标块被替换成切片（≥3 块）", crops >= 3, `实际 ${crops}`);
-check("光标所在块（列表项）保持源码形态", linesText.includes("列表项"), JSON.stringify(linesText));
+check("列表/公式等复杂块仍有局部切片（≥2 块）", crops >= 2, `实际 ${crops}`);
 check(
-  "被切片盖住的正文不再是源码形态",
-  !linesText.includes("第一段正文"),
+  "光标所在块（活动列表项）保持源码形态",
+  linesText.includes("活动列表项"),
   JSON.stringify(linesText),
 );
-check("被切片盖住的标题不再是源码形态", !linesText.includes("章节标题"), JSON.stringify(linesText));
 check(
-  "标记只在源码形态里出现（标题的 `= ` 已随切片消失）",
+  "普通正文始终是真实文本",
+  linesText.includes("第一段正文") && linesText.includes("第二段正文"),
+  JSON.stringify(linesText),
+);
+check("标题始终是真实文本", linesText.includes("章节标题"), JSON.stringify(linesText));
+check(
+  "光标不在标题标记附近时 `= ` 保持隐藏",
   !contentText.includes("= 章节标题"),
   JSON.stringify(contentText),
 );
@@ -87,7 +93,7 @@ const geom = await c.evaluate(`(() => {
 check("切片铺满正文列宽（±2px）", !!geom && Math.abs(geom.w - geom.cw) <= 2, JSON.stringify(geom));
 check("切片高度为正且内层 SVG 有高度", !!geom && geom.h > 4 && geom.svgH > 4, JSON.stringify(geom));
 
-console.log("3) 点击切片 → 光标落到该块源码起点，该块展开、原活动块变成切片");
+console.log("3) 点击复杂块切片 → 该块展开、原活动复杂块变成切片");
 const firstCropY = await c.evaluate(`(() => {
   const r = document.querySelector(".cm-block-crop").getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -96,16 +102,12 @@ await c.click(firstCropY.x, firstCropY.y);
 await new Promise((r) => setTimeout(r, 400));
 const afterClick = await c.evaluate(LINES_TEXT);
 const cropsAfter = await c.evaluate(CROPS);
-check(
-  "被点的那一块展开了源码（标题可见）",
-  afterClick.includes("章节标题"),
-  JSON.stringify(afterClick),
-);
-check("原来的活动块（列表项）变成切片", !afterClick.includes("列表项"), JSON.stringify(afterClick));
+check("被点的列表块展开了源码", afterClick.includes("被切片的列表项"), JSON.stringify(afterClick));
+check("原来的活动列表项变成切片", !afterClick.includes("活动列表项"), JSON.stringify(afterClick));
 check("切片数量不变（换了一块而已）", cropsAfter === crops, `${crops} → ${cropsAfter}`);
 check(
-  "`= ` 标记重新出现在源码里（展开后能看到标记）",
-  afterClick.includes("= 章节标题"),
+  "点击复杂块不改变标题的局部标记状态",
+  !afterClick.includes("= 章节标题"),
   JSON.stringify(afterClick),
 );
 await c.screenshot(SHOT("writing-blocks-click"));
@@ -164,7 +166,7 @@ await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 const SENTENCE = "这一段用来把文档撑过写作模式块级渲染的窗口化阈值，观察滚动时的补渲行为。";
 // **段落之间要有空行**：没有空行的话整篇就是一个块，光标一进去它整篇都是"活动块"，
 // 切片数会是 0（实测踩过）。
-const longDoc = Array.from({ length: 120 }, (_, i) => `第 ${i} 段。` + SENTENCE.repeat(3)).join(
+const longDoc = Array.from({ length: 120 }, (_, i) => `- 第 ${i} 段。` + SENTENCE.repeat(3)).join(
   "\n\n",
 );
 await c.click(400, 300);

@@ -116,6 +116,9 @@ for (const fx of withProbes) {
     .waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 })
     .catch(() => {});
   await new Promise((r) => setTimeout(r, 350));
+  const initialCrops = await c.evaluate(
+    `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
+  );
 
   // 按块分组（每块若干探针），轮转下单：点完一块它就变源码，所以下一次点**另一块**
   const byBlock = new Map();
@@ -191,8 +194,10 @@ for (const fx of withProbes) {
   }
 
   check(
-    `${fx.name}：${clicked} 次点击全部落在真实几何给出的字符上`,
-    clicked > 0 && matched === clicked,
+    clicked > 0
+      ? `${fx.name}：${clicked} 次复杂块点击全部落在真实几何给出的字符上`
+      : `${fx.name}：纯正文/标题没有生成可点击切片`,
+    clicked > 0 ? matched === clicked : initialCrops.length === 0,
     `命中 ${matched}/${clicked}`,
   );
   check(
@@ -207,8 +212,8 @@ for (const fx of withProbes) {
   );
   const activeFrom = byteToPos(fx.doc, fx.blocks[activeIndex].start);
   check(
-    "被点的块回到源码形态、其余块仍是切片",
-    !cropsNow.includes(activeFrom) && cropsNow.length > 0,
+    clicked > 0 ? "被点的复杂块回到源码形态" : "纯正文场景始终保持真实文本",
+    clicked > 0 ? !cropsNow.includes(activeFrom) : cropsNow.length === 0,
     JSON.stringify({ cropsNow, activeFrom }),
   );
 
