@@ -65,7 +65,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
       // 编译上下文与缓存键必须来自**同一次**文档快照（扩展内算，见 prefix 选项的说明）
       const context = buildMathContext(opts.prefix(), doc);
       // 块级切片（写作模式）：先算"哪些格子要被切片盖住"，再让公式/标记装饰避开它们
-      const covers = buildBlockCovers(state, opts, doc);
+      const covers = buildBlockCovers(state, opts, doc, opaque);
       // 有编译错误的格子强制展开源码：波浪线画在源码上，被图片盖住就"哪儿也找不到错误"
       // （必须在 applyBlockSelection **之后**跑，否则会被选区判定覆盖回去）
       if (covers.length > 0) {

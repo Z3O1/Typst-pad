@@ -8,11 +8,38 @@ import { insideCovered } from "./covered";
 import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import { planBlockCovers } from "../../core/block-plan";
-import type { BlockCover } from "../../core/block-plan";
+import type { Block, BlockCover } from "../../core/block-plan";
+import { scanNonMarkupRegions } from "../../core/typst-lex";
+import type { Region } from "../../core/typst-lex";
 import { PREFETCH_MARGIN } from "./options";
 import type { LivePreviewOptions } from "./options";
 import { BlockCropWidget } from "./widgets";
 import { applyBlockSelection } from "../../core/block-plan";
+
+/**
+ * 第一阶段的“可编辑正文”只接管能保守判定为纯 markup 的 Paragraph / Heading。
+ *
+ * `Paragraph` 只是 Typst 顶层分块的兜底类别，里面仍可能混有 `#image(...)`、自定义宏、raw、
+ * 注释等内容；仅按 kind 放开会把这些复杂内容从可靠的引擎切片退回近似源码显示。这里复用
+ * live-preview 已有的 lexer：块内只要出现任何非 markup 区域，就继续沿用局部渲染。
+ *
+ * 公式不属于 opaque 区域，因此“普通文字 + 行内公式”仍是可编辑正文，公式本身继续由
+ * math decoration 局部替换。粗体 / 斜体也属于 markup，直接作用在真实文本上。
+ */
+export function isDirectlyEditableTextBlock(
+  block: Pick<Block, "from" | "to" | "kind" | "found" | "skipped">,
+  opaque: readonly Region[],
+): boolean {
+  if ((block.kind !== "Paragraph" && block.kind !== "Heading") || !block.found || block.skipped) {
+    return false;
+  }
+  // opaque 按位置有序且互不重叠；越过块尾即可停止。
+  for (const region of opaque) {
+    if (region.from >= block.to) break;
+    if (region.to > block.from && region.from < block.to) return false;
+  }
+  return true;
+}
 
 /**
  * 把块表算成"当前文档下要覆盖哪些区间"（块表已是 CodeMirror 位置，见 block-plan.toBlockTable）。
@@ -25,7 +52,8 @@ import { applyBlockSelection } from "../../core/block-plan";
 export function buildBlockCovers(
   state: EditorState,
   opts: LivePreviewOptions,
-  _doc: string,
+  doc: string,
+  opaque: readonly Region[] = scanNonMarkupRegions(doc),
 ): BlockCover[] {
   const blocks = opts.blocks?.() ?? null;
   if (!blocks || blocks.length === 0) return [];
@@ -42,6 +70,11 @@ export function buildBlockCovers(
     state.selection.ranges.map((r) => ({ from: r.from, to: r.to, head: r.head })),
     docLength,
   );
+  // 普通正文与标题始终保留为真实文本：光标进出不会再触发整块图片/源码切换。
+  // 复杂 Paragraph / Heading（含代码、raw、注释等）不命中此规则，仍保留原来的可靠退路。
+  for (const cover of covers) {
+    if (isDirectlyEditableTextBlock(cover.block, opaque)) cover.revealed = true;
+  }
   return covers;
 }
 
