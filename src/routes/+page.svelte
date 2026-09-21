@@ -35,17 +35,11 @@
   import type { AppSettings } from "$lib/core/app-settings";
   import { createFontList } from "$lib/core/font-list";
   import { createOpenFileClaim } from "$lib/core/open-file-claim";
+  import { createCloseGuard, createDropHandler } from "$lib/core/window-events";
   import { planRestore } from "$lib/core/session-restore";
   import { createMathQueue } from "$lib/editor/math-queue";
   import type { WriteCommand } from "$lib/core/write-commands";
-  import {
-    openTypFile,
-    saveTypFile,
-    readTypFile,
-    pickTypPath,
-    pickFontDir,
-    isTauri,
-  } from "$lib/core/file-ops";
+  import { openTypFile, saveTypFile, readTypFile, pickFontDir, isTauri } from "$lib/core/file-ops";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
@@ -1609,7 +1603,8 @@
     }
   }
 
-  /** 关闭当前窗口（Ctrl+W）：与标题栏关闭走同一条路（未保存修改会先弹确认，见 onCloseRequested） */
+  /** 关闭当前窗口（Ctrl+W）：与标题栏关闭走同一条路（未保存修改会先弹确认，
+   * 判据见 `core/window-events.ts` 的 `createCloseGuard`） */
   function closeCurrentWindow() {
     if (!isTauri()) return;
     void getCurrentWindow().close();
@@ -1632,6 +1627,25 @@
       }
     },
     openPath: (path) => docSession.openPath(path),
+  });
+
+  // 桌面窗口级事件的两条规则（拖放 / 关闭确认）在 `$lib/core/window-events`：
+  // 这里只注入页面状态（覆盖层开关、状态栏、关闭确认弹窗）与文档会话的打开动作。
+  const dropHandler = createDropHandler({
+    setDragActive: (active) => {
+      dragActive = active;
+    },
+    openPath: (path) => docSession.openPath(path),
+    setStatus: (text) => {
+      statusText = text;
+    },
+  });
+  const closeGuard = createCloseGuard({
+    doc: () => doc,
+    dirty: () => dirty,
+    prompt: () => {
+      showClosePrompt = true;
+    },
   });
 
   /** Esc 关掉最上层的弹窗（顺序见 app-keys.topModal）；每种都取**破坏性最小**的那个"关闭"语义 */
@@ -1820,34 +1834,12 @@
       invoke<boolean>("get_debug_flag")
         .then(setCliDebug)
         .catch(() => {});
-      // 关闭确认：有实际未保存修改（dirty 且内容非空）时显示前端自定义三按钮弹窗
-      // （不依赖 dialog 插件返回值的语义差异，保证 保存/不保存/取消 可靠）
-      // 内容为空（含仅空白字符）视为无可丢失内容：输入过又删光后 dirty 仍为 true，
-      // 但 isEffectiveDirty 以内容为准判定为未修改，直接关闭
+      // 关闭确认：有实际未保存修改（dirty 且内容非空）才拦下来弹三按钮弹窗（规则见
+      // `core/window-events.ts` 的 `createCloseGuard`）
+      keepUnlisten(getCurrentWindow().onCloseRequested((event) => closeGuard.handle(event)));
+      // 窗口级拖放：把 .typ 文件拖到窗口内自动打开（覆盖层开关与"只认 .typ"的规则同上）
       keepUnlisten(
-        getCurrentWindow().onCloseRequested(async (event) => {
-          if (!isEffectiveDirty(dirty, doc)) return; // 无实际未保存修改（含空文档），直接关闭
-          event.preventDefault();
-          showClosePrompt = true;
-        }),
-      );
-      // 窗口级拖放：把 .typ 文件拖到窗口内自动打开
-      keepUnlisten(
-        getCurrentWindow().onDragDropEvent((event) => {
-          if (event.payload.type === "over" || event.payload.type === "enter") {
-            dragActive = true;
-          } else if (event.payload.type === "drop") {
-            dragActive = false;
-            const path = pickTypPath(event.payload.paths);
-            if (path) {
-              void docSession.openPath(path);
-            } else if (event.payload.paths.length > 0) {
-              statusText = "仅支持打开 .typ 文件";
-            }
-          } else {
-            dragActive = false;
-          }
-        }),
+        getCurrentWindow().onDragDropEvent((event) => dropHandler.handle(event.payload)),
       );
       // 应用已运行时再次打开文件（single-instance 转发）：先注册监听再取队列，
       // 避免转发事件落在两者之间而丢失。**多窗口下这条是广播**，要挑一个窗口接，见
