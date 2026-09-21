@@ -21,8 +21,9 @@
     positionRangeToByteRange,
     utf8Length,
   } from "$lib/core/block-offsets";
-  import { carryOverCrops, remapBlocksThroughEdit, toBlockTable } from "$lib/core/block-plan";
   import { clampHitOffset } from "$lib/core/block-hit";
+  import { blockWindowBytes, landBlocksResult, remapBlocksOnEdit } from "$lib/core/block-state";
+  import type { BlocksPatch, BlocksSnapshot } from "$lib/core/block-state";
   import type { Block } from "$lib/core/block-plan";
   import { buildFontFamilies, normalizeFontDirs } from "$lib/core/font-settings";
   import {
@@ -35,6 +36,7 @@
   import type { AppSettings } from "$lib/core/app-settings";
   import { createFontList } from "$lib/core/font-list";
   import { createOpenFileClaim } from "$lib/core/open-file-claim";
+  import { createNewWindow } from "$lib/core/new-window";
   import { createCloseGuard, createDropHandler } from "$lib/core/window-events";
   import { planRestore } from "$lib/core/session-restore";
   import { createMathQueue } from "$lib/editor/math-queue";
@@ -166,9 +168,6 @@
 
   /** 副窗口首屏编译落地后写在状态栏的一句说明（见 onMount 末尾） */
   const NEW_WINDOW_NOTICE = "新窗口：这里的修改不会记进「上次内容」";
-
-  /** 窗口 label 前缀：新窗口的 label 必须唯一（重名会创建失败），前缀要与 capabilities 里的 `editor-*` 一致 */
-  const NEW_WINDOW_LABEL_PREFIX = "editor-";
 
   // 启动打点：组件脚本求值时刻（JS chunk 加载后的首个可测点）
   mark("page-module-eval");
@@ -472,17 +471,11 @@
 
   /**
    * 块级渲染窗口（**文档坐标的字节偏移**）：视口范围 → 字节 + 前后各留一段预取。
-   * 取不到视口（编辑器未挂载）或文档很短（≤ 2×预取）时返回 null = 整篇都渲。
+   * "取不到视口（编辑器未挂载）或文档很短（≤ 2×预取）时整篇都渲"这条规则在
+   * `$lib/core/block-state` 的 `blockWindowBytes`：这里只把编辑器的可见范围喂进去。
    */
-  const BLOCK_WINDOW_MARGIN = 4000; // 字符
   function writingWindowBytes(): { from: number; to: number } | null {
-    if (doc.length <= BLOCK_WINDOW_MARGIN * 2) return null; // 短文档：全渲，省一次换算
-    // 编辑器还没挂载（首帧编译）→ 从文档开头起一段：光标在启动时本来就在开头，
-    // 而"取不到视口就整篇渲"在长文档下会一次性渲出十几 MB（实测 58 字节/字符）。
-    const visible = editorRef?.visibleRange() ?? { from: 0, to: 0 };
-    const from = Math.max(0, visible.from - BLOCK_WINDOW_MARGIN);
-    const to = Math.min(doc.length, visible.to + BLOCK_WINDOW_MARGIN);
-    return positionRangeToByteRange(doc, from, to);
+    return blockWindowBytes(doc, editorRef?.visibleRange() ?? null);
   }
 
   // 设置弹窗里的**草稿**（点“保存”才写回并持久化）：一个 `$state` 对象，
@@ -795,29 +788,47 @@
   }
 
   /**
-   * **每次编辑都让块表跟上**（阶段 2 补的，修"在块内按 Enter 之后会出问题"）：
+   * 块表快照（`core/block-state` 的输入形状）：四个值必须**一起**读 —— 块区间是字节偏移，
+   * 只有配上同一份文档、同一份几何编号与同一份字号才有意义（见那边的文件头第 2 条）。
+   */
+  function blocksSnapshot(): BlocksSnapshot {
+    return {
+      blocks: writingBlocks,
+      doc: writingBlocksDoc,
+      geometryId: writingGeometryId,
+      textPt: writingTextPt,
+    };
+  }
+
+  /**
+   * 把 `core/block-state` 算出来的 patch 写回页面状态，并自增 `blocksVersion` 让编辑器按新表重建
+   * 装饰（不然这一帧渲染出来的还是旧表的格子）。
+   */
+  function applyBlocksPatch(patch: BlocksPatch): void {
+    writingBlocks = patch.blocks;
+    writingBlocksDoc = patch.doc;
+    writingBlocksExact = patch.exact;
+    writingGeometryId = patch.geometryId;
+    writingTextPt = patch.textPt;
+    blocksVersion++;
+  }
+
+  /**
+   * **每次编辑都让块表跟上**（阶段 2 补的，修"在块内按 Enter 之后会出问题"）。
    *
-   * 块表与切片是上一次编译的产物，位置是**旧文档的坐标**。此前只有在编译失败时才用前后缀差分
-   * 平移一次，编辑期间则原样沿用（"偏一两个字符无害"）。但**插入换行会改变行结构**，
-   * 而格子的边界是按"块的最后一行之后"算的 —— 旧坐标放在新文档上会算到错误的行，
-   * 于是出现两类可见毛病：① 用户刚打的那一行落进**旁边那张旧切片**里（被图片盖住 = 字看不见，
-   * 编译失败时更不会自愈）；② 同一段文字既出现在旧切片里、又有一部分露成源码（看起来像重复）。
+   * 块表与切片是上一次编译的产物，位置是**旧文档的坐标**：插入换行会改变行结构，而格子的边界
+   * 是按"块的最后一行之后"算的 —— 旧坐标放在新文档上会算到错误的行，于是出现两类可见毛病：
+   * ① 用户刚打的那一行落进**旁边那张旧切片**里（被图片盖住 = 字看不见）；② 同一段文字既出现在
+   * 旧切片里、又有一部分露成源码（看起来像重复）。
    *
-   * 做法与"编译失败保留切片"完全相同（`remapBlocksThroughEdit`：前后缀差分 → 没被碰到的块
-   * 原样平移、被碰到的块退回源码），只是**每次编辑都跑**（O(n) 一次双指针比较，微秒级）。
-   * 跑完自增 `blocksVersion` 让编辑器按新表重建装饰（不然这一帧渲染出来的还是旧表的格子）。
-   *
-   * 注意：平移**不**等于"精确"——几何（y/高度）与 Rust 侧的命中测试缓存都还是上一次编译的，
-   * 所以点击精确定位的闸门（`writingBlocksExact`）在这里置回 false，等编译回来再打开。
+   * 平移算法（前后缀差分 → 没被碰到的块原样平移、被碰到的块退回源码）在
+   * `core/block-plan.ts` 的 `remapBlocksThroughEdit`，"每次编辑都跑 + 平移不等于精确"这两条
+   * 编排在 `core/block-state.ts` 的 `remapBlocksOnEdit`：这里只喂快照、把 patch 写回去。
    */
   function remapBlocksForEdit(newDoc: string) {
-    if (!writingBlocks || writingBlocks.length === 0) return;
-    if (writingBlocksDoc === newDoc) return;
-    const remap = remapBlocksThroughEdit(writingBlocks, writingBlocksDoc, newDoc);
-    writingBlocks = remap.blocks;
-    writingBlocksDoc = newDoc;
-    writingBlocksExact = false;
-    blocksVersion++;
+    const patch = remapBlocksOnEdit(blocksSnapshot(), newDoc);
+    // null = 没有块表 / 文档没变：什么都不用做（也不该白增一次代次）
+    if (patch) applyBlocksPatch(patch);
   }
 
   // ---------------------------------------------------------------------------
@@ -969,7 +980,7 @@
       uiZoom,
       theme,
       onNew: () => void docSession.createNew(),
-      onNewWindow: openNewWindow,
+      onNewWindow: () => newWindow.open(),
       onOpen: () => void docSession.open(),
       onSave: () => void docSession.save(),
       onOpenSettings: openSettings,
@@ -1423,62 +1434,19 @@
   }
 
   /**
-   * 写作模式块级编译的结果落地：成功 → 换上新切片；失败 → **块切片作废**（旧表的区间
-   * 已经对不上新文档），编辑器退回源码 + 波浪线，状态栏照旧显示错误数。
+   * 写作模式块级编译的结果落地：成功 → 换上新切片；失败 → 只把被改动到的那一块退回源码
+   * （**不整篇作废**，见 `core/block-state.ts` 的文件头第 1 条）。
    *
-   * 与整页预览路径的差别只有一处：整页预览在编译失败时**保留上一次成功产物**，而块切片
-   * 必须立刻撤掉 —— 位置对不上的 widget 会盖住错的正文。
+   * 成功/失败两条分支的写法（位置换算、窗口外沿用、`exact` 与几何编号的闸门、日志）都在
+   * `core/block-state.ts` 的 `landBlocksResult`：这里只喂快照 + 这次的编译结果，把 patch 写回，
+   * 再把"这一步的耗时"接在它的日志后面（耗时只有页面知道）。
    */
   function applyBlocksResult(result: BlocksOk | BlocksFail, t0: number) {
-    if (result.ok) {
-      // 字节偏移 → CodeMirror 位置（只在这里做一次，编辑器侧直接用位置）
-      const table = toBlockTable(doc, result.blocks);
-      // 窗口化渲染：窗口外的块这轮没有 SVG，按"块类型 + 源码文本相同"沿用上一轮结果
-      const carried = carryOverCrops(writingBlocks, table.blocks, doc);
-      writingBlocks = carried.blocks;
-      // 这一批切片与这份文档、这份几何（Rust 侧 HIT_CACHE 也是同一次编译）严格对应
-      writingBlocksDoc = doc;
-      writingBlocksExact = true;
-      writingGeometryId = result.geometryId;
-      blocksVersion++;
-      // 文档正文实际字号（源码透镜的字号基准，见 writingTextPt 的说明）
-      if (result.textPt > 0 && Math.abs(result.textPt - writingTextPt) > 0.01) {
-        writingTextPt = result.textPt;
-      }
-      if (carried.carried > 0 || carried.missing > 0) {
-        dbg.log(
-          "compile",
-          `切片窗口：新渲 ${result.blocks.filter((b) => b.svg).length} / 沿用 ${carried.carried} / 待渲 ${carried.missing}`,
-        );
-      }
-      applyCompileStatus(result, doc.length);
-      dbg.log(
-        "compile",
-        `blocks ok blocks:${result.blocks.length} 页宽:${result.pageWidthPt.toFixed(1)}pt t:${(
-          performance.now() - t0
-        ).toFixed(1)}ms`,
-      );
-      return;
-    }
-    // 失败：**不整篇作废**，只把"被改动到的那一块"退回源码（阶段 2）。
-    // 旧表是上一次成功编译的产物（区间 + 切片成套），而块切片一旦丢掉，写作模式会整篇退回
-    // 源码 —— 敲错一个字符就看到整篇源码闪一下，改好才回来。用前后缀差分把没被碰到的块
-    // 原样留下/整体平移（见 block-plan.remapBlocksThroughEdit，含两条"别盖住正文"的约束）。
-    const remap = writingBlocks
-      ? remapBlocksThroughEdit(writingBlocks, writingBlocksDoc, doc)
-      : { blocks: [] as Block[], kept: 0 };
-    // 区间是**估算**的（平移过的），点击精确定位据此退出（见 writingBlocksExact 的说明）
-    writingBlocks = remap.blocks.length > 0 ? remap.blocks : null;
-    writingBlocksDoc = doc;
-    writingBlocksExact = false;
-    blocksVersion++;
+    const patch = landBlocksResult(blocksSnapshot(), doc, result);
+    applyBlocksPatch(patch);
+    if (patch.detail) dbg.log("compile", patch.detail);
     applyCompileStatus(result, doc.length);
-    dbg.log(
-      "compile",
-      `blocks fail errors:${result.errors.length} 保留切片:${remap.kept}/${remap.blocks.length} t:${(
-        performance.now() - t0
-      ).toFixed(1)}ms`,
-    );
+    dbg.log("compile", `${patch.log} t:${(performance.now() - t0).toFixed(1)}ms`);
   }
 
   /**
@@ -1566,42 +1534,40 @@
   }
 
   /**
-   * 新建窗口（`Ctrl+Shift+N` / 菜单「文件 → 新建窗口」）。新窗口是**空白草稿窗口**：
+   * 新建窗口（`Ctrl+Shift+N` / 菜单「文件 → 新建窗口」）：新窗口是**空白草稿窗口**，
    * 起来不恢复上次内容、写存档只写设置（见 isSecondaryWindow 的说明）。
    *
-   * label 用时间戳保证唯一（Tauri 要求 label 唯一，重名会创建失败），前缀 `editor-` 必须与
-   * capabilities/default.json 的 `windows: ["main", "editor-*"]` 对得上 —— 否则新窗口里的
-   * 文件读写会在 ACL 层被拒（0.2.x 踩过，见提交 b187118）。
+   * 三条规则（label 唯一 + 前缀与 capabilities 的 `editor-*` 一致 + 失败报到状态栏）在
+   * `$lib/core/new-window`：这里只把 Tauri 的建窗口动作、状态栏与调试日志喂进去。
    *
-   * **另外还得有 create 的权限**：`new WebviewWindow()` 走的是 `plugin:webview|create_webview_window`，
-   * 需要在 capabilities/default.json 里显式写 `core:webview:allow-create-webview-window` ——
-   * `core:webview:default`（我们引的 `core:default` 里含它）**没有**这一条，缺了就在**运行时**被拒：
-   * 状态栏原文「新建窗口失败：Command plugin:webview|create_webview_window not allowed by ACL」
-   * （0.7.9 就是这样发出去的）。这类 ACL 拒绝浏览器验收碰不到，所以另加了
-   * `scripts/capabilities.test.mjs` 做静态体检：改这里的 Tauri 调用后，去那张表里补一行。
+   * **`new WebviewWindow()` 走的是 `plugin:webview|create_webview_window`**，需要在
+   * capabilities/default.json 里显式写 `core:webview:allow-create-webview-window`（`core:default`
+   * 里没有），缺了就在**运行时**被拒（0.7.9 这样发出去过）。这类 ACL 拒绝浏览器验收碰不到，
+   * 所以另有 `scripts/capabilities.test.mjs` 做静态体检：改这里的 Tauri 调用后去那张表补一行。
    */
-  function openNewWindow() {
-    if (!isTauri()) return; // 浏览器预览没有多窗口（应用本身也只在桌面版渲染）
-    try {
-      const win = new WebviewWindow(`${NEW_WINDOW_LABEL_PREFIX}${Date.now()}`, {
+  const newWindow = createNewWindow({
+    isTauri,
+    createWindow: (label, title, onAsyncError) => {
+      const win = new WebviewWindow(label, {
         url: "/",
-        title: "未命名.typ - Typst-pad",
+        title,
         width: 1280,
         height: 800,
         minWidth: 800,
         minHeight: 600,
         center: true,
       });
-      // 创建失败（label 撞车 / 系统拒绝）在发布版里是看不见的（没有 devtools），报到状态栏
+      // 创建失败（label 撞车 / 系统拒绝）在发布版里是看不见的（没有 devtools），由模块报到状态栏
       void win.once("tauri://error", (e) => {
-        const detail = (e as { payload?: unknown }).payload;
-        statusText = `新建窗口失败：${typeof detail === "string" ? detail : String(detail ?? "")}`;
-        dbg.log("window", "new-window error", detail);
+        onAsyncError((e as { payload?: unknown }).payload);
       });
-    } catch (e) {
-      statusText = `新建窗口失败：${e instanceof Error ? e.message : String(e)}`;
-    }
-  }
+    },
+    setStatus: (text) => {
+      statusText = text;
+    },
+    logCreateFailure: (detail) => dbg.log("window", "new-window error", detail),
+    now: () => Date.now(),
+  });
 
   /** 关闭当前窗口（Ctrl+W）：与标题栏关闭走同一条路（未保存修改会先弹确认，
    * 判据见 `core/window-events.ts` 的 `createCloseGuard`） */
@@ -1697,7 +1663,7 @@
         zoom: zoomBySteps,
         // reloadFile 只在有文件时才会走到（没文件时 decideAppKey 返回 null，放行给浏览器刷新）
         reloadFile: () => void docSession.reload(),
-        openNewWindow,
+        openNewWindow: () => newWindow.open(),
         closeWindow: () => void closeCurrentWindow(),
         dismissModal,
       },
