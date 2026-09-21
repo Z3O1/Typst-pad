@@ -1603,7 +1603,8 @@
     }
   }
 
-  /** 关闭当前窗口（Ctrl+W）：与标题栏关闭走同一条路（未保存修改会先弹确认，见 onCloseRequested） */
+  /** 关闭当前窗口（Ctrl+W）：与标题栏关闭走同一条路（未保存修改会先弹确认，
+   * 判据见 `core/window-events.ts` 的 `createCloseGuard`） */
   function closeCurrentWindow() {
     if (!isTauri()) return;
     void getCurrentWindow().close();
@@ -1838,13 +1839,7 @@
       keepUnlisten(getCurrentWindow().onCloseRequested((event) => closeGuard.handle(event)));
       // 窗口级拖放：把 .typ 文件拖到窗口内自动打开（覆盖层开关与"只认 .typ"的规则同上）
       keepUnlisten(
-        getCurrentWindow().onDragDropEvent((event) =>
-          // 只有 drop 那个变体带 paths（Tauri 的可判别联合），这里顺手收窄
-          dropHandler.handle(
-            event.payload.type,
-            event.payload.type === "drop" ? event.payload.paths : undefined,
-          ),
-        ),
+        getCurrentWindow().onDragDropEvent((event) => dropHandler.handle(event.payload)),
       );
       // 应用已运行时再次打开文件（single-instance 转发）：先注册监听再取队列，
       // 避免转发事件落在两者之间而丢失。**多窗口下这条是广播**，要挑一个窗口接，见

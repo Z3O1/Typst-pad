@@ -1,7 +1,14 @@
 // doc-utils：空文档判断 / 实际未保存修改判断 / 路径取文件名 / 前缀规范化纯函数单元测试
 // （关闭确认弹窗的前置判断逻辑 + 窗口标题用的文件名 + 编译前缀补尾随换行）
 import { describe, it, expect } from "vitest";
-import { isBlankDoc, isEffectiveDirty, ensureTrailingNewline, fileNameOf } from "./doc-utils";
+import {
+  isBlankDoc,
+  isEffectiveDirty,
+  ensureTrailingNewline,
+  fileNameOf,
+  isTypPath,
+  pickTypPath,
+} from "./doc-utils";
 
 describe("isBlankDoc", () => {
   it("空字符串：视为空文档", () => {
@@ -100,5 +107,27 @@ describe("fileNameOf", () => {
   it("混合分隔符与重复分隔符也取最后一段", () => {
     expect(fileNameOf("C:/Users\\me/a.typ")).toBe("a.typ");
     expect(fileNameOf("/a//b.typ")).toBe("b.typ");
+  });
+});
+
+describe("isTypPath / pickTypPath", () => {
+  it("只认 .typ 后缀，大小写不敏感（`.TYP` 也算）", () => {
+    expect(isTypPath("/tmp/论文.typ")).toBe(true);
+    expect(isTypPath("/tmp/论文.TYP")).toBe(true);
+    expect(isTypPath("/tmp/论文.typ.txt")).toBe(false);
+    expect(isTypPath("/tmp/论文")).toBe(false);
+    expect(isTypPath("")).toBe(false);
+  });
+
+  it("pickTypPath：取**第一个** .typ（拖放里夹着图片时靠它挑）", () => {
+    expect(pickTypPath(["/tmp/图.png", "/tmp/甲.typ", "/tmp/乙.typ"])).toBe("/tmp/甲.typ");
+    expect(pickTypPath(["/tmp/图.png", "/tmp/文档.pdf"])).toBeNull();
+    expect(pickTypPath([])).toBeNull();
+  });
+
+  it("pickTypPath 不改动传进来的数组", () => {
+    const paths = ["/tmp/a.png", "/tmp/b.typ"];
+    pickTypPath(paths);
+    expect(paths).toEqual(["/tmp/a.png", "/tmp/b.typ"]);
   });
 });

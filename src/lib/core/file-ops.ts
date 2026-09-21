@@ -13,16 +13,6 @@ export interface OpenedFile {
   content: string;
 }
 
-/** 判断路径是否为 .typ 文件（大小写不敏感） */
-export function isTypPath(path: string): boolean {
-  return path.toLowerCase().endsWith(".typ");
-}
-
-/** 从路径数组中选出第一个 .typ 文件；没有则返回 null */
-export function pickTypPath(paths: string[]): string | null {
-  return paths.find(isTypPath) ?? null;
-}
-
 /** 打开文件对话框选择 .typ 文件，返回路径；取消返回 null */
 export async function openTypFile(): Promise<string | null> {
   if (!isTauri()) {
