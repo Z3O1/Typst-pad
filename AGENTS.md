@@ -23,7 +23,7 @@ node scripts/check-fonts.mjs
 # 动编辑器 / 装饰 / 布局 / 组件样式时才跑浏览器验收（换端口，别跟 tauri dev 抢 1420）
 npm run verify:browser   # **推荐**：自己起 dev server + headless Chromium + 导夹具 + 跑七套 + 汇总
 npm run dev -- --port 1425
-BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs                              # 290 项
+BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs                              # 291 项
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs   # 改块级渲染必跑
 ```
 
@@ -49,8 +49,8 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-
 > 下面这组是**规则版**：每条对应分册里的实测数据与踩坑经过，展开与理由见对应分册。它是"入口索引"，**不追求与详版逐字一致**；发现规则被削弱或漏了，就补分册 + 这里补一句（PR #61 瘦身时漏过 3 组，见该 PR 的审查评论）。
 
 - **编译/后端（→02）**：诊断 `path` 主源表示只许一种；项目根跟着**引用**放宽（**别写成"目标文件的公共祖先"**）；`compile_blocks` 失败也要带 `blocks` 键；**必须注入默认字体族**；`CompileState` 一次一编译。
-- **块级渲染（→03）**：纯 markup 的正文/标题始终保留真实文本，复杂块才走局部切片；**别改回全渲**、**单块也要有上限**（`MAX_CROP_SOURCE_BYTES` = 8KB，超过只回几何不渲图，前端必须把 `skipped` 与"缺切片"分开）；**编辑期间块表必须跟着走**（`remapBlocksThroughEdit`）、`planBlockCovers` **绝不抛异常**；块切片 `Decoration.replace` **必须落在整行边界**；块间空行归上一块；竖直移动**别退回"一次跨一整块"**；**别自己写 scrollTop**（用 `scrollIntoView`）；**光标所在的复杂块必须展开**；链接热区 `mousedown` **必须 `preventDefault`**；打字期间不编译（150ms，公式再推 240ms）；缺切片只看块表、**且要排除 `skipped`**（`found && !skipped && svg === ""`）；"铺满全文"是 covers 的事，**别拿 `blocks` 去断言**。
-- **所见即所得（→04）**：宁可漏渲染、不可误渲染；正文内移动光标不展开整个构造，只在触碰对应标记时局部露出语法；`MATH_TEXT_PT = 10.5`、写作模式跟随文档字号（**别写死**）；标题梯度 1.4/1.2/1.0em；`$` 配对**右侧已有 `$` 就跨过去**（且排在"公式内部不配对"之前）、退格整对删；**不要用 `&dark` 选择器**；整块选中不展开但**别套到跨行行间公式**；**别用 CSS zoom**（走 `setZoom`）；**别让观察结果去改档位或回改引擎**；判据用 CSS 布局宽度；格式命令（菜单 + 快捷键，**不做工具条**）**无选区替换整行、不丢字**、有选区只替换选区、包装命令**首尾空白留定界符外侧**、引用**必须 `#quote(block: true)[...]`**（Typst 没有 `>`）；**快捷键分三处**归口（**MenuBar 只认 Ctrl+单键**）；切换模式**保持光标**（**别自己写 scrollTop**）。
+- **块级渲染（→03）**：纯 markup 的正文/标题始终保留真实文本，复杂块才走局部切片（**判据是"块内有没有 code / raw / 注释区域"**，markup 里的直引号**不算**复杂 —— lexer 把它登记成 `string` 是为公式扫描，别拿它把整段退回切片；markup 层渲染不出的构造 —— `@引用`、`<label>`、简写 `--`/`---`/`...`/`~`/`-?`、转义、英文单引号 —— 在可编辑正文里按源码显示，是这条规则的已知代价）；**别改回全渲**、**单块也要有上限**（`MAX_CROP_SOURCE_BYTES` = 8KB，超过只回几何不渲图，前端必须把 `skipped` 与"缺切片"分开）；**编辑期间块表必须跟着走**（`remapBlocksThroughEdit`）、`planBlockCovers` **绝不抛异常**；块切片 `Decoration.replace` **必须落在整行边界**；块间空行归上一块；竖直移动**别退回"一次跨一整块"**；**别自己写 scrollTop**（用 `scrollIntoView`）；**光标所在的复杂块必须展开**；链接热区 `mousedown` **必须 `preventDefault`**；打字期间不编译（150ms，公式再推 240ms）；缺切片只看块表、**且要排除 `skipped`**（`found && !skipped && svg === ""`）；"铺满全文"是 covers 的事，**别拿 `blocks` 去断言**。
+- **所见即所得（→04）**：宁可漏渲染、不可误渲染；正文内移动光标不展开整个构造，只在触碰对应标记时局部露出语法（**范围限定**：行内公式、围栏 raw、复杂块按各自规则整段展开，见 04）；`MATH_TEXT_PT = 10.5`、写作模式跟随文档字号（**别写死**）；标题梯度 1.4/1.2/1.0em；`$` 配对**右侧已有 `$` 就跨过去**（且排在"公式内部不配对"之前）、退格整对删；**不要用 `&dark` 选择器**；整块选中不展开但**别套到跨行行间公式**；**别用 CSS zoom**（走 `setZoom`）；**别让观察结果去改档位或回改引擎**；判据用 CSS 布局宽度；格式命令（菜单 + 快捷键，**不做工具条**）**无选区替换整行、不丢字**、有选区只替换选区、包装命令**首尾空白留定界符外侧**、引用**必须 `#quote(block: true)[...]`**（Typst 没有 `>`）；**快捷键分三处**归口（**MenuBar 只认 Ctrl+单键**）；切换模式**保持光标**（**别自己写 scrollTop**）。
 - **窗口/更新（→05）**：`decideAppKey` 顺序敏感（Esc → Alt+Z → Ctrl+Shift+N → 格式表）；新建窗口 ACL 两处都要；更新弹窗**只收起来**（**绝不写 `updateDismissedAt`**）；点过「稍后」= 只更新状态栏（**别退回时间窗口版**）；**不许再加"上次检查时间"式节流**；更新说明渲染**别退回 `<pre>`**。
 - **文件/安全（→02）**：写盘只有一条路（`document-session` 的 `save() → saveTypFile → write_file`），**没有自动保存**；**绝不能让 `editorDoc` 落后**；`validate_typ_path` / `validate_write_path` 不许绕过；`csp` 保持 `null`；「空文档存进已有文件」**不弹确认窗、直接写空（勿加回）**。
 - **测试/审查（→07）**：日常 `check` + 相关单测，动编辑器/装饰/布局才加浏览器验收；`file-ops` / `debug` / `computeMenuPosition` 这几处**不要补测试**；全套绿的 PR 仍要两条腿审（3 个只读子代理 + 主 agent 自己跑）；结论写进 `gh pr comment`。

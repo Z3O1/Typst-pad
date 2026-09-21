@@ -21,7 +21,14 @@ import { applyBlockSelection } from "../../core/block-plan";
  *
  * `Paragraph` 只是 Typst 顶层分块的兜底类别，里面仍可能混有 `#image(...)`、自定义宏、raw、
  * 注释等内容；仅按 kind 放开会把这些复杂内容从可靠的引擎切片退回近似源码显示。这里复用
- * live-preview 已有的 lexer：块内只要出现任何非 markup 区域，就继续沿用局部渲染。
+ * live-preview 已有的 lexer：块内只要出现**代码 / raw / 注释**区域，就继续沿用局部渲染。
+ *
+ * **`string` 区域不算复杂**（2026-09-22 审查发现）：lexer 把 `"` 无条件登记成 string（为了让
+ * `"$5"` 不被当成公式，见 `typst-lex` 的说明），但 markup 里的 `"` 就是 typst 的弯引号、是
+ * 纯 markup —— 一旦把它算作复杂内容，写了一对引号的正文（`他说"你好"，然后走了。`）就会整段
+ * 退回切片，未闭合的引号更会让其后所有段落一起退化，正好违背这条规则本身。真在代码里的字符串
+ * 一定被外层的 `code` 区域包住（`#let s = "x"`、`#image("x.png")`），所以放宽 string
+ * 不会漏掉任何代码。
  *
  * 公式不属于 opaque 区域，因此“普通文字 + 行内公式”仍是可编辑正文，公式本身继续由
  * math decoration 局部替换。粗体 / 斜体也属于 markup，直接作用在真实文本上。
@@ -33,12 +40,32 @@ export function isDirectlyEditableTextBlock(
   if ((block.kind !== "Paragraph" && block.kind !== "Heading") || !block.found || block.skipped) {
     return false;
   }
-  // opaque 按位置有序且互不重叠；越过块尾即可停止。
-  for (const region of opaque) {
-    if (region.from >= block.to) break;
-    if (region.to > block.from && region.from < block.to) return false;
+  return !overlapsComplexRegion(block.from, block.to, opaque);
+}
+
+/**
+ * 块区间与“复杂区域”（code / raw / comment）相交吗。
+ *
+ * `opaque` 按位置有序且互不重叠 ⇒ 二分找到第一个 `from >= from` 的区域，再往后扫到越过块尾
+ * 为止。**别写成从头线性扫**：那是每个格子一次、每次按键重建装饰一次，即 O(块 × 区域)；
+ * `markup-ranges` 里记过同样的教训（40k 字符实测 47ms/次）。
+ */
+function overlapsComplexRegion(from: number, to: number, opaque: readonly Region[]): boolean {
+  let lo = 0;
+  let hi = opaque.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (opaque[mid].from < from) lo = mid + 1;
+    else hi = mid;
   }
-  return true;
+  for (let i = Math.max(0, lo - 1); i < opaque.length; i++) {
+    const region = opaque[i];
+    if (region.from >= to) break;
+    // 引号是 markup：见 isDirectlyEditableTextBlock 的说明（只有 code/raw/comment 算复杂）
+    if (region.kind === "string") continue;
+    if (region.to > from && region.from < to) return true;
+  }
+  return false;
 }
 
 /**

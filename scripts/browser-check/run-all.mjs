@@ -38,8 +38,8 @@ const SUITES = [
   ["wysiwyg.mjs", 291],
   ["writing-blocks.mjs", 133],
   ["writing-blocks-visual.mjs", 67],
-  ["writing-blocks-hit.mjs", 27],
-  ["writing-mode-scenes.mjs", 64],
+  ["writing-blocks-hit.mjs", 28],
+  ["writing-mode-scenes.mjs", 65],
   ["wysiwyg-visual.mjs", 20],
   // 计算样式守卫（box-sizing 作用域 / CSS 源序）：两种回归都躲得过交互断言，只能按 computed style 量
   ["computed-style.mjs", 17],

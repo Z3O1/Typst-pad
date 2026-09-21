@@ -100,6 +100,9 @@ async function caret() {
 let totalClicks = 0;
 let totalMatched = 0;
 let totalSkipped = 0;
+/** 全场真的出现过多少张切片：**必须无条件断言 > 0** —— 否则"复杂块再也不切片"这种真回归会让
+ *  每篇都走 `clicked === 0` 的分支、两条断言都判绿（计数还是恒定的 3×N，守卫抓不到）。 */
+let sawCrops = 0;
 
 for (const fx of withProbes) {
   const picked = PROBE_PICK
@@ -119,6 +122,7 @@ for (const fx of withProbes) {
   const initialCrops = await c.evaluate(
     `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
   );
+  sawCrops += initialCrops.length;
 
   // 按块分组（每块若干探针），轮转下单：点完一块它就变源码，所以下一次点**另一块**
   const byBlock = new Map();
@@ -219,6 +223,14 @@ for (const fx of withProbes) {
 
   await c.screenshot(SHOT(`writing-blocks-hit-${fx.name}`));
 }
+
+// **无条件**的一条：整场至少真的量到过一张切片。没有它，一个"复杂块全都不再切片"的回归会让
+// 上面两条三元断言一起判绿（它们的分支各自算 1 项，计数守卫看不出来）。
+check(
+  "全场至少有一篇夹具真的生成了可点击切片（否则本套等于没验点击定位）",
+  sawCrops > 0,
+  `初始切片合计 ${sawCrops} 张`,
+);
 
 finish(
   `点击合计：命中 ${totalMatched}/${totalClicks}，跳过 ${totalSkipped}（探针点不在视口内）；通过 ${state.passed} 项检查\n` +

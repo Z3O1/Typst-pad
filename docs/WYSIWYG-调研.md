@@ -200,4 +200,4 @@ http://localhost:1420/?browserdev=1
 
 **仍未覆盖**（保持源码显示，可后续增量）：多行或含内容块的 `#let` 定义不参与公式上下文；写作模式的块级结构（表格/图片/引用块）**后来由块级切片覆盖**（表格仍按整块切、切片上没有文字层，见 `docs/文档模式渲染保真-调研.md`），本文写的是加块级渲染**之前**的状态。
 
-验证：`cargo test compile_math`（真实排版与基线测量）、`npm test`（区域扫描/标记拆解/jsdom 装饰行为）、`node scripts/browser-check/wysiwyg.mjs`（真实浏览器 + 真实输入 + 真实选区的 23 项验收与截图；**这套验收后来一直在长，现在已经是 290 项**）。
+验证：`cargo test compile_math`（真实排版与基线测量）、`npm test`（区域扫描/标记拆解/jsdom 装饰行为）、`node scripts/browser-check/wysiwyg.mjs`（真实浏览器 + 真实输入 + 真实选区的 23 项验收与截图；**这套验收后来一直在长，现在已经是 291 项**）。

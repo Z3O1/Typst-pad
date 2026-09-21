@@ -3,7 +3,7 @@
 // 与 `writing-blocks.mjs` 的分工：
 //   * `writing-blocks.mjs`          —— 桩产物，验**交互**（切片出现 / 光标进出 / 点击回源码 / 窗口化补渲）；
 //   * `writing-blocks-visual.mjs`   —— **真实产物**，验**几何**（切片是按真实排版切下来的，
-//                                      摞起来的高度、列宽、首尾相接关系与引擎的版式一致）。
+//                                      列宽、逐块高度、没有被拉伸、纵向位置与引擎的版式一致）。
 //
 // 链路（与 `wysiwyg-visual.mjs` 的公式夹具同款）：
 //   1) `npm run fixtures:blocks` —— Rust 侧 `dump_block_fixtures`（#[ignore] 按需测试）把每篇样例
@@ -39,7 +39,9 @@ const directlyEditable = (fx, block) => {
   if (!block.found || block.skipped || !["Paragraph", "Heading"].includes(block.kind)) return false;
   const from = byteToPos(fx.doc, block.start);
   const to = byteToPos(fx.doc, block.end);
-  return !/(#|`|\/\/|\/\*|")/.test(fx.doc.slice(from, to));
+  // 只有 code / raw / comment 算复杂：markup 里的直引号是 typst 的弯引号（lexer 登记的 string
+  // 区域），不算 —— 见 live-preview/block-decorations.ts 的 isDirectlyEditableTextBlock。
+  return !/(#|`|\/\/|\/\*)/.test(fx.doc.slice(from, to));
 };
 
 for (const fx of fixtures) {
@@ -78,15 +80,6 @@ for (const fx of fixtures) {
     JSON.stringify(actualFrom) === JSON.stringify(expectedFrom),
     JSON.stringify({ actualFrom, expectedFrom }),
   );
-  const directFrom = found
-    .filter((b) => directlyEditable(fx, b))
-    .map((b) => byteToPos(fx.doc, b.start));
-  check(
-    "普通正文/标题没有退回整块 SVG",
-    directFrom.every((from) => !actualFrom.includes(from)),
-    JSON.stringify({ directFrom, actualFrom }),
-  );
-
   // pt → px 换算因子由复杂切片宽度推出；没有切片的纯正文场景取 CSS 的 4/3。
   const factor = measured.crops[0]?.w ? measured.crops[0].w / fx.contentWidthPt : 4 / 3;
   check(
@@ -97,6 +90,13 @@ for (const fx of fixtures) {
 
   let worstHeight = 0;
   let worstRatio = 0;
+  // 纵向位置：旧版有一条"切片总跨度 = 真实版式跨度"，正文不再切片后它失去前提被删掉；
+  // 这里按"以首张复杂切片为基准的 y 偏移"补回覆盖（y 之前只量不用）。
+  const yBase = expected[0];
+  const yBaseCrop = yBase
+    ? measured.crops.find((crop) => crop.from === byteToPos(fx.doc, yBase.start))
+    : undefined;
+  let worstY = 0;
   for (const crop of measured.crops) {
     const block = expected.find((x) => byteToPos(fx.doc, x.start) === crop.from);
     if (!block) continue;
@@ -105,9 +105,13 @@ for (const fx of fixtures) {
       worstRatio,
       Math.abs(crop.h / crop.w / (block.heightPt / block.widthPt) - 1),
     );
+    if (yBase && yBaseCrop) {
+      worstY = Math.max(worstY, Math.abs(crop.y - yBaseCrop.y - (block.yPt - yBase.yPt) * factor));
+    }
   }
   check(`复杂切片高度与真实排版一致（最大偏差 ${worstHeight.toFixed(2)}px）`, worstHeight <= 2.5);
   check(`复杂切片没有被拉伸（最大偏差 ${(worstRatio * 100).toFixed(1)}%）`, worstRatio <= 0.02);
+  check(`复杂切片纵向位置与真实排版一致（最大偏差 ${worstY.toFixed(2)}px）`, worstY <= 2.5);
   check(
     "复杂切片左缘对齐正文列左缘（±2px）",
     measured.crops.every((crop) => Math.abs(crop.x) <= 2),

@@ -407,7 +407,8 @@ describe("livePreview 代码块（``` 围栏）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 块级切片（写作模式的"渲染表面"）：非光标块显示成引擎画的切片，光标所在块保持源码
+// 块级切片（写作模式的"渲染表面"）：纯 markup 的正文/标题始终是真实文本，含代码/raw/注释的
+// 复杂块显示成引擎画的切片、光标进去才展开源码
 // 见 docs/文档模式渲染保真-调研.md 第三节。这里锁的是"装饰层"的行为，
 // 真实排版几何由 Rust 侧 block_geometry 的测试与浏览器验收负责。
 // ---------------------------------------------------------------------------
@@ -545,24 +546,47 @@ describe("livePreview 块级切片", () => {
     view.dispatch({ selection: { anchor: paragraphFrom + 1 } });
     expect(crops().length).toBe(1);
     expect(content()).toBe(before); // 正文内移动光标不再切换整块显示形态
+    // 光标移到**另一个块**（列表）里：正文块仍是真实文本（列表成为活动块、展开成源码）
+    view.dispatch({ selection: { anchor: listFrom + 2 } });
+    expect(crops().length).toBe(0);
+    expect(content()).toContain("普通正文");
   });
 
   it("含代码表达式的 Paragraph 保守保留切片，不误当普通正文", () => {
-    const doc = '#image("x.png")\n\n普通正文。\n';
+    // 真实触发是"行内混了 `#` 表达式"：整行只有 `#image(...)` 时 Rust 侧的分块是 Code
+    // （见 block_geometry 的 LINE_ONLY_KINDS），只有混在段落里才是 kind=Paragraph。
+    const doc = '普通正文里混着 #image("x.png") 与代码。\n\n另一段。\n';
     const complexTo = doc.indexOf("\n");
-    const paragraphFrom = doc.indexOf("普通正文");
-    const paragraphTo = doc.indexOf("\n", paragraphFrom);
+    const secondFrom = doc.indexOf("另一段");
+    const secondTo = doc.indexOf("\n", secondFrom);
     mount(
       doc,
       [
         crop(0, complexTo, { kind: "Paragraph" }),
-        crop(paragraphFrom, paragraphTo, { kind: "Paragraph" }),
+        crop(secondFrom, secondTo, { kind: "Paragraph" }),
       ],
-      paragraphFrom + 2,
+      secondFrom + 2,
     );
     expect(crops().length).toBe(1);
     expect(content()).not.toContain("#image");
-    expect(content()).toContain("普通正文");
+    expect(content()).toContain("另一段");
+  });
+
+  it('正文里的直引号是 markup：一对 `"` 不把整段退回切片（审查发现）', () => {
+    // lexer 把 `"` 登记成 string（为了让 `"$5"` 不当公式），但 markup 里的引号是纯 markup；
+    // 若把它算作复杂内容，写了一句 `他说"你好"` 的正文就会整段变回切片。
+    const doc = '他说"你好"，然后走了。\n\n第二段。\n';
+    const firstTo = doc.indexOf("\n");
+    const secondFrom = doc.indexOf("第二段");
+    const secondTo = doc.indexOf("\n", secondFrom);
+    mount(
+      doc,
+      [crop(0, firstTo, { kind: "Paragraph" }), crop(secondFrom, secondTo, { kind: "Paragraph" })],
+      2,
+    );
+    expect(crops().length).toBe(0);
+    expect(content()).toContain("你好");
+    expect(content()).toContain("第二段");
   });
 
   it("blocks 为 null（源码模式 / 后端不支持）时行为与加这个功能前一致：不动装饰", () => {

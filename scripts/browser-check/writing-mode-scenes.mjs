@@ -36,7 +36,9 @@ const directlyEditable = (fx, block) => {
   if (!block.found || block.skipped || !["Paragraph", "Heading"].includes(block.kind)) return false;
   const from = byteToPos(fx.doc, block.start);
   const to = byteToPos(fx.doc, block.end);
-  return !/(#|`|\/\/|\/\*|")/.test(fx.doc.slice(from, to));
+  // 与前端同口径：只有 code / raw / comment 算复杂；markup 里的直引号（lexer 登记的 string
+  // 区域）不算（见 live-preview/block-decorations.ts 的 isDirectlyEditableTextBlock）。
+  return !/(#|`|\/\/|\/\*)/.test(fx.doc.slice(from, to));
 };
 
 /** 输入一篇文档（替换整篇），返回量到的切片几何 */
@@ -81,24 +83,32 @@ for (const fx of fixtures) {
     JSON.stringify(actualFrom) === JSON.stringify(expectedFrom),
     JSON.stringify({ actualFrom, expectedFrom }),
   );
-  const directFrom = found
-    .filter((b) => directlyEditable(fx, b))
-    .map((b) => byteToPos(fx.doc, b.start));
-  check(
-    "正文/标题不生成整块切片",
-    directFrom.every((from) => !actualFrom.includes(from)),
-  );
+  // pt → px 换算因子由第一张复杂切片的宽度推出；纯正文场景没有切片，取 CSS 的 4/3（不参与断言）
+  const factor = m.crops[0]?.w ? m.crops[0].w / fx.contentWidthPt : 4 / 3;
   check(
     "复杂切片铺满正文列宽（±2px；无切片时不适用）",
     m.crops.every((crop) => Math.abs(crop.w - m.columnWidth) <= 2),
   );
-  const factor = m.crops[0]?.w ? m.crops[0].w / fx.contentWidthPt : 4 / 3;
   let worst = 0;
   for (const crop of m.crops) {
     const block = expected.find((b) => byteToPos(fx.doc, b.start) === crop.from);
     if (block) worst = Math.max(worst, Math.abs(crop.h - block.heightPt * factor));
   }
   check(`复杂切片高度与真实排版一致（最大偏差 ${worst.toFixed(2)}px）`, worst <= 2.5);
+  // 原来这里是「正文/标题不生成整块切片」——它与上一条由同一个谓词互补切分，是恒真断言
+  // （切片集合已经由 `复杂切片数与范围正确` 钉死）。换成纵向位置的断言：补上旧版"切片总跨度
+  // = 真实版式跨度"那条断言随旧前提一起删掉之后留下的缺口（y 一直只是量了没人用）。
+  const yBase = expected[0];
+  const yBaseCrop = yBase
+    ? m.crops.find((crop) => crop.from === byteToPos(fx.doc, yBase.start))
+    : undefined;
+  let worstY = 0;
+  for (const crop of m.crops) {
+    const block = expected.find((b) => byteToPos(fx.doc, b.start) === crop.from);
+    if (!block || !yBase || !yBaseCrop) continue;
+    worstY = Math.max(worstY, Math.abs(crop.y - yBaseCrop.y - (block.yPt - yBase.yPt) * factor));
+  }
+  check(`复杂切片纵向位置与真实排版一致（最大偏差 ${worstY.toFixed(2)}px）`, worstY <= 2.5);
   check("状态栏没有脚本错误", !m.status.includes("脚本错误"), JSON.stringify(m.status));
   await c.screenshot(SHOT(`scene-${fx.name.replace(/[（）()]/g, "")}`));
   summary.push({
@@ -109,6 +119,15 @@ for (const fx of fixtures) {
     活动块行数: m.lineCount,
   });
 }
+
+// 9 篇场景里有 5 篇是纯正文/标题（0 张复杂切片），逐篇的几何断言在空数组上是恒真的。
+// 这条**无条件**的聚合断言把"该有切片却一张都没有"钉住（否则整套几何验收可以静默空转）。
+const totalCrops = summary.reduce((n, s) => n + s.切片, 0);
+check(
+  `至少一个场景真的量到了复杂切片（合计 ${totalCrops} 张）`,
+  totalCrops > 0,
+  `合计 ${totalCrops} 张`,
+);
 
 // 标题字号梯度必须跟 typst 一致（用户报「在标题所在块，标题就会变的很大」）：
 // 切片是引擎画的（h1 = 1.4em、h2 = 1.2em、h3 及以下 = 1.0em，只加粗），光标进标题块时那一块
@@ -280,7 +299,8 @@ if (!setDoc) {
   );
   check(
     "正文与标题照常显示为可编辑文字，没有退回整块切片",
-    a.text.includes("这一段用来") && a.text.includes("文档级设置") && a.crops === 0,
+    // 标题 `= 设置对照` 在正文里渲染成"设置对照"（标记被隐藏）——别再断言夹具名字
+    a.text.includes("这一段用来") && a.text.includes("设置对照") && a.crops === 0,
     JSON.stringify(a),
   );
   await c.screenshot(SHOT("scene-hidden-set"));
@@ -333,7 +353,13 @@ const after = await c.evaluate(`document.querySelectorAll(".cm-block-crop").leng
 const editedText = await c.evaluate(`document.querySelector(".cm-content").innerText`);
 check(
   `直接编辑正文后仍保持真实文本（切片 ${before} → ${after}）`,
-  editedText.includes("补充一句") && after === 0,
+  // 编辑之后文档不再与夹具逐字相同 → 桩改用 fakeBlocks：那一行 `#set …` 在桩里是"含代码的
+  // Paragraph"（复杂块）因而会被切片，所以这里允许 ≤1 张；判据的关键是**正文与标题都还能在
+  // DOM 里读到**（仍是真实文本、没被切片盖掉）。
+  editedText.includes("补充一句") &&
+    editedText.includes("这一段用来") &&
+    editedText.includes("设置对照") &&
+    after <= 1,
   JSON.stringify({ before, after, editedText: editedText.slice(-80) }),
 );
 check(
@@ -354,7 +380,10 @@ const backToWrite = await c.evaluate(`(() => ({
 }))()`);
 check(
   "切回写作模式：正文仍是可编辑文字",
-  backToWrite.crops === 0 && backToWrite.text.includes("补充一句"),
+  // 同上：允许 ≤1 张（`#set` 那行在桩里算复杂块），正文文字必须在 DOM 里读得到
+  backToWrite.crops <= 1 &&
+    backToWrite.text.includes("补充一句") &&
+    backToWrite.text.includes("这一段用来"),
   JSON.stringify(backToWrite),
 );
 

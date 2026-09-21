@@ -673,10 +673,15 @@ check("Ctrl+B 加粗（插入 Typst 标记）", bold.includes("*要加粗的文�
 await c.key("1", { code: "Digit1", keyCode: 49, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 300));
 const heading = await c.evaluate(`document.querySelector(".cm-content").innerText`);
+const headingDoc = await c.evaluate(
+  `document.querySelector(".cm-content").cmTile.root.view.state.doc.toString()`,
+);
 check(
-  "Ctrl+1 标题（行首加 `= `，写作模式下立刻变大）",
-  heading.trim().startsWith("= "),
-  JSON.stringify(heading),
+  // 新规则（见 live-preview 的 markup-decorations）：命令把 `= ` 写进了文档，但标记只在光标
+  // 触碰它时才露出 —— 所以判据是"文档行首有 `= `、而 innerText 里没有"，不是 innerText 有标记。
+  "Ctrl+1 标题（行首加 `= `，标记按新规则隐藏、正文仍是真实文本）",
+  headingDoc.startsWith("= ") && !heading.trim().startsWith("= "),
+  JSON.stringify({ heading, headingDoc }),
 );
 const headingSize = await c.evaluate(`(() => {
   const el = document.querySelector(".cm-markup-heading");
