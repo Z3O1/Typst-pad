@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Typst-pad = 仿 Typora 的 Typst 桌面编辑器，两套 UI：「写作模式」（默认，单栏整页纸张）与「源代码模式」（`Ctrl+E`）。前端 SvelteKit SPA（adapter-static）+ Tauri 2（Rust）+ 内嵌 typst crate 0.15.x（进程内编译、本地字体），无 wasm、无网络依赖。注释与 README 中文。
 
