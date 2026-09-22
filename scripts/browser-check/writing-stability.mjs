@@ -1451,6 +1451,57 @@ await boot(c, DEV_URL, { mathFixtures, settleMs: 800 });
   await c.send("Emulation.clearDeviceMetricsOverride");
 }
 
+// ===========================================================================
+// F. 连续写作交互（报告 T5）：列表里回车续项 / 空项退出（真键盘事件走完整链路）
+// ===========================================================================
+console.log("\n=== F. 列表回车续项与退出（报告 T5）");
+await boot(c, DEV_URL, { mathFixtures, settleMs: 800 });
+{
+  const doc = "= 清单\n\n- 第一项\n";
+  await replaceDocument(c, doc, 900);
+  const listPos = doc.indexOf("- 第一项") + "- 第一项".length;
+  await setCaret(listPos);
+  await sleep(300);
+  await c.key("Enter", { code: "Enter", keyCode: 13 });
+  await sleep(400);
+  const afterFirst = await c.evaluate(`window.__typstPadView.state.doc.toString()`);
+  check(
+    "写作模式：列表项末尾按回车 → 续出同级新项（依赖的列表命令没被本地 keymap 遮住）",
+    // 原文档末尾那个换行还在，所以结果末尾是「- 」+ 原换行
+    afterFirst === "= 清单\n\n- 第一项\n- \n",
+    JSON.stringify({ afterFirst }),
+  );
+  await c.key("Enter", { code: "Enter", keyCode: 13 });
+  await sleep(400);
+  const afterEmpty = await c.evaluate(`window.__typstPadView.state.doc.toString()`);
+  check(
+    "写作模式：空列表项按回车 → 退出列表（不留空标记）",
+    // 空项退出：`- ` 标记被去掉，那一行成了空行（不是留下一个空标记）
+    afterEmpty === "= 清单\n\n- 第一项\n\n",
+    JSON.stringify({ afterEmpty }),
+  );
+  // 非列表行仍走"沿用上一行缩进"
+  await replaceDocument(c, "正文一\n  缩进正文\n", 900);
+  await setCaret("正文一\n  缩进正文".length);
+  await sleep(300);
+  await c.key("Enter", { code: "Enter", keyCode: 13 });
+  await sleep(400);
+  const afterPlain = await c.evaluate(`window.__typstPadView.state.doc.toString()`);
+  check(
+    "非列表行回车仍沿用上一行缩进（列表命令认不出来时落回我们那条）",
+    afterPlain === "正文一\n  缩进正文\n  \n",
+    JSON.stringify({ afterPlain }),
+  );
+  record({
+    scene: "列表回车（写作模式）",
+    source: "fake",
+    phase: "Enter 续项 / 空项退出（报告 T5）",
+    afterFirst,
+    afterEmpty,
+    afterPlain,
+  });
+}
+
 // 收尾把设备覆盖清掉：它是留在 CDP target 上的，不还原会污染后续套件的视口
 await c.send("Emulation.clearDeviceMetricsOverride");
 
@@ -1475,6 +1526,7 @@ report.matrix = {
     "点击的例外（高块 widget 中下部**不钉**，页面不被滚走；右键不钉）",
     "模式切换锚点（Ctrl+E 往返：位置 + 屏幕高度 + 焦点；含连续快按时的作废路径）",
     "过期结果与过期命中（报告 T2 / A1）：`blockslow=1`（编译与命中各 350ms）下，命中在飞时改文档 → 这次点击整条作废；改版心宽后切片与链接热区成套重建",
+    "连续写作交互（报告 T5）：写作模式列表里回车续项、空项回车退出、非列表行仍沿用上一行缩进（真键盘事件）",
     "展开占位（报告 T4）：高公式展开时补的临时空白 —— 20 次进出收起高度零累积（偏差 0.00px）、编辑态只收敛一次且收缩有界、占位 ≤ 1 个可视高度（`planEditReserve` 无状态）",
     "编译调度与输入法安全（报告 T3）：连续 8 次编辑只落 ≤3 次 `compile_blocks`；合成期间零次新块编译、合成中文本照常进编辑区、合成结束后攒下的那次照常落地；纯选区移动不重扫全文（文档扫描缓存的 miss 不增）",
     "整选替换 / 跨行公式例外：由 `wysiwyg.mjs` 的「公式选区与输入」组（`$x^2$` 与整行 `$ x^2 $` 各一条）与 `live-preview.test.ts` 覆盖，本套件不重复",

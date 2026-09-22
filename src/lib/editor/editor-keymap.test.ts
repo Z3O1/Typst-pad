@@ -15,7 +15,8 @@ import {
 } from "@codemirror/commands";
 import { indentUnit } from "@codemirror/language";
 import { basicSetup } from "codemirror";
-import { editorKeymap } from "./editor-keymap";
+import { createEditorKeymap, editorKeymap } from "./editor-keymap";
+import { typst_lezer } from "codemirror-lang-typst/lezer";
 import { INDENT_UNIT } from "./auto-indent";
 
 // 与 Editor.svelte buildExtensions 的键位相关扩展保持一致（typst() 不含键位，不影响断言）
@@ -69,10 +70,15 @@ describe("editorKeymap 导出与绑定", () => {
     // 在 typst 文档里时灵时不灵（用户报「换行时应该和上一行缩进一样」）。
     // 注意 Enter 上还有 autocomplete 的 acceptCompletion（Prec.highest，缺省键位就在），
     // 补全面板开着时它先返回 true —— 那是既有行为，只要我们的命令确实挂在 Enter 上即可。
-    const shiftEnter = bindings.find((b) => b.key === "Shift-Enter")?.run;
-    const enterRuns = bindings.filter((b) => b.key === "Enter").map((b) => b.run);
-    expect(shiftEnter).toBeTruthy();
-    expect(enterRuns).toContain(shiftEnter);
+    const enterRun = bindings.find((b) => b.key === "Enter")?.run;
+    const shiftEnterRun = bindings.find((b) => b.key === "Shift-Enter")?.run;
+    expect(typeof enterRun).toBe("function");
+    expect(typeof shiftEnterRun).toBe("function");
+    // 报告 T5 起两者是**不同的包装**：Enter 先把列表命令（`insertNewTypstListItem`）调一遍、
+    // Shift-Enter 试"续行"（`insertTypstListContinuation`），都不是 CM 默认的
+    // `insertNewlineAndIndent`（那条的缩进来自语言服务，在 typst 文档里时灵时不灵）。
+    // 源码模式下两者行为依旧等价，由下面的行为用例锁住。
+    expect(enterRun).not.toBe(shiftEnterRun);
   });
 
   it("Mod-d 优先级高于 basicSetup 的「选中下一处」（searchKeymap）", () => {
@@ -123,6 +129,53 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
     expect(view.state.doc.toString()).toBe("#foo\n");
     view.destroy();
+  });
+
+  it("写作模式：列表里按回车续出下一项；空项回车退出列表（报告 T5）", () => {
+    // 用**原生 Lezer** 语言入口（`typst_lezer`，无 wasm）：列表命令要语法树，
+    // 而 `typst()` 那个 wasm 入口在 Node 下会 panic（见文件头说明）。
+    const writeExtensions = [
+      basicSetup,
+      createEditorKeymap({ isWriteMode: () => true }),
+      indentUnit.of(INDENT_UNIT),
+      typst_lezer(),
+      commentTokensData,
+    ];
+    const makeWriteView = (doc: string) => {
+      const host = document.createElement("div");
+      document.body.appendChild(host);
+      return new EditorView({ doc, parent: host, extensions: writeExtensions });
+    };
+
+    // ① 列表项末尾回车 → 续出同级新项
+    let view = makeWriteView("- 第一项");
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("- 第一项\n- ");
+    view.destroy();
+
+    // ② 空列表项回车 → 退出列表（不留下一个空标记）
+    view = makeWriteView("- 第一项\n- ");
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("- 第一项\n");
+    view.destroy();
+
+    // ③ 非列表行回车 → 仍走"沿用上一行缩进"（列表命令认不出来就落到我们那条）
+    view = makeWriteView("  普通正文");
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("  普通正文\n  ");
+    view.destroy();
+
+    // ④ **源码模式不碰列表语义**（模式感知的价值）：同一份文档、同一个回车 → 只是换行 + 抄缩进
+    view = makeWriteView("- 第一项");
+    view.destroy();
+    const sourceView = makeView("- 第一项");
+    sourceView.dispatch({ selection: { anchor: sourceView.state.doc.length } });
+    press(sourceView, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(sourceView.state.doc.toString()).toBe("- 第一项\n");
+    sourceView.destroy();
   });
 
   it("Tab 缩进与回车继承是同一套宽度：Tab 出来的 4 格，回车后照抄", () => {

@@ -87,9 +87,17 @@ export function planLinePrefix(doc: string, pos: number, prefix: string): EditPl
   const line = doc.slice(from, to);
   const existing = /^([ \t]*)([=+\-]+[ \t]+)/.exec(line);
   if (existing && existing[2] === prefix) {
-    // 再点一次：去掉标记，光标位置相应前移
-    const shift = existing[2].length;
-    return { from, to: from + shift, insert: "", anchor: Math.max(from, pos - shift) };
+    // 再点一次：去掉**标记本身**、保留缩进（报告 T5 的代码确定性修复）。
+    // 原来从行首删 `existing[2].length` 个字符 —— 带缩进时删掉的是缩进：
+    // `  - 项` → `- 项`（标记还在）而不是 `  项`。
+    const indentLen = existing[1].length;
+    const markerLen = existing[2].length;
+    return {
+      from: from + indentLen,
+      to: from + indentLen + markerLen,
+      insert: "",
+      anchor: Math.max(from + indentLen, pos - markerLen),
+    };
   }
   const body = line.replace(/^([ \t]*)([=+\-]+[ \t]+)/, "$1");
   const indent = /^[ \t]*/.exec(body)?.[0] ?? "";
@@ -137,17 +145,22 @@ function planLineBlock(
 
 /** 行间公式（独占整行；typst 的行间公式就是"定界符内侧带空白"，独占一行最稳） */
 export function planBlockMath(doc: string, from: number, to = from): EditPlan {
+  // **anchorOffset 由前缀长度算**（报告 T5 的代码确定性修复）：`"$\n  "` 是 4 个字符，
+  // 原来写死 3 —— 光标会落在公式体**开头前一个字符**（公式体第一个字符前面差一格），
+  // 用户接着打字时位置不对。写死常量的测试断言也一并改成"选中的就是原正文"。
+  const prefix = "$\n  ";
   return planLineBlock(doc, from, to, (body) => ({
-    insert: `$\n  ${body}\n$\n`,
-    anchorOffset: 3, // `$\n  ` 之后
+    insert: `${prefix}${body}\n$\n`,
+    anchorOffset: prefix.length,
   }));
 }
 
 /** 代码块（``` 围栏） */
 export function planCodeBlock(doc: string, from: number, to = from, lang = "typ"): EditPlan {
+  const prefix = `\`\`\`${lang}\n`;
   return planLineBlock(doc, from, to, (body) => ({
-    insert: `\`\`\`${lang}\n${body}\n\`\`\`\n`,
-    anchorOffset: 3 + lang.length + 1,
+    insert: `${prefix}${body}\n\`\`\`\n`,
+    anchorOffset: prefix.length, // 同样由前缀长度算，别写死
   }));
 }
 

@@ -14,7 +14,7 @@
   // 所以我们那份 `typst-highlight.ts` 覆盖补丁已经删掉（见 CHANGELOG）。
   import { typst_lezer } from "codemirror-lang-typst/lezer";
   import { typstHeadingHighlight } from "./typst-highlight";
-  import { editorKeymap } from "./editor-keymap";
+  import { createEditorKeymap } from "./editor-keymap";
   import { planDollarInput } from "./auto-pair";
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
@@ -205,7 +205,9 @@
   function buildExtensions() {
     return [
       basicSetup,
-      editorKeymap, // 自定义编辑快捷键（Prec.high，优先于 basicSetup 默认键位）
+      // 自定义编辑快捷键（Prec.high，优先于 basicSetup 默认键位）。**模式感知**：
+      // 写作模式先把 Enter 交给 typst 的列表命令（续项 / 空项退出），它不认才沿用上一行缩进
+      createEditorKeymap({ isWriteMode: () => mode === "write" }),
       // 一档缩进 = 4 个空格（用户要求「Tab 应该是四格缩进」）：Tab / Shift+Tab 与语言侧自动缩进
       // 都走这个 facet。回车那条**不用它** —— 新行照抄上一行实际的前导空白（见 auto-indent.ts）。
       indentUnit.of(INDENT_UNIT),

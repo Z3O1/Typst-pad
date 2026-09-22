@@ -9,6 +9,8 @@ import {
   toggleBlockComment,
   toggleComment,
 } from "@codemirror/commands";
+import type { Command } from "@codemirror/view";
+import { insertNewTypstListItem, insertTypstListContinuation } from "codemirror-lang-typst/lezer";
 import { emptyPairBackspace } from "./auto-pair";
 import { indentForNewLine, isBlankLine } from "./auto-indent";
 
@@ -63,18 +65,70 @@ function newlineKeepingIndent(view: EditorView): boolean {
   return true;
 }
 
+export interface EditorKeymapOptions {
+  /**
+   * 当前是不是**写作模式**（缺省 false = 源码模式）。
+   *
+   * 为什么需要它（报告 T5）：`codemirror-lang-typst/lezer` 自带
+   * `typstLezerListKeymap`（`Prec.high`，Enter = `insertNewTypstListItem`、
+   * Shift-Enter = `insertTypstListContinuation`），而本文件也导出 `Prec.high` 且**注册在前**
+   * —— 同优先级下先返回 true 者胜出，于是那条 Enter 把列表命令整个遮住了（写作模式的列表里
+   * 按回车不会续出下一项）。修法是**在写作模式先把列表命令调一遍**，它返回 false（不在列表里）
+   * 才落回"沿用上一行缩进"；**不重写第二份列表 Enter 状态机**。
+   */
+  isWriteMode?: () => boolean;
+}
+
+/**
+ * 写作模式的回车：先让依赖导出的列表命令处理，不认再沿用上一行缩进。
+ *
+ * 依赖那条命令已经实现"同级拆项 / 空顶层退出 / 空嵌套项上移"，别再自己写一遍；
+ * 它返回 false 的场合（光标不在列表项里）我们仍然要接管 —— 那正是"新行沿用上一行缩进"
+ * 存在的理由（CM 默认的 `insertNewlineAndIndent` 在 typst 文档里时灵时不灵）。
+ * 任何异常都退回缩进那条路：输入链路绝不能因为列表逻辑而吞掉按键。
+ */
+function listAwareEnter(
+  isWriteMode: () => boolean,
+  listCommand: Command,
+): (view: EditorView) => boolean {
+  return (view) => {
+    if (isWriteMode()) {
+      try {
+        if (listCommand(view)) return true;
+      } catch (e) {
+        console.error("[editor-keymap] 列表命令失败，退回沿用缩进：", e);
+      }
+    }
+    return newlineKeepingIndent(view);
+  };
+}
+
 // CM6 中同一按键的多条绑定按注册顺序执行、先返回 true 者胜出，因此把自定义键位放在
 // basicSetup 之后无法覆盖其默认绑定（例如 Mod-d 会被 searchKeymap 的"选中下一处"
 // 在空选区时抢先返回 true）。用 Prec.high 提升优先级，保证自定义快捷键先被检查。
-export const editorKeymap = Prec.high(
-  keymap.of([
-    indentWithTab, // Tab 缩进 / Shift+Tab 反缩进
-    { key: "Enter", run: newlineKeepingIndent, preventDefault: true }, // 新行沿用上一行缩进
-    { key: "Shift-Enter", run: newlineKeepingIndent, preventDefault: true }, // 同上（默认键位里两者同义）
-    { key: "Backspace", run: deleteEmptyDollarPair, preventDefault: true }, // 空配对整对删
-    { key: "Mod-Shift-d", run: copyLineDown, preventDefault: true }, // 复制当前行到下方（VS Code 语义）
-    { key: "Mod-d", run: deleteLine, preventDefault: true }, // 删除当前行（有意覆盖 searchKeymap 的"选中下一处"）
-    { key: "Mod-Shift-/", run: toggleBlockComment, preventDefault: true }, // 块注释
-    { key: "Mod-/", run: toggleComment, preventDefault: true }, // 行注释（Ctrl+/ 切换）
-  ]),
-);
+export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
+  const isWriteMode = opts.isWriteMode ?? (() => false);
+  return Prec.high(
+    keymap.of([
+      indentWithTab, // Tab 缩进 / Shift+Tab 反缩进
+      {
+        key: "Enter",
+        run: listAwareEnter(isWriteMode, insertNewTypstListItem),
+        preventDefault: true,
+      },
+      {
+        key: "Shift-Enter",
+        run: listAwareEnter(isWriteMode, insertTypstListContinuation),
+        preventDefault: true,
+      },
+      { key: "Backspace", run: deleteEmptyDollarPair, preventDefault: true }, // 空配对整对删
+      { key: "Mod-Shift-d", run: copyLineDown, preventDefault: true }, // 复制当前行到下方（VS Code 语义）
+      { key: "Mod-d", run: deleteLine, preventDefault: true }, // 删除当前行（有意覆盖 searchKeymap 的"选中下一处"）
+      { key: "Mod-Shift-/", run: toggleBlockComment, preventDefault: true }, // 块注释
+      { key: "Mod-/", run: toggleComment, preventDefault: true }, // 行注释（Ctrl+/ 切换）
+    ]),
+  );
+}
+
+/** 源码模式（不碰列表语义）的键位；写作模式用 `createEditorKeymap({ isWriteMode })` */
+export const editorKeymap = createEditorKeymap();
