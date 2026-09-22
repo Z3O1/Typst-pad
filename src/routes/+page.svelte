@@ -42,6 +42,7 @@
   import { planRestore } from "$lib/core/session-restore";
   import { createMathQueue } from "$lib/editor/math-queue";
   import { createWritingCompileScheduler } from "$lib/core/writing-compile-scheduler";
+  import type { CompileReason } from "$lib/core/writing-compile-scheduler";
   import type { WriteCommand } from "$lib/core/write-commands";
   import { openTypFile, saveTypFile, readTypFile, pickFontDir, isTauri } from "$lib/core/file-ops";
   import { invoke } from "@tauri-apps/api/core";
@@ -86,6 +87,13 @@
     type ContextMenuItemSpec,
   } from "$lib/ui/context-menu-utils";
   import { clearState } from "$lib/core/persistence";
+  // 浏览器验收的**只读**钩子（`?browserdev=1` 才挂；见各自文件头）：验收要断言块表带的是
+  // 新排版戳、写作模式的编译次数与调度器运行次数对得上 —— 这两件事在 DOM 里都看不出来。
+  import {
+    registerWriteTestHooks,
+    reportWriteTestBlocks,
+    unregisterWriteTestHooks,
+  } from "$lib/dev/write-test-hook";
   import {
     isErrorLineInPrefix,
     formatDiagnosticForClipboard,
@@ -401,19 +409,49 @@
    * （引用编号、折行、字号都可能变）。四个修订号各自的"+1 时机"：
    *  - `blockSessionId`：打开 / 新建 / 重读文件（`resetBlocks`）；
    *  - `blockDocRevision`：每次编辑（`handleDocChange`）；
-   *  - `blockContextRevision` / `blockLayoutRevision`：在 `runCompile` 里跟上一轮的
-   *    编译输入（前缀 / 字体 / 路径、版心宽）比出来 —— 比"到处记得自增"可靠。
+   *  - `blockContextRevision` / `blockLayoutRevision`：在**读戳时**（`currentStamp` →
+   *    `syncStampRevisions`）跟上一轮编译的输入（前缀 / 字体 / 路径、版心宽）比出来 ——
+   *    比"到处记得自增"可靠，也比"等下一次编译启动再比"及时（见 syncStampRevisions）。
    */
   let blockSessionId = $state(0);
   let blockDocRevision = 0;
   let blockContextRevision = 0;
   let blockLayoutRevision = 0;
-  /** 上一轮编译用过的排版输入指纹（用来推 context/layout 的修订号） */
+  /**
+   * 上一轮编译用过的排版输入指纹（用来推 context/layout 的修订号）。**只在 `syncStampRevisions`
+   * 里读写**：读戳就同步，所以任何 `currentStamp()` 调用者拿到的都是"当前输入对应"的修订号。
+   */
   let lastContextKey = "";
   let lastLayoutKey = "";
 
-  /** 当前排版戳（发请求时复制一份，回来再比 —— 见 runCompile） */
+  /**
+   * **排版输入指纹 → 修订号**（报告 T2；PR #77 复审第 3 条）。
+   *
+   * 以前这段只在 `runCompile` 里、也就是"下一轮编译**启动**时"才跑，于是有一个窗口：
+   * 列宽/字体/前缀**已经**变了，旧输入的 `compile_blocks` 还在途，而 `blockLayoutRevision`
+   * 还是旧的 → 旧结果回来时 `requestStamp === currentStamp()` 成立，会被**当成精确命中**落地
+   * （`writingBlocksExact = true`，点击就会拿旧版心的几何去定位）。
+   *
+   * 现在把它抽成"读戳就同步"的纯状态比较（`currentStamp()` 里调）：任何一次读戳——包括
+   * **await 回来之后的复查**——都会先把指纹与"上一轮编译用过的"比一遍，不符就推进修订号。
+   * 于是旧产物在落地前必然被判过期，不必等下一次编译启动。**别把它挪回编译启动那一处**。
+   */
+  function syncStampRevisions(): void {
+    const contextKey = JSON.stringify([prefixEnabled, prefixCode, filePath, fontArgs()]);
+    const layoutKey = String(writingWidthPt > 0 ? writingWidthPt : DEFAULT_WRITING_WIDTH_PT);
+    if (contextKey !== lastContextKey) {
+      lastContextKey = contextKey;
+      blockContextRevision += 1;
+    }
+    if (layoutKey !== lastLayoutKey) {
+      lastLayoutKey = layoutKey;
+      blockLayoutRevision += 1;
+    }
+  }
+
+  /** 当前排版戳（发请求时复制一份，回来再比 —— 见 runCompile；**读之前先同步修订号**） */
   function currentStamp(): RenderStamp {
+    syncStampRevisions();
     return {
       sessionId: blockSessionId,
       documentRevision: blockDocRevision,
@@ -867,6 +905,14 @@
     writingGeometryId = patch.geometryId;
     writingTextPt = patch.textPt;
     blocksVersion++;
+    // 浏览器验收的只读快照（`?browserdev=1` 才真正写；见 write-test-hook）
+    reportWriteTestBlocks({
+      stamp: patch.stamp,
+      geometryId: patch.geometryId,
+      exact: patch.exact,
+      blocks: patch.blocks?.length ?? 0,
+      stale: patch.blocks?.filter((b) => b.stale === true).length ?? 0,
+    });
   }
 
   /**
@@ -1119,13 +1165,16 @@
     writeScheduler.holdForMath(MATH_COMPILE_HEADSTART_MS);
   }
 
-  /** 公式渲染结果的刷新合并（见 mathQueue 的 onRendered）：一帧最多刷新一次装饰 */
-  let mathRefreshFrame = false;
+  /**
+   * 公式渲染结果的刷新合并（见 mathQueue 的 onRendered）：一帧最多刷新一次装饰。
+   * 帧号存下来是为了**卸载时能取消**（复审第 5 条）：只留 bool 的话，最后一次 rAF 会在组件
+   * 已经拆掉之后跑（`mathVersion++` 打到已销毁的实例上）。
+   */
+  let mathRefreshFrame = 0;
   function scheduleMathRefresh() {
-    if (mathRefreshFrame) return;
-    mathRefreshFrame = true;
-    requestAnimationFrame(() => {
-      mathRefreshFrame = false;
+    if (mathRefreshFrame !== 0) return;
+    mathRefreshFrame = requestAnimationFrame(() => {
+      mathRefreshFrame = 0;
       mathVersion++;
     });
   }
@@ -1167,6 +1216,7 @@
     blockDocRevision = 0;
     lastBlocksRequest = "";
     blocksVersion++;
+    reportWriteTestBlocks(null); // 块表清空：验收的只读快照一起清（见 write-test-hook）
   }
 
   /**
@@ -1213,14 +1263,30 @@
    * **写作模式的编译调度器**（报告 T3）：编辑 / 补渲 / 版心重排 / 公式让路四个入口
    * 合成**一个单槽**（最多一个在途 + 一份待执行；理由取并集）。之前是四个互不知情的定时器，
    * 一次"改字 + 滚动 + 公式到货"能同时挂上两三次编译，而它们在 Rust 侧共用一把锁。
-   * 去抖仍是 150ms（`WRITE_COMPILE_DEBOUNCE_MS` 现在由调度器的 `debounceMs` 承担）。
-   * 源码模式的编译**不走它**（立即编译，见 scheduleCompile）。
+   * 去抖仍是 150ms（`WRITE_COMPILE_DEBOUNCE_MS` 现在由调度器的 `debounceMs` 承担，
+   * 而且是**尾随**的：持续打字期间不启动，停手 150ms 才编译）。
+   *
+   * **所有**写作模式的编译都必须经过它（PR #77 复审第 2 条）：`saveSettings` / 预览栏重排 /
+   * 启动首编译过去直接 `void runCompile()`，在调度器已有在途或待执行时照样并发挤进 Rust 那把锁
+   * —— `compileSeq` 只能丢旧结果，消不掉已经排上的昂贵编译。需要"立刻编译 + 落地后做事"的入口
+   * 走 `requestNow`（见 `compileNow`）。源码模式的编译**不走它**（另一边是整页预览，立即编译）。
    */
   const writeScheduler = createWritingCompileScheduler({
     run: () => runCompile(),
     debounceMs: 150,
     log: (message) => dbg.log("compile-schedule", message),
   });
+  // 浏览器验收的只读计数钩子（`?browserdev=1` 才挂；桌面版空操作）
+  registerWriteTestHooks(() => writeScheduler.stats());
+
+  /**
+   * 需要"**立刻**编译、并且在这一轮落地后做点什么"的入口（启动首编译要写状态栏、设置保存后要
+   * 更新"设置已保存"文案）：写作模式走调度器的立即通道（在途时不抢跑，等这一轮跑完立刻接上），
+   * 源码模式本来就是立即编译。**别再直接 `void runCompile()`** —— 那会绕过单槽模型。
+   */
+  function compileNow(reason: CompileReason): Promise<void> {
+    return viewMode === "write" ? writeScheduler.requestNow(reason) : runCompile();
+  }
 
   /**
    * 内容变化后的编译调度。**两种模式走两条路**（用户反馈「输入手感很差（公式）」后改的）：
@@ -1316,7 +1382,8 @@
     if (diff.fontsChanged || diff.prefixChanged) {
       // 重编译落地后再定状态栏文案：编译只写「就绪」时补「设置已保存」，有警告/错误就让位
       // （实测：点保存后 "设置已保存" 一闪而过，验收也因此判失败 —— 见 app-settings.ts）。
-      void runCompile().finally(() => {
+      // 走 `compileNow`：写作模式下这是"编译上下文的输入变了"，必须由单槽调度器登记（复审第 2 条）
+      void compileNow("context").finally(() => {
         statusText = statusAfterSettingsSave(statusText);
       });
     }
@@ -1392,7 +1459,10 @@
       if (!changed) return;
       previewPageWidthRequest = next;
       dbg.log("preview-reflow", `页宽 ${next === 0 ? "关闭（不重排）" : `${next.toFixed(1)}pt`}`);
-      void runCompile();
+      // 写作模式下预览栏也可以被单独打开，这次重排同样是写作模式编译的一种输入 →
+      // 交给单槽调度器（复审第 2 条：别在这里 `void runCompile()` 绕过它）
+      if (viewMode === "write") writeScheduler.request("reflow");
+      else void runCompile();
     }, 250);
   }
 
@@ -1436,18 +1506,8 @@
     // 写作模式：走块级编译（每个源块一张真实排版切片），不渲染整页预览 —— 整页 SVG 在写作
     // 模式下是看不见的（预览栏隐藏），省下的是同一量级的工作，换来的是"编辑区里就是真排版"。
     if (viewMode === "write") {
-      // 排版输入指纹：**变了才**推进对应的修订号。这样调用方不必到处记得自增，
-      // 也不会漏掉"字体设置改了 / 前缀改了 / 列宽变了"这些不改文档但要重排的输入。
-      const contextKey = JSON.stringify([prefixEnabled, prefixCode, filePath, fontArgs()]);
-      const layoutKey = String(writingWidthPt > 0 ? writingWidthPt : DEFAULT_WRITING_WIDTH_PT);
-      if (contextKey !== lastContextKey) {
-        lastContextKey = contextKey;
-        blockContextRevision += 1;
-      }
-      if (layoutKey !== lastLayoutKey) {
-        lastLayoutKey = layoutKey;
-        blockLayoutRevision += 1;
-      }
+      // 排版输入指纹 → 修订号：**读戳时同步**（见 syncStampRevisions —— 别在这里再比一遍，
+      // 那段比较已经收进 currentStamp()，两处各写一份就是"漏一处就白改"的老毛病）
       const window = writingWindowBytes();
       // **发请求时把戳复制一份**（报告 T2）：回来之后与"那时的戳"比，任何一格不同
       // （会话换了 / 又编辑了 / 改了前缀或字体 / 改了版心宽）都说明这份产物已经过期。
@@ -1475,6 +1535,9 @@
         reportStartup();
       }
       if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
+      // `currentStamp()` 会**先**把排版输入的指纹同步成修订号（复审第 3 条）：所以这里能抓到
+      // "等待期间改了列宽/字体/前缀、而新一轮编译还没启动"的那种过期产物 —— 以前那段比较放在
+      // `runCompile` 的开头，这种情况下 revision 还没动，旧产物会被当成精确命中落地。
       if (requestDoc !== doc || !sameStamp(requestStamp, currentStamp())) {
         // 文档在编译期间变过（或会话/上下文/版心宽变过）→ 这份产物的出身已经不是当前状态，
         // 套上去就是"旧图配新几何"，**丢掉**。
@@ -1819,7 +1882,7 @@
       })
       .catch((e) => dbg.log("font", "打包字体没装上（保持系统字体栈）：", e));
 
-    const firstCompile = runCompile();
+    const firstCompile = compileNow("context");
     if (isSecondaryWindow) {
       // 副窗口是草稿窗口，说明一句"这里的内容不会记进上次内容"。首次编译成功会把状态栏写成
       // 「就绪」，所以等它落地再写（只在没有更重要的话时才顶替，与 saveSettings 同一套路）。
@@ -1952,8 +2015,14 @@
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);
       mathQueue.reset(); // 作废公式队列：清缓存 + 取消定时器 + 丢掉已发出请求的结果
+      if (mathRefreshFrame !== 0) cancelAnimationFrame(mathRefreshFrame); // 见 scheduleMathRefresh
       clearTimeout(previewReflowTimer); // 停止在途的预览重排（避免卸载后还发起编译）
       clearTimeout(startupCheckTimer); // 关窗时取消还没发起的自动更新检查
+      // **写作重排的定时器与调度器都要清**（复审第 5 条）：只 `compileSeq++` 拦不住它们 ——
+      // 待执行的 timer 会在卸载**之后**新启动一次 `runCompile()`（那是新的请求，不是"在途结果"）。
+      clearTimeout(writingReflowTimer);
+      writeScheduler.dispose();
+      unregisterWriteTestHooks();
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
     };
   });

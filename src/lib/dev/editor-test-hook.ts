@@ -13,7 +13,7 @@ import type { EditorView } from "@codemirror/view";
 import { docScanStats } from "../editor/live-preview/doc-scan";
 
 /** 当前页是不是浏览器开发模式（与 browser-dev-stub 的开关是同一个查询参数） */
-function browserDevEnabled(): boolean {
+export function browserDevEnabled(): boolean {
   if (typeof window === "undefined") return false;
   try {
     return new URLSearchParams(window.location.search).has("browserdev");

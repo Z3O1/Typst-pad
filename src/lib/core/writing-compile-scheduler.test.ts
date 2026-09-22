@@ -6,7 +6,10 @@
 //  ③ 在途那次跑完必须复位（不复位就永远卡住，后续请求全丢）；
 //  ④ 公式让路只推"挂着没跑"的那次；
 //  ⑤ 合成期间不启动新编译，合成结束把攒下的排上；
-//  ⑥ 文档切换清掉挂着的那份。
+//  ⑥ 文档切换清掉挂着的那份；
+//  ⑦ **去抖是尾随的**（PR #77 复审第 1 条）：`edit` 重置计时 —— 首请求 +150ms 不许跑、
+//     末请求 +150ms 才跑；只有 `edit` 续期（滚动/重排不许无限推迟编译）；
+//  ⑧ `requestNow` 立即跑且返回"覆盖它的那一轮"跑完的 Promise（复审第 2 条的入口）。
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   createWritingCompileScheduler,
@@ -58,6 +61,109 @@ describe("createWritingCompileScheduler", () => {
     vi.advanceTimersByTime(150);
     await settle();
     expect(runs).toBe(1);
+  });
+
+  it("尾随去抖：从**最后一次编辑**起算 150ms，不是从第一次", async () => {
+    scheduler.request("edit");
+    vi.advanceTimersByTime(140); // 距首请求只差 10ms
+    scheduler.request("edit"); // 又敲了一个字 → 重新计时
+    vi.advanceTimersByTime(20); // 首请求 +160ms：若是"从首请求计时"的节流，这里已经跑了
+    expect(runs).toBe(0);
+    vi.advanceTimersByTime(129); // 末请求 +149ms
+    expect(runs).toBe(0);
+    vi.advanceTimersByTime(1); // 末请求 +150ms
+    expect(runs).toBe(1);
+    await settle();
+  });
+
+  it("只有 edit 续期：滚动 / 重排不许把编译无限推迟", async () => {
+    scheduler.request("edit"); // t=0，定时器排到 t=150
+    vi.advanceTimersByTime(100);
+    scheduler.request("blocks-needed"); // t=100，不续期
+    vi.advanceTimersByTime(40);
+    scheduler.request("reflow"); // t=140，不续期
+    vi.advanceTimersByTime(10); // t=150：首请求那次的期限到了
+    expect(runs).toBe(1);
+    await settle();
+  });
+
+  it("公式让路之后按让路的时刻重排（edit 重置不许把 240ms 的让路掀回 150ms）", async () => {
+    scheduler.request("edit");
+    vi.advanceTimersByTime(100);
+    scheduler.holdForMath(240); // 让路到 t=340
+    scheduler.request("edit"); // 又敲字：重置，但仍要等让路到期
+    vi.advanceTimersByTime(239);
+    expect(runs).toBe(0);
+    vi.advanceTimersByTime(1);
+    expect(runs).toBe(1);
+    await settle();
+  });
+
+  it("requestNow：不在途时**立刻**跑，Promise 在这一轮跑完后 resolve", async () => {
+    let resolved = false;
+    const done = scheduler.requestNow("context").then(() => {
+      resolved = true;
+    });
+    expect(runs).toBe(1); // 不等 150ms
+    expect(resolved).toBe(false);
+    await settle();
+    await done;
+    expect(resolved).toBe(true);
+  });
+
+  it("requestNow：在途时并进待执行，跑完**立刻**接上（不走 150ms 去抖）", async () => {
+    scheduler.request("edit");
+    vi.advanceTimersByTime(150); // 第一轮在途
+    expect(runs).toBe(1);
+    let resolved = false;
+    const done = scheduler.requestNow("context").then(() => {
+      resolved = true;
+    });
+    vi.advanceTimersByTime(50);
+    expect(runs).toBe(1); // 在途期间一次都没多跑
+    await settle(); // 第一轮跑完 → 立刻接上第二轮
+    expect(runs).toBe(2);
+    expect(resolved).toBe(false); // 第二轮还在跑，Promise 不许提前兑现
+    await settle();
+    await done;
+    expect(resolved).toBe(true);
+  });
+
+  it("requestNow 撞上合成：不启动，合成结束后立刻跑（不等去抖）", async () => {
+    scheduler.setComposing(true);
+    let resolved = false;
+    const done = scheduler.requestNow("context").then(() => {
+      resolved = true;
+    });
+    vi.advanceTimersByTime(500);
+    expect(runs).toBe(0);
+    scheduler.setComposing(false);
+    expect(runs).toBe(1);
+    await settle();
+    await done;
+    expect(resolved).toBe(true);
+  });
+
+  it("cancelPending / dispose 会放行 requestNow 的等待者（作废不许让 Promise 悬空）", async () => {
+    scheduler.setComposing(true);
+    let cancelled = false;
+    const a = scheduler.requestNow("context").then(() => {
+      cancelled = true;
+    });
+    scheduler.cancelPending();
+    await a;
+    expect(cancelled).toBe(true);
+    expect(runs).toBe(0);
+    scheduler.setComposing(false);
+
+    scheduler.setComposing(true);
+    let disposed = false;
+    const b = scheduler.requestNow("context").then(() => {
+      disposed = true;
+    });
+    scheduler.dispose();
+    await b;
+    expect(disposed).toBe(true);
   });
 
   it("在途期间来的请求**不另起**：并进同一份待执行，跑完再排一次", async () => {

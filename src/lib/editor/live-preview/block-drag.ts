@@ -54,8 +54,9 @@ export function createBlockDrag({
   type HitOutcome = number | "cancelled" | null;
 
   /**
-   * 按下会话号（报告 T2 / A1 的"动作令牌"）：每次新的切片按下 +1。
-   * 上一次按下可能还有一次命中测试在飞 —— 它回来时发现会话已变，就什么都不提交。
+   * 按下会话号（报告 T2 / A1 的"动作令牌"）：每次新的切片按下 +1，**普通源码上的按下也 +1**。
+   * 上一次按下可能还有一次命中测试在飞 —— 它回来时发现会话已变，就什么都不提交（见
+   * `cropMouseSelection`：只在新切片会话开始时推进是不够的，那会漏掉"点切片 → 点普通源码"）。
    */
   let clickEpoch = 0;
 
@@ -316,6 +317,12 @@ export function createBlockDrag({
   /**
    * 把"按在切片上"的鼠标按下交给 `CropSelection`（见上面的长注释）。
    * 返回 null = 不是切片上的按下（或找不到那一格）→ CodeMirror 用默认的鼠标选择。
+   *
+   * **不是切片上的按下也要 +epoch**（PR #77 复审的第 4 条）：CodeMirror 每次按下都会问这个
+   * facet（`handlers.mousedown` 里遍历 `mouseSelectionStyle`），所以这里是"编辑器里又开始了
+   * 一次指针选择"的唯一收口。少了这一步就有一个真实的错序：切片 A 的命中 IPC 还在飞时，
+   * 用户点了普通源码 B —— 默认选择路径不动 epoch、文档身份也没变，A 的结果回来后 `commit()`
+   * 的两道检查全过，光标会**从 B 被拉回 A**。任何后续指针选择都该作废那个在途会话。
    */
   const cropMouseSelection = EditorView.mouseSelectionStyle.of((view, event) => {
     try {
@@ -323,13 +330,21 @@ export function createBlockDrag({
       const crop = (event.target as Element | null)?.closest?.(
         ".cm-block-crop",
       ) as HTMLElement | null;
-      if (!crop) return null;
+      if (!crop) {
+        clickEpoch += 1; // 普通源码上的按下：作废在途的切片命中
+        return null;
+      }
       const cover = decoFieldCovers(view).find(
         (c) => c.block.from === Number(crop.dataset.blockFrom),
       );
-      return cover ? new CropSelection(view, cover, event, ++clickEpoch) : null;
+      if (!cover) {
+        clickEpoch += 1; // 切片 DOM 已经对不上块表（旧图）→ 同样按"不在切片上"处理
+        return null;
+      }
+      return new CropSelection(view, cover, event, ++clickEpoch);
     } catch (e) {
       console.error("[live-preview] 切片鼠标选择接管失败，交回默认：", e);
+      clickEpoch += 1; // 接管失败走的是默认选择路径，同样要作废在途的切片命中
       return null;
     }
   });
