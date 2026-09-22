@@ -374,8 +374,15 @@
     if (!target || !anchor) return;
     target.requestMeasure({
       read: () => {
-        const box = target.scrollDOM.getBoundingClientRect();
-        return measureAnchorYMargin(target, box.top + anchor.offsetFromTop, "top");
+        // 整体 try/catch：视图在排队期间被销毁时 `scrollDOM.getBoundingClientRect()` 会抛，
+        // 而 read 抛错会被 CodeMirror 记成 `logException` → 状态栏弹「脚本错误」。抛了就当
+        // 这次不还原（与 measureAnchorYMargin 内部那条兜底同一个语义）。
+        try {
+          const box = target.scrollDOM.getBoundingClientRect();
+          return measureAnchorYMargin(target, box.top + anchor.offsetFromTop, "top");
+        } catch {
+          return null;
+        }
       },
       write: (yMargin) => {
         if (yMargin === null || epoch !== caretAnchorEpoch || target !== view) return;

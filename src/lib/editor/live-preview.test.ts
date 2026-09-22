@@ -328,6 +328,24 @@ describe("livePreview 扩展", () => {
     expect(host.querySelector(".cm-math-line")).toBeNull();
   });
 
+  it("整段选中行间公式后替换：新文本落进正确位置，装饰随之撤掉（报告 §8 选择/历史）", () => {
+    // 与浏览器套件 wysiwyg.mjs 第 37 组同源：那套走真实输入（选中 → 打字），这里走等价事务。
+    // 这两种"整选替换"曾经都出过事：整行 block widget 是 contenteditable=false 的顶层元素，
+    // 字符会被插到下一行（见 buildMathDecorations 的说明）。
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
+    mount("$ x^2 $\n后文\n");
+    expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
+    // 选区先落在整行公式上（0..7），然后**只派发 changes**：选区由 CodeMirror 自己映射到新文档
+    //（与浏览器里"选中一段再打字"读到的事务形状一致）。同时给 selection 的话那个坐标是按
+    // **新文档**解释的，写 7 会直接抛 "Selection points outside of document"。
+    view.dispatch({ selection: { anchor: 0, head: 7 } });
+    view.dispatch({ changes: { from: 0, to: 7, insert: "z" } });
+    expect(view.state.doc.toString()).toBe("z\n后文\n");
+    expect(view.state.selection.main.head).toBe(1); // 选区被替换、光标跟到新文本之后
+    expect(host.querySelectorAll(".cm-math-block").length).toBe(0);
+    expect(host.querySelector(".cm-math-line")).toBeNull(); // 公式没了，行级居中也要跟着走
+  });
+
   it("与文字同行的 `$ x $` 不套行级居中（免得把整行正文也居中）", () => {
     cache.set(mathCacheKey("x", true, "", MATH_TEXT_PT), render("x"));
     mount("前 $ x $ 后\n");
@@ -461,15 +479,43 @@ describe("livePreview 代码块（``` 围栏）", () => {
     expect(host2.querySelector(".cm-content")?.textContent).toContain("```");
   });
 
-  it("点击代码块 widget：选区与滚动目标在**同一个事务**里（报告 T1 / V2）", () => {
+  it("点击代码块 widget 的**第一行**：选区与滚动目标在同一个事务里（报告 T1 / V2）", () => {
     mount2("```\ncode\n```\n");
     const block = host2.querySelector(".cm-raw-block") as HTMLElement;
     expect(block).not.toBeNull();
     const spy = vi.spyOn(view2, "dispatch");
-    block.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientY: 90 }));
+    // jsdom 里所有 rect 都是 0，所以 clientY=5 就是"离 widget 顶边 5px"= 第一行上
+    block.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientY: 5 }));
     const specs = spy.mock.calls.map((c) => c[0] as { selection?: unknown; effects?: unknown });
     expect(specs.some((s) => s?.selection && s.effects)).toBe(true);
     expect(view2.state.selection.main.head).toBe(0);
+    spy.mockRestore();
+  });
+
+  it("点击**高**代码块 widget 的中下部：只落选区、**不要**滚动目标（否则页面被滚走）", () => {
+    // 回归（PR #77 审查）：选区只能落在块首，而把块首那一行钉到鼠标处 = 视图向上滚整个块的高度
+    //（`y:"start"` 是绝对定位），被夹到 0 时表现成"点一下代码块，页面跳到文档顶部"。
+    mount2("```\n" + Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n") + "\n```\n");
+    const block = host2.querySelector(".cm-raw-block") as HTMLElement;
+    expect(block).not.toBeNull();
+    const spy = vi.spyOn(view2, "dispatch");
+    block.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientY: 400 }));
+    const specs = spy.mock.calls.map((c) => c[0] as { selection?: unknown; effects?: unknown });
+    expect(specs.some((s) => s?.selection)).toBe(true);
+    expect(specs.some((s) => s?.effects)).toBe(false); // 高块：不钉
+    expect(view2.state.selection.main.head).toBe(0);
+    spy.mockRestore();
+  });
+
+  it("右键点 widget：只落选区、不要滚动目标", () => {
+    mount2("```\ncode\n```\n");
+    const block = host2.querySelector(".cm-raw-block") as HTMLElement;
+    const spy = vi.spyOn(view2, "dispatch");
+    // clientY=5 落在第一行上（本来会钉）：这里锁的是"非左键一律不钉"
+    block.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 2, clientY: 5 }));
+    const specs = spy.mock.calls.map((c) => c[0] as { selection?: unknown; effects?: unknown });
+    expect(specs.some((s) => s?.selection)).toBe(true);
+    expect(specs.some((s) => s?.effects)).toBe(false);
     spy.mockRestore();
   });
 });

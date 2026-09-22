@@ -93,10 +93,11 @@ export class MathWidget extends WidgetType {
         svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
       }
       // 点击 widget：光标落到公式源码起点 → 选区进入该区间 → 装饰撤掉，源码展开。
-      // 选区与"钉在鼠标点高度"的滚动目标必须**同一个事务**（见 reveal.ts 的说明）
+      // 选区与"钉在鼠标点高度"的滚动目标必须**同一个事务**（见 reveal.ts 的说明）。
+      // 行内公式是单行 widget，第一行就是用户点的那一行，所以不传 widgetTop（总是可钉）。
       wrap.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        revealSourceAt(view, this.range.from, e.clientY);
+        revealSourceAt(view, this.range.from, e.clientY, { button: e.button });
         view.focus();
       });
       return wrap;
@@ -142,8 +143,12 @@ export class CodeBlockWidget extends WidgetType {
       block.appendChild(pre);
       block.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        // 与 MathWidget 同一套：选区 + 滚动目标放同一个事务（见 reveal.ts 的说明）
-        revealSourceAt(view, this.range.from, e.clientY);
+        // 与 MathWidget 同一套：选区 + 滚动目标放同一个事务。**但围栏代码块往往是几十行的高块**：
+        // 只有点在它的第一行上才钉，不然"把首行钉到鼠标处"会让页面向上滚整个块（见 reveal.ts）
+        revealSourceAt(view, this.range.from, e.clientY, {
+          button: e.button,
+          widgetTop: block.getBoundingClientRect().top,
+        });
         view.focus();
       });
       return block;
@@ -340,8 +345,12 @@ export class MathBlockWidget extends WidgetType {
       block.appendChild(box);
       block.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        // 与 MathWidget 同一套：选区 + 滚动目标放同一个事务（见 reveal.ts 的说明）
-        revealSourceAt(view, this.range.from, e.clientY);
+        // 单行形态（inline）第一行就是点中的那一行；跨行形态与围栏代码块一样是高块 —— 由
+        // `widgetTop` 交给 reveal.ts 判定（见那边的 shouldPin）
+        revealSourceAt(view, this.range.from, e.clientY, {
+          button: e.button,
+          widgetTop: block.getBoundingClientRect().top,
+        });
         view.focus();
       });
       return block;
