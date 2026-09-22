@@ -41,6 +41,7 @@
   import { createCloseGuard, createDropHandler } from "$lib/core/window-events";
   import { planRestore } from "$lib/core/session-restore";
   import { createMathQueue } from "$lib/editor/math-queue";
+  import { createWritingCompileScheduler } from "$lib/core/writing-compile-scheduler";
   import type { WriteCommand } from "$lib/core/write-commands";
   import { openTypFile, saveTypFile, readTypFile, pickFontDir, isTauri } from "$lib/core/file-ops";
   import { invoke } from "@tauri-apps/api/core";
@@ -346,10 +347,10 @@
       // 上下文字号都取自请求本身（必须与生成缓存键时用的一致，见 MathRequest 的说明）
       compileMath(req.body, req.display, context, filePath, req.sizePt, fontArgs()),
     fallbackContext: () => (prefixEnabled ? ensureTrailingNewline(prefixCode) : ""),
-    // 队列只在**渲染成功**时回调（失败的结果也进缓存，但装饰集没变、自增代次是白跑）
-    onRendered: () => {
-      mathVersion++;
-    },
+    // 队列只在**渲染成功**时回调（失败的结果也进缓存，但装饰集没变、自增代次是白跑）。
+    // **按绘制帧合并**（报告 T3）：一屏十几个公式逐个 `mathVersion++` 会让装饰集重建十几次，
+    // 而它们在同一帧里看上去是一次变化 —— 攒到下一个 rAF 只自增一次。
+    onRendered: scheduleMathRefresh,
     deferBlockCompile: deferPendingBlockCompile,
     log: (message) => dbg.log("live-preview", message),
   });
@@ -393,8 +394,6 @@
   let writingReflowTimer: ReturnType<typeof setTimeout> | undefined;
   /** 量不到列宽时的兜底版心宽（495px = 371.25pt，写作模式常见列宽） */
   const DEFAULT_WRITING_WIDTH_PT = 371.25;
-  /** "视口内出现没切片的块"的重编译定时器（去抖：滚动过程中会连着触发） */
-  let blocksTimer: ReturnType<typeof setTimeout> | undefined;
   /**
    * **排版戳的四个修订号**（报告 T2）。
    *
@@ -456,8 +455,7 @@
     const window = writingWindowBytes();
     const key = stampKey(currentStamp(), window);
     if (key === lastBlocksRequest) return;
-    clearTimeout(blocksTimer);
-    blocksTimer = setTimeout(() => void runCompile(), 150);
+    writeScheduler.request("blocks-needed");
   }
 
   /**
@@ -1116,12 +1114,32 @@
    * 表示"没有挂着的编译"（见 `scheduleCompile` 里"跑完必须置回 undefined"的说明）。
    */
   function deferPendingBlockCompile() {
-    if (viewMode !== "write" || writeCompileTimer === undefined) return;
-    clearTimeout(writeCompileTimer);
-    writeCompileTimer = setTimeout(() => {
-      writeCompileTimer = undefined;
-      void runCompile();
-    }, MATH_COMPILE_HEADSTART_MS);
+    if (viewMode !== "write") return;
+    // 让路只推"挂着还没跑"的那次；在途的不打扰（见 scheduling 模块的 holdForMath）
+    writeScheduler.holdForMath(MATH_COMPILE_HEADSTART_MS);
+  }
+
+  /** 公式渲染结果的刷新合并（见 mathQueue 的 onRendered）：一帧最多刷新一次装饰 */
+  let mathRefreshFrame = false;
+  function scheduleMathRefresh() {
+    if (mathRefreshFrame) return;
+    mathRefreshFrame = true;
+    requestAnimationFrame(() => {
+      mathRefreshFrame = false;
+      mathVersion++;
+    });
+  }
+
+  /**
+   * 输入法合成开始 / 结束（报告 T3）：
+   *  - 合成期间**不启动**新的后台块编译（`setComposing(true)` 会把挂着的那次按暂停），
+   *    但 `editorDoc` 的镜像与 ranges/covers 的映射照常（它们不是"后台编译"）；
+   *  - 合成结束：调度器把攒下的那次排上；装饰刷新由 Editor 自己补一次
+   *    （`compositionend` 里那条既有逻辑）。
+   */
+  function handleComposition(active: boolean) {
+    writeScheduler.setComposing(active);
+    dbg.log("ime", active ? "合成开始：暂停新的块编译" : "合成结束：把攒下的编译排上");
   }
 
   /** 文档切换（打开/新建/重读）：公式缓存作废（include 根与上下文都可能变），并让装饰重建一次 */
@@ -1136,7 +1154,8 @@
    * 新文档的编译结果（数十毫秒后）会填回来。
    */
   function resetBlocks() {
-    clearTimeout(blocksTimer);
+    // 挂着的写作编译也作废（它是上一份文档/上一个版心排的）
+    writeScheduler.cancelPending();
     writingBlocks = null;
     writingBlocksDoc = "";
     writingBlocksStamp = null;
@@ -1190,15 +1209,18 @@
     return buildWarningItems(compileWarnings);
   }
 
-  /** 写作模式"打字期间不编译"的去抖时长（见 scheduleCompile） */
-  const WRITE_COMPILE_DEBOUNCE_MS = 150;
   /**
-   * 挂着的写作模式编译定时器（去抖）。
-   * **跑完要置回 undefined**：它同时被当成"有没有挂着的编译"的判据（见 math-queue 的 deferBlockCompile：
-   * 有挂着的块编译才把公式优先级提前）。不置回的话，每一个公式请求都会在 240ms 后再排一次
-   * 整篇编译 —— 公式多的文档接近双倍编译量（PR #60 审查的第 8 条）。
+   * **写作模式的编译调度器**（报告 T3）：编辑 / 补渲 / 版心重排 / 公式让路四个入口
+   * 合成**一个单槽**（最多一个在途 + 一份待执行；理由取并集）。之前是四个互不知情的定时器，
+   * 一次"改字 + 滚动 + 公式到货"能同时挂上两三次编译，而它们在 Rust 侧共用一把锁。
+   * 去抖仍是 150ms（`WRITE_COMPILE_DEBOUNCE_MS` 现在由调度器的 `debounceMs` 承担）。
+   * 源码模式的编译**不走它**（立即编译，见 scheduleCompile）。
    */
-  let writeCompileTimer: ReturnType<typeof setTimeout> | undefined;
+  const writeScheduler = createWritingCompileScheduler({
+    run: () => runCompile(),
+    debounceMs: 150,
+    log: (message) => dbg.log("compile-schedule", message),
+  });
 
   /**
    * 内容变化后的编译调度。**两种模式走两条路**（用户反馈「输入手感很差（公式）」后改的）：
@@ -1237,16 +1259,11 @@
 
   function scheduleCompile() {
     if (viewMode === "write") {
-      clearTimeout(writeCompileTimer);
-      // **跑完必须置回 undefined**（`let` 声明处有说明）：这个变量同时是"有没有挂着的编译"
-      // 的判据 —— math-queue 的 deferBlockCompile 只在有挂着的编译时才把块编译往后推。
-      writeCompileTimer = setTimeout(() => {
-        writeCompileTimer = undefined;
-        void runCompile();
-      }, WRITE_COMPILE_DEBOUNCE_MS);
+      // 单槽调度：合并理由 + 单份待执行（见 writeScheduler 的说明）
+      writeScheduler.request("edit");
       return;
     }
-    runCompile();
+    void runCompile();
   }
 
   /** 生效配置（读页面 `$state`）：**调用时**取值，别缓存 */
@@ -1550,7 +1567,7 @@
       if (Math.abs(next - writingWidthPt) <= 1.5) return;
       writingWidthPt = next;
       dbg.log("writing-reflow", `版心宽 ${next.toFixed(1)}pt（列宽 ${px}px）`);
-      void runCompile();
+      writeScheduler.request("reflow");
     }, 250);
   }
 
@@ -1979,6 +1996,7 @@
             onBlocksNeeded={handleBlocksNeeded}
             onCropClick={handleCropClick}
             onOpenLink={handleOpenLink}
+            onComposition={handleComposition}
           />
         </div>
       </section>

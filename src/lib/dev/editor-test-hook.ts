@@ -10,6 +10,7 @@
 // **只在浏览器开发模式（URL 带 `?browserdev=1`）挂上去**：桌面版的地址没有这个参数，
 // `registerEditorView` 就只是一次普通赋值，产品行为零变化。
 import type { EditorView } from "@codemirror/view";
+import { docScanStats } from "../editor/live-preview/doc-scan";
 
 /** 当前页是不是浏览器开发模式（与 browser-dev-stub 的开关是同一个查询参数） */
 function browserDevEnabled(): boolean {
@@ -30,6 +31,9 @@ function hookHost(): { __typstPadView?: EditorView } {
 export function registerEditorView(view: EditorView): void {
   if (!browserDevEnabled()) return;
   hookHost().__typstPadView = view;
+  // 文档扫描缓存的命中/未命中计数（报告 T3 / P1）：验收要断言"纯选区移动不重新扫描全文"，
+  // 而这件事在 DOM 上看不出来 —— 只能读计数。
+  (window as unknown as { __typstPadScanStats?: () => unknown }).__typstPadScanStats = docScanStats;
 }
 
 /** 编辑器销毁时撤销登记（只撤自己那一个实例，避免多窗口/重挂载后留一个已销毁的视图） */
@@ -37,4 +41,5 @@ export function unregisterEditorView(view: EditorView): void {
   if (!browserDevEnabled()) return;
   const host = hookHost();
   if (host.__typstPadView === view) delete host.__typstPadView;
+  delete (window as unknown as { __typstPadScanStats?: unknown }).__typstPadScanStats;
 }

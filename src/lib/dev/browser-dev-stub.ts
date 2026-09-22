@@ -331,11 +331,25 @@ function fixtureHit(args: Record<string, unknown>): number | null {
   return best ? best.o : null;
 }
 
+/**
+ * 每个假命令被调了多少次（只给验收脚本看，`window.__browserDevCallCounts`）。
+ *
+ * 报告 T3 的两条断言在 DOM 上看不出来："合成期间**零次**新的后台块编译"、"连续 8 次编辑
+ * 只落 **1~2 次** `compile_blocks`"—— 只能数调用次数。
+ */
+function countCall(command: string): void {
+  if (typeof window === "undefined") return;
+  const host = window as unknown as Record<string, Record<string, number>>;
+  const counts = (host.__browserDevCallCounts ??= {});
+  counts[command] = (counts[command] ?? 0) + 1;
+}
+
 async function handleCommand(
   command: string,
   args: Record<string, unknown> | undefined,
 ): Promise<unknown> {
   const a = args ?? {};
+  countCall(command);
   if (
     blockslowEnabled() &&
     // `block_hit_test` 也一起放慢：报告 T2 / A1 要验的是"命中还在飞的时候文档/几何变了"

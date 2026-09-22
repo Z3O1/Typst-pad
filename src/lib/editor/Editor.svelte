@@ -91,6 +91,14 @@
     /** **切片里的链接被点**（阶段 3）：父组件交给 opener 插件打开（不移动光标、不吞点击） */
     onOpenLink?: (href: string) => void;
     /**
+     * **输入法合成开始 / 结束**（报告 T3）：`compositionstart` / `compositionend` 时各调一次。
+     *
+     * 为什么不能只靠 `view.composing`：那个标志要**第一次输入之后**才为真，而"合成开始"到
+     * "第一次输入"之间页面已经在跑编译调度了（150ms 去抖挡不住整篇编译）。页面据此在合成期间
+     * **不启动**新的后台块编译（已经跑完的照常结束，结果由排版戳过滤）。
+     */
+    onComposition?: (active: boolean) => void;
+    /**
      * 自动换行（源码模式 Alt+Z 切换，状态与持久化由父组件持有）。
      * 打开时给内容加 CodeMirror 的 `cm-lineWrapping`（`white-space: break-spaces` + 断词），
      * 长行折行显示、不再需要横向滚动。
@@ -117,6 +125,7 @@
     onBlocksNeeded,
     onCropClick,
     onOpenLink,
+    onComposition,
     wrap = false,
   }: Props = $props();
 
@@ -208,7 +217,15 @@
       // 汉字输入法：合成结束时把"合成期间攒下的装饰刷新"补上（见下面 $effect 的说明）。
       // 不这么做的话，合成期间那次刷新就彻底丢了 —— 公式 widget / 切片要等下一次编辑才回来。
       EditorView.domEventHandlers({
+        compositionstart: () => {
+          // 合成一开始就告诉页面（别等第一次输入后 `view.composing` 变真）
+          onComposition?.(true);
+          return false;
+        },
         compositionend: () => {
+          // **先告诉页面合成结束了**（它据此把攒下的那次块编译排上）——
+          // 再补装饰刷新：两者都不许在合成中途跑（见 Props 里 onComposition 的说明）
+          onComposition?.(false);
           if (!refreshPendingRefresh) return false;
           refreshPendingRefresh = false;
           // 推到微任务：让 CodeMirror 先把合成的最终文本落进 state（否则刷新看到的是半个字）

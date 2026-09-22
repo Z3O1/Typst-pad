@@ -27,7 +27,8 @@
 //   * V2 点击公式 widget 后锚点漂移 11.26px / 10.06px（>`≤8px` 判据）；
 //   * 同日量到的既有几何：进入公式 −25.45 / −14.62 / −23.08px；点击代码切片 **+94.27px**、
 //     表格切片 **+82.52px**（与报告 §2.2 的 +94.266 / +82.516 一致）。
-// T1 之后这 6 项全绿；T2 又补了 C 段（慢编译 + 过期命中），现在 81 项。
+// T1 之后这 6 项全绿；T2 补了 C 段（慢编译 + 过期命中）、T3 补了 D 段（调度合并 + 合成闸门 +
+// 扫描缓存），现在 88 项。
 //
 // 前置：dev server + headless Chromium（见 scripts/browser-check/run-all.mjs）。
 // 运行：`CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-stability.mjs`
@@ -1230,13 +1231,142 @@ await boot(c, `${BLOCKS_URL}&blockslow=1`, { blockFixtures, mathFixtures, settle
   await c.send("Emulation.clearDeviceMetricsOverride");
 }
 
+// ===========================================================================
+// D. 调度与输入法安全（报告 T3）：合成期间零次新块编译、连打合并成一次、纯选区移动不重扫
+// ===========================================================================
+console.log("\n=== D. 编译调度与输入法安全（报告 T3）");
+await boot(c, BLOCKS_URL, { blockFixtures, mathFixtures, settleMs: 900 });
+{
+  /** 假命令调用计数（桩写在 window.__browserDevCallCounts 上） */
+  const counts = () =>
+    c.evaluate(`JSON.parse(JSON.stringify(window.__browserDevCallCounts ?? {}))`);
+  const blocksCalls = async () => (await counts()).compile_blocks ?? 0;
+
+  await replaceDocument(c, sceneCode.doc, 1400);
+  await setCaret(sceneCode.doc.length);
+  await sleep(800);
+
+  // ① 连续 8 次编辑：单槽调度必须把它们合并成 1~2 次块编译（不是 8 次）
+  {
+    await c.click(400, 300);
+    await c.key("End", { code: "End", keyCode: 35, modifiers: 2 });
+    await sleep(300);
+    const before = await blocksCalls();
+    for (let i = 0; i < 8; i++) {
+      await c.type("字");
+      await sleep(20); // 20ms × 8 = 160ms：跨过 150ms 去抖边界一点点
+    }
+    await sleep(1200); // 等最后一次去抖 + 编译落地
+    const after = await blocksCalls();
+    check(
+      `连续 8 次编辑只落 ${after - before} 次 compile_blocks（单槽调度：≤3，未合并时是 8）`,
+      after - before <= 3,
+      JSON.stringify({ before, after, delta: after - before }),
+    );
+    record({
+      scene: "连续 8 次编辑的编译次数",
+      source: "fake",
+      phase: "调度合并（报告 T3）",
+      compileBlocksDelta: after - before,
+      note: "单槽调度：最多一个在途 + 一份待执行",
+    });
+  }
+
+  // ② 输入法合成期间：**零次**新的后台块编译；结束后攒下的那次照常落地
+  {
+    await replaceDocument(c, sceneCode.doc, 1400);
+    await c.click(400, 300);
+    await c.key("End", { code: "End", keyCode: 35, modifiers: 2 });
+    await sleep(700);
+    const before = await blocksCalls();
+    // 走真实的合成路径（Chrome 的 imeSetComposition = "正在合成这段文本"）
+    await c.send("Input.imeSetComposition", { text: "zhong", selectionStart: 5, selectionEnd: 5 });
+    await sleep(700); // 远超过 150ms 去抖：若没有合成闸门，这里必然已经编译过
+    const during = await blocksCalls();
+    check(
+      `合成期间没有启动新的块编译（${before} → ${during}）`,
+      during === before,
+      JSON.stringify({ before, during }),
+    );
+    const textDuring = await c.evaluate(
+      `document.querySelector(".cm-content").innerText.includes("zhong")`,
+    );
+    check("合成中的文本照常进编辑区（暂停编译不等于暂停编辑）", textDuring === true);
+    await c.send("Input.insertText", { text: "中" });
+    await sleep(1400);
+    const after = await blocksCalls();
+    check(
+      `合成结束后攒下的那次编译照常落地（${during} → ${after}）`,
+      after > during,
+      JSON.stringify({ during, after }),
+    );
+    const committed = await c.evaluate(
+      `(() => { const t = document.querySelector(".cm-content").innerText; return { has中: t.includes("中"), has拼音: t.includes("zhong") }; })()`,
+    );
+    check(
+      "合成提交后最终文本正确（`中` 在、拼音串不在）",
+      committed.has中 === true && committed.has拼音 === false,
+      JSON.stringify(committed),
+    );
+    record({
+      scene: "输入法合成期间的编译",
+      source: "fake",
+      phase: "合成闸门（报告 T3）",
+      compileBlocksBefore: before,
+      compileBlocksDuring: during,
+      compileBlocksAfter: after,
+    });
+  }
+
+  // ③ 纯选区移动不重新扫描整篇（报告 T3 / P1：读的是文档扫描缓存的 miss 计数）
+  {
+    await replaceDocument(c, sceneCode.doc, 1200);
+    await sleep(600);
+    const statsBefore = await c.evaluate(`window.__typstPadScanStats?.() ?? null`);
+    check(
+      "dev 钩子暴露了文档扫描计数（不然这条断言没有判据）",
+      statsBefore !== null && typeof statsBefore.misses === "number",
+      JSON.stringify({ statsBefore }),
+    );
+    // 只动选区：上下左右各走几步、再来一次全选（都不改文档）
+    for (let i = 0; i < 6; i++) {
+      await c.key("ArrowDown", { code: "ArrowDown", keyCode: 40 });
+      await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 });
+    }
+    await c.evaluate(`(() => {
+      const v = window.__typstPadView;
+      v.dispatch({ selection: { anchor: 0 } });
+      v.dispatch({ selection: { anchor: v.state.doc.length } });
+      return true;
+    })()`);
+    await sleep(400);
+    const statsAfter = await c.evaluate(`window.__typstPadScanStats?.() ?? null`);
+    check(
+      `纯选区移动没有重扫全文（miss ${statsBefore?.misses} → ${statsAfter?.misses}、hit +${(statsAfter?.hits ?? 0) - (statsBefore?.hits ?? 0)}）`,
+      statsAfter !== null &&
+        statsAfter.misses === statsBefore.misses &&
+        statsAfter.hits > statsBefore.hits,
+      JSON.stringify({ statsBefore, statsAfter }),
+    );
+    record({
+      scene: "纯选区移动的扫描缓存",
+      source: "fake",
+      phase: "扫描缓存（报告 T3 / P1）",
+      hitsBefore: statsBefore?.hits ?? null,
+      hitsAfter: statsAfter?.hits ?? null,
+      missesBefore: statsBefore?.misses ?? null,
+      missesAfter: statsAfter?.misses ?? null,
+    });
+  }
+  await c.send("Emulation.clearDeviceMetricsOverride");
+}
+
 // 收尾把设备覆盖清掉：它是留在 CDP target 上的，不还原会污染后续套件的视口
 await c.send("Emulation.clearDeviceMetricsOverride");
 
 // --- 反空转守卫：本套件没覆盖的矩阵维度必须显式列出来，不能算作"通过" ----------------------
 const UNCOVERED = [
   "编辑后的**真实动态编译**（`real-dynamic`）：桩没有引擎、文档一改就退回假切片，只有桌面版能验",
-  "输入法合成（报告 T3）",
   '**乱序**响应（两个在途编译的到达次序）：本套件的 C 段只用 `blockslow=1` 的 350ms 验了"命中在飞 + 文档变了"，没造出乱序',
   "长文 2k/20k/100k 的性能分布（报告 T4 之后）",
   "多窗口 A/B 交替（报告 T2）",
@@ -1255,6 +1385,7 @@ report.matrix = {
     "点击的例外（高块 widget 中下部**不钉**，页面不被滚走；右键不钉）",
     "模式切换锚点（Ctrl+E 往返：位置 + 屏幕高度 + 焦点；含连续快按时的作废路径）",
     "过期结果与过期命中（报告 T2 / A1）：`blockslow=1`（编译与命中各 350ms）下，命中在飞时改文档 → 这次点击整条作废；改版心宽后切片与链接热区成套重建",
+    "编译调度与输入法安全（报告 T3）：连续 8 次编辑只落 ≤3 次 `compile_blocks`；合成期间零次新块编译、合成中文本照常进编辑区、合成结束后攒下的那次照常落地；纯选区移动不重扫全文（文档扫描缓存的 miss 不增）",
     "整选替换 / 跨行公式例外：由 `wysiwyg.mjs` 的「公式选区与输入」组（`$x^2$` 与整行 `$ x^2 $` 各一条）与 `live-preview.test.ts` 覆盖，本套件不重复",
   ],
   uncovered: UNCOVERED,

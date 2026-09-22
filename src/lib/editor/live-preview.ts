@@ -13,9 +13,7 @@ import { Decoration, EditorView, ViewPlugin } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
 import { StateField } from "@codemirror/state";
 import type { EditorState, Extension } from "@codemirror/state";
-import { scanMathRanges } from "../core/math-ranges";
-import { scanNonMarkupRegions } from "../core/typst-lex";
-import { buildMathContext } from "../core/math-context";
+import { scanDocument } from "./live-preview/doc-scan";
 import { revealBlocksWithDiagnostics } from "../core/block-plan";
 import type { BlockCover } from "../core/block-plan";
 import { dbg } from "../core/debug";
@@ -38,6 +36,7 @@ import { mathWidgetTheme } from "./live-preview/theme";
 
 // 公共面原样再导出：外部（Editor.svelte / +page.svelte / 单测）的 import 路径不变
 export { refreshLivePreview } from "./live-preview/options";
+export { docScanStats, resetDocScanCache } from "./live-preview/doc-scan";
 export type { LivePreviewOptions, MathRequest } from "./live-preview/options";
 
 /**
@@ -57,13 +56,15 @@ export function livePreview(opts: LivePreviewOptions): Extension {
   const collect = (state: EditorState): { deco: DecorationSet; covers: BlockCover[] } => {
     try {
       if (!opts.enabled()) return { deco: Decoration.none, covers: [] };
-      // 一次重建里 lexer 只跑一遍：区域扫描结果同时喂给公式与标记两条扫描
-      // （此前两条路径各自再扫一遍，40k 字符文档实测每次按键 ~14ms，合并后约 1/3）
-      const doc = state.doc.toString();
-      const opaque = scanNonMarkupRegions(doc);
-      const math = scanMathRanges(doc, opaque);
-      // 编译上下文与缓存键必须来自**同一次**文档快照（扩展内算，见 prefix 选项的说明）
-      const context = buildMathContext(opts.prefix(), doc);
+      // 扫描结果走**文档扫描缓存**（`doc-scan.ts`）：docChanged / 选区变化 / 刷新三种事务
+      // 都要重建装饰，而只有第一种真的改了文档 —— 身份判据（CM 的 Text 对象）让后两种
+      // 直接复用，纯选区移动不再全文重扫（报告 T3 / P1）。
+      // 编译上下文与缓存键也来自同一次快照（扩展内算，见 prefix 选项的说明）。
+      const scan = scanDocument(state, opts.prefix());
+      const doc = scan.docString;
+      const opaque = scan.opaque;
+      const math = scan.math;
+      const context = scan.context;
       // 块级切片（写作模式）：先算"哪些格子要被切片盖住"，再让公式/标记装饰避开它们
       const covers = buildBlockCovers(state, opts, doc, opaque);
       // 有编译错误的格子强制展开源码：波浪线画在源码上，被图片盖住就"哪儿也找不到错误"
