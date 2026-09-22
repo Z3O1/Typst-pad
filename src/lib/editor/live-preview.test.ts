@@ -298,6 +298,62 @@ describe("livePreview 扩展", () => {
     expect(text()).toContain("$ x^2 $");
   });
 
+  // -------------------------------------------------------------------------
+  // 报告 T1：行级对齐与 widget 点击（V1 / V2）
+  // -------------------------------------------------------------------------
+
+  it("独占单行的行间公式：光标进入（编辑态）时**仍然居中**（报告 T1 / V1）", () => {
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
+    mount("$ x^2 $\n正文");
+    const line = () => host.querySelector(".cm-math-line");
+    expect(line()).not.toBeNull(); // 渲染态：整行居中（Decoration.line）
+    view.dispatch({ selection: { anchor: 3 } }); // 光标进公式内部 → widget 撤、源码露出
+    expect(host.querySelectorAll(".cm-math-block").length).toBe(0);
+    expect(text()).toContain("$ x^2 $");
+    // 改之前这里会变成 null：行级居中挂在"渲染态"那条分支里，widget 一撤就跟着消失，
+    // 实测同一行从 text-align:center（行盒 33.5px）变成 text-align:start（行盒 24.2px）
+    expect(line()).not.toBeNull();
+  });
+
+  it("行级居中与渲染结果无关：还没渲过的行间公式也居中（不然一进一出会先左后中）", () => {
+    mount("$ x^2 $\n正文"); // 不预置缓存：停在源码形态
+    expect(text()).toContain("$ x^2 $");
+    expect(host.querySelector(".cm-math-line")).not.toBeNull();
+  });
+
+  it("多行行间公式不套单行居中（T1 的明确例外）", () => {
+    cache.set(mathCacheKey("a + b", true, "", MATH_TEXT_PT), render("a + b"));
+    mount("$\n  a + b\n$\n正文");
+    expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
+    expect(host.querySelector(".cm-math-line")).toBeNull();
+  });
+
+  it("与文字同行的 `$ x $` 不套行级居中（免得把整行正文也居中）", () => {
+    cache.set(mathCacheKey("x", true, "", MATH_TEXT_PT), render("x"));
+    mount("前 $ x $ 后\n");
+    expect(widgetCount()).toBe(1);
+    expect(host.querySelector(".cm-math-line")).toBeNull();
+  });
+
+  it("行内公式所在行不套行级居中", () => {
+    mount("前 $x^2$ 后\n", { cache: true });
+    expect(widgetCount()).toBe(1);
+    expect(host.querySelector(".cm-math-line")).toBeNull();
+  });
+
+  it("点击行内公式 widget：选区与滚动目标在**同一个事务**里（报告 T1 / V2）", () => {
+    mount("前 $x^2$ 后\n", { cache: true });
+    const widget = host.querySelector(".cm-math-widget") as HTMLElement;
+    expect(widget).not.toBeNull();
+    const spy = vi.spyOn(view, "dispatch");
+    widget.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientY: 120 }));
+    const specs = spy.mock.calls.map((c) => c[0] as { selection?: unknown; effects?: unknown });
+    // 关键：**同一次 dispatch** 里既有选区又有滚动目标（分两次会"先跳一下再修正"）
+    expect(specs.some((s) => s?.selection && s.effects)).toBe(true);
+    expect(view.state.selection.main.head).toBe(2); // 公式源码起点（`$`）
+    spy.mockRestore();
+  });
+
   it("暗色主题标记注入 widget（供反色样式匹配）", () => {
     mount("$x^2$\n", { cache: true, dark: true });
     expect(host.querySelector(".cm-math-widget")?.className).toContain("cm-math-dark");
@@ -403,6 +459,18 @@ describe("livePreview 代码块（``` 围栏）", () => {
     view2.dispatch({ selection: { anchor: 4 } }); // 落在代码内容里
     expect(host2.querySelectorAll(".cm-raw-block").length).toBe(0);
     expect(host2.querySelector(".cm-content")?.textContent).toContain("```");
+  });
+
+  it("点击代码块 widget：选区与滚动目标在**同一个事务**里（报告 T1 / V2）", () => {
+    mount2("```\ncode\n```\n");
+    const block = host2.querySelector(".cm-raw-block") as HTMLElement;
+    expect(block).not.toBeNull();
+    const spy = vi.spyOn(view2, "dispatch");
+    block.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientY: 90 }));
+    const specs = spy.mock.calls.map((c) => c[0] as { selection?: unknown; effects?: unknown });
+    expect(specs.some((s) => s?.selection && s.effects)).toBe(true);
+    expect(view2.state.selection.main.head).toBe(0);
+    spy.mockRestore();
   });
 });
 

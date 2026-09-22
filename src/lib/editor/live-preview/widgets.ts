@@ -10,6 +10,7 @@ import type { EditorView } from "@codemirror/view";
 import type { MathRender } from "../../core/typst-engine";
 import type { Block, BlockCover } from "../../core/block-plan";
 import type { MathRange } from "../../core/math-ranges";
+import { revealSourceAt } from "./reveal";
 
 /**
  * widget 构造失败的兜底：退回纯文本节点。
@@ -91,10 +92,11 @@ export class MathWidget extends WidgetType {
         svg.setAttribute("height", "100%");
         svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
       }
-      // 点击 widget：光标落到公式源码起点 → 选区进入该区间 → 装饰撤掉，源码展开
+      // 点击 widget：光标落到公式源码起点 → 选区进入该区间 → 装饰撤掉，源码展开。
+      // 选区与"钉在鼠标点高度"的滚动目标必须**同一个事务**（见 reveal.ts 的说明）
       wrap.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        view.dispatch({ selection: { anchor: this.range.from } });
+        revealSourceAt(view, this.range.from, e.clientY);
         view.focus();
       });
       return wrap;
@@ -140,7 +142,8 @@ export class CodeBlockWidget extends WidgetType {
       block.appendChild(pre);
       block.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        view.dispatch({ selection: { anchor: this.range.from } });
+        // 与 MathWidget 同一套：选区 + 滚动目标放同一个事务（见 reveal.ts 的说明）
+        revealSourceAt(view, this.range.from, e.clientY);
         view.focus();
       });
       return block;
@@ -314,7 +317,9 @@ export class MathBlockWidget extends WidgetType {
 
   toDOM(view: EditorView): HTMLElement {
     try {
-      const block = document.createElement(this.inline ? "span" : "div");
+      // 显式标成 HTMLElement：`createElement(a ? "span" : "div")` 的联合类型会让
+      // addEventListener 的重载解析退化成 Event，拿不到 `clientY`（svelte-check 报错）
+      const block: HTMLElement = document.createElement(this.inline ? "span" : "div");
       const classes = ["cm-math-block"];
       if (this.inline) classes.push("cm-math-block-inline");
       if (this.dark) classes.push("cm-math-dark");
@@ -335,7 +340,8 @@ export class MathBlockWidget extends WidgetType {
       block.appendChild(box);
       block.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        view.dispatch({ selection: { anchor: this.range.from } });
+        // 与 MathWidget 同一套：选区 + 滚动目标放同一个事务（见 reveal.ts 的说明）
+        revealSourceAt(view, this.range.from, e.clientY);
         view.focus();
       });
       return block;

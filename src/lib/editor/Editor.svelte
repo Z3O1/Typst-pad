@@ -29,6 +29,7 @@
   import { mark } from "../core/startup-timing";
   import { WRITE_FONT_STACK } from "./editor-font";
   import { dbg } from "../core/debug";
+  import { anchorEffectAt, measureAnchorYMargin } from "./scroll-anchor";
   // 浏览器验收用的测试钩子（只在 `?browserdev=1` 下真的挂到 window 上，桌面版是空操作）
   import { registerEditorView, unregisterEditorView } from "../dev/editor-test-hook";
 
@@ -242,6 +243,9 @@
     registerEditorView(view);
 
     return () => {
+      // 视图销毁：让已经排队的那次"模式切换恢复"作废（它要去动一个已经拆掉的视图）
+      caretAnchorEpoch += 1;
+      caretAnchor = null;
       unregisterEditorView(view);
       view.destroy();
     };
@@ -322,13 +326,23 @@
    * （注意：**不是**折行重配导致的：源码模式下单独按 Alt+Z 切换折行，scrollTop 2920 纹丝不动。）
    *
    * 做法：切换**前**记下光标在视口里的偏移（由页面在改 viewMode 之前调 `captureCaretAnchor`），
-   * 布局换完之后把滚动调回去，让光标回到原来的屏幕高度；调到文档端点时会被夹住，但仍在视口内。
+   * 布局换完之后把这个偏移**表达成 CodeMirror 自己的滚动目标**（`scrollIntoView` 的 yMargin），
+   * 而不是自己去写 `scrollTop`。见 scroll-anchor.ts 顶部那段实测说明：直接写 scrollTop 会被
+   * CM 的 measure 循环再改一次，两次修正叠加反而偏得更多（实测偏 91px）。
    * 光标切换前本来就在视口外（用户手动滚走了）时**不做任何事** —— 那是用户的意图，别把他拽回来。
    */
   let caretAnchor: { pos: number; offsetFromTop: number } | null = null;
+  /**
+   * 在途恢复请求的代号。三种情况下 +1，让已经排队但还没跑的那次恢复**作废**：
+   * ① 又捕获了一次锚点（用户连续按 Ctrl+E）；② 视图销毁。见 restoreCaretAnchor。
+   */
+  let caretAnchorEpoch = 0;
 
   /** 记下光标当前在视口里的高度（页面在改 viewMode **之前**调用；见 restoreCaretAnchor） */
   export function captureCaretAnchor(): void {
+    // 捕获前清掉旧 anchor 并作废在途请求：连续切换时不该再按上一轮的位置去滚
+    caretAnchorEpoch += 1;
+    caretAnchor = null;
     if (!view) return;
     const pos = view.state.selection.main.head;
     const caret = view.coordsAtPos(pos);
@@ -339,34 +353,54 @@
     caretAnchor = { pos, offsetFromTop };
   }
 
-  /** 换完布局把滚动调回去，让光标回到原来的屏幕高度（越界时夹在视口内） */
-  function restoreCaretAnchor(): void {
+  /**
+   * 换完布局把光标调回原来的屏幕高度。
+   *
+   * 三步，顺序有讲究（实测踩过）：
+   *  1. **读布局**放在 CM 的 `requestMeasure().read` 里：那里是官方允许读 rect 的时机，
+   *     也不会在别处逼出计划外的重排；
+   *  2. **事务不能在 `write` 里派发**：measure 的 write 阶段 `updateState` 仍是 Updating，
+   *     `view.dispatch` 会抛 `Calls to EditorView.update are not allowed while an update is
+   *     in progress`（实测：模式切换时那次调回**整条静默失效**，光标照旧被甩走）。
+   *     所以用微任务推迟到这次 measure 结束之后；
+   *  3. 滚动目标由 CM 自己的测量循环消费（`scrollIntoView` + yMargin），**不写 scrollTop**。
+   * `epoch` 与当前代号不符（又捕了一次 / 视图销毁）就直接作废，不做任何补偿。
+   */
+  function restoreCaretAnchor(epoch: number): void {
+    if (epoch !== caretAnchorEpoch) return;
+    const target = view;
     const anchor = caretAnchor;
     caretAnchor = null;
-    if (!view || !anchor) return;
-    const scroller = view.scrollDOM;
-    const caret = view.coordsAtPos(view.state.selection.main.head);
-    if (!caret) return;
-    const current = caret.top - scroller.getBoundingClientRect().top;
-    const target = Math.max(0, Math.min(anchor.offsetFromTop, scroller.clientHeight - 1));
-    const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    const next = Math.max(0, Math.min(maxScroll, scroller.scrollTop + (current - target)));
-    if (Math.abs(next - scroller.scrollTop) > 1) {
-      dbg.log(
-        "editor",
-        `模式切换：把光标调回视口 y≈${Math.round(target)}（滚动 ${Math.round(scroller.scrollTop)} → ${Math.round(next)}）`,
-      );
-      scroller.scrollTop = next;
-    }
+    if (!target || !anchor) return;
+    target.requestMeasure({
+      read: () => {
+        const box = target.scrollDOM.getBoundingClientRect();
+        return measureAnchorYMargin(target, box.top + anchor.offsetFromTop, "top");
+      },
+      write: (yMargin) => {
+        if (yMargin === null || epoch !== caretAnchorEpoch || target !== view) return;
+        // 见上面第 2 条：这里还在 CM 的更新过程中，只能推迟一拍再派发
+        queueMicrotask(() => {
+          if (epoch !== caretAnchorEpoch || target !== view) return;
+          target.dispatch({ effects: anchorEffectAt(anchor.pos, yMargin) });
+          dbg.log(
+            "editor",
+            `模式切换：把光标（pos ${anchor.pos}）调回视口 y≈${Math.round(anchor.offsetFromTop)}（yMargin ${Math.round(yMargin)}，${mode} 布局）`,
+          );
+        });
+      },
+    });
   }
 
-  // 界面模式变化 → 下一帧（再下一帧，等 CodeMirror 自己的 measure 跑完）把光标调回原处
+  // 界面模式变化 → 下一帧（等这次模式切换的布局/扩展都落地）把光标调回原处。
+  // **只等一帧、不重试**：滚动目标交给 CodeMirror 自己的测量循环（见 restoreCaretAnchor）。
   let appliedMode: "write" | "source" | null = null;
   $effect(() => {
     if (!view) return;
     if (appliedMode === mode) return;
     appliedMode = mode;
-    requestAnimationFrame(() => requestAnimationFrame(restoreCaretAnchor));
+    const epoch = caretAnchorEpoch;
+    requestAnimationFrame(() => restoreCaretAnchor(epoch));
   });
 
   // 编译错误（diagnostics）/ 前缀代码（prefixCode）变化：通过 Compartment 重配，

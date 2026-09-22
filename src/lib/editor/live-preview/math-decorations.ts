@@ -52,9 +52,23 @@ export function buildMathDecorations(
     const decision = mathRevealDecision(decorated, selections, {
       inlinePresentation: !asBlockWidget,
     });
-    if (decision.reveal) continue;
     // 落在"已被块切片盖住"的区间里：整块已经由块 widget 呈现，这里不能再叠一层 replace
     if (insideCovered(range.from, range.to, covered)) continue;
+    // **独占单行的行间公式：行级居中要在 reveal 分支之前挂**（报告 V1）。
+    // 以前这枚 `Decoration.line` 只挂在"渲染态"那条分支里（`!decision.reveal && render.ok`），
+    // 于是光标一进公式、widget 一撤，`text-align: center` 跟着消失 —— 实测同一行从
+    // `text-align:center`（行盒 33.5px）变成 `text-align:start`（行盒 24.2px），
+    // 用户看到的就是"点进公式，公式跳到左边、整段还矮了一截"。
+    // 对齐是**行的属性**，不是渲染产物：源码形态与渲染形态必须共用同一个对齐，
+    // 所以它属于"决定展开与否之前"这一步，也不该受渲染缓存到没到货影响。
+    // 条件严格限定 `block !== null && !range.multiline`：多行行间公式走整行 block widget、
+    // 不套单行对齐；与文字同行的 `$ x $`（`block === null`）更不能整行居中（会把正文一起居中）。
+    if (block !== null && !range.multiline) {
+      decorations.push(
+        Decoration.line({ class: "cm-math-line" }).range(state.doc.lineAt(block.from).from),
+      );
+    }
+    if (decision.reveal) continue;
     const sizePt = opts.mathSizePt?.() ?? MATH_TEXT_PT;
     const render = opts.lookup(mathCacheKey(range.body, range.display, context, sizePt));
     // 未渲染 / 渲染失败 → 保持源码显示
@@ -77,9 +91,7 @@ export function buildMathDecorations(
       // （浏览器删掉它、在同一位置插入文本，CodeMirror 能正常读到改动）。
       // 替换区间用**整行**（block.from..block.to）而不是只盖公式：行内可能有前后空白
       // （`  $ x $  ` 这种写法），一起盖掉才真的居中——widget 是 inline-box，留着空白会被推到一边。
-      decorations.push(
-        Decoration.line({ class: "cm-math-line" }).range(state.doc.lineAt(block.from).from),
-      );
+      // （行级居中的 `Decoration.line` 已经在上面、reveal 之前挂好，这里不再重复挂。）
       decorations.push(
         Decoration.replace({
           widget: new MathBlockWidget(render, range, opts.dark(), decision.selected, true),
