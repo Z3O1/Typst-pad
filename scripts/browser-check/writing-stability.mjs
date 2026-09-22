@@ -28,7 +28,15 @@
 //   * 同日量到的既有几何：进入公式 −25.45 / −14.62 / −23.08px；点击代码切片 **+94.27px**、
 //     表格切片 **+82.52px**（与报告 §2.2 的 +94.266 / +82.516 一致）。
 // T1 之后这 6 项全绿；T2 补了 C 段（慢编译 + 过期命中）、T3 补了 D 段（调度合并 + 合成闸门 +
-// 扫描缓存）、T4 补了 E 段（展开占位 20 次进出），现在 93 项。
+// 扫描缓存）、T4 补了 E 段（展开占位 20 次进出）、T5 补了 F 段（列表回车），现在 107 项。
+//
+// PR #77 复审（2026-09-22）之后又加了 11 项，都是**防假绿**的：
+//   * C 段：改版心宽之后必须**真的重编译**（`compile_blocks` 计数 + 新 layout 修订号，见
+//     `window.__typstPadBlocks`）；"命中在飞时点普通源码"这条迟到的命中不许把光标拉回去；
+//   * D 段：连续 8 次编辑的编译次数要有**下界**（1~3，一次都没有 = 假绿）+ 断言那 8 个字真的
+//     进了文档；`compile_blocks` 次数必须等于调度器 `runs`（否则有入口绕过了单槽调度）；
+//   * A 段：连续快按 Ctrl+E 的作废路径改成**确定性复现**（手动扣住 `requestAnimationFrame`，
+//     数"到底派发了几次恢复"），不再靠 `sleep(60)` 撞时机。
 //
 // 前置：dev server + headless Chromium（见 scripts/browser-check/run-all.mjs）。
 // 运行：`CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-stability.mjs`
@@ -816,7 +824,95 @@ console.log("\n=== 三档等效几何（100/150/200%）：点击、左右键、C
     });
   }
 
-  // 连续快按 Ctrl+E：第二次 capture 必须让第一次**已经排队**的恢复作废，且最终仍在写作模式
+  // 连续快按 Ctrl+E：第二次 capture 必须让第一次**已经排队**的恢复作废，且最终仍在写作模式。
+  //
+  // **复审第 8 条**：原来"第一次切换后 sleep 60ms"其实**测不到**这条竞态 —— 页面的恢复只排
+  // 一个 rAF + measure + microtask，60Hz 下第一次恢复早在 60ms 前就跑完了，第二次切换时已经
+  // 没有"仍排队的恢复"可作废（那条断言只是"两次切换的终态对不对"）。这里改成**确定性**复现：
+  // 先把 `window.requestAnimationFrame` 换成手动队列（恢复回调排进来但**不跑**），按下第一次
+  // Ctrl+E（恢复 #1 入队）→ 按下第二次（恢复 #2 入队 + epoch 推进）→ 手动放行整队。
+  // 判据不是"终态对不对"（那只证明最后一次恢复有效），而是**到底几次恢复真的派发了**：
+  // 页面在 `commit` 那一刻会写一条调试日志（`模式切换：把光标…调回视口`），数它 ——
+  // 作废的恢复必须**一条都不写**（旧代码这里会是 2 条：迟到的那次也派发了）。
+  {
+    await replaceDocument(c, longDoc, 900);
+    const pos = Math.floor(longDoc.length * 0.6);
+    await setCaret(pos);
+    await c.wheel(700, 400, -200);
+    await sleep(400);
+    const before = await snapshot();
+    // 装探针：手动 rAF 队列 + 收集 `[debug]` 日志（只数本段的"模式切换…调回视口"）
+    await c.evaluate(`(() => {
+      window.__rafHeld = [];
+      window.__rafOrig = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = (cb) => { window.__rafHeld.push(cb); return 0; };
+      window.__dbgLines = [];
+      const orig = console.log.bind(console);
+      console.log = (...args) => {
+        try { window.__dbgLines.push(args.map((a) => String(a)).join(" ")); } catch {}
+        orig(...args);
+      };
+      window.__flushRaf = (passes = 10) => new Promise((resolve) => {
+        let n = 0;
+        const pass = () => {
+          const queued = window.__rafHeld.splice(0);
+          for (const cb of queued) { try { cb(performance.now()); } catch (e) { window.__rafErr = String(e); } }
+          n += 1;
+          if (n >= passes || window.__rafHeld.length === 0) return resolve(n);
+          setTimeout(pass, 0);
+        };
+        pass();
+      });
+      return true;
+    })()`);
+    const restoreLogs = () =>
+      c.evaluate(`(window.__dbgLines ?? []).filter((l) => l.includes("模式切换：把光标")).length`);
+    await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+    await sleep(50);
+    await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+    await sleep(50);
+    // 放行前：两次恢复都还挂着（第一次的 rAF 被我们扣住了），所以一条日志都不该有
+    const heldLogs = await restoreLogs();
+    check(
+      "连续快按 Ctrl+E：第二次切换发生在第一次恢复**放行之前**（确定性复现竞态，放行前 0 条恢复日志）",
+      heldLogs === 0,
+      JSON.stringify({ heldLogs }),
+    );
+    await c.evaluate(`window.__flushRaf(10)`);
+    await sleep(400);
+    const flushedLogs = await restoreLogs();
+    check(
+      `迟到的第一次恢复被作废：整段只派发 ${flushedLogs} 次恢复（旧代码是 2 次：迟到的那次也滚了）`,
+      flushedLogs === 1,
+      JSON.stringify({ flushedLogs }),
+    );
+    await c.evaluate(`(() => {
+      window.requestAnimationFrame = window.__rafOrig;
+      delete window.__rafErr;
+      return true;
+    })()`);
+    await sleep(400);
+    const after = await snapshot();
+    // 这一段只断言**位置**与模式：扣住 `requestAnimationFrame` 同时也冻住了 CodeMirror 自己的
+    // 测量循环（它用的是 `view.win.requestAnimationFrame`），所以这一轮里 `coordsAtPos` 读到的
+    // 锚点是在"没测量过的新布局"上取的 —— 屏幕高度会偏，那是**测试装置**造成的，不是产品行为
+    // （下一段用正常时序单独验屏幕高度）。
+    check(
+      `连续快按 Ctrl+E（确定性复现）→ 回到写作模式，光标位置不变（${before?.head} → ${after?.head}）`,
+      after?.mode === "写作" && after?.head === pos,
+      JSON.stringify({ beforeMode: before?.mode, afterMode: after?.mode, head: after?.head, pos }),
+    );
+    record({
+      scene: "连续快按 Ctrl+E（扣住 rAF 的确定性复现）",
+      source: "fake",
+      phase: "第二次 capture 作废第一次恢复（复审第 8 条）",
+      restoreDispatches: flushedLogs,
+      headBefore: before?.head ?? null,
+      headAfter: after?.head ?? null,
+    });
+  }
+
+  // 同一件事的**正常时序**版本：不扣 rAF，只快按两次，验"终态屏幕高度不变"。
   {
     await replaceDocument(c, longDoc, 900);
     const pos = Math.floor(longDoc.length * 0.6);
@@ -825,7 +921,7 @@ console.log("\n=== 三档等效几何（100/150/200%）：点击、左右键、C
     await sleep(400);
     const before = await snapshot();
     await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
-    await sleep(60); // 第一次 rAF 恢复还没跑，第二次切换就来了
+    await sleep(60);
     await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
     await sleep(1400);
     const after = await snapshot();
@@ -1166,10 +1262,98 @@ await boot(c, `${BLOCKS_URL}&blockslow=1`, { blockFixtures, mathFixtures, settle
     });
   }
 
+  // ③ **命中还在飞的时候点了普通源码**：迟到的切片命中不许把光标从新位置拉回去（复审第 4 条）。
+  // 旧的 `clickEpoch` 只在新切片按下时才推进，于是"点切片 A（命中在飞）→ 点普通源码 B"这条路上
+  // B 不推进 epoch、文档身份也没变，A 的结果回来后两道检查全过 → 光标从 B 被拉回 A。
+  await replaceDocument(c, sceneCode.doc, 1600);
+  await setCaret(sceneCode.doc.length);
+  await sleep(900);
+  const cropFrom = byteToPos(sceneCode.doc, sceneCode.blocks.find((b) => b.kind === "Raw").start);
+  const lateCropPoint = await c.evaluate(`(() => {
+    const el = Array.from(document.querySelectorAll(".cm-block-crop"))
+      .find((e) => Number(e.dataset.blockFrom) === ${cropFrom});
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const sc = window.__typstPadView.scrollDOM.getBoundingClientRect();
+    const y = Math.round(r.top + Math.min(r.height / 2, 30));
+    return { x: Math.round(r.left + r.width / 2), y, visible: r.top >= sc.top && y <= sc.bottom };
+  })()`);
+  const plainPoint = await c.evaluate(`(() => {
+    const v = window.__typstPadView;
+    const sc = v.scrollDOM.getBoundingClientRect();
+    const line = Array.from(document.querySelectorAll(".cm-content .cm-line")).find((el) => {
+      const r = el.getBoundingClientRect();
+      return (
+        r.height > 4 &&
+        r.top >= sc.top + 4 &&
+        r.bottom <= sc.bottom - 4 &&
+        (el.textContent ?? "").trim().length > 3
+      );
+    });
+    if (!line) return null;
+    const r = line.getBoundingClientRect();
+    const x = Math.round(r.left + 30);
+    const y = Math.round(r.top + r.height / 2);
+    return { x, y, pos: v.posAtCoords({ x, y }), text: (line.textContent ?? "").trim().slice(0, 16) };
+  })()`);
+  check(
+    "迟到命中用例：量到切片点与**普通源码**点（两者都在视口内）",
+    lateCropPoint !== null &&
+      lateCropPoint.visible === true &&
+      plainPoint !== null &&
+      typeof plainPoint.pos === "number",
+    JSON.stringify({ lateCropPoint, plainPoint }),
+  );
+  if (lateCropPoint && plainPoint) {
+    await c.click(lateCropPoint.x, lateCropPoint.y);
+    await sleep(80); // blockslow 把命中拖住 350ms —— 此刻还在飞
+    await c.click(plainPoint.x, plainPoint.y); // 普通源码：默认选择路径（旧代码不推进 epoch）
+    const afterPlain = await c.evaluate(`window.__typstPadView.state.selection.main.head`);
+    check(
+      "迟到命中用例：普通源码点击确实把光标放到了新位置（基线，不是回到切片块首）",
+      typeof afterPlain === "number" &&
+        Math.abs(afterPlain - plainPoint.pos) <= 1 &&
+        afterPlain !== cropFrom,
+      JSON.stringify({ afterPlain, plainPos: plainPoint.pos, cropFrom }),
+    );
+    await sleep(900); // 让那次迟到的命中回来
+    const settledLate = await c.evaluate(`window.__typstPadView.state.selection.main.head`);
+    check(
+      `切片命中在飞时点普通源码 → 迟到的命中不许把光标拉回去（${afterPlain} → ${settledLate}）`,
+      settledLate === afterPlain,
+      JSON.stringify({ afterPlain, settledLate, cropFrom, plainPos: plainPoint.pos }),
+    );
+    record({
+      scene: "命中在飞时点普通源码",
+      source: "real-static",
+      phase: "点击作废（复审第 4 条）",
+      headAfterPlainClick: afterPlain,
+      headSettled: settledLate,
+      cropFrom,
+    });
+  }
+
   // ② 版心宽变了（layoutRevision）之后：切片与链接热区必须**成套**重建
+  // **复审第 7 条**：只比 resize 前后的 crop 数 / href / 百分比位置是**假绿** —— 产品完全不重编译、
+  // 继续用旧 DOM 恰好也全绿（列宽变化只证明 CSS 容器变了）。所以这里同时钉两件 DOM 看不出来的事：
+  // ① `compile_blocks` 计数增加（桩自己记，见 browser-dev-stub 的 countCall）；② 新块表带的是
+  // **新的 layout 修订号**（`window.__typstPadBlocks`，浏览器开发模式的只读钩子）。
+  const blocksCalls = async () =>
+    (await c.evaluate(`JSON.parse(JSON.stringify(window.__browserDevCallCounts ?? {}))`))
+      .compile_blocks ?? 0;
+  const blocksHook = () => c.evaluate(`window.__typstPadBlocks ?? null`);
   await replaceDocument(c, sceneLink.doc, 1600);
   await setCaret(sceneLink.doc.length);
   await sleep(700);
+  const callsBefore = await blocksCalls();
+  const hookBefore = await blocksHook();
+  check(
+    "链接场景：块表已落地且带排版戳（基线，读得到只读钩子）",
+    hookBefore !== null &&
+      typeof hookBefore.stamp?.layoutRevision === "number" &&
+      hookBefore.exact === true,
+    JSON.stringify({ hookBefore }),
+  );
   const linksBefore = await c.evaluate(`(() => {
     const cr = document.querySelector(".cm-content").getBoundingClientRect();
     return {
@@ -1194,7 +1378,9 @@ await boot(c, `${BLOCKS_URL}&blockslow=1`, { blockFixtures, mathFixtures, settle
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await sleep(1400); // 列宽变化 → scheduleWritingReflow（去抖 250ms）+ 慢编译 350ms
+  await sleep(1800); // 列宽变化 → scheduleWritingReflow（去抖 250ms）+ 调度器去抖 150ms + 慢编译 350ms
+  const callsAfter = await blocksCalls();
+  const hookAfter = await blocksHook();
   const linksAfter = await c.evaluate(`(() => {
     const cr = document.querySelector(".cm-content").getBoundingClientRect();
     return {
@@ -1212,6 +1398,19 @@ await boot(c, `${BLOCKS_URL}&blockslow=1`, { blockFixtures, mathFixtures, settle
     `改版心宽后列宽确实变了（${linksBefore.column} → ${linksAfter.column}px）`,
     Math.abs(linksAfter.column - linksBefore.column) > 20,
     JSON.stringify({ before: linksBefore.column, after: linksAfter.column }),
+  );
+  check(
+    `改版心宽后**确实重新编译过**（compile_blocks ${callsBefore} → ${callsAfter}）`,
+    callsAfter > callsBefore,
+    JSON.stringify({ callsBefore, callsAfter }),
+  );
+  check(
+    `新块表带的是**新的 layout 修订号**（${hookBefore?.stamp?.layoutRevision} → ${hookAfter?.stamp?.layoutRevision}）且仍是精确命中`,
+    hookAfter !== null &&
+      typeof hookAfter.stamp?.layoutRevision === "number" &&
+      hookAfter.stamp.layoutRevision > (hookBefore?.stamp?.layoutRevision ?? -1) &&
+      hookAfter.exact === true,
+    JSON.stringify({ hookBefore, hookAfter }),
   );
   check(
     "改版心宽后切片与链接热区**一起**重建（href 与百分比位置不变，说明它们随块成套走）",
@@ -1241,34 +1440,55 @@ await boot(c, BLOCKS_URL, { blockFixtures, mathFixtures, settleMs: 900 });
   const counts = () =>
     c.evaluate(`JSON.parse(JSON.stringify(window.__browserDevCallCounts ?? {}))`);
   const blocksCalls = async () => (await counts()).compile_blocks ?? 0;
+  /** 写作编译调度器的计数（浏览器开发模式的只读钩子，见 src/lib/dev/write-test-hook.ts） */
+  const scheduleStats = () => c.evaluate(`window.__typstPadScheduleStats?.() ?? null`);
 
   await replaceDocument(c, sceneCode.doc, 1400);
   await setCaret(sceneCode.doc.length);
   await sleep(800);
 
-  // ① 连续 8 次编辑：单槽调度必须把它们合并成 1~2 次块编译（不是 8 次）
+  // ① 连续 8 次编辑：单槽调度必须把它们合并成 1~3 次块编译（不是 8 次）
+  // **复审第 6 条**：旧断言只有 `delta <= 3` —— 调度器坏到"一次都不编译"（delta === 0）也照样绿。
+  // 所以要同时钉住下界（≥1）与"这 8 个字符真的进了文档"，否则"什么都没发生"就是满分。
   {
     await c.click(400, 300);
     await c.key("End", { code: "End", keyCode: 35, modifiers: 2 });
     await sleep(300);
     const before = await blocksCalls();
+    const statsBefore = await scheduleStats();
     for (let i = 0; i < 8; i++) {
       await c.type("字");
       await sleep(20); // 20ms × 8 = 160ms：跨过 150ms 去抖边界一点点
     }
     await sleep(1200); // 等最后一次去抖 + 编译落地
     const after = await blocksCalls();
+    const statsAfter = await scheduleStats();
+    const delta = after - before;
+    const runsDelta = (statsAfter?.runs ?? 0) - (statsBefore?.runs ?? 0);
     check(
-      `连续 8 次编辑只落 ${after - before} 次 compile_blocks（单槽调度：≤3，未合并时是 8）`,
-      after - before <= 3,
-      JSON.stringify({ before, after, delta: after - before }),
+      `连续 8 次编辑落 ${delta} 次 compile_blocks（单槽调度：1~3，未合并时是 8，一次都没有 = 假绿）`,
+      delta >= 1 && delta <= 3,
+      JSON.stringify({ before, after, delta }),
+    );
+    check(
+      "连续 8 次编辑真的进了文档（`字`×8 在文末，不然上一条在测空气）",
+      (await c.evaluate(`window.__typstPadView.state.doc.toString().endsWith("字".repeat(8))`)) ===
+        true,
+    );
+    // **复审第 2 条**的不变量：写作模式的每一次块编译都必须经由单槽调度器 —— 绕过它的入口
+    // （设置保存 / 预览栏重排 / 启动首编译）会让"编译次数 > 调度器运行次数"。
+    check(
+      `块编译次数与调度器运行次数一致（compile_blocks +${delta} / scheduler runs +${runsDelta}）：没有绕过单槽的入口`,
+      statsBefore !== null && statsAfter !== null && delta === runsDelta && runsDelta >= 1,
+      JSON.stringify({ statsBefore, statsAfter, delta, runsDelta }),
     );
     record({
       scene: "连续 8 次编辑的编译次数",
       source: "fake",
       phase: "调度合并（报告 T3）",
-      compileBlocksDelta: after - before,
-      note: "单槽调度：最多一个在途 + 一份待执行",
+      compileBlocksDelta: delta,
+      schedulerRunsDelta: runsDelta,
+      note: "单槽调度：最多一个在途 + 一份待执行；块编译次数 === 调度器运行次数（无绕过入口）",
     });
   }
 
