@@ -29,6 +29,8 @@
   import { mark } from "../core/startup-timing";
   import { WRITE_FONT_STACK } from "./editor-font";
   import { dbg } from "../core/debug";
+  // 浏览器验收用的测试钩子（只在 `?browserdev=1` 下真的挂到 window 上，桌面版是空操作）
+  import { registerEditorView, unregisterEditorView } from "../dev/editor-test-hook";
 
   interface Props {
     initialDoc?: string;
@@ -237,8 +239,10 @@
       state: EditorState.create({ doc: initialDoc, extensions: buildExtensions() }),
     });
     mark("editor-created");
+    registerEditorView(view);
 
     return () => {
+      unregisterEditorView(view);
       view.destroy();
     };
   });
