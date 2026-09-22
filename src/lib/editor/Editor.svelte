@@ -80,13 +80,14 @@
      * 父组件负责换算（字节 ↔ 位置）与 IPC（Rust 侧 `block_hit_test`）；返回 null =
      * 定不了位，编辑器退回"光标落到块首"。见 block-hit.ts 与 live-preview 的说明。
      */
+    /** 返回 `"cancelled"` = 这次命中在等待期间作废（会话/文档/几何变了），整条点击必须放弃 */
     onCropClick?: (req: {
       page: number;
       xPt: number;
       yPt: number;
       from: number;
       to: number;
-    }) => Promise<number | null>;
+    }) => Promise<number | null | "cancelled">;
     /** **切片里的链接被点**（阶段 3）：父组件交给 opener 插件打开（不移动光标、不吞点击） */
     onOpenLink?: (href: string) => void;
     /**

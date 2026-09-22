@@ -8,7 +8,7 @@
 // **不改编辑器状态只在选区上做替换**、抬起时 dispatch 一次；`mousedown` 要 `preventDefault`
 // （否则会夺走编辑区焦点，见红线 5）。
 import { EditorSelection } from "@codemirror/state";
-import type { EditorState } from "@codemirror/state";
+import type { EditorState, Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { ViewUpdate } from "@codemirror/view";
 import type { BlockCover } from "../../core/block-plan";
@@ -43,8 +43,24 @@ export function createBlockDrag({
    */
   const DRAG_THRESHOLD_PX = 3;
 
+  /**
+   * 命中测试的三种结果（报告 T2 / A1）：
+   *  - `number`：落在哪儿；
+   *  - `null`：**定不了位**（后端没有几何、命中不可用）→ 调用方退回"光标落到块首"；
+   *  - `"cancelled"`：这次命中在等待期间**作废**（会话换了 / 文档改了 / 几何编号变了）→
+   *    调用方必须**整条取消**，**绝不能**按 `null` 那样退回块首继续提交 ——
+   *    那等于"明知结果过时，还照旧把光标插到块首"，正是这条要防的事。
+   */
+  type HitOutcome = number | "cancelled" | null;
+
+  /**
+   * 按下会话号（报告 T2 / A1 的"动作令牌"）：每次新的切片按下 +1。
+   * 上一次按下可能还有一次命中测试在飞 —— 它回来时发现会话已变，就什么都不提交。
+   */
+  let clickEpoch = 0;
+
   /** 指针位置 → 源码位置（切片走命中测试、源码行走 CM 坐标映射） */
-  async function positionAtPointer(view: EditorView, x: number, y: number): Promise<number | null> {
+  async function positionAtPointer(view: EditorView, x: number, y: number): Promise<HitOutcome> {
     let crop: HTMLElement | null = null;
     try {
       // **用 Element 而不是 HTMLElement**：指针多半落在切片内部那个 `<svg>` 上，而它是 SVGElement
@@ -70,6 +86,7 @@ export function createBlockDrag({
             from: cover.block.from,
             to: cover.block.to,
           });
+          if (hit === "cancelled") return "cancelled";
           if (hit !== null && Number.isFinite(hit)) return hit;
         } catch (e) {
           console.error("[live-preview] 拖选定位失败，落回块首：", e);
@@ -98,6 +115,10 @@ export function createBlockDrag({
     private readonly extendFrom: number | null;
     private moved = false;
     private busy = false;
+    /** 本次交互已经作废（命中结果过时）：之后一律不提交任何东西 */
+    private cancelled = false;
+    /** 按下那一刻的文档：拖动/命中往返期间文档变过就作废（位置都是旧坐标） */
+    private readonly docAtStart: Text;
     /** 松手那次解析可能撞上"上一次解析还没回来" —— 记下"要收尾"，等这一轮跑完照样收尾 */
     private wantsFinal = false;
     private sweep: HTMLElement | null = null;
@@ -108,9 +129,16 @@ export function createBlockDrag({
       private readonly view: EditorView,
       private readonly cover: BlockCover,
       event: MouseEvent,
+      /**
+       * 这次按下的会话号（模块级 `clickEpoch` 每次按下 +1）：上一次按下的异步命中回来时，
+       * 若已经又按了一次（新会话），它的提交必须作废 —— 否则用户"点 A 又点 B"会看到光标
+       * 先跳到 A、再跳到 B（迟到的那次覆盖了新的）。
+       */
+      private readonly epoch: number,
     ) {
       this.start = { x: event.clientX, y: event.clientY };
       this.last = { ...this.start };
+      this.docAtStart = view.state.doc;
       // 与 CM 默认选择同一口径：扩选的固定端是"原选区的锚点"，原选区为空时就是光标
       // （那种情况下 anchor == head，等于从光标处扩起）。
       const current = view.state.selection.main;
@@ -154,6 +182,8 @@ export function createBlockDrag({
      * 只用一个半透明的"扫过"色块给出反馈，松手时才把真选区交出去（那一下版式变一次是应有的）。
      */
     get(event: MouseEvent, extend: boolean): EditorSelection {
+      // 已经作废的会话不许再落选区（也不许再退回块首）：保持现状
+      if (this.cancelled) return this.view.state.selection;
       this.last = { x: event.clientX, y: event.clientY };
       if (
         !this.moved &&
@@ -188,6 +218,14 @@ export function createBlockDrag({
         for (;;) {
           const point = this.last;
           const pos = await positionAtPointer(this.view, point.x, point.y);
+          if (pos === "cancelled") {
+            // 命中作废：这次交互彻底结束，**不提交任何东西**（不能当 null 退回块首）
+            this.cancelled = true;
+            this.head = null;
+            this.anchor = null;
+            this.clearSweep();
+            return;
+          }
           if (pos !== null) {
             const clamped = Math.max(0, Math.min(this.view.state.doc.length, pos));
             if (this.anchor === null) this.anchor = clamped;
@@ -205,6 +243,11 @@ export function createBlockDrag({
 
     /** 松手（或还没拖动时的单击）：把选区真正落下去 —— 版面这一步会变（相关块展开成源码） */
     private commit(point: { x: number; y: number }): void {
+      if (this.cancelled) return;
+      // 文档在按下之后变过（IME、异步替换、别处的编辑）：手里的位置全是旧坐标，这次作废
+      if (this.view.state.doc !== this.docAtStart) return;
+      // 又按了一次（新会话）：迟到的那次不许覆盖新的
+      if (this.epoch !== clickEpoch) return;
       if (this.head === null) return;
       // 扩选时锚点来自原选区，按下那一刻解析出来的位置不作数（见 extendFrom 的说明）；
       // 非扩选且没拖动过 = 普通单击 → 光标落在点处。
@@ -284,7 +327,7 @@ export function createBlockDrag({
       const cover = decoFieldCovers(view).find(
         (c) => c.block.from === Number(crop.dataset.blockFrom),
       );
-      return cover ? new CropSelection(view, cover, event) : null;
+      return cover ? new CropSelection(view, cover, event, ++clickEpoch) : null;
     } catch (e) {
       console.error("[live-preview] 切片鼠标选择接管失败，交回默认：", e);
       return null;

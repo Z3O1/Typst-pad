@@ -33,6 +33,17 @@ export interface Block {
    */
   skipped?: boolean;
   /**
+   * **这一块的切片是"沿用"来的旧产物**（报告 T2 / A4）：文档这次没有重新渲染它
+   * （窗口外、或编译失败后平移来的），图还是上一版排版画的。
+   *
+   * 与 `svg === ""`（缺切片）必须分开：
+   *  - 外观上可以先用旧图（不至于整篇闪回源码），但**精确命中必须关掉** —— 旧图配新几何
+   *    会点错地方（`handleCropClick` 据此退回块首）；
+   *  - 窗口滚到它附近时要**请求新图**（见 `notifyBlocksNeeded` 的新鲜度判据）。
+   * 只在"这一块确实有图、但图不是本轮产物"时为 true；新渲的块没有这个字段。
+   */
+  stale?: boolean;
+  /**
    * **引擎对这块什么都没有画**（`#set` / `#show` / `#let` / 纯注释行这类"规则"）。
    *
    * 与 `found: false` 的区别很重要：`found: false` 还有另一种来源 —— 编辑之后块表"过期"了、
@@ -154,10 +165,17 @@ export function carryOverCrops(
   prev: readonly Block[] | null,
   next: readonly Block[],
   doc: string,
+  /**
+   * `allow: false` = **禁止沿用**（报告 T2 / A4 的回退开关）：
+   * 版心宽度 / 字体 / 编译前缀这类**排版输入**变过之后，"文本相同"不再等于"排版相同"
+   * （引用编号、折行位置、字号都可能变），旧图配新几何比缺图更坏 —— 这一轮就当它没有旧产物。
+   */
+  opts: { allow?: boolean } = {},
 ): { blocks: Block[]; carried: number; missing: number } {
   if (next.length === 0) return { blocks: [], carried: 0, missing: 0 };
+  const allow = opts.allow ?? true;
   const cache = new Map<string, string>();
-  if (prev) {
+  if (prev && allow) {
     for (const b of prev) {
       if (!b.svg) continue;
       cache.set(`${b.kind}\u0000${doc.slice(b.from, b.to)}`, b.svg);
@@ -167,10 +185,11 @@ export function carryOverCrops(
   let missing = 0;
   const blocks = next.map((b) => {
     if (b.svg) return b;
-    const reused = cache.get(`${b.kind}\u0000${doc.slice(b.from, b.to)}`);
+    const reused = allow ? cache.get(`${b.kind}\u0000${doc.slice(b.from, b.to)}`) : undefined;
     if (reused) {
       carried++;
-      return { ...b, svg: reused };
+      // 沿用的旧图必须标 stale：外观可以先用，精确命中与"不用补渲"这两条都要按它让路
+      return { ...b, svg: reused, stale: true };
     }
     missing++;
     return b;

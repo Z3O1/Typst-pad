@@ -66,7 +66,11 @@ export interface LivePreviewOptions {
   onBlocksNeeded?: () => void;
   /**
    * **点击定位**（阶段 2）：点在某张切片上的 `(xPt, yPt)`（页面坐标）→ 返回光标的
-   * CodeMirror 位置；返回 null = 定不了位，调用方退回"光标落到块首"。
+   * CodeMirror 位置。三种返回（报告 T2 / A1）：
+   *  - `number`：命中位置；
+   *  - `null`：**定不了位**（块表不精确、后端没有这份几何、命中不可用）→ 调用方退回"块首"；
+   *  - `"cancelled"`：这次命中在等待期间**作废**（会话/文档/几何编号变了）→ 调用方必须
+   *    整条取消，**不许**把它当 `null` 用（那会落一个明知过时的光标）。
    *
    * 真实实现在父组件（→ Rust 侧 `block_hit_test`，见 block-hit.ts / +page.svelte），
    * 这里只负责"量出点击点在切片里的相对位置"并把结果落在事务里。
@@ -78,7 +82,7 @@ export interface LivePreviewOptions {
     /** 被点那块的源码范围（CodeMirror 位置） */
     from: number;
     to: number;
-  }) => Promise<number | null>;
+  }) => Promise<number | null | "cancelled">;
   /**
    * **点切片里的链接**（阶段 3）：typst 的 `#link("…")[文字]` 在切片上是画出来的文字，
    * 点击时把 URL 交给父组件（→ opener 插件用系统浏览器打开）。不传则链接只是不可点的热区。

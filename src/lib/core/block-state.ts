@@ -16,11 +16,66 @@
 //    意义；文档换了一次编译就要整批作废（`resetBlocks` 在页面，理由见那边的注释）。
 // 3. **编辑期间也要平移**（`remapBlocksOnEdit`）：插入换行会改变行结构，而格子边界是按"块的最后一
 //    行之后"算的 —— 旧坐标放在新文档上会算到错误的行，表现为"刚打的那行落进旁边的旧切片里"。
+// 4. **产物必须带"排版戳"**（报告 T2 / A4）：`RenderStamp` 记下这份产物是在哪一份文档、哪一套
+//    编译上下文与版心下渲出来的。沿用缓存只在"戳上的排版输入没变"时才允许开（`carryOverCrops`
+//    的 `allow`）；沿用的块一律标 `stale`（精确命中关掉、滚到附近要补渲）。
 
 import { positionRangeToByteRange } from "./block-offsets";
 import { carryOverCrops, remapBlocksThroughEdit, toBlockTable } from "./block-plan";
 import type { Block } from "./block-plan";
 import type { BlocksFail, BlocksOk } from "./typst-engine";
+
+/**
+ * **排版戳**：一份块级产物的"出身"（报告 T2）。
+ *
+ * 为什么不能只比文档字符串：同一份文本在不同版心宽度、不同字体设置、不同编译前缀下
+ * **排版不同**（引用编号、折行、字号都可能变），所以"文本相同"既不等于"图上就是它"，
+ * 也不等于"旧图能配新几何"。四个修订号分工：
+ *  - `sessionId`：打开 / 新建 / 重读文件后 +1 —— 上一份文档的产物一律作废；
+ *  - `documentRevision`：每次编辑 +1（编辑期间块表已经用 `remapBlocksOnEdit` 跟上了，
+ *    但那些区间是**平移来的估算**，不能当"精确"用）；
+ *  - `contextRevision`：编译前缀 / 字体设置 / 目标文件路径变化时 +1（影响排版与编号）；
+ *  - `layoutRevision`：版心宽度变化时 +1（写作模式重排）。
+ */
+export interface RenderStamp {
+  sessionId: number;
+  documentRevision: number;
+  contextRevision: number;
+  layoutRevision: number;
+}
+
+/** 两个戳是否**完全**相同（缺省视为同一份全零戳，便于老调用方） */
+export function sameStamp(
+  a: RenderStamp | null | undefined,
+  b: RenderStamp | null | undefined,
+): boolean {
+  const x = a ?? ZERO_STAMP;
+  const y = b ?? ZERO_STAMP;
+  return (
+    x.sessionId === y.sessionId &&
+    x.documentRevision === y.documentRevision &&
+    x.contextRevision === y.contextRevision &&
+    x.layoutRevision === y.layoutRevision
+  );
+}
+
+/** 全零戳：没有产物时的占位（`sameStamp(undefined, undefined) === true`） */
+export const ZERO_STAMP: RenderStamp = Object.freeze({
+  sessionId: 0,
+  documentRevision: 0,
+  contextRevision: 0,
+  layoutRevision: 0,
+});
+
+/**
+ * 补渲去重键（`handleBlocksNeeded` 用）：**必须带上完整的戳**。
+ * 只用 `from:to` 时，同一个窗口在新一次编辑之后会被判成"已经渲过"而永远不再补渲
+ * （旧图/源码一直留在那儿）；带上戳之后"同一窗口的新 revision"是一次**新**请求。
+ */
+export function stampKey(stamp: RenderStamp, window: { from: number; to: number } | null): string {
+  const w = window === null ? "all" : `${window.from}:${window.to}`;
+  return `${stamp.sessionId}/${stamp.documentRevision}/${stamp.contextRevision}/${stamp.layoutRevision}|${w}`;
+}
 
 /** 块级渲染窗口的前后预取（**字符**数，见 blockWindowBytes） */
 export const BLOCK_WINDOW_MARGIN = 4000;
@@ -29,6 +84,11 @@ export const BLOCK_WINDOW_MARGIN = 4000;
 export interface BlocksSnapshot {
   /** 当前块表（null = 没有切片，编辑器整篇显示源码） */
   blocks: Block[] | null;
+  /**
+   * 这份产物的排版戳（见 RenderStamp）。**可缺省**：缺省按全零戳处理（`sameStamp` 兜底），
+   * 这样"还没有产物"的空快照与单测里手搓的快照都不必显式给。
+   */
+  stamp?: RenderStamp;
   /** 块表对应的**文档原文**（= 生成这批切片时编译的那一份） */
   doc: string;
   /** 生成块表的那次编译在 Rust 侧写下的几何编号（0 = 没有几何） */
@@ -41,6 +101,8 @@ export interface BlocksSnapshot {
 export interface BlocksPatch {
   blocks: Block[] | null;
   doc: string;
+  /** 与 `blocks` 成套的排版戳（沿用来的块已按 `stale` 标好） */
+  stamp: RenderStamp;
   /** 区间是否**精确**（false = 估算的 → 点击不做精确定位，退回"光标落到块首"） */
   exact: boolean;
   /** 这一批切片对应的 Rust 侧几何编号（失败分支**保持旧值**：块表还是上一批的那些切片） */
@@ -64,14 +126,22 @@ export function landBlocksResult(
   prev: BlocksSnapshot,
   doc: string,
   result: BlocksOk | BlocksFail,
+  stamp: RenderStamp = ZERO_STAMP,
 ): BlocksPatch {
   if (result.ok) {
     const table = toBlockTable(doc, result.blocks);
-    // 窗口化渲染：窗口外的块这轮没有 SVG，按"块类型 + 源码文本相同"沿用上一轮结果
-    const carried = carryOverCrops(prev.blocks, table.blocks, doc);
+    // 窗口化渲染：窗口外的块这轮没有 SVG，按"块类型 + 源码文本相同"沿用上一轮结果。
+    // **但只在排版输入没变时才允许沿用**（报告 T2 / A4）：版心宽度、字体、前缀一变，
+    // "文本相同"就不再等于"排版相同"（引用编号、折行、字号都可能变），旧图配新几何比缺图更坏。
+    const allowCarry = sameStamp(prev.stamp, {
+      ...stamp,
+      documentRevision: (prev.stamp ?? ZERO_STAMP).documentRevision,
+    });
+    const carried = carryOverCrops(prev.blocks, table.blocks, doc, { allow: allowCarry });
     return {
       blocks: carried.blocks,
       doc,
+      stamp,
       exact: true,
       geometryId: result.geometryId,
       // 后端没给（旧版本/桩）时是 0 → 保持上一次量到的字号，别把透镜字号打回默认值
@@ -88,8 +158,10 @@ export function landBlocksResult(
     ? remapBlocksThroughEdit(prev.blocks, prev.doc, doc)
     : { blocks: [] as Block[], kept: 0 };
   return {
-    blocks: remap.blocks.length > 0 ? remap.blocks : null,
+    // 平移来的块同样是"旧图 + 新文档坐标"：标 stale（精确命中关掉、滚到附近要补渲）
+    blocks: remap.blocks.length > 0 ? remap.blocks.map((b) => ({ ...b, stale: true })) : null,
     doc,
+    stamp,
     exact: false, // 区间是估算的：点击精确定位据此退出
     geometryId: prev.geometryId, // 块表没换，几何编号也就不动
     textPt: prev.textPt,
@@ -103,13 +175,19 @@ export function landBlocksResult(
  * 返回 null = 没有块表、或文档没变（什么都不用做）；返回 patch = 页面写回这四个值并自增代次
  * （让编辑器按新表重建装饰，不然这一帧渲染出来的还是旧表的格子）。
  */
-export function remapBlocksOnEdit(prev: BlocksSnapshot, newDoc: string): BlocksPatch | null {
+export function remapBlocksOnEdit(
+  prev: BlocksSnapshot,
+  newDoc: string,
+  documentRevision: number,
+): BlocksPatch | null {
   if (!prev.blocks || prev.blocks.length === 0) return null;
   if (prev.doc === newDoc) return null;
   const remap = remapBlocksThroughEdit(prev.blocks, prev.doc, newDoc);
   return {
-    blocks: remap.blocks,
+    // 编辑后的块表是**估算**的：图还是旧图的，标 stale 让精确命中与补渲都走保守路线
+    blocks: remap.blocks.map((b) => ({ ...b, stale: true })),
     doc: newDoc,
+    stamp: { ...(prev.stamp ?? ZERO_STAMP), documentRevision },
     // 平移**不**等于"精确"：几何与命中缓存都还是上一次编译的
     exact: false,
     geometryId: prev.geometryId,

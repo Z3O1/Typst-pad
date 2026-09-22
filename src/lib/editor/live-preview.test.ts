@@ -597,6 +597,23 @@ describe("livePreview 块级切片", () => {
     expect(needed).toBeGreaterThan(0);
   });
 
+  it("**沿用来的旧图**（stale）也要补渲（报告 T2 / A4）", () => {
+    // 只看 `svg === ""` 时，沿用的旧图会让判据永远为假 —— 那一块再也不会刷新。
+    let needed = 0;
+    mount("abc\n", [crop(0, 4, { stale: true })], undefined, () => {
+      needed += 1;
+    });
+    expect(needed).toBeGreaterThan(0);
+  });
+
+  it("新渲的块（有图、不 stale）不要求补渲", () => {
+    let needed = 0;
+    mount("abc\n", [crop(0, 4)], undefined, () => {
+      needed += 1;
+    });
+    expect(needed).toBe(0);
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     view?.destroy();
@@ -789,6 +806,111 @@ describe("livePreview 块级切片", () => {
     expect(last).toMatchObject({ from: 0, to: 3 });
     // ② 光标落在回调给的位置（而不是块首 0）
     expect(view.state.selection.main.head).toBe(7);
+    spy.mockRestore();
+  });
+
+  it("命中作废（返回 `cancelled`）→ **什么都不提交**（不能当 null 退回块首）（报告 T2 / A1）", async () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    const geo = { page: 1, xPt: 58, yPt: 100, widthPt: 371.25, heightPt: 20 };
+    const rect = {
+      left: 0,
+      top: 0,
+      width: 100,
+      height: 50,
+      right: 100,
+      bottom: 50,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    };
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(rect as DOMRect);
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3, geo), crop(5, 8, geo), crop(10, 13, geo)],
+            onCropClick: async () => "cancelled",
+          }),
+        ],
+      }),
+    });
+    const dispatchSpy = vi.spyOn(view, "dispatch");
+    const first = crops()[0] as HTMLElement;
+    first.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 75, clientY: 25 }));
+    // 按下那一瞬间 CM 自己会问一次 get()（那一步把光标放到块首，是既有行为）
+    const dispatchesAfterPress = dispatchSpy.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 0));
+    // 作废的语义是"迟到的那次结果什么都不提交"：既不落到命中位置（7），
+    // 也不许再补一次退回块首的提交
+    expect(dispatchSpy.mock.calls.length).toBe(dispatchesAfterPress);
+    expect(view.state.selection.main.head).not.toBe(7);
+    dispatchSpy.mockRestore();
+    spy.mockRestore();
+  });
+
+  it("命中往返期间文档变了 → 这次点击作废（不提交旧坐标）", async () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    const geo = { page: 1, xPt: 58, yPt: 100, widthPt: 371.25, heightPt: 20 };
+    const rect = {
+      left: 0,
+      top: 0,
+      width: 100,
+      height: 50,
+      right: 100,
+      bottom: 50,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    };
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(rect as DOMRect);
+    let viewRef: EditorView | null = null;
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3, geo), crop(5, 8, geo), crop(10, 13, geo)],
+            onCropClick: async () => {
+              // 命中还没回来时文档被改了（IME、异步替换、别处的编辑）
+              viewRef?.dispatch({ changes: { from: 0, to: 0, insert: "x" } });
+              return 7;
+            },
+          }),
+        ],
+      }),
+    });
+    viewRef = view;
+    const first = crops()[0] as HTMLElement;
+    first.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 75, clientY: 25 }));
+    await new Promise((r) => setTimeout(r, 0));
+    // 文档变了 -> 命中的位置（7）在新文档里指向别的字：不能提交
+    expect(view.state.doc.toString()).toBe("xaaa\n\nbbb\n\nccc\n");
+    expect(view.state.selection.main.head).not.toBe(7);
     spy.mockRestore();
   });
 

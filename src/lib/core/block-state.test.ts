@@ -11,6 +11,8 @@ import {
   blockWindowBytes,
   landBlocksResult,
   remapBlocksOnEdit,
+  sameStamp,
+  stampKey,
   type BlocksSnapshot,
 } from "./block-state";
 import { toBlockTable } from "./block-plan";
@@ -116,6 +118,46 @@ describe("landBlocksResult：编译成功", () => {
     expect(patch.detail).toBe("切片窗口：新渲 1 / 沿用 1 / 待渲 0");
   });
 
+  it("沿用来的块**标 stale**（精确命中关掉、滚到附近要补渲）（报告 T2 / A4）", () => {
+    const doc = "段落一\n\n段落二";
+    const prevTable = toBlockTable(doc, [crop(0, 9), crop(11, 20, { svg: "<svg id='2'/>" })]);
+    const patch = landBlocksResult(
+      emptySnap({ blocks: prevTable.blocks, doc }),
+      doc,
+      okResult(doc, [crop(0, 9), crop(11, 20, { svg: "" })]),
+    );
+    expect(patch.blocks?.[0].stale).toBeUndefined(); // 这一轮新渲的：新鲜
+    expect(patch.blocks?.[1].stale).toBe(true); // 沿用来的：旧图
+  });
+
+  it("**排版输入变了就不许沿用**（版心宽/字体/前缀变过 → 旧图配新几何比缺图更坏）", () => {
+    const doc = "段落一\n\n段落二";
+    const prevTable = toBlockTable(doc, [crop(0, 9), crop(11, 20, { svg: "<svg id='2'/>" })]);
+    const prevStamp = { sessionId: 1, documentRevision: 3, contextRevision: 1, layoutRevision: 1 };
+    const patch = landBlocksResult(
+      emptySnap({ blocks: prevTable.blocks, doc, stamp: prevStamp }),
+      doc,
+      okResult(doc, [crop(0, 9), crop(11, 20, { svg: "" })]),
+      { ...prevStamp, layoutRevision: 2 }, // 版心宽改过
+    );
+    // 不许沿用 → 第二块保持"缺切片"（等下一轮真渲），而不是拿旧图顶上
+    expect(patch.blocks?.[1].svg).toBe("");
+    expect(patch.detail).toBe("切片窗口：新渲 1 / 沿用 0 / 待渲 1");
+  });
+
+  it("同一套排版输入（只有文档变了）→ 沿用照旧开", () => {
+    const doc = "段落一\n\n段落二";
+    const prevTable = toBlockTable(doc, [crop(0, 9), crop(11, 20, { svg: "<svg id='2'/>" })]);
+    const prevStamp = { sessionId: 1, documentRevision: 3, contextRevision: 1, layoutRevision: 1 };
+    const patch = landBlocksResult(
+      emptySnap({ blocks: prevTable.blocks, doc, stamp: prevStamp }),
+      doc,
+      okResult(doc, [crop(0, 9), crop(11, 20, { svg: "" })]),
+      { ...prevStamp, documentRevision: 4 },
+    );
+    expect(patch.blocks?.[1].svg).toBe("<svg id='2'/>");
+  });
+
   it("没有任何沿用/待渲时不写统计日志（少一行噪音）", () => {
     const doc = "abc";
     const patch = landBlocksResult(emptySnap(), doc, okResult(doc, [crop(0, 3)]));
@@ -123,7 +165,39 @@ describe("landBlocksResult：编译成功", () => {
   });
 });
 
+describe("RenderStamp：戳的比较与去重键", () => {
+  it("四个修订号全同才算同戳；缺省（undefined）按全零戳处理", () => {
+    const a = { sessionId: 1, documentRevision: 2, contextRevision: 3, layoutRevision: 4 };
+    expect(sameStamp(a, { ...a })).toBe(true);
+    expect(sameStamp(a, { ...a, layoutRevision: 5 })).toBe(false);
+    expect(sameStamp(undefined, undefined)).toBe(true);
+    expect(sameStamp(a, undefined)).toBe(false);
+  });
+
+  it("补渲去重键**必须带戳**：同一窗口的新 revision 是一次新请求", () => {
+    const stamp = { sessionId: 1, documentRevision: 2, contextRevision: 0, layoutRevision: 0 };
+    const w = { from: 10, to: 20 };
+    expect(stampKey(stamp, w)).not.toBe(stampKey({ ...stamp, documentRevision: 3 }, w));
+    expect(stampKey(stamp, w)).not.toBe(stampKey({ ...stamp, layoutRevision: 1 }, w));
+    expect(stampKey(stamp, w)).toBe(stampKey(stamp, { from: 10, to: 20 }));
+    expect(stampKey(stamp, null)).toContain("all");
+  });
+});
+
 describe("landBlocksResult：编译失败", () => {
+  it("失败时平移来的块也标 stale（旧图 + 新坐标，精确命中必须关）", () => {
+    const before = "段落一\n\n段落二";
+    const after = "段落一改了\n\n段落二";
+    const prevTable = toBlockTable(before, [crop(0, 9), crop(11, 20)]);
+    const patch = landBlocksResult(
+      emptySnap({ blocks: prevTable.blocks, doc: before, geometryId: 3 }),
+      after,
+      failResult(),
+    );
+    expect(patch.blocks?.length).toBeGreaterThan(0);
+    expect(patch.blocks?.every((b) => b.stale === true)).toBe(true);
+  });
+
   it("**保留切片**：没被碰到的块原样平移，exact 关掉（区间是估算的）", () => {
     const before = "段落一\n\n段落二";
     const after = "段落一改了\n\n段落二";
@@ -163,17 +237,20 @@ describe("remapBlocksOnEdit：编辑期间让块表跟上", () => {
   const table = toBlockTable(before, [crop(0, 9), crop(11, 20)]);
 
   it("没有块表：返回 null（编辑器本来就显示源码）", () => {
-    expect(remapBlocksOnEdit(emptySnap({ doc: before }), "改了")).toBeNull();
+    expect(remapBlocksOnEdit(emptySnap({ doc: before }), "改了", 1)).toBeNull();
   });
 
   it("文档没变：返回 null（O(n) 的比较没必要白跑，也不该白增代次）", () => {
-    expect(remapBlocksOnEdit(emptySnap({ blocks: table.blocks, doc: before }), before)).toBeNull();
+    expect(
+      remapBlocksOnEdit(emptySnap({ blocks: table.blocks, doc: before }), before, 1),
+    ).toBeNull();
   });
 
   it("文档变了：平移块表、exact 关掉、几何编号与字号保持", () => {
     const patch = remapBlocksOnEdit(
       emptySnap({ blocks: table.blocks, doc: before, geometryId: 3, textPt: 11.5 }),
       "段落一\n\n段落二。",
+      7,
     );
     expect(patch).not.toBeNull();
     expect(patch!.doc).toBe("段落一\n\n段落二。");

@@ -336,7 +336,12 @@ async function handleCommand(
   args: Record<string, unknown> | undefined,
 ): Promise<unknown> {
   const a = args ?? {};
-  if (blockslowEnabled() && (command === "compile_blocks" || command === "compile_doc")) {
+  if (
+    blockslowEnabled() &&
+    // `block_hit_test` 也一起放慢：报告 T2 / A1 要验的是"命中还在飞的时候文档/几何变了"
+    // 这条竞态 —— 命中瞬时返回时那个窗口根本不存在，浏览器里复现不出来。
+    (command === "compile_blocks" || command === "compile_doc" || command === "block_hit_test")
+  ) {
     await new Promise((r) => setTimeout(r, SLOW_COMPILE_MS));
   }
   switch (command) {

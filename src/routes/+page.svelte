@@ -23,7 +23,8 @@
   } from "$lib/core/block-offsets";
   import { clampHitOffset } from "$lib/core/block-hit";
   import { blockWindowBytes, landBlocksResult, remapBlocksOnEdit } from "$lib/core/block-state";
-  import type { BlocksPatch, BlocksSnapshot } from "$lib/core/block-state";
+  import type { BlocksPatch, BlocksSnapshot, RenderStamp } from "$lib/core/block-state";
+  import { sameStamp, stampKey } from "$lib/core/block-state";
   import type { Block } from "$lib/core/block-plan";
   import { buildFontFamilies, normalizeFontDirs } from "$lib/core/font-settings";
   import {
@@ -369,6 +370,8 @@
    * Rust 侧几何缓存里的字节区间还是失败前那一版的，混着用会点错地方（宁可退回块首）。
    */
   let writingBlocksDoc = $state("");
+  /** 与当前块表**成套**的排版戳（`landBlocksResult` 回来时写回；resetBlocks 清掉） */
+  let writingBlocksStamp = $state<RenderStamp | null>(null);
   let writingBlocksExact = $state(false);
   /**
    * 生成当前块表的那次编译在 Rust 侧写下的**几何编号**（`BlocksOutput.geometryId`）。
@@ -392,8 +395,39 @@
   const DEFAULT_WRITING_WIDTH_PT = 371.25;
   /** "视口内出现没切片的块"的重编译定时器（去抖：滚动过程中会连着触发） */
   let blocksTimer: ReturnType<typeof setTimeout> | undefined;
-  /** 上一次**已经渲过**的窗口（`from:to` 或 `all`）：同一个窗口不重复编译，防抖成环 */
-  let lastBlocksWindow = $state("");
+  /**
+   * **排版戳的四个修订号**（报告 T2）。
+   *
+   * 为什么不能只比文档字符串：同一份文本在不同版心宽度 / 字体设置 / 编译前缀下**排版不同**
+   * （引用编号、折行、字号都可能变）。四个修订号各自的"+1 时机"：
+   *  - `blockSessionId`：打开 / 新建 / 重读文件（`resetBlocks`）；
+   *  - `blockDocRevision`：每次编辑（`handleDocChange`）；
+   *  - `blockContextRevision` / `blockLayoutRevision`：在 `runCompile` 里跟上一轮的
+   *    编译输入（前缀 / 字体 / 路径、版心宽）比出来 —— 比"到处记得自增"可靠。
+   */
+  let blockSessionId = $state(0);
+  let blockDocRevision = 0;
+  let blockContextRevision = 0;
+  let blockLayoutRevision = 0;
+  /** 上一轮编译用过的排版输入指纹（用来推 context/layout 的修订号） */
+  let lastContextKey = "";
+  let lastLayoutKey = "";
+
+  /** 当前排版戳（发请求时复制一份，回来再比 —— 见 runCompile） */
+  function currentStamp(): RenderStamp {
+    return {
+      sessionId: blockSessionId,
+      documentRevision: blockDocRevision,
+      contextRevision: blockContextRevision,
+      layoutRevision: blockLayoutRevision,
+    };
+  }
+
+  /**
+   * 上一次**已经渲过**的请求键：`stampKey(戳) + 窗口`（见 `core/block-state` 的 stampKey）。
+   * **必须带戳**：只用 `from:to` 时，同一个窗口在新一次编辑之后会被判成"已经渲过"而永不补渲。
+   */
+  let lastBlocksRequest = $state("");
 
   /**
    * **点切片里的链接**（阶段 3）：交给系统默认浏览器打开（opener 插件，与「关于 → 项目主页」
@@ -415,11 +449,13 @@
    */
   function handleBlocksNeeded() {
     if (viewMode !== "write") return;
-    // 同一个窗口不重复编译：补渲后仍有块没拿到 svg（后端渲染不出来）时，
-    // 不去抖反复重编译（否则就是每 150ms 一次的编译循环）
+    // 同一个窗口 + **同一份排版戳**不重复编译：补渲后仍有块没拿到 svg（后端渲染不出来）时，
+    // 不去抖反复重编译（否则就是每 150ms 一次的编译循环）。反过来，窗口一样但戳变了
+    // （又编辑了一处、改了宽度/字体）**必须允许补渲** —— 旧实现只记 `from:to`，
+    // 那种情况下新 revision 会被判成"已经渲过"，缺图的块永远停在源码（报告 T2）。
     const window = writingWindowBytes();
-    const key = window === null ? "all" : `${window.from}:${window.to}`;
-    if (key === lastBlocksWindow) return;
+    const key = stampKey(currentStamp(), window);
+    if (key === lastBlocksRequest) return;
     clearTimeout(blocksTimer);
     blocksTimer = setTimeout(() => void runCompile(), 150);
   }
@@ -443,8 +479,17 @@
     yPt: number;
     from: number;
     to: number;
-  }): Promise<number | null> {
+  }): Promise<number | null | "cancelled"> {
     if (!writingBlocksExact || writingBlocksDoc !== doc) return null;
+    // ③ **被点那一块的图是"沿用"来的（stale）→ 精确命中关掉**（报告 T2 / A4）：
+    // 图是上一版排版画的，而几何是新的 —— 按它算出来的字节会落到别的字上。
+    // 这里返回 null（"定不了位"），编辑器退回"光标落到块首"，不点错。
+    const target = writingBlocks?.find((b) => b.from === req.from && b.to === req.to);
+    if (target?.stale === true) return null;
+    // 发请求时把**会话 / 文档 / 几何编号**一起抓下来（报告 T2 的"动作令牌"）
+    const sessionAtRequest = blockSessionId;
+    const docAtRequest = doc;
+    const geometryAtRequest = writingGeometryId;
     const range = positionRangeToByteRange(doc, req.from, req.to);
     if (range.to <= range.from) return null;
     const bounds = { fromByte: range.from, toByte: range.to };
@@ -455,12 +500,21 @@
         req.page,
         req.xPt,
         req.yPt,
-        writingGeometryId,
+        geometryAtRequest,
       ),
       bounds,
     );
+    // 回来之后**重新验一遍**：任一变了就作废整条点击（不是"退回块首"）
+    if (
+      sessionAtRequest !== blockSessionId ||
+      docAtRequest !== doc ||
+      geometryAtRequest !== writingGeometryId
+    ) {
+      dbg.log("hit-test", "命中结果已作废（会话/文档/几何在等待期间变了），本次点击不提交");
+      return "cancelled";
+    }
     if (hit === null) return null;
-    const pos = byteOffsetsToPositions(doc, [hit])[0];
+    const pos = byteOffsetsToPositions(docAtRequest, [hit])[0];
     if (!Number.isFinite(pos)) return null;
     dbg.log(
       "hit-test",
@@ -782,6 +836,8 @@
     doc = newDoc;
     editorDoc = newDoc; // 镜像同步（见 editorDoc 声明处）：陈旧镜像 = 切模式/重挂载时丢内容
     dirty = true;
+    // 文档修订 +1：在途的编译结果据此判废（见 runCompile 的戳比较）
+    blockDocRevision += 1;
     remapBlocksForEdit(newDoc);
     scheduleCompile();
     schedulePersist();
@@ -795,6 +851,7 @@
     return {
       blocks: writingBlocks,
       doc: writingBlocksDoc,
+      stamp: writingBlocksStamp ?? undefined,
       geometryId: writingGeometryId,
       textPt: writingTextPt,
     };
@@ -807,6 +864,7 @@
   function applyBlocksPatch(patch: BlocksPatch): void {
     writingBlocks = patch.blocks;
     writingBlocksDoc = patch.doc;
+    writingBlocksStamp = patch.stamp;
     writingBlocksExact = patch.exact;
     writingGeometryId = patch.geometryId;
     writingTextPt = patch.textPt;
@@ -826,7 +884,7 @@
    * 编排在 `core/block-state.ts` 的 `remapBlocksOnEdit`：这里只喂快照、把 patch 写回去。
    */
   function remapBlocksForEdit(newDoc: string) {
-    const patch = remapBlocksOnEdit(blocksSnapshot(), newDoc);
+    const patch = remapBlocksOnEdit(blocksSnapshot(), newDoc, blockDocRevision);
     // null = 没有块表 / 文档没变：什么都不用做（也不该白增一次代次）
     if (patch) applyBlocksPatch(patch);
   }
@@ -1081,8 +1139,14 @@
     clearTimeout(blocksTimer);
     writingBlocks = null;
     writingBlocksDoc = "";
+    writingBlocksStamp = null;
     writingBlocksExact = false;
     writingGeometryId = 0; // 没有块表就没有对应的几何，别拿旧编号去问后端
+    // 会话 +1：在途的编译结果与点击命中**全部作废**（新文档的坐标/几何都换了），
+    // 补渲去重的键也要清掉 —— 否则新文档里同一个窗口会被判成"已经渲过"
+    blockSessionId += 1;
+    blockDocRevision = 0;
+    lastBlocksRequest = "";
     blocksVersion++;
   }
 
@@ -1355,9 +1419,24 @@
     // 写作模式：走块级编译（每个源块一张真实排版切片），不渲染整页预览 —— 整页 SVG 在写作
     // 模式下是看不见的（预览栏隐藏），省下的是同一量级的工作，换来的是"编辑区里就是真排版"。
     if (viewMode === "write") {
+      // 排版输入指纹：**变了才**推进对应的修订号。这样调用方不必到处记得自增，
+      // 也不会漏掉"字体设置改了 / 前缀改了 / 列宽变了"这些不改文档但要重排的输入。
+      const contextKey = JSON.stringify([prefixEnabled, prefixCode, filePath, fontArgs()]);
+      const layoutKey = String(writingWidthPt > 0 ? writingWidthPt : DEFAULT_WRITING_WIDTH_PT);
+      if (contextKey !== lastContextKey) {
+        lastContextKey = contextKey;
+        blockContextRevision += 1;
+      }
+      if (layoutKey !== lastLayoutKey) {
+        lastLayoutKey = layoutKey;
+        blockLayoutRevision += 1;
+      }
       const window = writingWindowBytes();
-      // 记下这一轮渲的窗口：视口内仍有"没拿到切片"的块时，同一个窗口不重复编译（见 handleBlocksNeeded）
-      lastBlocksWindow = window === null ? "all" : `${window.from}:${window.to}`;
+      // **发请求时把戳复制一份**（报告 T2）：回来之后与"那时的戳"比，任何一格不同
+      // （会话换了 / 又编辑了 / 改了前缀或字体 / 改了版心宽）都说明这份产物已经过期。
+      const requestStamp = currentStamp();
+      // 记下这一轮请求的键（戳 + 窗口）：同一个键不重复编译（见 handleBlocksNeeded）
+      lastBlocksRequest = stampKey(requestStamp, window);
       // **编译请求发出时的文档**：块区间是**字节偏移**，只有配上同一份文档才有意义。
       // 写作模式的编译是去抖的（150ms），所以"文档已经改了、但新一轮编译还没开始"是常态 ——
       // 这期间回来的旧结果若直接套到当前文档上，格子就会错位：旧切片盖住被移动的正文
@@ -1379,16 +1458,20 @@
         reportStartup();
       }
       if (mySeq !== compileSeq) return; // 已有更新的编译请求，丢弃本结果
-      if (requestDoc !== doc) {
-        // 文档在这次编译期间变过 → 这份结果的坐标属于旧文档，**丢掉**。
+      if (requestDoc !== doc || !sameStamp(requestStamp, currentStamp())) {
+        // 文档在编译期间变过（或会话/上下文/版心宽变过）→ 这份产物的出身已经不是当前状态，
+        // 套上去就是"旧图配新几何"，**丢掉**。
         // 编辑那条路已经排了一次去抖编译（handleDocChange → scheduleCompile），
         // 它会带着新坐标回来；这期间块表保持 remapBlocksThroughEdit 之后的样子
         // （改动过的块退回源码），是设计中的中间态。
-        dbg.log("compile", "块级渲染结果已过期（编译期间文档变了），丢弃");
+        dbg.log(
+          "compile",
+          `块级渲染结果已过期（排版戳不符：文档 ${requestStamp.documentRevision}/${blockDocRevision}、上下文 ${requestStamp.contextRevision}/${blockContextRevision}、版心 ${requestStamp.layoutRevision}/${blockLayoutRevision}），丢弃`,
+        );
         return;
       }
       if (!blocksResult.unavailable) {
-        applyBlocksResult(blocksResult, t0);
+        applyBlocksResult(blocksResult, t0, requestStamp);
         // 预览栏被手动打开时（视图菜单可以单独开），整页预览也要跟上：接着走下面的
         // compile_doc 路径把预览填上。只在写作模式额外付一次编译 —— 那是用户显式要的。
         if (!showPreview) return;
@@ -1441,8 +1524,8 @@
    * `core/block-state.ts` 的 `landBlocksResult`：这里只喂快照 + 这次的编译结果，把 patch 写回，
    * 再把"这一步的耗时"接在它的日志后面（耗时只有页面知道）。
    */
-  function applyBlocksResult(result: BlocksOk | BlocksFail, t0: number) {
-    const patch = landBlocksResult(blocksSnapshot(), doc, result);
+  function applyBlocksResult(result: BlocksOk | BlocksFail, t0: number, stamp: RenderStamp) {
+    const patch = landBlocksResult(blocksSnapshot(), doc, result, stamp);
     applyBlocksPatch(patch);
     if (patch.detail) dbg.log("compile", patch.detail);
     applyCompileStatus(result, doc.length);
