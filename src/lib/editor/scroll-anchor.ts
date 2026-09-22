@@ -62,7 +62,14 @@ export function measureAnchorYMargin(
   }
 }
 
-/** 用**已经算好的** yMargin 构造滚动目标（不读布局，可在 write 阶段直接派发） */
+/**
+ * 用**已经算好的** yMargin 构造滚动目标（不读布局）。
+ *
+ * 注意：它是"构造"，派发仍要挑时机 —— **不要**在 CodeMirror `requestMeasure().write`
+ * 里直接 `view.dispatch`，那时 `updateState` 还是 Updating，会抛
+ * `Calls to EditorView.update are not allowed while an update is in progress`
+ * （实测踩过：模式切换那次调回整条静默失效）。见 Editor.svelte 的 restoreCaretAnchor。
+ */
 export function anchorEffectAt(pos: number, yMargin: number): StateEffect<unknown> {
   return EditorView.scrollIntoView(EditorSelection.cursor(pos), { y: "start", yMargin });
 }
