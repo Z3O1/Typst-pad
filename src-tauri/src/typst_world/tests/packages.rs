@@ -1,5 +1,4 @@
 // 包系统端到端：`@local` 读取、`@preview` 缓存命中/下载、404 与网络失败的区分（全用临时目录）。
-use super::super::*;
 use super::*;
 
 /// 构造临时包目录（在 root 下 {namespace}/{name}/{version}/...）

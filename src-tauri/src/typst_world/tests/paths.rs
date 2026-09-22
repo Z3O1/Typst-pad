@@ -1,5 +1,4 @@
 // 路径与诊断口径：相对 include/import、项目根放宽、缺文件提示、未保存文档预检、主源不发 `path`。
-use super::super::*;
 use super::*;
 
 /// 诊断转换：语法错误文档应返回 ok=false 且行列 1-based 合理
