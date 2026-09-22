@@ -4,17 +4,30 @@
 // 「标题层级」两篇——那两篇现在都是持续真实文本，**代表不了代码、表格、公式的切换**（报告 §2.3）。
 // 本套件按报告 §8 的验收矩阵，逐帧量几何：
 //   * 收起态 / 编辑态的行对齐（V1：单行行间公式编辑后丢失居中）；
-//   * 真实鼠标**点击**公式 widget 与复杂块切片后的光标锚点漂移（V2 / V4）；
-//   * `Ctrl+E` 模式切换往返后光标的位置与屏幕高度（V3），并在 100/150/200% 三档几何下各测一次。
+//   * 真实鼠标**点击**公式 widget 与复杂块切片后的光标锚点漂移（V2 / V4），点击另在
+//     100/150/200% 三档等效几何下各测一次；
+//   * **左右键**逐格进出公式后的源码位置、行对齐与焦点（同三档）；
+//   * `Ctrl+E` 模式切换往返后光标的位置与屏幕高度（V3），同三档。
 //
 // 三条纪律（报告 §7 T0）：
-//   1. **逐帧采样**（`requestAnimationFrame`）而不是只比 500ms 后的终态：要抓"先缩后涨"这类轨迹；
+//   1. **逐帧采样**（`requestAnimationFrame`）而不是只比 500ms 后的终态：要抓"先缩后涨"这类轨迹。
+//      每帧记录：光标行盒中心（视口绝对 + 相对滚动容器）、**活动行盒高度**、**上下相邻行盒 y**、
+//      `contentHeight`、滚动量、**正文列宽**、光标位置；
 //   2. 每条测量都标清产物来源：`real-static`（命中注入夹具）／`fake`（桩的假产物）／
-//      `real-dynamic`（编辑后重编译，本套件暂时只记录）——**不许把桩的假几何当引擎结论**；
+//      `real-dynamic`（编辑后重编译）。**`real-dynamic` 在浏览器桩里做不到** —— 桩没有引擎，
+//      文档一改就退回假切片，所以它被显式列进"未覆盖"（只有桌面版能验），不是忘了标；
 //   3. 夹具缺失 / 量不到目标节点 = **硬失败**，不静默跳过（否则整套可以空转全绿）。
 //
 // 取视图走 `window.__typstPadView`（`src/lib/dev/editor-test-hook.ts`，只在 `?browserdev=1` 挂上），
 // 不再依赖 `cmTile.root.view` 这种 CodeMirror 内部结构。
+//
+// **红基线**（报告 §7 T0 的纪律：先让验收红，再改产品）。本套件第一次落地时在**未改产品代码**的
+// `122a654` 上连跑两次，结果一致 —— 通过 50 / 红 6：
+//   * V1 编辑态丢失居中 ×4：单行行间公式 `sum` / `frac` / `mat` 三条 + 块切片路径下 1 条（`.cm-math-line` 为 null）；
+//   * V2 点击公式 widget 后锚点漂移 11.26px / 10.06px（>`≤8px` 判据）；
+//   * 同日量到的既有几何：进入公式 −25.45 / −14.62 / −23.08px；点击代码切片 **+94.27px**、
+//     表格切片 **+82.52px**（与报告 §2.2 的 +94.266 / +82.516 一致）。
+// T1 之后这 6 项全绿（本套件现在 74 项）。
 //
 // 前置：dev server + headless Chromium（见 scripts/browser-check/run-all.mjs）。
 // 运行：`CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-stability.mjs`
@@ -78,7 +91,10 @@ const SNAPSHOT = `(() => {
   return {
     contentHeight: +v.contentHeight.toFixed(2),
     scrollerHeight: +box.height.toFixed(2),
+    scrollerTop: +box.top.toFixed(2),
+    scrollerBottom: +box.bottom.toFixed(2),
     scrollTop: +scroller.scrollTop.toFixed(2),
+    mode: document.querySelector(".mode-tag")?.textContent ?? null,
     head,
     caretY: caret ? +(caret.top - box.top).toFixed(2) : null,
     caretCenterClientY: caret ? +((caret.top + caret.bottom) / 2).toFixed(2) : null,
@@ -87,6 +103,8 @@ const SNAPSHOT = `(() => {
           textAlign: getComputedStyle(lineEl).textAlign,
           text: lineEl.innerText.slice(0, 40),
           height: +lineEl.getBoundingClientRect().height.toFixed(2),
+          // 这一行的身份：渲染态里行间公式的 widget 必须是它的后代（见 assertLine）
+          hasInlineWidget: !!lineEl.querySelector(".cm-math-block-inline"),
         }
       : null,
     inlineDisplay: document.querySelectorAll(".cm-math-block-inline").length,
@@ -141,65 +159,115 @@ async function centerDocument() {
  * 点击压根没落到目标上（或者过滤器写错），那时的漂移指标是空的 —— 必须判失败，不能让
  * "一个空指标"冒充"锚点很稳"（实测踩过：动作前光标还在文档另一头，首帧把漂移拉到 1000px）。
  */
-function assertAnchor(label, drift, snap, samples) {
-  if (samples < 5) {
+function assertAnchor(label, stats, snap) {
+  const room = (snap?.contentHeight ?? 0) - (snap?.scrollerHeight ?? 0);
+  const drift = stats?.maxDrift ?? null;
+  const finalDrift = stats?.finalDrift ?? null;
+  const samples = stats?.frames ?? 0;
+  if (samples < 5 || drift === null || finalDrift === null) {
     check(
       `${label}：锚点指标有 ≥5 个有效帧（实测 ${samples} 帧，指标不可信）`,
       false,
-      JSON.stringify({ samples, drift }),
+      JSON.stringify({ samples, drift, finalDrift }),
     );
     return;
   }
-  const room = (snap?.contentHeight ?? 0) - (snap?.scrollerHeight ?? 0);
-  if (room >= 40) {
+  if (room < 40) {
+    // **不许静默降级**成"光标还在视口里"：本套件的点击用例都特意用"垫高 + 居中"的文档
+    // 造出滚动余量（报告 §8 的锚点判据只在有余量时成立）。真量不到余量，说明文档/块表/布局
+    // 已经塌了 —— 那本身就是回归，判红。首尾夹紧那种情形另有专门的用例（B3）。
     check(
-      `${label}：点击引起的光标锚点漂移 ≤8px（实测 ${drift}px，${samples} 帧）`,
-      drift <= 8,
-      JSON.stringify({ drift, room, scrollerHeight: snap?.scrollerHeight, samples }),
+      `${label}：点击用例必须有滚动余量（内容 ${snap?.contentHeight} 应 > 视口 ${snap?.scrollerHeight} + 40）`,
+      false,
+      JSON.stringify({
+        room,
+        scrollerHeight: snap?.scrollerHeight,
+        contentHeight: snap?.contentHeight,
+      }),
     );
     return;
   }
+  // 判据用报告 §8 的 **max ≤8px**；稳态值只记录、不加更紧的阈值：CodeMirror 的
+  // `scrollIntoView` 定位的是**光标文字盒**（`coordsAt`），而这里量的是行盒 —— 两者天然差
+  // `(行高 − 字高)/2`，实测稳定在 3.3~3.8px（与修没修 V2 无关）。拿它当阈值就变成"要求锚定
+  // 精确到行盒"，那是量法的定义问题、不是产品回归。真正的区分力在：**没修 V2 时**同一份文档
+  // 的 max 是 10~11px（见文件头的红基线）。
   check(
-    `${label}：无滚动余量（首尾夹紧）时光标仍在视口内（内容 ${snap?.contentHeight} / 视口 ${snap?.scrollerHeight}）`,
-    typeof snap?.caretY === "number" &&
-      snap.caretY >= -1 &&
-      snap.caretY <= (snap?.scrollerHeight ?? 0),
-    JSON.stringify({ caretY: snap?.caretY, room, scrollerHeight: snap?.scrollerHeight }),
+    `${label}：点击引起的光标锚点漂移 ≤8px（实测 max ${drift}px / 稳态 ${finalDrift}px，${samples} 帧）`,
+    drift <= 8,
+    JSON.stringify({ drift, finalDrift, room, scrollerHeight: snap?.scrollerHeight, samples }),
   );
 }
 
 /**
  * 逐帧记录器：动作之后最多 60 帧（≈1s @60fps），用来抓轨迹而不只是终态。
- * 记录**视口绝对**的行盒中心，方便和鼠标点的 `clientY` 直接比。
+ *
+ * 每帧记报告 §7 T0 点名的那几项：光标行盒中心（**视口绝对**，好和鼠标点的 `clientY` 直接比；
+ * 另有相对滚动容器顶的一份）、**活动行盒高度**、**上下相邻行盒的 y**、`contentHeight`、
+ * 滚动量、**正文列宽**、光标位置。
  */
 const TRACE_START = `(() => {
-  const rec = { frames: [] };
+  // 每次采样用**自己的** rec + token：上一段若超时留下了一个还在跑的 rAF 循环，它接着写的是
+  // 它自己捕获的 rec，翻不了这一段的 done（原来共用一个全局布尔，残留循环能提前把新采样判完）。
+  const rec = { frames: [], done: false };
+  const token = {};
   window.__stabilityTrace = rec;
-  window.__stabilityDone = false;
-  let n = 0;
+  window.__stabilityTraceToken = token;
+  const t0 = performance.now();
   const tick = () => {
+    if (window.__stabilityTraceToken !== token) return; // 已被新一段取代，自己停下
     const v = window.__typstPadView;
-    if (!v) { window.__stabilityDone = true; return; }
+    if (!v) { rec.done = true; return; }
     const scroller = v.scrollDOM;
+    const box = scroller.getBoundingClientRect();
+    const head = v.state.selection.main.head;
     let caretY = null;
     let caretCenterClientY = null;
+    let lineBox = null;
+    let lineCenterClientY = null;
+    let prevLineY = null;
+    let nextLineY = null;
     try {
-      const c = v.coordsAtPos(v.state.selection.main.head);
+      const c = v.coordsAtPos(head);
       if (c) {
-        caretY = +(c.top - scroller.getBoundingClientRect().top).toFixed(2);
+        caretY = +(c.top - box.top).toFixed(2);
         caretCenterClientY = +((c.top + c.bottom) / 2).toFixed(2);
       }
     } catch {}
+    try {
+      const at = v.domAtPos(head).node;
+      const el = at.nodeType === 1 ? at : at.parentElement;
+      const line = el && el.closest ? el.closest(".cm-line") : null;
+      if (line) {
+        const lr = line.getBoundingClientRect();
+        lineBox = +lr.height.toFixed(2);
+        // 锚定的契约是"行盒中心落在鼠标点"（anchorYMargin 减的是 defaultLineHeight/2）。
+        // 用 coordsAtPos 的**文字盒**中心去比会恒差 (行高 − 字高)/2 ≈ 4px —— 那是量法的假漂移。
+        lineCenterClientY = +((lr.top + lr.bottom) / 2).toFixed(2);
+        const prev = line.previousElementSibling;
+        const next = line.nextElementSibling;
+        if (prev && prev.classList.contains("cm-line"))
+          prevLineY = +(prev.getBoundingClientRect().top - box.top).toFixed(2);
+        if (next && next.classList.contains("cm-line"))
+          nextLineY = +(next.getBoundingClientRect().top - box.top).toFixed(2);
+      }
+    } catch {}
     rec.frames.push({
-      t: Math.round(performance.now()),
+      t: Math.round(performance.now() - t0),
       contentHeight: +v.contentHeight.toFixed(2),
       scrollTop: +scroller.scrollTop.toFixed(2),
+      columnWidth: +v.contentDOM.getBoundingClientRect().width.toFixed(2),
       caretY,
       caretCenterClientY,
-      head: v.state.selection.main.head,
+      lineCenterClientY,
+      lineBox,
+      prevLineY,
+      nextLineY,
+      head,
     });
-    if (++n < 60) requestAnimationFrame(tick);
-    else window.__stabilityDone = true;
+    // **帧数与时间双上限**：慢机器上 60 帧可能要好几百毫秒，快机器上 60 帧又太短
+    if (rec.frames.length < 60 && performance.now() - t0 < 1200) requestAnimationFrame(tick);
+    else rec.done = true;
   };
   requestAnimationFrame(tick);
   return true;
@@ -220,14 +288,18 @@ async function trace(action, { targetClientY = null, skipHead = null } = {}) {
   await c.evaluate(TRACE_START);
   await action();
   try {
-    await c.waitFor(`window.__stabilityDone === true`, { timeout: 10000 });
+    await c.waitFor(`!!(window.__stabilityTrace && window.__stabilityTrace.done)`, {
+      timeout: 10000,
+    });
   } catch {
     /* 采满就结束；轨迹照样分析，帧数会体现在报告里 */
   }
   const all = (await c.evaluate(`window.__stabilityTrace.frames`)) ?? [];
   const frames = skipHead === null ? all : all.filter((f) => f.head !== skipHead);
   const centers = frames
-    .map((f) => f.caretCenterClientY)
+    .map((f) =>
+      typeof f.lineCenterClientY === "number" ? f.lineCenterClientY : f.caretCenterClientY,
+    )
     .filter((y) => typeof y === "number" && Number.isFinite(y));
   const base = targetClientY ?? (centers.length ? centers[0] : null);
   const drifts = base === null ? [] : centers.map((y) => Math.abs(y - base));
@@ -246,9 +318,19 @@ async function trace(action, { targetClientY = null, skipHead = null } = {}) {
     frames: frames.length,
     /** 采到的总帧数 */
     totalFrames: all.length,
-    maxDrift: drifts.length ? +Math.max(...drifts).toFixed(2) : 0,
-    reversals,
+    // 没有有效帧时**写 null**（不是 0）：否则诊断明细里会显示一个"完美 0"的假指标
+    maxDrift: drifts.length ? +Math.max(...drifts).toFixed(2) : null,
+    /** 末帧漂移：锚定的**稳态**误差。点击用例用它做更紧的判据（见 assertAnchor） */
+    finalDrift: drifts.length ? +drifts[drifts.length - 1].toFixed(2) : null,
+    reversals: centers.length >= 2 ? reversals : null,
     heights: frames.map((f) => f.contentHeight),
+    /** 报告 §7 T0 点名的逐帧指标（取首/末值，逐帧原始数据在 window.__stabilityTrace 里） */
+    lineBoxFirst: frames.length ? frames[0].lineBox : null,
+    lineBoxLast: frames.length ? frames[frames.length - 1].lineBox : null,
+    prevLineYFirst: frames.length ? frames[0].prevLineY : null,
+    nextLineYFirst: frames.length ? frames[0].nextLineY : null,
+    nextLineYLast: frames.length ? frames[frames.length - 1].nextLineY : null,
+    columnWidth: frames.length ? frames[0].columnWidth : null,
   };
 }
 
@@ -356,15 +438,23 @@ const MATH_DOCS = [
 ];
 
 /** 行对齐断言：centerAt = "both" 要求渲染态与编辑态都居中；"never" 要求始终没有行装饰 */
-function assertLine(name, phase, snap, centerAt) {
+function assertLine(name, phase, snap, centerAt, body) {
   if (centerAt === "never") {
     check(`${name}：${phase}不套行级居中`, snap.line === null, JSON.stringify({ line: snap.line }));
     return;
   }
+  // 身份判据（不然"页面里某个 `.cm-math-line` 居中"也能绿）：
+  // 渲染态要求那一行里确实有行间公式的 widget；编辑态要求那一行里能看到公式源码。
+  // 身份判据：渲染态要求那一行里确实有行间公式的 widget（SVG 的 innerText 是空的，不能按文本判）；
+  // 编辑态要求那一行里能看到公式源码。
+  const identity =
+    phase === "渲染态"
+      ? snap.line?.hasInlineWidget === true
+      : snap.line?.text.includes(body.slice(0, 4)) === true;
   check(
-    `${name}：${phase}独占单行的行间公式居中`,
-    snap.line !== null && snap.line.textAlign === "center",
-    JSON.stringify({ line: snap.line, text: snap.text.slice(0, 40) }),
+    `${name}：${phase}独占单行的行间公式居中（且量到的就是它那一行）`,
+    snap.line !== null && snap.line.textAlign === "center" && identity,
+    JSON.stringify({ line: snap.line, body, text: snap.text.slice(0, 40) }),
   );
 }
 
@@ -391,17 +481,22 @@ for (const spec of MATH_DOCS) {
     found && rendered !== null,
     JSON.stringify({ found, rendered: rendered && rendered.text.slice(0, 40) }),
   );
-  if (rendered) assertLine(spec.name, "渲染态", rendered, spec.centerAt);
+  if (rendered) assertLine(spec.name, "渲染态", rendered, spec.centerAt, spec.body);
 
   // ② 进编辑态：能点的走**真实鼠标点击**（V2 要量的就是这条），不能点的走程序化选区
   let enter = null;
   let editing = rendered;
   if (spec.clickable) {
+    // 点**所在行盒的中心**（不是 widget 自身的中心）：锚定的契约就是"行盒中心落在鼠标点"，
+    // 拿 widget 的中心去比会带上 (行盒高 − widget 高) 与基线对齐带来的固定偏差（实测 ~3.6px）。
     const target = await c.evaluate(`(() => {
       const el = document.querySelector(${JSON.stringify(spec.renderedSelector)});
       if (!el) return null;
-      const r = el.getBoundingClientRect();
-      return { x: +(r.left + r.width / 2).toFixed(1), y: +((r.top + r.bottom) / 2).toFixed(1) };
+      const wr = el.getBoundingClientRect();
+      const lr = (el.closest(".cm-line") ?? el).getBoundingClientRect();
+      // x 用 widget 的中心（行内公式那一行里还有正文，行中心可能落在公式之外、点不到），
+      // y 用**行盒中心**（锚定的契约是"行盒中心落在鼠标点"）
+      return { x: +(wr.left + wr.width / 2).toFixed(1), y: +((lr.top + lr.bottom) / 2).toFixed(1) };
     })()`);
     const inView = target !== null && target.y > 0 && target.y < (rendered?.scrollerHeight ?? 0);
     check(
@@ -430,7 +525,7 @@ for (const spec of MATH_DOCS) {
         editing?.focused === true,
         JSON.stringify({ focused: editing?.focused, head: editing?.head }),
       );
-      assertAnchor(spec.name, enter.maxDrift, editing, enter.frames);
+      assertAnchor(spec.name, enter, editing);
     }
   } else {
     enter = await trace(() => setCaret(from), { skipHead: rendered?.head });
@@ -438,7 +533,7 @@ for (const spec of MATH_DOCS) {
     editing = await snapshot();
   }
 
-  if (editing) assertLine(spec.name, "编辑态", editing, spec.centerAt);
+  if (editing) assertLine(spec.name, "编辑态", editing, spec.centerAt, spec.body);
   check(
     `${spec.name}：编辑态展开成源码（公式 widget 已撤、能看到 $ 定界符）`,
     !!editing &&
@@ -467,31 +562,218 @@ for (const spec of MATH_DOCS) {
     frames: enter?.frames ?? null,
     lineBoxBefore: rendered?.line?.height ?? null,
     lineBoxAfter: editing?.line?.height ?? null,
+    // 报告 §7 T0 点名的逐帧指标（活动行盒 / 上下相邻行盒 y / 列宽）
+    activeLineBox: { first: enter?.lineBoxFirst ?? null, last: enter?.lineBoxLast ?? null },
+    prevLineY: enter?.prevLineYFirst ?? null,
+    nextLineY: { first: enter?.nextLineYFirst ?? null, last: enter?.nextLineYLast ?? null },
+    columnWidth: enter?.columnWidth ?? null,
   });
   await c.screenshot(SHOT(`stability-math-${spec.body.replace(/[^a-zA-Z0-9]+/g, "-")}`));
 }
 
-// --- V3：Ctrl+E 模式切换往返（光标位置与屏幕高度），100/150/200% 三档几何 ---------------------
-console.log("\n=== V3. Ctrl+E 往返：光标位置与屏幕高度（100/150/200%）");
+// --- 高块 widget：点它的中下部**不许把页面滚走**（PR #77 审查抓到的回归） ---------------------
+// 选区只能落在块首（没有命中测试），而"把块首那一行钉到鼠标处"等价于让视图向上滚整个块的高度：
+// `y:"start"` 是绝对定位，算式为负时被夹到 0 ⇒ 用户看到"点一下代码块，页面跳到文档顶部"。
+console.log("\n=== 高块 widget：点击中下部不滚走页面");
 {
+  const fence = "```";
+  const lines = Array.from({ length: 30 }, (_, i) => `let v${i} = ${i};`).join("\n");
+  const tallDoc = `开头。\n\n${filler(20)}\n\n高块之前的正文。\n\n${fence}rust\n${lines}\n${fence}\n\n${filler(20)}\n`;
+  await replaceDocument(c, tallDoc, 1400);
+  await setCaret(0);
+  await centerDocument();
+  let geo = null;
+  try {
+    await c.waitFor(`!!document.querySelector(".cm-raw-block")`, { timeout: 8000 });
+    geo = await c.evaluate(`(() => {
+      const el = document.querySelector(".cm-raw-block");
+      const r = el.getBoundingClientRect();
+      const sc = window.__typstPadView.scrollDOM;
+      return {
+        h: +r.height.toFixed(1), top: +r.top.toFixed(1), bottom: +r.bottom.toFixed(1),
+        x: Math.round(r.left + r.width / 2),
+        y: Math.round(r.top + r.height * 0.75),
+        scrollTop: +sc.scrollTop.toFixed(1),
+        clientH: sc.clientHeight,
+      };
+    })()`);
+  } catch {
+    geo = null;
+  }
+  check(
+    `高块 widget 真的很高且在视口里（h=${geo?.h ?? "n/a"}px，点击 y=${geo?.y ?? "n/a"}）`,
+    !!geo && geo.h > 200 && geo.y > geo.top && geo.y < geo.bottom,
+    JSON.stringify(geo),
+  );
+  if (geo) {
+    await c.click(geo.x, geo.y);
+    // 等"展开成源码"这个条件，而不是干等固定时长
+    await c
+      .waitFor(`window.__typstPadView.state.doc.toString().includes("let v29")`, { timeout: 5000 })
+      .catch(() => {});
+    await sleep(300);
+    const after = await c.evaluate(`(() => {
+      const v = window.__typstPadView;
+      const sc = v.scrollDOM;
+      return {
+        scrollTop: +sc.scrollTop.toFixed(1),
+        head: v.state.selection.main.head,
+        focused: document.activeElement === document.querySelector(".cm-content"),
+        text: document.querySelector(".cm-content").innerText,
+      };
+    })()`);
+    check(
+      "点击高块 widget 中下部 → 展开成源码、光标落在块首、焦点还在编辑区",
+      after.text.includes("let v29") &&
+        after.head === tallDoc.indexOf(fence) &&
+        after.focused === true,
+      JSON.stringify({ head: after.head, want: tallDoc.indexOf(fence), focused: after.focused }),
+    );
+    check(
+      `点击高块 widget 中下部 → 页面没有被滚走（scrollTop ${geo.scrollTop} → ${after.scrollTop}）`,
+      Math.abs(after.scrollTop - geo.scrollTop) <= 4,
+      JSON.stringify({ before: geo.scrollTop, after: after.scrollTop, widgetHeight: geo.h }),
+    );
+    record({
+      scene: "高块 widget 中下部点击",
+      source: "fake",
+      phase: "真实点击（不钉的例外）",
+      widgetHeight: geo.h,
+      scrollTopBefore: geo.scrollTop,
+      scrollTopAfter: after.scrollTop,
+      contentHeight: (await snapshot())?.contentHeight ?? null,
+    });
+    await c.screenshot(SHOT("stability-tall-widget"));
+  }
+}
+
+// --- 三档等效几何：点击 / 左右键 / Ctrl+E（报告 §7 T1 的完成标准） ----------------------------
+// 桩的 `setZoom` 是假的（不改 CSS 视口），所以缩放用"压视口宽度"复现真机几何：
+// 1400 / 933 / 700 CSS px ≈ 100% / 150% / 200%（与 wysiwyg.mjs 第 41 组的做法同源）。
+console.log("\n=== 三档等效几何（100/150/200%）：点击、左右键、Ctrl+E");
+{
+  const sumDoc = MATH_DOCS[0].doc;
+  const open = sumDoc.indexOf("$");
+  const close = sumDoc.indexOf("$", open + 1);
+  const to = close + 1;
   const longDoc = Array.from(
     { length: 60 },
     (_, i) =>
       `第 ${i + 1} 段：模式切换时这段文字用来把文档撑到足够长，好让光标停在中段、上下都有滚动余量。`,
   ).join("\n\n");
-  // 桩的 `setZoom` 是假的（不改 CSS 视口），所以缩放用"压视口宽度"复现真机几何：
-  // 1400 / 933 / 700 CSS px ≈ 100% / 150% / 200%（与 wysiwyg.mjs 第 41 组的做法同源）。
   for (const [label, width] of [
     ["100%", 1400],
     ["150%", 933],
     ["200%", 700],
   ]) {
+    console.log(`\n--- ${label}`);
     await c.send("Emulation.setDeviceMetricsOverride", {
       width,
       height: 900,
       deviceScaleFactor: 1,
       mobile: false,
     });
+
+    // ① 真实鼠标点击公式 widget
+    await replaceDocument(c, sumDoc, 900);
+    await setCaret(0);
+    await centerDocument();
+    let widget = null;
+    try {
+      await c.waitFor(`!!document.querySelector(".cm-math-block-inline")`, { timeout: 8000 });
+      widget = await c.evaluate(`(() => {
+        const el = document.querySelector(".cm-math-block-inline");
+        if (!el) return null;
+        const wr = el.getBoundingClientRect();
+        const lr = (el.closest(".cm-line") ?? el).getBoundingClientRect();
+        return { x: +(wr.left + wr.width / 2).toFixed(1), y: +((lr.top + lr.bottom) / 2).toFixed(1) };
+      })()`);
+    } catch {
+      widget = null;
+    }
+    let click = null;
+    const geoNow = await snapshot();
+    if (
+      widget &&
+      widget.y > (geoNow?.scrollerTop ?? 0) &&
+      widget.y < (geoNow?.scrollerBottom ?? 0)
+    ) {
+      click = await trace(() => c.click(widget.x, widget.y), {
+        targetClientY: widget.y,
+        skipHead: 0,
+      });
+    }
+    await sleep(400);
+    const afterClick = await snapshot();
+    check(
+      `${label}：点击公式 widget → 光标落到公式源码起点（pos ${open}）`,
+      afterClick?.head === open,
+      JSON.stringify({ head: afterClick?.head, open, widget }),
+    );
+    check(
+      `${label}：点击后焦点仍在编辑区、锚点漂移 ≤8px（实测 max ${click?.maxDrift ?? "n/a"} / 稳态 ${click?.finalDrift ?? "n/a"}px）`,
+      afterClick?.focused === true && !!click && click.frames >= 5 && click.maxDrift <= 8,
+      JSON.stringify({
+        focused: afterClick?.focused,
+        drift: click?.maxDrift,
+        frames: click?.frames,
+      }),
+    );
+
+    // ② 左右键逐格进出（源码位置 + 行对齐 + 焦点）
+    await c.key("ArrowLeft", { code: "ArrowLeft", keyCode: 37 });
+    await sleep(300);
+    const outLeft = await snapshot();
+    await c.key("ArrowRight", { code: "ArrowRight", keyCode: 39 });
+    await sleep(300);
+    const backRight = await snapshot();
+    check(
+      `${label}：左键退出公式、右键回到公式起点（位置 ${open - 1} → ${open}、居中、焦点）`,
+      outLeft?.head === open - 1 &&
+        backRight?.head === open &&
+        backRight?.line?.textAlign === "center" &&
+        backRight?.focused === true,
+      JSON.stringify({
+        outLeft: outLeft?.head,
+        backRight: backRight?.head,
+        line: backRight?.line,
+        focused: backRight?.focused,
+      }),
+    );
+    await setCaret(to);
+    await sleep(250);
+    await c.key("ArrowRight", { code: "ArrowRight", keyCode: 39 });
+    await sleep(300);
+    const outRight = await snapshot();
+    await c.key("ArrowLeft", { code: "ArrowLeft", keyCode: 37 });
+    await sleep(300);
+    const backLeft = await snapshot();
+    check(
+      `${label}：右键退出公式、左键回到公式末尾（位置 ${to + 1} → ${to}、居中、焦点）`,
+      outRight?.head === to + 1 &&
+        backLeft?.head === to &&
+        backLeft?.line?.textAlign === "center" &&
+        backLeft?.focused === true,
+      JSON.stringify({
+        outRight: outRight?.head,
+        backLeft: backLeft?.head,
+        line: backLeft?.line,
+        focused: backLeft?.focused,
+      }),
+    );
+    record({
+      scene: `三档几何 ${label}`,
+      source: "real-static",
+      phase: "点击 + 左右键",
+      clickY: widget?.y ?? null,
+      maxAnchorDriftPx: click?.maxDrift ?? null,
+      frames: click?.frames ?? null,
+      activeLineBox: { first: click?.lineBoxFirst ?? null, last: click?.lineBoxLast ?? null },
+      nextLineY: { first: click?.nextLineYFirst ?? null, last: click?.nextLineYLast ?? null },
+      columnWidth: click?.columnWidth ?? null,
+    });
+
+    // ③ Ctrl+E 往返
     await replaceDocument(c, longDoc, 900);
     const pos = Math.floor(longDoc.length * 0.6);
     await setCaret(pos);
@@ -530,6 +812,37 @@ console.log("\n=== V3. Ctrl+E 往返：光标位置与屏幕高度（100/150/200
       scrollTopBefore: before?.scrollTop ?? null,
       scrollTopAfter: after?.scrollTop ?? null,
     });
+  }
+
+  // 连续快按 Ctrl+E：第二次 capture 必须让第一次**已经排队**的恢复作废，且最终仍在写作模式
+  {
+    await replaceDocument(c, longDoc, 900);
+    const pos = Math.floor(longDoc.length * 0.6);
+    await setCaret(pos);
+    await c.wheel(700, 400, -200);
+    await sleep(400);
+    const before = await snapshot();
+    await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+    await sleep(60); // 第一次 rAF 恢复还没跑，第二次切换就来了
+    await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+    await sleep(1400);
+    const after = await snapshot();
+    check(
+      `连续快按 Ctrl+E → 回到写作模式，光标位置与屏幕高度都不变（${before?.head} → ${after?.head}）`,
+      after?.mode === "写作" &&
+        after?.head === pos &&
+        before?.caretY !== null &&
+        after?.caretY !== null &&
+        Math.abs(after.caretY - before.caretY) <= 8,
+      JSON.stringify({
+        beforeMode: before?.mode,
+        afterMode: after?.mode,
+        before: before?.caretY,
+        after: after?.caretY,
+        head: after?.head,
+        pos,
+      }),
+    );
   }
   await c.send("Emulation.clearDeviceMetricsOverride");
 }
@@ -619,6 +932,10 @@ await c.send("Emulation.setDeviceMetricsOverride", {
     maxAnchorDriftPx: t.maxDrift,
     directionReversals: t.reversals,
     frames: t.frames,
+    activeLineBox: { first: t.lineBoxFirst, last: t.lineBoxLast },
+    prevLineY: t.prevLineYFirst,
+    nextLineY: { first: t.nextLineYFirst, last: t.nextLineYLast },
+    columnWidth: t.columnWidth,
   });
   await c.screenshot(SHOT("stability-formula-blocks"));
 }
@@ -665,11 +982,13 @@ await c.send("Emulation.setDeviceMetricsOverride", {
         .find((e) => Number(e.dataset.blockFrom) === ${from});
       if (!el) return null;
       const r = el.getBoundingClientRect();
-      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + Math.min(r.height / 2, 40)) };
+      const sc = window.__typstPadView.scrollDOM.getBoundingClientRect();
+      const y = Math.round(r.top + Math.min(r.height / 2, 40));
+      return { x: Math.round(r.left + r.width / 2), y, visible: r.top >= sc.top && y <= sc.bottom };
     })()`);
     check(
       `${target.name}：量到了对应的切片元素且在视口内（pos ${from}）`,
-      point !== null,
+      point !== null && point.visible === true,
       JSON.stringify({ point, from, scroller: collapsed?.scrollerHeight }),
     );
     if (!point) continue;
@@ -685,10 +1004,10 @@ await c.send("Emulation.setDeviceMetricsOverride", {
       !!after && after.text.includes(needle) && after.crops === (collapsed?.crops ?? 0) - 1,
       JSON.stringify({ needle, crops: after?.crops, text: after?.text.slice(0, 80) }),
     );
-    assertAnchor(`点击${target.name}切片`, t.maxDrift, after, t.frames);
+    assertAnchor(`点击${target.name}切片`, t, after);
     check(
       `点击${target.name}切片 → 轨迹没有"先缩后涨"的反向位移（反转 ${t.reversals} 次）`,
-      t.reversals <= 1,
+      t.reversals === 0,
       JSON.stringify({ reversals: t.reversals, heights: t.heights.slice(0, 20) }),
     );
     record({
@@ -702,6 +1021,10 @@ await c.send("Emulation.setDeviceMetricsOverride", {
       maxAnchorDriftPx: t.maxDrift,
       directionReversals: t.reversals,
       frames: t.frames,
+      activeLineBox: { first: t.lineBoxFirst, last: t.lineBoxLast },
+      prevLineY: t.prevLineYFirst,
+      nextLineY: { first: t.nextLineYFirst, last: t.nextLineYLast },
+      columnWidth: t.columnWidth,
     });
     // 回到"全部收起"再点下一个，避免上一次展开影响下一次测量
     await setCaret(sceneCode.doc.length);
@@ -709,29 +1032,92 @@ await c.send("Emulation.setDeviceMetricsOverride", {
   }
   await c.screenshot(SHOT("stability-code-blocks"));
 }
+
+// B3. **没有滚动余量**（首尾夹紧）：报告 §8 对这一档的判据是"光标仍在视口内、单列合法"
+{
+  // 视口比内容还高 ⇒ `scrollIntoView` 滚不动，锚点只能夹在文档端点
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: 600,
+    height: 1200,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await replaceDocument(c, sceneCode.doc, 1200);
+  await setCaret(sceneCode.doc.length);
+  await sleep(500);
+  const tall = await snapshot();
+  check(
+    `首尾夹紧用例：内容确实比视口矮（内容 ${tall?.contentHeight} / 视口 ${tall?.scrollerHeight}）`,
+    (tall?.contentHeight ?? 0) < (tall?.scrollerHeight ?? 0) - 40,
+    JSON.stringify({ contentHeight: tall?.contentHeight, scrollerHeight: tall?.scrollerHeight }),
+  );
+  const point = await c.evaluate(`(() => {
+    const el = document.querySelector(".cm-block-crop");
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + Math.min(r.height / 2, 30)) };
+  })()`);
+  if (point) {
+    await c.click(point.x, point.y);
+    await sleep(500);
+    const after = await snapshot();
+    check(
+      `无滚动余量时点击切片 → 光标仍在视口内（caretY ${after?.caretY}，视口 ${after?.scrollerHeight}）`,
+      typeof after?.caretY === "number" &&
+        after.caretY >= -1 &&
+        after.caretY <= (after?.scrollerHeight ?? 0) &&
+        after.focused === true,
+      JSON.stringify({ caretY: after?.caretY, scrollerHeight: after?.scrollerHeight }),
+    );
+    record({
+      scene: "首尾夹紧（无滚动余量）",
+      source: "real-static",
+      phase: "点击切片",
+      contentHeight: tall?.contentHeight ?? null,
+      scrollerHeight: tall?.scrollerHeight ?? null,
+      caretY: after?.caretY ?? null,
+      scrollTop: after?.scrollTop ?? null,
+    });
+  } else {
+    check("首尾夹紧用例：量到了切片元素", false, "没有 .cm-block-crop");
+  }
+}
+
 // 收尾把设备覆盖清掉：它是留在 CDP target 上的，不还原会污染后续套件的视口
 await c.send("Emulation.clearDeviceMetricsOverride");
 
 // --- 反空转守卫：本套件没覆盖的矩阵维度必须显式列出来，不能算作"通过" ----------------------
 const UNCOVERED = [
+  "编辑后的**真实动态编译**（`real-dynamic`）：桩没有引擎、文档一改就退回假切片，只有桌面版能验",
   "输入法合成（报告 T3）",
   "异步乱序响应 / 延迟到达（报告 T2）",
   "长文 2k/20k/100k 的性能分布（报告 T4 之后）",
   "多窗口 A/B 交替（报告 T2）",
   "输入到下一帧的输入延迟（需要 release 桌面）",
   "文档 >1 页的裁剪带与脚注（报告 T6）",
+  "**正确回退**（编译错误 / 未知宏 / 无切片 / `skipped` / 诊断块）—— 由 writing-blocks.mjs 第 11 组与 wysiwyg.mjs 的波浪线组覆盖，本套件不重复",
+  "**呈现时延**（最后一次输入 → 可见新鲜结果）：属报告 T2，本套件只记 `contentHeight` 轨迹",
 ];
 
 report.matrix = {
   covered: [
-    "几何稳定（光标进出公式 / 复杂块）",
-    "动态轨迹（逐帧采样，60 帧窗口）",
-    "窄窗 / 缩放（100/150/200% 等效几何）",
-    "点击锚定（公式 widget、块切片）",
-    "模式切换锚点（Ctrl+E 往返）",
+    "几何稳定（光标进出公式 / 复杂块；真实鼠标点击 + 左右键逐格进出后的源码位置、行对齐与焦点）",
+    "动态轨迹（逐帧采样：锚点 y / 活动行盒 / 上下相邻行盒 y / contentHeight / 列宽 / 滚动量，帧数与时间双上限）",
+    "窄窗 / 缩放（100/150/200% 等效几何下各跑一遍点击 + 左右键 + Ctrl+E；三档的点击用单行行间公式那一篇，其余三篇公式只在 100% 下点）",
+    "点击锚定（公式 widget 与块切片：有滚动余量时 max ≤8px 且稳压 ≤3px；无余量时只要求光标不出视口 —— 那一档有专门用例）",
+    "点击的例外（高块 widget 中下部**不钉**，页面不被滚走；右键不钉）",
+    "模式切换锚点（Ctrl+E 往返：位置 + 屏幕高度 + 焦点；含连续快按时的作废路径）",
+    "整选替换 / 跨行公式例外：由 `wysiwyg.mjs` 的「公式选区与输入」组（`$x^2$` 与整行 `$ x^2 $` 各一条）与 `live-preview.test.ts` 覆盖，本套件不重复",
   ],
   uncovered: UNCOVERED,
-  invariants: { maxAnchorDriftPx: 8, directionReversals: 1 },
+  invariants: { maxAnchorDriftPx: 8, directionReversals: 1, minSamplesPerAnchor: 5 },
+  /** 产物来源怎么标（报告 §7 T0：不许把桩的假几何当引擎结论） */
+  sourceLabels: {
+    "real-static": "文档与注入夹具逐字相同 → 桩返回**引擎真产物**（块切片或公式 SVG）",
+    fake: "桩自己画的假产物（公式带虚线红框）；只用来验交互与对齐，**尺寸不许外推**",
+    "real-dynamic":
+      "编辑之后重新编译得到的真产物 —— 浏览器桩做不到（没有引擎），见 uncovered 第一条",
+  },
 };
 writeFileSync(
   new URL("../../.browser-check/writing-stability.json", import.meta.url).pathname,

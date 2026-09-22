@@ -41,9 +41,9 @@ const SUITES = [
   ["writing-blocks-hit.mjs", 31],
   ["writing-mode-scenes.mjs", 70],
   ["wysiwyg-visual.mjs", 20],
-  // 写作模式的**动态稳定性**（报告 T0）：逐帧量"光标进出公式/复杂块"的几何，
-  // 覆盖 291+133+67+28+65+20+17 这七套都不管的那段动态手感（见 writing-stability.mjs 的说明）
-  ["writing-stability.mjs", 56],
+  // 写作模式的**动态稳定性**（报告 T0）：逐帧量"光标进出公式/复杂块"的几何（点击 / 左右键 /
+  // Ctrl+E 三档等效几何、高块 widget 不钉的例外），补上另外七套都不管的那段动态手感
+  ["writing-stability.mjs", 74],
   // 计算样式守卫（box-sizing 作用域 / CSS 源序）：两种回归都躲得过交互断言，只能按 computed style 量
   ["computed-style.mjs", 17],
 ];
