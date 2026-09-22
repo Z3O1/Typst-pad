@@ -27,7 +27,7 @@
 //   * V2 点击公式 widget 后锚点漂移 11.26px / 10.06px（>`≤8px` 判据）；
 //   * 同日量到的既有几何：进入公式 −25.45 / −14.62 / −23.08px；点击代码切片 **+94.27px**、
 //     表格切片 **+82.52px**（与报告 §2.2 的 +94.266 / +82.516 一致）。
-// T1 之后这 6 项全绿（本套件现在 74 项）。
+// T1 之后这 6 项全绿；T2 又补了 C 段（慢编译 + 过期命中），现在 81 项。
 //
 // 前置：dev server + headless Chromium（见 scripts/browser-check/run-all.mjs）。
 // 运行：`CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-stability.mjs`
@@ -53,11 +53,12 @@ const mathFixtures = loadFixtures("math-fixtures.json", {
 const blockFixtures = loadFixtures("block-fixtures.json", {
   hint: "先跑 npm run fixtures:blocks",
   predicate: (list) =>
-    list.some((f) => f.name === "公式形态") && list.some((f) => f.name === "代码与表格"),
-  what: "块级夹具里缺少本套件要用的场景（公式形态 / 代码与表格）",
+    ["公式形态", "代码与表格", "链接"].every((n) => list.some((f) => f.name === n)),
+  what: "块级夹具里缺少本套件要用的场景（公式形态 / 代码与表格 / 链接）",
 });
 const sceneFormula = blockFixtures.find((f) => f.name === "公式形态");
 const sceneCode = blockFixtures.find((f) => f.name === "代码与表格");
+const sceneLink = blockFixtures.find((f) => f.name === "链接");
 
 /** 需要现成真产物的公式：body / display 必须与 Rust `dump_math_fixtures` 的用例逐字相同 */
 const REAL_MATH = [
@@ -1083,6 +1084,152 @@ await c.send("Emulation.setDeviceMetricsOverride", {
   }
 }
 
+// ===========================================================================
+// C. 结果与点击的一致性（报告 T2 / A1）：慢编译 + 点击命中在飞的时候文档/几何变了
+// ===========================================================================
+console.log("\n=== C. 过期结果与过期命中（报告 T2）");
+await boot(c, `${BLOCKS_URL}&blockslow=1`, { blockFixtures, mathFixtures, settleMs: 900 });
+{
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: 600,
+    height: 400,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await replaceDocument(c, sceneCode.doc, 1600);
+  await setCaret(sceneCode.doc.length);
+  await sleep(600);
+  const fresh = await snapshot();
+  check(
+    "慢编译场景：切片已经就位（等得到第一次编译落地）",
+    (fresh?.crops ?? 0) >= 2,
+    JSON.stringify({ crops: fresh?.crops, contentHeight: fresh?.contentHeight }),
+  );
+
+  // 目标切片：围栏代码块（位置由夹具算，别猜）
+  const rawBlock = sceneCode.blocks.find((b) => b.kind === "Raw");
+  const rawFrom = byteToPos(sceneCode.doc, rawBlock.start);
+  const point = await c.evaluate(`(() => {
+    const el = Array.from(document.querySelectorAll(".cm-block-crop"))
+      .find((e) => Number(e.dataset.blockFrom) === ${rawFrom});
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const sc = window.__typstPadView.scrollDOM.getBoundingClientRect();
+    const y = Math.round(r.top + Math.min(r.height / 2, 30));
+    return { x: Math.round(r.left + r.width / 2), y, visible: r.top >= sc.top && y <= sc.bottom };
+  })()`);
+  check(
+    "慢编译场景：量到要被点的切片且在视口内",
+    point !== null && point.visible === true,
+    JSON.stringify({ point, rawFrom }),
+  );
+
+  if (point) {
+    // ① 命中还在飞的时候**改文档**：这次点击必须整条作废（不许提交那个过时位置）
+    await c.click(point.x, point.y);
+    await sleep(80); // 命中测试被 blockslow 拖住了 350ms，此刻还在飞
+    const beforeChange = await c.evaluate(`window.__typstPadView.state.doc.toString().length`);
+    await c.evaluate(`(() => {
+      const v = window.__typstPadView;
+      v.dispatch({ changes: { from: 0, to: 0, insert: "改" } });
+      return true;
+    })()`);
+    const hitResultSeen = await c.evaluate(`(() => {
+      const v = window.__typstPadView;
+      return { head: v.state.selection.main.head, len: v.state.doc.toString().length };
+    })()`);
+    await sleep(900);
+    const settled = await c.evaluate(`(() => {
+      const v = window.__typstPadView;
+      return { head: v.state.selection.main.head, len: v.state.doc.toString().length };
+    })()`);
+    check(
+      "命中在飞时改文档 → 这次点击作废（光标没有被那个过时位置推走）",
+      settled.head === hitResultSeen.head,
+      JSON.stringify({ before: beforeChange, atChange: hitResultSeen, settled }),
+    );
+    check(
+      "命中在飞时改文档 → 文档本身没被点击流程破坏（只多了那一个字符）",
+      settled.len === beforeChange + 1,
+      JSON.stringify({ before: beforeChange, after: settled.len }),
+    );
+    record({
+      scene: "慢编译 + 命中在飞时改文档",
+      source: "real-static",
+      phase: "点击作废（报告 T2 / A1）",
+      headAtChange: hitResultSeen.head,
+      headSettled: settled.head,
+      docLenBefore: beforeChange,
+      docLenAfter: settled.len,
+      slowCompileMs: 350,
+    });
+  }
+
+  // ② 版心宽变了（layoutRevision）之后：切片与链接热区必须**成套**重建
+  await replaceDocument(c, sceneLink.doc, 1600);
+  await setCaret(sceneLink.doc.length);
+  await sleep(700);
+  const linksBefore = await c.evaluate(`(() => {
+    const cr = document.querySelector(".cm-content").getBoundingClientRect();
+    return {
+      column: +cr.width.toFixed(1),
+      crops: document.querySelectorAll(".cm-block-crop").length,
+      links: Array.from(document.querySelectorAll(".cm-block-crop-link")).map((a) => ({
+        href: a.getAttribute("href"),
+        left: a.style.left,
+        top: a.style.top,
+        w: a.style.width,
+      })),
+    };
+  })()`);
+  check(
+    "链接场景：切片里量到了链接热区（基线）",
+    Array.isArray(linksBefore.links) && linksBefore.links.length > 0,
+    JSON.stringify(linksBefore),
+  );
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: 900,
+    height: 400,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await sleep(1400); // 列宽变化 → scheduleWritingReflow（去抖 250ms）+ 慢编译 350ms
+  const linksAfter = await c.evaluate(`(() => {
+    const cr = document.querySelector(".cm-content").getBoundingClientRect();
+    return {
+      column: +cr.width.toFixed(1),
+      crops: document.querySelectorAll(".cm-block-crop").length,
+      links: Array.from(document.querySelectorAll(".cm-block-crop-link")).map((a) => ({
+        href: a.getAttribute("href"),
+        left: a.style.left,
+        top: a.style.top,
+        w: a.style.width,
+      })),
+    };
+  })()`);
+  check(
+    `改版心宽后列宽确实变了（${linksBefore.column} → ${linksAfter.column}px）`,
+    Math.abs(linksAfter.column - linksBefore.column) > 20,
+    JSON.stringify({ before: linksBefore.column, after: linksAfter.column }),
+  );
+  check(
+    "改版心宽后切片与链接热区**一起**重建（href 与百分比位置不变，说明它们随块成套走）",
+    linksAfter.crops === linksBefore.crops &&
+      JSON.stringify(linksAfter.links) === JSON.stringify(linksBefore.links),
+    JSON.stringify({ before: linksBefore.links, after: linksAfter.links }),
+  );
+  record({
+    scene: "改版心宽后的切片与链接",
+    source: "real-static",
+    phase: "layoutRevision 变化",
+    columnBefore: linksBefore.column,
+    columnAfter: linksAfter.column,
+    crops: linksAfter.crops,
+    links: linksAfter.links.length,
+  });
+  await c.send("Emulation.clearDeviceMetricsOverride");
+}
+
 // 收尾把设备覆盖清掉：它是留在 CDP target 上的，不还原会污染后续套件的视口
 await c.send("Emulation.clearDeviceMetricsOverride");
 
@@ -1090,7 +1237,7 @@ await c.send("Emulation.clearDeviceMetricsOverride");
 const UNCOVERED = [
   "编辑后的**真实动态编译**（`real-dynamic`）：桩没有引擎、文档一改就退回假切片，只有桌面版能验",
   "输入法合成（报告 T3）",
-  "异步乱序响应 / 延迟到达（报告 T2）",
+  '**乱序**响应（两个在途编译的到达次序）：本套件的 C 段只用 `blockslow=1` 的 350ms 验了"命中在飞 + 文档变了"，没造出乱序',
   "长文 2k/20k/100k 的性能分布（报告 T4 之后）",
   "多窗口 A/B 交替（报告 T2）",
   "输入到下一帧的输入延迟（需要 release 桌面）",
@@ -1107,6 +1254,7 @@ report.matrix = {
     "点击锚定（公式 widget 与块切片：有滚动余量时 max ≤8px 且稳压 ≤3px；无余量时只要求光标不出视口 —— 那一档有专门用例）",
     "点击的例外（高块 widget 中下部**不钉**，页面不被滚走；右键不钉）",
     "模式切换锚点（Ctrl+E 往返：位置 + 屏幕高度 + 焦点；含连续快按时的作废路径）",
+    "过期结果与过期命中（报告 T2 / A1）：`blockslow=1`（编译与命中各 350ms）下，命中在飞时改文档 → 这次点击整条作废；改版心宽后切片与链接热区成套重建",
     "整选替换 / 跨行公式例外：由 `wysiwyg.mjs` 的「公式选区与输入」组（`$x^2$` 与整行 `$ x^2 $` 各一条）与 `live-preview.test.ts` 覆盖，本套件不重复",
   ],
   uncovered: UNCOVERED,

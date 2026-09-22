@@ -14,7 +14,7 @@ Typst-pad = 仿 Typora 的 Typst 桌面编辑器，两套 UI：「写作模式�
 ```bash
 npm run tauri dev    # 桌面应用（Vite 固定 1420；WSL 可跑，libEGL 警告正常）
 npm run check        # svelte-check（0 errors / 0 warnings）
-npm test             # 单测（53 文件 / 967 项）；npm test -- <文件> 跑单个
+npm test             # 单测（53 文件 / 977 项）；npm test -- <文件> 跑单个
 npm run format:check # prettier（`npm run format` 是对称的写入版）
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check                  # rustfmt（默认风格，无 rustfmt.toml）
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
@@ -24,7 +24,7 @@ node scripts/check-fonts.mjs
 npm run verify:browser   # **推荐**：自己起 dev server + headless Chromium + 导夹具 + 跑八套 + 汇总
 npm run dev -- --port 1425
 BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs                              # 291 项
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-stability.mjs        # 改公式/锚点/模式切换必跑（74 项）
+CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-stability.mjs        # 改公式/锚点/模式切换必跑（81 项）
 CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs   # 改块级渲染必跑
 ```
 
@@ -50,7 +50,7 @@ CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-
 > 下面这组是**规则版**：每条对应分册里的实测数据与踩坑经过，展开与理由见对应分册。它是"入口索引"，**不追求与详版逐字一致**；发现规则被削弱或漏了，就补分册 + 这里补一句（PR #61 瘦身时漏过 3 组，见该 PR 的审查评论）。
 
 - **编译/后端（→02）**：诊断 `path` 主源表示只许一种；项目根跟着**引用**放宽（**别写成"目标文件的公共祖先"**）；`compile_blocks` 失败也要带 `blocks` 键；**必须注入默认字体族**；`CompileState` 一次一编译。
-- **块级渲染（→03）**：纯 markup 的正文/标题始终保留真实文本，复杂块才走局部切片（**判据是"块内有没有 code / raw / 注释区域"**，markup 里的直引号**不算**复杂 —— lexer 把它登记成 `string` 是为公式扫描，别拿它把整段退回切片；markup 层渲染不出的构造 —— `@引用`、`<label>`、简写 `--`/`---`/`...`/`~`/`-?`、转义、英文单引号 —— 在可编辑正文里按源码显示，是这条规则的已知代价）；**别改回全渲**、**单块也要有上限**（`MAX_CROP_SOURCE_BYTES` = 8KB，超过只回几何不渲图，前端必须把 `skipped` 与"缺切片"分开）；**编辑期间块表必须跟着走**（`remapBlocksThroughEdit`）、`planBlockCovers` **绝不抛异常**；块切片 `Decoration.replace` **必须落在整行边界**；块间空行归上一块；竖直移动**别退回"一次跨一整块"**；**别自己写 scrollTop**（用 `scrollIntoView`）；**光标所在的复杂块必须展开**；链接热区 `mousedown` **必须 `preventDefault`**；打字期间不编译（150ms，公式再推 240ms）；缺切片只看块表、**且要排除 `skipped`**（`found && !skipped && svg === ""`）；"铺满全文"是 covers 的事，**别拿 `blocks` 去断言**。
+- **块级渲染（→03）**：纯 markup 的正文/标题始终保留真实文本，复杂块才走局部切片（**判据是"块内有没有 code / raw / 注释区域"**，markup 里的直引号**不算**复杂 —— lexer 把它登记成 `string` 是为公式扫描，别拿它把整段退回切片；markup 层渲染不出的构造 —— `@引用`、`<label>`、简写 `--`/`---`/`...`/`~`/`-?`、转义、英文单引号 —— 在可编辑正文里按源码显示，是这条规则的已知代价）；**别改回全渲**、**单块也要有上限**（`MAX_CROP_SOURCE_BYTES` = 8KB，超过只回几何不渲图，前端必须把 `skipped` 与"缺切片"分开）；**编辑期间块表必须跟着走**（`remapBlocksThroughEdit`）、`planBlockCovers` **绝不抛异常**；块切片 `Decoration.replace` **必须落在整行边界**；块间空行归上一块；竖直移动**别退回"一次跨一整块"**；**别自己写 scrollTop**（用 `scrollIntoView`）；**光标所在的复杂块必须展开**；链接热区 `mousedown` **必须 `preventDefault`**；打字期间不编译（150ms，公式再推 240ms）；缺切片只看块表、**且要排除 `skipped`**（`found && !skipped && svg === ""`）；"铺满全文"是 covers 的事，**别拿 `blocks` 去断言**；产物带**排版戳**（会话/文档/上下文/版心四个修订号，见 `RenderStamp`），**戳不符就丢**；沿用只在排版输入没变时开、沿用来的块标 `stale`（**精确命中关掉**、滚到附近要补渲，判据是 `svg === "" || stale`）；**补渲去重键必须带戳 + 窗口**（`stampKey`）；**点击命中带会话/文档/几何令牌，作废时返回 `"cancelled"` 整条取消**（`null` 才是"退回块首"，两者语义不许混）。
 - **所见即所得（→04）**：宁可漏渲染、不可误渲染；正文内移动光标不展开整个构造，只在触碰对应标记时局部露出语法（**范围限定**：行内公式、围栏 raw、复杂块按各自规则整段展开，见 04）；`MATH_TEXT_PT = 10.5`、写作模式跟随文档字号（**别写死**）；标题梯度 1.4/1.2/1.0em；`$` 配对**右侧已有 `$` 就跨过去**（且排在"公式内部不配对"之前）、退格整对删；**不要用 `&dark` 选择器**；整块选中不展开但**别套到跨行行间公式**；**别用 CSS zoom**（走 `setZoom`）；**别让观察结果去改档位或回改引擎**；判据用 CSS 布局宽度；格式命令（菜单 + 快捷键，**不做工具条**）**无选区替换整行、不丢字**、有选区只替换选区、包装命令**首尾空白留定界符外侧**、引用**必须 `#quote(block: true)[...]`**（Typst 没有 `>`）；**快捷键分三处**归口（**MenuBar 只认 Ctrl+单键**）；切换模式**保持光标**（**别自己写 scrollTop**）；单行行间公式的**行级居中与渲染产物解耦**（编辑态也要居中，别挂在"渲染成功"那条分支里）；widget 点击（公式 / 围栏代码 / 行间公式）的**选区与滚动目标必须同一事务**（见 `live-preview/reveal.ts`），**但高块 widget 只有点在它第一行上才钉**（否则会把页面向上滚整个块的高度）；**只有左键钉**。
 - **窗口/更新（→05）**：`decideAppKey` 顺序敏感（Esc → Alt+Z → Ctrl+Shift+N → 格式表）；新建窗口 ACL 两处都要；更新弹窗**只收起来**（**绝不写 `updateDismissedAt`**）；点过「稍后」= 只更新状态栏（**别退回时间窗口版**）；**不许再加"上次检查时间"式节流**；更新说明渲染**别退回 `<pre>`**。
 - **文件/安全（→02）**：写盘只有一条路（`document-session` 的 `save() → saveTypFile → write_file`），**没有自动保存**；**绝不能让 `editorDoc` 落后**；`validate_typ_path` / `validate_write_path` 不许绕过；`csp` 保持 `null`；「空文档存进已有文件」**不弹确认窗、直接写空（勿加回）**。
