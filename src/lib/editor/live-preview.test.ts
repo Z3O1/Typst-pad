@@ -16,13 +16,13 @@ import { MATH_TEXT_PT } from "../core/typst-engine";
 import type { MathRender } from "../core/typst-engine";
 
 /** 假渲染结果：真实契约里 svg 是 Rust 侧产物，这里只需区分不同公式 */
-function render(body: string): MathRender {
+function render(body: string, heightPt = 7): MathRender {
   return {
     ok: true,
-    svg: `<svg viewBox="0 0 10 7" width="10pt" height="7pt"><text>${body}</text></svg>`,
+    svg: `<svg viewBox="0 0 10 ${heightPt}" width="10pt" height="${heightPt}pt"><text>${body}</text></svg>`,
     widthPt: 10,
-    heightPt: 7,
-    baselinePt: 5,
+    heightPt,
+    baselinePt: Math.min(5, heightPt),
   };
 }
 
@@ -42,6 +42,10 @@ describe("livePreview 扩展", () => {
       cursor?: number;
       /** 公式字号（pt）：不给 = 缺省 10.5pt（源码模式）；写作模式由父组件传文档字号 */
       mathSizePt?: number;
+      /** 行高（px）：展开占位（报告 T4）用；jsdom 里缺省是 0 */
+      lineHeight?: number;
+      /** 可视高度（px）：占位上限 1 个可视高度（报告 T4） */
+      viewportHeight?: number;
     } = {},
   ) {
     const enabled = opts.enabled ?? true;
@@ -63,6 +67,10 @@ describe("livePreview 扩展", () => {
             onRequest: (reqs) => requests.push(...reqs),
             dark: () => dark,
             ...(opts.mathSizePt === undefined ? {} : { mathSizePt: () => opts.mathSizePt! }),
+            ...(opts.lineHeight === undefined ? {} : { lineHeight: () => opts.lineHeight! }),
+            ...(opts.viewportHeight === undefined
+              ? {}
+              : { viewportHeight: () => opts.viewportHeight! }),
           }),
         ],
       }),
@@ -344,6 +352,48 @@ describe("livePreview 扩展", () => {
     expect(view.state.selection.main.head).toBe(1); // 选区被替换、光标跟到新文本之后
     expect(host.querySelectorAll(".cm-math-block").length).toBe(0);
     expect(host.querySelector(".cm-math-line")).toBeNull(); // 公式没了，行级居中也要跟着走
+  });
+
+  it("已展开的高公式补临时占位（报告 T4）：补到渲染盒高度为止", () => {
+    // 渲染盒 20pt → 26.67px；源码一行 24.2px → 补 2.47px
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2", 20));
+    mount("$ x^2 $\n正文", { lineHeight: 24.2, viewportHeight: 800 });
+    expect(host.querySelector(".cm-reserve-spacer")).toBeNull(); // 渲染态：不需要
+    view.dispatch({ selection: { anchor: 3 } }); // 进编辑态
+    const spacer = host.querySelector(".cm-reserve-spacer") as HTMLElement | null;
+    expect(spacer).not.toBeNull();
+    expect(Number.parseFloat(spacer!.style.height)).toBeCloseTo(26.6667 - 24.2, 2);
+  });
+
+  it("源码比渲染盒高时不补（真实内容不许压）", () => {
+    // 渲染盒 7pt → 9.33px < 一行源码 24.2px
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
+    mount("$ x^2 $\n正文", { lineHeight: 24.2, viewportHeight: 800 });
+    view.dispatch({ selection: { anchor: 3 } });
+    expect(host.querySelector(".cm-reserve-spacer")).toBeNull();
+  });
+
+  it("占位上限 = 1 个可视高度（报告 T4）", () => {
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2", 500)); // 666px 的盒子
+    mount("$ x^2 $\n正文", { lineHeight: 0, viewportHeight: 120 });
+    view.dispatch({ selection: { anchor: 3 } });
+    const spacer = host.querySelector(".cm-reserve-spacer") as HTMLElement | null;
+    expect(spacer).not.toBeNull();
+    expect(Number.parseFloat(spacer!.style.height)).toBeCloseTo(120, 1); // 一个可视高度
+  });
+
+  it("反复进出不累积：占位只由当前状态决定（无状态纯函数）", () => {
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2", 20));
+    mount("$ x^2 $\n正文", { lineHeight: 24.2, viewportHeight: 800 });
+    const heights: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      view.dispatch({ selection: { anchor: 3 } }); // 进
+      heights.push(
+        Number.parseFloat((host.querySelector(".cm-reserve-spacer") as HTMLElement).style.height),
+      );
+      view.dispatch({ selection: { anchor: 10 } }); // 出（光标移到"正文"里）
+    }
+    expect(new Set(heights).size).toBe(1); // 每次都一样，没有越攒越大
   });
 
   it("与文字同行的 `$ x $` 不套行级居中（免得把整行正文也居中）", () => {

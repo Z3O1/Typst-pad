@@ -284,6 +284,39 @@ export class BlockCropWidget extends WidgetType {
 }
 
 /**
+ * **临时占位**（报告 T4）：已展开的高公式下方补一段不可交互的空白，把"高渲染 → 矮源码"的
+ * 收缩按住（实测独占单行的行间公式 49.66px → 24.2px）。
+ *
+ * 三条纪律：
+ *  - **零交互**：`ignoreEvent() === true`（CM 不处理它身上的事件）、CSS 里 `pointer-events: none`，
+ *    点它既不移动光标也不打断拖选；
+ *  - **高度由 `planEditReserve` 算**（上限 1 个可视高度、且不超过渲染盒），这里只负责画；
+ *  - 它由 **StateField** 提供（块级装饰不许来自 ViewPlugin）—— 见 `buildMathDecorations`。
+ */
+export class ReserveWidget extends WidgetType {
+  constructor(private readonly heightPx: number) {
+    super();
+  }
+
+  eq(other: ReserveWidget): boolean {
+    return other.heightPx === this.heightPx;
+  }
+
+  toDOM(): HTMLElement {
+    const el = document.createElement("div");
+    el.className = "cm-reserve-spacer";
+    el.style.height = `${this.heightPx}px`;
+    el.setAttribute("aria-hidden", "true");
+    return el;
+  }
+
+  /** 不吞事件：它不是可编辑内容，交给编辑器默认处理 */
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+/**
  * 独占整行的行间公式（display）用**块级 widget**：整行替换成居中显示的排版结果，
  * 与 typst 把 `$ ... $` 排成独立居中式子的行为一致（行内 widget 只能贴着文字基线放，
  * 视觉上不像"独立成行的公式"）。

@@ -52,6 +52,16 @@ export interface LivePreviewOptions {
   /** 是否暗色主题（typst 产物是黑字透明底，暗色下需反色；见 mathWidgetTheme） */
   dark: () => boolean;
   /**
+   * 编辑器当前的行高（px，`view.defaultLineHeight`）。
+   * 只给**展开占位**用（报告 T4）：源码的自然高度 = 行数 × 行高。
+   */
+  lineHeight?: () => number;
+  /**
+   * 编辑器的可视高度（px，`scrollDOM.clientHeight`）。
+   * 只给**展开占位**用：占位上限是 1 个可视高度（`MAX_RESERVED_VIEWPORTS`）。
+   */
+  viewportHeight?: () => number;
+  /**
    * 写作模式的**块级渲染**：整篇编译出的"每块一张切片"（父组件每次 compile_blocks 后更新）。
    * 返回 null / 空数时整体关闭 —— 那时的行为与加这个功能之前**逐字节一致**
    * （源码模式、浏览器开发桩、后端没有该命令时都走这条路）。

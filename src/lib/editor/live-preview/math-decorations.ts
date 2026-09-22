@@ -7,8 +7,9 @@ import type { EditorState, Text } from "@codemirror/state";
 import { mathCacheKey, mathRevealDecision } from "../../core/math-ranges";
 import type { MathRange } from "../../core/math-ranges";
 import type { LivePreviewOptions } from "./options";
-import { MathBlockWidget, MathWidget } from "./widgets";
+import { MathBlockWidget, MathWidget, ReserveWidget } from "./widgets";
 import { MATH_TEXT_PT } from "../../core/typst-engine";
+import { planEditReserve, sourceHeightPx } from "./edit-session";
 
 /**
  * 该行间公式是否**独占所在各行**（前后只有空白）。
@@ -67,6 +68,31 @@ export function buildMathDecorations(
       decorations.push(
         Decoration.line({ class: "cm-math-line" }).range(state.doc.lineAt(block.from).from),
       );
+      // **已展开时补一点临时空白**（报告 T4）：高公式（`frac(a,b)`、求和式）展开成一行源码
+      // 会把下方内容整体往上拽（实测 49.66px → 24.2px）。补的规则全在 `planEditReserve` 里：
+      // 上限 1 个可视高度、不超过进进入时的渲染盒、无状态不累积。
+      if (decision.reveal) {
+        const reservePt = opts.mathSizePt?.() ?? MATH_TEXT_PT;
+        const cached = opts.lookup(mathCacheKey(range.body, range.display, context, reservePt));
+        const reserve = planEditReserve({
+          // 公式盒高是 pt，编辑器 CSS 里 1pt = 4/3 px（见 widgets.ts 的说明）
+          renderPx: cached?.ok ? (cached.heightPt * 4) / 3 : 0,
+          sourcePx: sourceHeightPx(
+            state.doc.sliceString(block.from, block.to),
+            opts.lineHeight?.() ?? 0,
+          ),
+          viewportPx: opts.viewportHeight?.() ?? 0,
+        });
+        if (reserve.reservePx > 0) {
+          decorations.push(
+            Decoration.widget({
+              widget: new ReserveWidget(reserve.reservePx),
+              block: true,
+              side: 1,
+            }).range(block.to),
+          );
+        }
+      }
     }
     if (decision.reveal) continue;
     const sizePt = opts.mathSizePt?.() ?? MATH_TEXT_PT;

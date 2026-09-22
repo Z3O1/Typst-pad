@@ -156,6 +156,9 @@
     // 源码模式根本不会有公式 widget；真要开，10.5pt 才是与 14px 正文对齐的值。
     mathSizePt: () => (mode === "write" ? docTextPt : MATH_TEXT_PT),
     dark: () => theme === "dark",
+    // 展开占位（报告 T4）需要的两个度量：行高与可视高度
+    lineHeight: () => view?.defaultLineHeight ?? 0,
+    viewportHeight: () => view?.scrollDOM.clientHeight ?? 0,
     // 块级切片：只在写作模式交给渲染层，源码模式一律 null（要看到真正的源码）
     blocks: () => (mode === "write" ? (blocks ?? null) : null),
     onBlocksNeeded: () => onBlocksNeeded?.(),

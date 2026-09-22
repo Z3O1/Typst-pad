@@ -28,7 +28,7 @@
 //   * 同日量到的既有几何：进入公式 −25.45 / −14.62 / −23.08px；点击代码切片 **+94.27px**、
 //     表格切片 **+82.52px**（与报告 §2.2 的 +94.266 / +82.516 一致）。
 // T1 之后这 6 项全绿；T2 补了 C 段（慢编译 + 过期命中）、T3 补了 D 段（调度合并 + 合成闸门 +
-// 扫描缓存），现在 88 项。
+// 扫描缓存）、T4 补了 E 段（展开占位 20 次进出），现在 93 项。
 //
 // 前置：dev server + headless Chromium（见 scripts/browser-check/run-all.mjs）。
 // 运行：`CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-stability.mjs`
@@ -1361,6 +1361,96 @@ await boot(c, BLOCKS_URL, { blockFixtures, mathFixtures, settleMs: 900 });
   await c.send("Emulation.clearDeviceMetricsOverride");
 }
 
+// ===========================================================================
+// E. 展开占位（报告 T4）：高公式展开时补的临时空白 —— 20 次进出零累积、上限 1 个可视高度
+// ===========================================================================
+console.log("\n=== E. 展开占位：20 次进出不累积（报告 T4）");
+await boot(c, DEV_URL, { mathFixtures, settleMs: 800 });
+{
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: 1400,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  const spec = MATH_DOCS.find((d) => d.body === "frac(a,b)") ?? MATH_DOCS[0];
+  // 正文行高（14.6667px × 1.65 = 24.2px）：判"收缩有界"要用它
+  const lineHeightPx = 24.2;
+  await replaceDocument(c, spec.doc, 1000);
+  await setCaret(0);
+  await centerDocument();
+  await c.waitFor(`!!document.querySelector(".cm-math-block-inline")`, { timeout: 8000 });
+  const formulaPos = spec.doc.indexOf("$") + 2; // 落进公式内部
+  const collapsed = await snapshot();
+  const viewport = collapsed?.scrollerHeight ?? 0;
+
+  const renderedHeights = [];
+  const editingHeights = [];
+  const spacerHeights = [];
+  for (let i = 1; i <= 20; i++) {
+    await setCaret(formulaPos);
+    await sleep(140);
+    const editing = await snapshot();
+    const spacer = await c.evaluate(`(() => {
+      const el = document.querySelector(".cm-reserve-spacer");
+      return el ? +parseFloat(el.style.height || "0").toFixed(2) : null;
+    })()`);
+    editingHeights.push(editing?.contentHeight ?? null);
+    spacerHeights.push(spacer);
+    await setCaret(spec.doc.length);
+    await sleep(140);
+    const back = await snapshot();
+    renderedHeights.push(back?.contentHeight ?? null);
+  }
+  const first = renderedHeights[0];
+  const worstBack = Math.max(...renderedHeights.map((h) => Math.abs((h ?? 0) - (first ?? 0))));
+  check(
+    `20 次进出之后收起高度不累积（每次都回到 ${first}px，最大偏差 ${worstBack.toFixed(2)}px）`,
+    worstBack <= 1.5,
+    JSON.stringify({ first, renderedHeights: renderedHeights.slice(-3), worstBack }),
+  );
+  const minEditing = Math.min(...editingHeights.map((h) => h ?? Number.POSITIVE_INFINITY));
+  // 占位补的是**公式盒**与源码行的差（实测 2.43px）；渲染态的行盒还含 leading（38.83 vs 26.63），
+  // 那部分属于报告允许的"一次必要的结构收敛"。所以这里判的是：收缩有界（一行 + 占位 + 1px），
+  // 而不是"编辑态不许比收起态矮"。
+  const bound = lineHeightPx + (spacerHeights[0] ?? 0);
+  check(
+    `编辑态的收缩有界（收起 ${first}px → 编辑 ${minEditing}px，收缩 ${(first - minEditing).toFixed(1)}px ≤ 一行 + 占位 ${bound.toFixed(1)}px）`,
+    typeof first === "number" && first - minEditing <= bound + 1,
+    JSON.stringify({ first, minEditing, bound, spacer: spacerHeights[0] }),
+  );
+  check(
+    `20 次进入后的编辑态高度完全一致（${[...new Set(editingHeights)].join("/")}px，只收敛一次）`,
+    new Set(editingHeights).size === 1,
+    JSON.stringify({ editingHeights: [...new Set(editingHeights)] }),
+  );
+  const maxEditing = Math.max(...editingHeights.map((h) => h ?? 0));
+  check(
+    `编辑态高度不超过"收起态 + 1 个可视高度"（上限 ${viewport}px，实测最高超出 ${(maxEditing - (first ?? 0)).toFixed(1)}px）`,
+    typeof first === "number" && maxEditing - first <= viewport + 1,
+    JSON.stringify({ first, maxEditing, viewport }),
+  );
+  const applied = spacerHeights.filter((h) => typeof h === "number" && h > 0);
+  check(
+    `占位高度存在且每次相同（${applied.length}/20 次量到，值 ${[...new Set(applied)].join("/")}px）`,
+    applied.length === 20 && new Set(applied).size === 1 && applied[0] <= viewport,
+    JSON.stringify({ applied: [...new Set(applied)], viewport }),
+  );
+  record({
+    scene: `${spec.body} 的展开占位`,
+    source: spec.real ? "real-static" : "fake",
+    phase: "20 次进出（报告 T4）",
+    collapsedHeight: first,
+    editingHeightMin: minEditing,
+    editingHeightMax: maxEditing,
+    reservePx: applied[0] ?? null,
+    viewportHeight: viewport,
+    worstReturnDeviationPx: +worstBack.toFixed(2),
+  });
+  await c.screenshot(SHOT("stability-reserve"));
+  await c.send("Emulation.clearDeviceMetricsOverride");
+}
+
 // 收尾把设备覆盖清掉：它是留在 CDP target 上的，不还原会污染后续套件的视口
 await c.send("Emulation.clearDeviceMetricsOverride");
 
@@ -1385,6 +1475,7 @@ report.matrix = {
     "点击的例外（高块 widget 中下部**不钉**，页面不被滚走；右键不钉）",
     "模式切换锚点（Ctrl+E 往返：位置 + 屏幕高度 + 焦点；含连续快按时的作废路径）",
     "过期结果与过期命中（报告 T2 / A1）：`blockslow=1`（编译与命中各 350ms）下，命中在飞时改文档 → 这次点击整条作废；改版心宽后切片与链接热区成套重建",
+    "展开占位（报告 T4）：高公式展开时补的临时空白 —— 20 次进出收起高度零累积（偏差 0.00px）、编辑态只收敛一次且收缩有界、占位 ≤ 1 个可视高度（`planEditReserve` 无状态）",
     "编译调度与输入法安全（报告 T3）：连续 8 次编辑只落 ≤3 次 `compile_blocks`；合成期间零次新块编译、合成中文本照常进编辑区、合成结束后攒下的那次照常落地；纯选区移动不重扫全文（文档扫描缓存的 miss 不增）",
     "整选替换 / 跨行公式例外：由 `wysiwyg.mjs` 的「公式选区与输入」组（`$x^2$` 与整行 `$ x^2 $` 各一条）与 `live-preview.test.ts` 覆盖，本套件不重复",
   ],
