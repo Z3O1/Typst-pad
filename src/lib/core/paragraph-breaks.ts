@@ -1,6 +1,6 @@
 import type { MathRange } from "./math-ranges";
 import type { MarkupDecoration } from "./markup-ranges";
-import type { Region } from "./typst-lex";
+import { scanNonMarkupRegions, type Region } from "./typst-lex";
 
 /**
  * 空白分隔行在写作模式里的目标高度（相对当前正文 em）。
@@ -10,6 +10,32 @@ import type { Region } from "./typst-lex";
  * 因此中间那条源码行只应占 0.208em。它是空行的行盒高度，不是 par.spacing 本身。
  */
 export const TYPOGRAPHIC_PARBREAK_ROW_EM = 0.208;
+
+const PAR_RULE = /#(?:set|show)\s+par\b/g;
+
+/** 注释、raw 与字符串中的示例不是活动的段落规则。 */
+function hasActiveParRule(source: string, regions: readonly Region[]): boolean {
+  PAR_RULE.lastIndex = 0;
+  let regionIndex = 0;
+  for (const match of source.matchAll(PAR_RULE)) {
+    const from = match.index ?? 0;
+    const to = from + match[0].length;
+    while (regionIndex < regions.length && regions[regionIndex].to <= from) regionIndex++;
+    let hidden = false;
+    for (let i = regionIndex; i < regions.length && regions[i].from < to; i++) {
+      const region = regions[i];
+      if (
+        (region.kind === "comment" || region.kind === "raw" || region.kind === "string") &&
+        region.to > from
+      ) {
+        hidden = true;
+        break;
+      }
+    }
+    if (!hidden) return true;
+  }
+  return false;
+}
 
 export interface ParagraphGapRow {
   /** CodeMirror line decoration 的位置（该源码行起点） */
@@ -60,8 +86,11 @@ export function scanParagraphGapRows(
   prefix = "",
 ): ParagraphGapRow[] {
   if (!doc.includes("\n")) return [];
-  // 当前块数据没有携带自定义段距。遇到显式段落 show/set 规则时保留源码原始留白。
-  if (/#(?:set|show)\s+par\b/.test(`${prefix}\n${doc}`)) return [];
+  // 当前块数据没有携带自定义段距。只把活动的 set/show 规则视为自定义段距；
+  // 注释、raw 与字符串中的示例不能禁用段距压缩。
+  if (hasActiveParRule(prefix, scanNonMarkupRegions(prefix)) || hasActiveParRule(doc, opaque)) {
+    return [];
+  }
 
   const starts = [0];
   const ends: number[] = [];

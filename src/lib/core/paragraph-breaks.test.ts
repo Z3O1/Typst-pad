@@ -70,6 +70,24 @@ describe("scanParagraphGapRows", () => {
     expect(gaps("正文一\n\n正文二", "#set par(spacing: 0.8em)\n")).toEqual([]);
   });
 
+  it("注释里的 par 示例不禁用段距压缩", () => {
+    const lineComment = "// #set par(spacing: 0.8em)\n\n正文一\n\n正文二";
+    const blockComment = "/* #show par: ... */\n\n正文一\n\n正文二";
+    expect(gaps(lineComment)).toEqual([{ from: lineComment.indexOf("\n\n正文二") + 1, count: 1 }]);
+    expect(gaps(blockComment)).toEqual([
+      { from: blockComment.indexOf("\n\n正文二") + 1, count: 1 },
+    ]);
+    expect(gaps("正文一\n\n正文二", "// #set par(spacing: 0.8em)\n")).toEqual([
+      { from: 4, count: 1 },
+    ]);
+  });
+
+  it("活动 par 规则仍禁用段距压缩，即使注释里也有示例", () => {
+    expect(
+      gaps("// #set par(spacing: 0.8em)\n#set par(spacing: 0.6em)\n\n正文一\n\n正文二"),
+    ).toEqual([]);
+  });
+
   it("正文里的直引号与行内公式不妨碍识别段间隔", () => {
     expect(gaps('他说 "你好"，公式 $x^2$。\n\n下一段。')).toEqual([{ from: 18, count: 1 }]);
   });
