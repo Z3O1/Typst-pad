@@ -4,13 +4,14 @@ import { Decoration } from "@codemirror/view";
 import { insideCovered } from "./covered";
 import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
-import { scanMarkupDecorations } from "../../core/markup-ranges";
-import type { MarkupKind } from "../../core/markup-ranges";
+import type { MarkupDecoration, MarkupKind } from "../../core/markup-ranges";
 import type { Region } from "../../core/typst-lex";
 import { TextWidget } from "./widgets";
 import type { MathRange } from "../../core/math-ranges";
 import { selectionTouchesRange } from "../../core/math-ranges";
 import { CodeBlockWidget } from "./widgets";
+import type { ParagraphGapRow } from "../../core/paragraph-breaks";
+import { TYPOGRAPHIC_PARBREAK_ROW_EM } from "../../core/paragraph-breaks";
 
 /** markup 装饰对应的 CSS 类（样式见 livePreviewTheme） */
 const MARKUP_CLASS: Record<MarkupKind, string> = {
@@ -31,13 +32,29 @@ const MARKUP_CLASS: Record<MarkupKind, string> = {
  */
 export function buildMarkupDecorations(
   state: EditorState,
-  scan: { opaque: Region[]; math: MathRange[] },
+  scan: {
+    docString: string;
+    opaque: Region[];
+    math: MathRange[];
+    markup: MarkupDecoration[];
+    paragraphGapRows: ParagraphGapRow[];
+  },
   covered: readonly { from: number; to: number }[] = [],
 ): Range<Decoration>[] {
-  const doc = state.doc.toString();
-  const marks = scanMarkupDecorations(doc, scan);
+  const doc = scan.docString;
+  const marks = scan.markup;
   const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
   const decorations: Range<Decoration>[] = [];
+  for (const row of scan.paragraphGapRows) {
+    decorations.push(
+      Decoration.line({
+        class: "cm-write-parbreak",
+        attributes: {
+          style: `--write-parbreak-height: ${(TYPOGRAPHIC_PARBREAK_ROW_EM / row.count).toFixed(6)}em`,
+        },
+      }).range(row.from),
+    );
+  }
   for (const item of marks) {
     // 块级结构（代码块）：整段替换为 widget；光标/选区进入即整段回到源码
     if (item.block) {

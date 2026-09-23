@@ -1709,7 +1709,7 @@ await boot(c, DEV_URL, { mathFixtures, settleMs: 800 });
   const afterPlain = await c.evaluate(`window.__typstPadView.state.doc.toString()`);
   check(
     "非列表行回车仍沿用上一行缩进（列表命令认不出来时落回我们那条）",
-    afterPlain === "正文一\n  缩进正文\n  \n",
+    afterPlain === "正文一\n  缩进正文\n\n  ",
     JSON.stringify({ afterPlain }),
   );
   record({

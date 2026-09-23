@@ -2708,7 +2708,7 @@ await retype("前文\n  缩进行");
 await enter();
 check(
   "缩进行行尾回车 → 新行缩进与上一行一样（`  `）",
-  (await c.evaluate(savedContent)) === "前文\n  缩进行\n  ",
+  (await c.evaluate(savedContent)) === "前文\n  缩进行\n\n  ",
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
@@ -2717,7 +2717,7 @@ await retype("前文\n    深缩进");
 await enter();
 check(
   "四空格缩进同样照抄（不再出现「两空格行能继承、四空格行不能」的随机感）",
-  (await c.evaluate(savedContent)) === "前文\n    深缩进\n    ",
+  (await c.evaluate(savedContent)) === "前文\n    深缩进\n\n    ",
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
@@ -2726,7 +2726,7 @@ await retype("  abcdef", 3);
 await enter();
 check(
   "行中间回车：下半行对齐整行缩进（`  abc` / `  def`）",
-  (await c.evaluate(savedContent)) === "  abc\n  def",
+  (await c.evaluate(savedContent)) === "  abc\n\n  def",
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
@@ -2735,7 +2735,7 @@ await retype("前文\n  缩进行");
 await enter(2);
 check(
   "在「带缩进的空行」上再按回车：残留空白被清掉（连按回车不堆空缩进行）",
-  (await c.evaluate(savedContent)) === "前文\n  缩进行\n\n",
+  (await c.evaluate(savedContent)) === "前文\n  缩进行\n\n\n",
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
@@ -2744,7 +2744,7 @@ await retype("普通文本");
 await enter();
 check(
   "无缩进行回车就是普通换行（不凭空多出空格）",
-  (await c.evaluate(savedContent)) === "普通文本\n",
+  (await c.evaluate(savedContent)) === "普通文本\n\n",
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
@@ -2753,7 +2753,7 @@ await retype("前文\n\tTab 缩进");
 await enter();
 check(
   "制表符缩进照抄（`\\t` 不算成空格）",
-  (await c.evaluate(savedContent)) === "前文\n\tTab 缩进\n\t",
+  (await c.evaluate(savedContent)) === "前文\n\tTab 缩进\n\n\t",
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
@@ -2780,7 +2780,7 @@ await c.key("End", { code: "End", keyCode: 35 });
 await enter();
 check(
   "Tab 缩进后的回车照抄同一宽度（4 格）",
-  (await c.evaluate(savedContent)) === "    第一行\n    ",
+  (await c.evaluate(savedContent)) === "    第一行\n\n    ",
   JSON.stringify(await c.evaluate(savedContent)),
 );
 // ⑩ Shift+Tab 反缩进一层：把光标放回第一行，它整好少掉 4 格（第二行的 4 格不动）
@@ -2790,7 +2790,7 @@ await c.key("Tab", { code: "Tab", keyCode: 9, modifiers: 8 });
 await new Promise((r) => setTimeout(r, 500));
 check(
   "Shift+Tab 反缩进一层（4 格 → 行首）",
-  (await c.evaluate(savedContent)) === "第一行\n    ",
+  (await c.evaluate(savedContent)) === "第一行\n\n    ",
   JSON.stringify(await c.evaluate(savedContent)),
 );
 

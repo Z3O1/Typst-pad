@@ -13,6 +13,9 @@ import type { Command } from "@codemirror/view";
 import { insertNewTypstListItem, insertTypstListContinuation } from "codemirror-lang-typst/lezer";
 import { emptyPairBackspace } from "./auto-pair";
 import { indentForNewLine, isBlankLine } from "./auto-indent";
+import { scanMathRanges } from "../core/math-ranges";
+import { scanNonMarkupRegions } from "../core/typst-lex";
+import type { Region } from "../core/typst-lex";
 
 /**
  * 退格时把补出来的空配对整对删掉（`$|$` 与 `$  |  $` 都一次删干净）。
@@ -32,7 +35,7 @@ function deleteEmptyDollarPair(view: EditorView): boolean {
 }
 
 /**
- * 回车换行：新行沿用**上一行的缩进**（用户要求「换行时应该和上一行缩进一样」）。
+ * 普通换行：新行沿用**上一行的缩进**（用户要求「换行时应该和上一行缩进一样」）。
  *
  * 替代 CM 默认的 `insertNewlineAndIndent`：默认那条的缩进来自语言服务 / 语法树，在 typst
  * 文档里实测**时灵时不灵**（两空格缩进能抄到、四空格抄不到、光标停在行中间时一律丢失），
@@ -65,6 +68,149 @@ function newlineKeepingIndent(view: EditorView): boolean {
   return true;
 }
 
+/** 选区/光标是否触碰 Typst 中不按普通 markup 处理的区域。 */
+function touchesOpaqueContext(
+  from: number,
+  to: number,
+  doc: string,
+  opaque: readonly Region[],
+  math: readonly { from: number; to: number }[],
+): boolean {
+  // Lexer 为公式扫描也会记录 markup 直引号；字符串在 `#...` 代码里已包含于 code span。
+  const markupRegions = opaque.filter((region) => region.kind !== "string");
+  if (from !== to) {
+    return [...markupRegions, ...math].some((range) => from < range.to && to > range.from);
+  }
+  if ([...markupRegions, ...math].some((range) => from >= range.from && from < range.to)) {
+    return true;
+  }
+
+  // 代码区间按半开范围存储，但光标停在语句末尾（包括紧邻换行符前）仍应沿用普通换行。
+  if (
+    markupRegions.some(
+      (region) => region.kind === "code" && from === region.to && region.from < region.to,
+    )
+  ) {
+    return true;
+  }
+
+  // 行注释包含其行尾；块注释仅在未闭合时把 EOF 也算作注释内部。
+  if (
+    markupRegions.some((region) => {
+      if (region.kind !== "comment" || from !== region.to) return false;
+      const opener = doc.slice(region.from, region.from + 2);
+      if (opener === "//") return true;
+      if (opener !== "/*" || from !== doc.length) return false;
+      let depth = 0;
+      for (let i = region.from; i < from;) {
+        if (doc.startsWith("/*", i)) {
+          depth++;
+          i += 2;
+        } else if (doc.startsWith("*/", i)) {
+          depth--;
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      return depth > 0;
+    })
+  ) {
+    return true;
+  }
+
+  // 未闭合 raw/string 会延伸到 EOF；闭合定界符右侧仍是普通 markup。
+  return markupRegions.some((region) => {
+    if (from !== doc.length || region.to !== doc.length || from !== region.to) return false;
+    if (region.kind === "raw" && doc[region.from] === "`") {
+      let run = 1;
+      while (doc[region.from + run] === "`") run++;
+      return doc.indexOf("`".repeat(run), region.from + run) < 0;
+    }
+    return false;
+  });
+}
+
+/**
+ * 写作模式的普通 markup 换行：Enter 分段，Shift+Enter 写 Typst 显式换行符。
+ * 代码/raw/注释/代码字符串/公式及源码模式继续走既有单换行逻辑；markup 直引号仍按正文处理。
+ */
+function newlineWithTypstSemantics(view: EditorView, softBreak: boolean): boolean {
+  const { state } = view;
+  if (state.readOnly) return false;
+
+  const doc = state.doc.toString();
+  const opaque = scanNonMarkupRegions(doc);
+  const math = scanMathRanges(doc, opaque);
+  view.dispatch(
+    state.update(
+      state.changeByRange((range) => {
+        const line = state.doc.lineAt(range.from);
+        const indent = indentForNewLine(line.text, range.from - line.from);
+        const blank = range.empty && isBlankLine(line.text);
+
+        // 空白行上沿用原有行为：清理残留缩进并增加一行，不写没有正文的 `\\`。
+        if (blank) {
+          const insert = state.lineBreak;
+          return {
+            changes: { from: line.from, to: line.to, insert },
+            range: EditorSelection.cursor(line.from + insert.length),
+          };
+        }
+
+        if (touchesOpaqueContext(range.from, range.to, doc, opaque, math)) {
+          const insert = state.lineBreak + indent;
+          return {
+            changes: { from: range.from, to: range.to, insert },
+            range: EditorSelection.cursor(range.from + insert.length),
+          };
+        }
+
+        // 当光标/选区正好到行尾时，已有的行分隔符可以参与构造：
+        // Enter 在它前面再插一个换行，得到恰好两个换行；Shift+Enter 则把它改成 `\\\n`。
+        const endsAtLineBreak =
+          range.to === line.to &&
+          state.doc.sliceString(line.to, line.to + state.lineBreak.length) === state.lineBreak;
+
+        if (!softBreak) {
+          // Enter = Typora 的新段落：用恰好两个换行替换行尾原有的一个，或在行中直接插入。
+          // 光标落在新段落起点；接着打字不会落进空白分隔行里。
+          const insert = state.lineBreak.repeat(2) + indent;
+          const to = endsAtLineBreak ? range.to + state.lineBreak.length : range.to;
+          return {
+            changes: { from: range.from, to, insert },
+            range: EditorSelection.cursor(range.from + insert.length),
+          };
+        }
+
+        if (endsAtLineBreak) {
+          // 复用已有换行，并保留下一行现有缩进；仅在下一行没有缩进时沿用本行缩进。
+          const nextLine = state.doc.lineAt(line.to + state.lineBreak.length);
+          const nextIndent = /^[ \t]*/.exec(nextLine.text)?.[0] ?? "";
+          const continuationIndent = nextIndent.length === 0 ? indent : "";
+          const insert = "\\" + state.lineBreak + continuationIndent;
+          const from = range.from;
+          const to = range.to + state.lineBreak.length;
+          const caret = from + insert.length + (nextIndent.length > 0 ? nextIndent.length : 0);
+          return {
+            changes: { from, to, insert },
+            range: EditorSelection.cursor(caret),
+          };
+        }
+
+        // Shift+Enter = Typst line break (`\\` followed by a source newline and indentation).
+        const insert = "\\" + state.lineBreak + indent;
+        return {
+          changes: { from: range.from, to: range.to, insert },
+          range: EditorSelection.cursor(range.from + insert.length),
+        };
+      }),
+      { scrollIntoView: true, userEvent: "input" },
+    ),
+  );
+  return true;
+}
+
 export interface EditorKeymapOptions {
   /**
    * 当前是不是**写作模式**（缺省 false = 源码模式）。
@@ -74,32 +220,35 @@ export interface EditorKeymapOptions {
    * Shift-Enter = `insertTypstListContinuation`），而本文件也导出 `Prec.high` 且**注册在前**
    * —— 同优先级下先返回 true 者胜出，于是那条 Enter 把列表命令整个遮住了（写作模式的列表里
    * 按回车不会续出下一项）。修法是**在写作模式先把列表命令调一遍**，它返回 false（不在列表里）
-   * 才落回"沿用上一行缩进"；**不重写第二份列表 Enter 状态机**。
+   * 才落回普通 Typst 换行处理；**不重写第二份列表 Enter 状态机**。
    */
   isWriteMode?: () => boolean;
 }
 
 /**
- * 写作模式的回车：先让依赖导出的列表命令处理，不认再沿用上一行缩进。
+ * 写作模式的回车：先让依赖导出的列表命令处理，不认再按 Typst markup 语义换行。
  *
  * 依赖那条命令已经实现"同级拆项 / 空顶层退出 / 空嵌套项上移"，别再自己写一遍；
- * 它返回 false 的场合（光标不在列表项里）我们仍然要接管 —— 那正是"新行沿用上一行缩进"
- * 存在的理由（CM 默认的 `insertNewlineAndIndent` 在 typst 文档里时灵时不灵）。
- * 任何异常都退回缩进那条路：输入链路绝不能因为列表逻辑而吞掉按键。
+ * 它返回 false 的场合（光标不在列表项里）我们仍然要接管 —— 普通 markup 用段落/显式换行，
+ * 其他上下文沿用上一行缩进（CM 默认的 `insertNewlineAndIndent` 在 typst 文档里时灵时不灵）。
+ * 列表命令抛错也继续走普通换行处理：输入链路绝不能因为列表逻辑而吞掉按键。
  */
 function listAwareEnter(
   isWriteMode: () => boolean,
   listCommand: Command,
+  softBreak: boolean,
 ): (view: EditorView) => boolean {
   return (view) => {
-    if (isWriteMode()) {
+    const writeMode = isWriteMode();
+    if (writeMode) {
       try {
         if (listCommand(view)) return true;
       } catch (e) {
-        console.error("[editor-keymap] 列表命令失败，退回沿用缩进：", e);
+        console.error("[editor-keymap] 列表命令失败，退回普通换行：", e);
       }
     }
-    return newlineKeepingIndent(view);
+    if (!writeMode) return newlineKeepingIndent(view);
+    return newlineWithTypstSemantics(view, softBreak);
   };
 }
 
@@ -113,12 +262,12 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
       indentWithTab, // Tab 缩进 / Shift+Tab 反缩进
       {
         key: "Enter",
-        run: listAwareEnter(isWriteMode, insertNewTypstListItem),
+        run: listAwareEnter(isWriteMode, insertNewTypstListItem, false),
         preventDefault: true,
       },
       {
         key: "Shift-Enter",
-        run: listAwareEnter(isWriteMode, insertTypstListContinuation),
+        run: listAwareEnter(isWriteMode, insertTypstListContinuation, true),
         preventDefault: true,
       },
       { key: "Backspace", run: deleteEmptyDollarPair, preventDefault: true }, // 空配对整对删

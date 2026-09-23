@@ -120,7 +120,117 @@ for (const fx of fixtures) {
   });
 }
 
-// 9 篇场景里有 5 篇是纯正文/标题（0 张复杂切片），逐篇的几何断言在空数组上是恒真的。
+// 段间距的最小对照来自真实 Typst 0.15 产物：两个字形顶部相差 20.438pt。
+console.log("\n=== 段落换行与真实 Typst 几何对齐");
+const paragraphScene = fixtures.find((f) => f.name === "段落间距");
+check("找到真实 Typst 的最小段落间距夹具", !!paragraphScene);
+if (paragraphScene) {
+  await loadScene(paragraphScene.doc);
+  const paragraphGeometry = await c.evaluate(
+    '(() => { const content = document.querySelector(".cm-content"); const view = content.cmTile.root.view; const lines = Array.from(content.querySelectorAll(":scope > .cm-line")); const gap = lines.find((line) => line.classList.contains("cm-write-parbreak")); const first = lines[0]?.getBoundingClientRect(); const last = lines.at(-1)?.getBoundingClientRect(); return { source: view.state.doc.toString(), lineCount: lines.length, gapCount: lines.filter((line) => line.classList.contains("cm-write-parbreak")).length, gapHeight: gap?.getBoundingClientRect().height ?? null, glyphTopDelta: first && last ? last.top - first.top : null }; })()',
+  );
+  check(
+    "原文与三条可编辑源码行都保留",
+    paragraphGeometry.source === paragraphScene.doc &&
+      paragraphGeometry.lineCount === 3 &&
+      paragraphGeometry.gapCount === 1,
+    JSON.stringify(paragraphGeometry),
+  );
+  const typstGapPx = (20.438 * 4) / 3;
+  check(
+    "段距行高与真实 Typst 字形位置一致（目标 " + typstGapPx.toFixed(2) + "px）",
+    paragraphGeometry.gapHeight !== null &&
+      Math.abs(paragraphGeometry.gapHeight - 3.05) <= 0.25 &&
+      Math.abs(paragraphGeometry.glyphTopDelta - typstGapPx) <= 1,
+    JSON.stringify(paragraphGeometry),
+  );
+
+  await replaceDocument(c, "1\n\n\n 1", 100);
+  const repeatedGap = await c.evaluate(
+    '(() => { const lines = Array.from(document.querySelectorAll(".cm-content > .cm-line")); const gaps = lines.filter((line) => line.classList.contains("cm-write-parbreak")); return { count: gaps.length, totalHeight: gaps.reduce((sum, line) => sum + line.getBoundingClientRect().height, 0), glyphTopDelta: lines.at(-1).getBoundingClientRect().top - lines[0].getBoundingClientRect().top, editableRows: gaps.every((line) => line.matches(".cm-line") && line.querySelector(".cm-widget") === null) }; })()',
+  );
+  check(
+    "连续空行共享同一份段距，且各自仍是源码行",
+    repeatedGap.count === 2 &&
+      Math.abs(repeatedGap.totalHeight - 3.05) <= 0.25 &&
+      Math.abs(repeatedGap.glyphTopDelta - typstGapPx) <= 1 &&
+      repeatedGap.editableRows,
+    JSON.stringify(repeatedGap),
+  );
+} else {
+  check("原文与三条可编辑源码行都保留", false, "场景夹具缺失");
+  check("段距行高与真实 Typst 字形位置一致", false, "场景夹具缺失");
+  check("连续空行共享同一份段距", false, "场景夹具缺失");
+}
+
+await replaceDocument(c, "#set par(spacing: 0.8em)\n\n1\n\n1", 100);
+const customParagraphStyle = await c.evaluate(
+  '({ gapDecorations: document.querySelectorAll(".cm-write-parbreak").length })',
+);
+check(
+  "自定义 par 规则不误套默认段距",
+  customParagraphStyle.gapDecorations === 0,
+  JSON.stringify(customParagraphStyle),
+);
+
+await replaceDocument(c, "alpha\nbeta", 100);
+await c.evaluate(
+  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; view.dispatch({ selection: { anchor: "alpha".length } }); })()',
+);
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+const enterParagraph = await c.evaluate(
+  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; return { doc: view.state.doc.toString(), head: view.state.selection.main.head }; })()',
+);
+check(
+  "写作模式 Enter 创建段落并落在后段正文起点",
+  enterParagraph.doc === "alpha\n\nbeta" && enterParagraph.head === "alpha\n\n".length,
+  JSON.stringify(enterParagraph),
+);
+
+await replaceDocument(c, "alpha", 100);
+await c.evaluate(
+  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); })()',
+);
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+const beforeFirstCharacter = await c.evaluate(
+  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; const caret = view.coordsAtPos(view.state.selection.main.head); const gap = document.querySelector(".cm-write-parbreak"); return { doc: view.state.doc.toString(), caretTop: caret?.top ?? null, gapHeight: gap?.getBoundingClientRect().height ?? null }; })()',
+);
+await c.type("x");
+const afterFirstCharacter = await c.evaluate(
+  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; const caret = view.coordsAtPos(view.state.selection.main.head); const gap = document.querySelector(".cm-write-parbreak"); return { doc: view.state.doc.toString(), caretTop: caret?.top ?? null, gapHeight: gap?.getBoundingClientRect().height ?? null }; })()',
+);
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+const afterDeletingLastCharacter = await c.evaluate(
+  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; const caret = view.coordsAtPos(view.state.selection.main.head); const gap = document.querySelector(".cm-write-parbreak"); return { doc: view.state.doc.toString(), caretTop: caret?.top ?? null, gapHeight: gap?.getBoundingClientRect().height ?? null }; })()',
+);
+check(
+  "文末新段在 Enter、首字输入和撤字时保持段距与光标位置稳定",
+  beforeFirstCharacter.doc === "alpha\n\n" &&
+    afterFirstCharacter.doc === "alpha\n\nx" &&
+    afterDeletingLastCharacter.doc === "alpha\n\n" &&
+    [beforeFirstCharacter, afterFirstCharacter, afterDeletingLastCharacter].every(
+      (sample) => sample.caretTop !== null && Math.abs(sample.gapHeight - 3.05) <= 0.25,
+    ) &&
+    Math.abs(beforeFirstCharacter.caretTop - afterFirstCharacter.caretTop) <= 1 &&
+    Math.abs(beforeFirstCharacter.caretTop - afterDeletingLastCharacter.caretTop) <= 1,
+  JSON.stringify({ beforeFirstCharacter, afterFirstCharacter, afterDeletingLastCharacter }),
+);
+
+await replaceDocument(c, "alpha\nbeta", 100);
+await c.evaluate(
+  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; view.dispatch({ selection: { anchor: "alpha".length } }); })()',
+);
+await c.key("Enter", { code: "Enter", keyCode: 13, modifiers: 8 });
+const shiftEnterLinebreak = await c.evaluate(
+  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; return { doc: view.state.doc.toString(), head: view.state.selection.main.head }; })()',
+);
+check(
+  "写作模式 Shift+Enter 写 Typst 显式换行",
+  shiftEnterLinebreak.doc === "alpha\\\nbeta" && shiftEnterLinebreak.head === "alpha\\\n".length,
+  JSON.stringify(shiftEnterLinebreak),
+);
+
+// 11 篇场景里有 6 篇是纯正文/标题（0 张复杂切片），逐篇的几何断言在空数组上是恒真的。
 // 这条**无条件**的聚合断言把"该有切片却一张都没有"钉住（否则整套几何验收可以静默空转）。
 const totalCrops = summary.reduce((n, s) => n + s.切片, 0);
 check(

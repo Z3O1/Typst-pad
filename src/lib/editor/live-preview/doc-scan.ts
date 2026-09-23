@@ -1,4 +1,4 @@
-// **文档扫描缓存**（报告 T3 / P1）：一次更新里被用三处的词法扫描与公式扫描，只算一次。
+// **文档扫描缓存**（报告 T3 / P1）：词法、公式、markup 与段落行识别按 CM Text 身份缓存。
 //
 // 为什么需要：`live-preview` 的装饰字段在 **docChanged / 选区变化 / 刷新 effect** 三种事务上
 // 都会重建，而每次重建都要 `scanNonMarkupRegions`（词法区）+ `scanMathRanges`（公式区）+
@@ -19,6 +19,10 @@ import type { Region } from "../../core/typst-lex";
 import { scanMathRanges } from "../../core/math-ranges";
 import type { MathRange } from "../../core/math-ranges";
 import { buildMathContext } from "../../core/math-context";
+import { scanMarkupDecorations } from "../../core/markup-ranges";
+import type { MarkupDecoration } from "../../core/markup-ranges";
+import { scanParagraphGapRows } from "../../core/paragraph-breaks";
+import type { ParagraphGapRow } from "../../core/paragraph-breaks";
 
 export interface DocScan {
   /** 这份扫描对应的 CM 文档对象（身份判据，见文件头） */
@@ -33,6 +37,10 @@ export interface DocScan {
   opaque: Region[];
   /** 公式区间 */
   math: MathRange[];
+  /** 常用 markup 装饰范围（文档不变时复用，选区移动不重扫全文） */
+  markup: MarkupDecoration[];
+  /** 默认段距对应的空白源码行（与 markup 一样按 Text 身份缓存） */
+  paragraphGapRows: ParagraphGapRow[];
 }
 
 let cache: DocScan | null = null;
@@ -52,13 +60,17 @@ export function scanDocument(state: EditorState, prefix: string): DocScan {
   misses += 1;
   const docString = doc.toString();
   const opaque = scanNonMarkupRegions(docString);
+  const math = scanMathRanges(docString, opaque);
+  const markup = scanMarkupDecorations(docString, { opaque, math });
   cache = {
     doc,
     docString,
     prefix,
     context: buildMathContext(prefix, docString),
     opaque,
-    math: scanMathRanges(docString, opaque),
+    math,
+    markup,
+    paragraphGapRows: scanParagraphGapRows(docString, opaque, math, markup, prefix),
   };
   return cache;
 }

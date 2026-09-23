@@ -96,6 +96,11 @@ export const mathWidgetTheme = EditorView.theme({
   ".cm-math-line": {
     textAlign: "center",
   },
+  // Typst 的段落分隔仍保留为空白源码行，但它不能沿用 1.65em 普通行高。
+  // 行数因子在装饰上分配：多个连续空行共享同一段距，且每行仍有可编辑的行盒。
+  ".cm-write-parbreak": {
+    lineHeight: "var(--write-parbreak-height, 1.65)",
+  },
   // 展开占位的空白（报告 T4）：只占高度，不参与任何交互（`ReserveWidget.ignoreEvent` 也返回
   // true，两道保险 —— 点它既不移动光标也不打断拖选）
   ".cm-reserve-spacer": {

@@ -37,9 +37,9 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 const SUITES = [
   ["wysiwyg.mjs", 291],
   ["writing-blocks.mjs", 133],
-  ["writing-blocks-visual.mjs", 74],
-  ["writing-blocks-hit.mjs", 31],
-  ["writing-mode-scenes.mjs", 70],
+  ["writing-blocks-visual.mjs", 81],
+  ["writing-blocks-hit.mjs", 34],
+  ["writing-mode-scenes.mjs", 83],
   ["wysiwyg-visual.mjs", 20],
   // 写作模式的**动态稳定性**（报告 T0）：逐帧量"光标进出公式/复杂块"的几何（点击 / 左右键 /
   // Ctrl+E 三档等效几何、高块 widget 不钉的例外），补上另外七套都不管的那段动态手感

@@ -86,7 +86,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         ...buildHiddenBlockDecorations(state, covers),
         ...buildFenceHidingDecorations(state, covers),
         ...buildMathDecorations(state, opts, math, context, covered),
-        ...buildMarkupDecorations(state, { opaque, math }, covered),
+        ...buildMarkupDecorations(state, scan, covered),
       ];
       return {
         // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）

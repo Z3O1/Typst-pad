@@ -34,6 +34,14 @@ const behaviorExtensions = [
   commentTokensData,
 ];
 
+const writeBehaviorExtensions = [
+  basicSetup,
+  createEditorKeymap({ isWriteMode: () => true }),
+  indentUnit.of(INDENT_UNIT),
+  typst_lezer(),
+  commentTokensData,
+];
+
 /** 按优先级展平后的全部键位绑定（facet 值按 Prec 优先级排列） */
 function allBindings() {
   return EditorState.create({ extensions: bindingExtensions }).facet(keymapFacet).flat();
@@ -109,6 +117,13 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     return new EditorView({ doc, parent: host, extensions: behaviorExtensions });
   }
 
+  /** 写作模式行为测试使用原生 Lezer（避免 wasm 解析器在 Node 环境下 panic）。 */
+  function makeWriteView(doc: string) {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    return new EditorView({ doc, parent: host, extensions: writeBehaviorExtensions });
+  }
+
   /** 在编辑器上派发 keydown（与真实浏览器一致：shift 修饰键通常反映到 key 上） */
   function press(view: EditorView, init: KeyboardEventInit & { code: string; keyCode: number }) {
     view.contentDOM.dispatchEvent(
@@ -134,19 +149,6 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
   it("写作模式：列表里按回车续出下一项；空项回车退出列表（报告 T5）", () => {
     // 用**原生 Lezer** 语言入口（`typst_lezer`，无 wasm）：列表命令要语法树，
     // 而 `typst()` 那个 wasm 入口在 Node 下会 panic（见文件头说明）。
-    const writeExtensions = [
-      basicSetup,
-      createEditorKeymap({ isWriteMode: () => true }),
-      indentUnit.of(INDENT_UNIT),
-      typst_lezer(),
-      commentTokensData,
-    ];
-    const makeWriteView = (doc: string) => {
-      const host = document.createElement("div");
-      document.body.appendChild(host);
-      return new EditorView({ doc, parent: host, extensions: writeExtensions });
-    };
-
     // ① 列表项末尾回车 → 续出同级新项
     let view = makeWriteView("- 第一项");
     view.dispatch({ selection: { anchor: view.state.doc.length } });
@@ -161,11 +163,11 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     expect(view.state.doc.toString()).toBe("- 第一项\n");
     view.destroy();
 
-    // ③ 非列表行回车 → 仍走"沿用上一行缩进"（列表命令认不出来就落到我们那条）
+    // ③ 非列表正文 Enter → Typora 段落语义：两个源码换行，并沿用缩进
     view = makeWriteView("  普通正文");
     view.dispatch({ selection: { anchor: view.state.doc.length } });
     press(view, { key: "Enter", code: "Enter", keyCode: 13 });
-    expect(view.state.doc.toString()).toBe("  普通正文\n  ");
+    expect(view.state.doc.toString()).toBe("  普通正文\n\n  ");
     view.destroy();
 
     // ④ **源码模式不碰列表语义**（模式感知的价值）：同一份文档、同一个回车 → 只是换行 + 抄缩进
@@ -219,6 +221,77 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
     expect(view.state.doc.toString()).toBe("  缩进\n  ");
     view.destroy();
+  });
+
+  it("写作模式：Enter 分段，Shift+Enter 写 Typst 显式换行并保留缩进", () => {
+    let view = makeWriteView("  abcdef");
+    view.dispatch({ selection: { anchor: 5 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("  abc\n\n  def");
+    view.destroy();
+
+    view = makeWriteView("  abcdef");
+    view.dispatch({ selection: { anchor: 5 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("  abc\\\n  def");
+    view.destroy();
+
+    // 行尾已有的换行被替换为段落分隔符；光标落在新段落正文起点。
+    view = makeWriteView("abc\ndef");
+    view.dispatch({ selection: { anchor: 3 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("abc\n\ndef");
+    expect(view.state.selection.main.head).toBe("abc\n\n".length);
+    view.destroy();
+
+    // 行尾的既有换行被复用；下一行原有缩进保留且光标落在正文开头。
+    view = makeWriteView("  abc\n  def");
+    view.dispatch({ selection: { anchor: 5 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("  abc\\\n  def");
+    expect(view.state.selection.main.head).toBe("  abc\\\n  ".length);
+    view.destroy();
+  });
+
+  it("写作模式：只替换实际选区，markup 引号仍按普通正文处理", () => {
+    let view = makeWriteView('带 "引号" 的正文');
+    view.dispatch({ selection: { anchor: 4 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe('带 "引\n\n号" 的正文');
+    view.destroy();
+
+    view = makeWriteView("abcdef\nnext");
+    view.dispatch({ selection: { anchor: 2, head: 6 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    // 选区恰好到行尾时复用后面的原换行，只形成一个段落分隔。
+    expect(view.state.doc.toString()).toBe("ab\n\nnext");
+    expect(view.state.selection.main.head).toBe("ab\n\n".length);
+    view.destroy();
+  });
+
+  it("写作模式：代码、raw、注释与公式内沿用安全的普通换行", () => {
+    const contexts = [
+      { doc: "#let x = 1", pos: 6 },
+      { doc: "#let x = 1", pos: "#let x = 1".length },
+      { doc: '#let s = "abc"', pos: 11 },
+      { doc: "`raw`", pos: 2 },
+      { doc: "// comment", pos: 4 },
+      { doc: "// comment", pos: "// comment".length },
+      { doc: "/* open", pos: "/* open".length },
+      { doc: "```\n  let a = 1", pos: "```\n  let a = 1".length },
+      { doc: "$x$", pos: 1 },
+    ];
+
+    for (const { doc, pos } of contexts) {
+      for (const shiftKey of [false, true]) {
+        const view = makeWriteView(doc);
+        view.dispatch({ selection: { anchor: pos } });
+        press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey });
+        expect(view.state.doc.toString().split("\n")).toHaveLength(doc.split("\n").length + 1);
+        expect(view.state.doc.toString()).not.toContain("\\\n");
+        view.destroy();
+      }
+    }
   });
 
   it("Ctrl+D 无选区删除整行（覆盖 searchKeymap 的选中下一处）", () => {

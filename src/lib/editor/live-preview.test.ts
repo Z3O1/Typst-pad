@@ -126,6 +126,29 @@ describe("livePreview 扩展", () => {
     expect(view.state.doc.toString()).toContain("y");
   });
 
+  it("段落分隔行保留源码且只在写作装饰中压缩", () => {
+    const doc = "1 \n\n 1";
+    mount(doc);
+    const gap = host.querySelector(".cm-line.cm-write-parbreak");
+    expect(gap).not.toBeNull();
+    expect(gap?.getAttribute("style")).toContain("0.208000em");
+    expect(view.state.doc.toString()).toBe(doc);
+
+    view.destroy();
+    host.replaceChildren();
+    mount(doc, { enabled: false });
+    expect(host.querySelector(".cm-write-parbreak")).toBeNull();
+  });
+
+  it("连续段落分隔行按总段距分配，且不把空行替换成 widget", () => {
+    mount("前段\n\n\n后段");
+    const rows = Array.from(host.querySelectorAll(".cm-line.cm-write-parbreak"));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.getAttribute("style")?.includes("0.104000em"))).toBe(true);
+    expect(host.querySelectorAll(".cm-widgetBuffer")).toHaveLength(0);
+    expect(view.state.doc.toString()).toBe("前段\n\n\n后段");
+  });
+
   it("已缓存的公式被 widget 替换（源码里的 $ 不再出现）", () => {
     mount("前面的 $x^2$ 后面", { cache: true });
     expect(widgetCount()).toBe(1);
