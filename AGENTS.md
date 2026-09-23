@@ -1,93 +1,55 @@
-# AGENTS.md
+# Coding agent 指南
 
-Typst-pad = 仿 Typora 的 Typst 桌面编辑器，两套 UI：「写作模式」（默认，单栏整页纸张）与「源代码模式」（`Ctrl+E`）。前端 SvelteKit SPA（adapter-static）+ Tauri 2（Rust）+ 内嵌 typst crate 0.15.x（进程内编译、本地字体），无 wasm、无网络依赖。注释与 README 中文。
+Typst-pad 是本地 Typst 桌面编辑器：SvelteKit 静态 SPA + TypeScript / CodeMirror 6 前端，Tauri 2 / Rust 内嵌 Typst 编译后端。正文和注释以中文为主。产品入口见 [README](README.md)，详细知识见 [docs](docs/README.md)。
 
-**本文档只写规则**；每条规则的实测数据、踩坑经过与完整论证在 `docs/实现细则/`（7 个分册，索引 `docs/实现细则/README.md`）。**动某块之前先读文末「文档地图」里对应的那一册**——本文件不再复制细则。
+## 目录与边界
 
-## 当前状态
+- `src/routes/`：页面状态、应用装配和生命周期。
+- `src/lib/core/`：领域逻辑、引擎包装、依赖注入的流程；不反向依赖 editor/ui/dev。
+- `src/lib/editor/`：CodeMirror 视图、装饰、输入与公式队列；`src/lib/ui/`：界面组件与展示模型。
+- `src/lib/dev/`：仅开发和验收使用的桩与观测钩子，不引入生产模块。
+- `src-tauri/src/`：原生命令、编译世界、块几何、文件与包；`src-tauri/fonts/`：打包字体。
+- `scripts/`：测试、浏览器验收、字体和发布工具；`.github/workflows/`：CI 与发布。
 
-- 版本 **0.10.0**；版本历史 `CHANGELOG.md`，提交历史 `git log`，踩坑经过 `docs/实现细则/`。
-- **仓库必须保持公开**（否则客户端检查更新全失败）；自动更新只覆盖 Windows。
-
-## 常用命令
+## 常用命令与验证选择
 
 ```bash
-npm run tauri dev    # 桌面应用（Vite 固定 1420；WSL 可跑，libEGL 警告正常）
-npm run check        # svelte-check（0 errors / 0 warnings）
-npm test             # 单测（56 文件 / 1016 项）；npm test -- <文件> 跑单个
-npm run format:check # prettier（`npm run format` 是对称的写入版）
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check                  # rustfmt（默认风格，无 rustfmt.toml）
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust 单测（61 passed / 6 ignored）
-node scripts/check-fonts.mjs
-# 动编辑器 / 装饰 / 布局 / 组件样式时才跑浏览器验收（换端口，别跟 tauri dev 抢 1420）
-npm run verify:browser   # **推荐**：自己起 dev server + headless Chromium + 导夹具 + 跑八套 + 汇总
-npm run dev -- --port 1425
-BROWSER_CHECK_PORT=1425 node scripts/browser-check/wysiwyg.mjs                              # 291 项
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-stability.mjs        # 改公式/锚点/模式切换必跑（107 项）
-CDP_PORT=9335 BROWSER_CHECK_PORT=1425 node scripts/browser-check/writing-blocks-visual.mjs   # 改块级渲染必跑
+npm run tauri dev
+npm run check
+npm test -- <相关测试文件>
+npm run format:check
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run verify:browser
 ```
 
-打包、发布、全部验收脚本的命令全文：`docs/实现细则/06-命令与发布.md`。
+按改动风险选择检查，完整矩阵与 Rust 静态检查命令见[测试](docs/development/testing.md)：纯文档查链接与 diff；代码改动跑相关静态检查和单测，提交前完成对应 CI 门禁；编辑器、装饰、布局或组件样式加浏览器验证，原生能力还需桌面验证。不要仅为测试数量添加重复断言，不要移除既有 CI 门禁。
 
-## 改动前的红线（勿回退）
+## 关键不变量
 
-1. 改 `src/` = HMR 到运行中的 `tauri dev`；改 `src-tauri/` = Tauri 重启应用。
-2. `editorDoc` 必须是编辑器内容的**实时镜像**（否则丢未保存内容）。
-3. `Decoration.*.range(a, b)` 必须 `b > a`；装饰计算与 widget 渲染留在 try/catch 内（抛进 CM 事务 = 编辑区卡死）。
-4. 写作模式留白挂 `.cm-scroller`，不是 `.cm-content` 的 padding。
-5. 菜单（Alt / 鼠标）不许夺编辑区焦点。
-6. `src-tauri/fonts/` 不放 `static/`。
-7. `vite.config.js` 的 dev 白屏修复三件套与 `optimizeDeps.exclude: ["codemirror-lang-typst"]` 不许删；前端已无 wasm，那两个 wasm 插件暂无服务对象，要删先在 WSL/WebKit 验启动。
-8. 版本号三处一致（`package.json` / `src-tauri/tauri.conf.json` / `src-tauri/Cargo.toml`）；rust-cache 禁 `cache-on-failure`。
-9. **绝不阻塞等 workflow**：推 main / 打 tag / 后续命令一律不等 CI、Release；不挂轮询任务；状态最多**单查**一次 `gh run list`；不要加"别在 CI 运行中 push main"这类限制。
-10. 签名密钥不许动：Secrets 删了就构建不了、换了就再也发不出更新。
-11. 发版权在用户手里：改版本号 / CHANGELOG 版本段 / 打 tag / 建发 Release，只在他说"发 X.Y.Z"之后做。
-12. **五道格式/静态检查门不许摘**（都在 CI 的 `test` job 里，摘一道就等于没有）：`npm run check`、`npm test`、`npm run format:check`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`，另有 `cargo test --manifest-path src-tauri/Cargo.toml`。改完先本地跑齐；`cargo check` 那一步已被 `clippy --all-targets` 取代（两步都跑等于同一份代码编两遍）。
+- 源码是文档真相，`editorDoc` 必须实时镜像编辑器；保存、会话恢复、窗口隔离遵循[文件与安全](docs/development/files-and-security.md)，不得引入隐式写盘。
+- 装饰计算和 widget 异常不得逃逸进 CodeMirror 事务；非空替换/mark 范围合法，渲染不确定时保留源码。菜单不得夺走编辑位置。
+- 编译产物必须匹配当前文档与排版输入；过期产物、命中和调度任务不能回写新会话。修改写作链路须遵循[写作渲染](docs/development/writing-rendering.md)的戳、窗口化、输入法与取消契约。
+- Rust 路径校验不能绕过；成功与失败的 IPC 形状都要核对，浏览器桩不等于真实后端。
+- 不把打包字体复制到 `static/`；开发启动兼容处理的变更须经目标 WebView 验证，见[排障](docs/development/debugging.md)。
 
-## 细则红线（一句话版；展开与理由见对应分册）
+## 按任务导航
 
-> 下面这组是**规则版**：每条对应分册里的实测数据与踩坑经过，展开与理由见对应分册。它是"入口索引"，**不追求与详版逐字一致**；发现规则被削弱或漏了，就补分册 + 这里补一句（PR #61 瘦身时漏过 3 组，见该 PR 的审查评论）。
+只阅读本次任务相关页面，无需每次遍历所有文档。
 
-- **编译/后端（→02）**：诊断 `path` 主源表示只许一种；项目根跟着**引用**放宽（**别写成"目标文件的公共祖先"**）；`compile_blocks` 失败也要带 `blocks` 键；**必须注入默认字体族**；`CompileState` 一次一编译。
-- **块级渲染（→03）**：纯 markup 的正文/标题始终保留真实文本，复杂块才走局部切片（**判据是"块内有没有 code / raw / 注释区域"**，markup 里的直引号**不算**复杂 —— lexer 把它登记成 `string` 是为公式扫描，别拿它把整段退回切片；markup 层渲染不出的构造 —— `@引用`、`<label>`、简写 `--`/`---`/`...`/`~`/`-?`、转义、英文单引号 —— 在可编辑正文里按源码显示，是这条规则的已知代价）；**别改回全渲**、**单块也要有上限**（`MAX_CROP_SOURCE_BYTES` = 8KB，超过只回几何不渲图，前端必须把 `skipped` 与"缺切片"分开）；**编辑期间块表必须跟着走**（`remapBlocksThroughEdit`）、`planBlockCovers` **绝不抛异常**；块切片 `Decoration.replace` **必须落在整行边界**；块间空行归上一块；竖直移动**别退回"一次跨一整块"**；**别自己写 scrollTop**（用 `scrollIntoView`）；**光标所在的复杂块必须展开**；链接热区 `mousedown` **必须 `preventDefault`**；打字期间不编译（150ms，公式再推 240ms）；缺切片只看块表、**且要排除 `skipped`**（`found && !skipped && svg === ""`）；"铺满全文"是 covers 的事，**别拿 `blocks` 去断言**；产物带**排版戳**（会话/文档/上下文/版心四个修订号，见 `RenderStamp`），**戳不符就丢**；沿用只在排版输入没变时开、沿用来的块标 `stale`（**精确命中关掉**、滚到附近要补渲，判据是 `svg === "" || stale`）；**补渲去重键必须带戳 + 窗口**（`stampKey`）；**点击命中带会话/文档/几何令牌，作废时返回 `"cancelled"` 整条取消**（`null` 才是"退回块首"，两者语义不许混；**任何非切片的编辑器按下也要推进 `clickEpoch`** —— 否则"点切片（命中在飞）→ 点普通源码"会把光标拉回切片）；写作编译只走**单槽调度**（`core/writing-compile-scheduler.ts`：最多一个在途 + 一份待执行、理由取并集；公式让路用 `holdForMath`，不许再为每个入口各挂一个定时器；**去抖是尾随的** —— `edit` 重置计时，滚动/重排不许续期；**写作模式的每个入口都要登记**：设置保存 / 预览栏重排 / 启动首编译走 `requestNow`，别直接 `void runCompile()`）；**排版戳的修订号在"读戳时"同步**（`syncStampRevisions` 由 `currentStamp` 调，别挪回"下一轮编译启动时"—— 否则旧版心/旧字体的产物会被当成精确命中落地）；**合成期间不启动新的后台编译**（闸门从 `compositionstart` 起，不能只靠 `view.composing`——它要第一次输入后才为真）；**卸载要 `dispose` 调度器 + 清写作重排定时器 + 取消公式刷新 rAF**（`compileSeq++` 只废在途结果，拦不住"卸载后新启动一次编译"）；**公式渲染刷新按绘制帧合并**；**文档扫描按 CM 的 `Text` 身份缓存**（`live-preview/doc-scan.ts`，纯选区移动/滚动不许重扫全文）。
-- **所见即所得（→04）**：宁可漏渲染、不可误渲染；正文内移动光标不展开整个构造，只在触碰对应标记时局部露出语法（**范围限定**：行内公式、围栏 raw、复杂块按各自规则整段展开，见 04）；`MATH_TEXT_PT = 10.5`、写作模式跟随文档字号（**别写死**）；标题梯度 1.4/1.2/1.0em；`$` 配对**右侧已有 `$` 就跨过去**（且排在"公式内部不配对"之前）、退格整对删；**不要用 `&dark` 选择器**；整块选中不展开但**别套到跨行行间公式**；**别用 CSS zoom**（走 `setZoom`）；**别让观察结果去改档位或回改引擎**；判据用 CSS 布局宽度；格式命令（菜单 + 快捷键，**不做工具条**）**无选区替换整行、不丢字**、有选区只替换选区、包装命令**首尾空白留定界符外侧**、引用**必须 `#quote(block: true)[...]`**（Typst 没有 `>`）、`planLinePrefix` 取消带缩进的标记**只删标记保留缩进**、`planBlockMath` 的 `anchorOffset` **由前缀长度算**（`"$\n  "` 是 4，别写死 3）；**写作模式的 Enter 先走依赖导出的列表命令**（`insertNewTypstListItem` / `insertTypstListContinuation`，本地 keymap 与依赖同为 `Prec.high` 且本地在前，**别把列表命令遮住**），它不认才落回"沿用上一行缩进"，源码模式不碰列表语义；列表的 **Tab/Backspace 结构化语义还没做**（报告 T5 的既定顺序是先恢复续项）；**快捷键分三处**归口（**MenuBar 只认 Ctrl+单键**）；切换模式**保持光标**（**别自己写 scrollTop**）；单行行间公式的**行级居中与渲染产物解耦**（编辑态也要居中，别挂在"渲染成功"那条分支里）；widget 点击（公式 / 围栏代码 / 行间公式）的**选区与滚动目标必须同一事务**（见 `live-preview/reveal.ts`），**但高块 widget 只有点在它第一行上才钉**（否则会把页面向上滚整个块的高度）；**只有左键钉**；**已展开的高公式要补临时占位**（`live-preview/edit-session.ts` 的 `planEditReserve`：上限 **1 个可视高度**、不超过渲染盒、**无状态不累积**；占位 widget 零交互且由 StateField 提供 —— 只补"公式盒 − 源码行"，渲染态行盒的 leading 差属于允许的一次结构收敛）。
-- **窗口/更新（→05）**：`decideAppKey` 顺序敏感（Esc → Alt+Z → Ctrl+Shift+N → 格式表）；新建窗口 ACL 两处都要；更新弹窗**只收起来**（**绝不写 `updateDismissedAt`**）；点过「稍后」= 只更新状态栏（**别退回时间窗口版**）；**不许再加"上次检查时间"式节流**；更新说明渲染**别退回 `<pre>`**。
-- **文件/安全（→02）**：写盘只有一条路（`document-session` 的 `save() → saveTypFile → write_file`），**没有自动保存**；**绝不能让 `editorDoc` 落后**；`validate_typ_path` / `validate_write_path` 不许绕过；`csp` 保持 `null`；「空文档存进已有文件」**不弹确认窗、直接写空（勿加回）**。
-- **测试/审查（→07）**：日常 `check` + 相关单测，动编辑器/装饰/布局才加浏览器验收；`file-ops` / `debug` / `computeMenuPosition` 这几处**不要补测试**；**断言不许留假绿**：合并类断言要有**下界**（`1 ≤ delta ≤ 3`，否则"一次都没编译"也是满分）+ 证明输入真的生效，"确实重建/重编译"要有**编译计数或新戳**这类 DOM 看不出来的证据（浏览器开发模式的只读钩子），竞态要**确定性复现**（如手动扣住 `requestAnimationFrame` 放行顺序），不靠 `sleep(60)` 撞时机；全套绿的 PR 仍要两条腿审（3 个只读子代理 + 主 agent 自己跑）；结论写进 `gh pr comment`。
-- **发布（→06）**：`cache-on-failure` 禁；**别 force push / 改 remote**；签名密钥不许动；发版权在用户手里。
+| 修改领域 | 参考 |
+| --- | --- |
+| 分层、流程归属 | [架构](docs/development/architecture.md) |
+| 页面、窗口、快捷键、缩放、组件样式 | [前端](docs/development/frontend.md) |
+| 编译、诊断、字体、包 | [编译后端](docs/development/compiler-backend.md) |
+| 块渲染、调度、坐标、命中 | [写作渲染](docs/development/writing-rendering.md) |
+| 公式、标记、选区揭示 | [所见即所得](docs/development/wysiwyg.md) |
+| 打开保存、会话、权限与路径 | [文件与安全](docs/development/files-and-security.md) |
+| 测试或复现 | [测试](docs/development/testing.md)、[排障](docs/development/debugging.md) |
+| CI、打包、发布、更新 | [CI](docs/maintainers/ci.md)、[发布](docs/maintainers/release.md)、[更新器](docs/maintainers/updater.md) |
+| 渲染取舍或新交互设计 | [渲染模型](docs/design/rendering-model.md)、[编辑设计与研究](docs/design/wysiwyg-research.md) |
 
-## 已知未决 / 可做
+## 外部操作与发布权限
 
-- `?browserdev=1` 是假编译（真实排版走 fixtures）；真保存 / 导出 PDF / 系统对话框必须桌面版。
-- 「启动时恢复上次内容」默认开。
-- 自动更新只覆盖 Windows（上其它平台要补构建 job + `relaunch()`）。
-- 点过「稍后」后所有新版本都不再自动弹窗（要"按版本"得比 `skippedVersion`）。
-- 写作模式：脚注不显示、表格整块、无每字形文字层、真机手感未验。
-
-## 和这位用户协作的偏好
-
-- 他自己跑桌面版，反馈是一句话/截图；**先复现再改**，复现不出就加兜底 + 让错误在状态栏可见。
-- 不等慢测试：日常 `check` + 相关单测；`browser-check` 只在动编辑器/装饰/布局时跑。
-- 发版两步：要不要发、发哪个号由他说；说了就"草稿一建好直接 Publish，不用再问"。
-- 不可逆 / 改仓库设置的动作先问；既有约定覆盖的机械动作直接做。
-- 清理现场只动自己创建的对象（别全量 taskkill）；推送被规则拦住先问"放宽还是走 PR"。
-- 产品：仿 Typora（**无工具条**）、不许夺焦、界面无多余色块与凸出。
-
-## 环境备忘（本机 WSL）
-
-- push 22 端口被掐走 443：`GIT_SSH_COMMAND="ssh -p 443 -o StrictHostKeyChecking=accept-new" git push git@ssh.github.com:Z3O1/Typst-pad.git HEAD:main`（`accept-new` 不可省）；fetch 同理显式 443 URL + tracking ref。
-- 1420 = Vite，CDP 默认 9333（单跑套件）/ 9335（`npm run verify:browser`）；查占用 `ss -ltnp | grep :1420` / Windows `netstat.exe -ano | findstr :1420`。`gh` 用 Windows 版（`--repo Z3O1/Typst-pad`）。
-- headless Chromium 用 Windows Chrome（镜像网络下 WSL 才能连 9333）或 WSL Playwright 的 `chromium_headless_shell-*`；**用托管后台任务起**，收尾按记下的 job/端口关。
-
-## 文档地图（改哪块，先读哪册）
-
-| 要动的东西 | 先读 |
-|---|---|
-| 模块清单全景、红线、协作偏好 | `docs/实现细则/01-总览与红线.md` |
-| 编译链路与诊断、项目根、typst_world、字体、路径安全、持久化 | `docs/实现细则/02-编译与后端.md` |
-| 写作模式块级渲染（切片 / 透镜 / 命中 / 鼠标 / 链接） | `docs/实现细则/03-块级渲染.md`＋`docs/文档模式渲染保真-调研.md`、`docs/写作模式块级渲染-现状与交接.md` |
-| 所见即所得（范围识别 / 公式 / 标记 / 两套 UI / 缩放 / 状态栏） | `docs/实现细则/04-所见即所得.md`＋`docs/WYSIWYG-调研.md` |
-| 按键路由、多窗口与 ACL、自动更新、启动打点 | `docs/实现细则/05-窗口与更新.md` |
-| 全部命令与验收脚本、CI 缓存纪律、签名与发版 | `docs/实现细则/06-命令与发布.md` |
-| 单测范围与坑、浏览器验收（八套 + 一条命令）、PR 审查两条腿 | `docs/实现细则/07-测试与审查.md` |
+- 版本变更、CHANGELOG 新版本段、tag、创建或发布 Release，必须有用户明确的发布版本授权；普通重构和审查不包含发版。获得授权后按[发布流程](docs/maintainers/release.md)完成资产检查和发布，无需为已授权步骤重复询问。
+- 不擅自替换或删除更新签名密钥，不改变仓库可见性、分支保护、remote 或 force push 来绕过限制。不可逆操作或仓库设置变更须有明确授权。
+- 清理只涉及自己创建的文件与进程；保留他人的工作。不要为等待外部 workflow 持续轮询或阻塞当前任务，按实际已完成状态汇报。
