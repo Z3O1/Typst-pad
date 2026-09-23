@@ -21,7 +21,7 @@ concurrency:
 # （GitHub 托管 runner 早已满足；自托管需先升级 runner）。
 # Swatinem/rust-cache@v2 本身已是 node24、dtolnay/rust-toolchain 是 composite 类型，
 # 两者都没有 Node 20 问题，无需升级。升级这些 action **不影响缓存 key**
-# （rust-cache 的 key 只由 shared-key/平台/Rust 版本/Cargo.lock 决定），见 CLAUDE.md「缓存纪律」。
+# （rust-cache 的 key 只由 shared-key/平台/Rust 版本/Cargo.lock 决定），见 docs/maintainers/ci.md。
 jobs:
   test:
     runs-on: ubuntu-latest

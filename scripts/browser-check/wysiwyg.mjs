@@ -886,7 +886,7 @@ check(
 console.log("23) 自动更新入口（浏览器开发模式：桩固定返回「没有新版本」）");
 // 桩对 plugin:updater|check 返回 null（见 browser-dev-stub.ts），所以这里断言的是
 // **前端链路**：菜单项在不在、手动检查有没有明确反馈、没更新时会不会乱弹窗。
-// 真实下载/安装/签名校验只能在桌面版验证（Windows NSIS），见 CLAUDE.md「测试」。
+// 真实下载/安装/签名校验只能在桌面版验证（Windows NSIS），见 docs/development/testing.md。
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });

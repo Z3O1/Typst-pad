@@ -14,7 +14,7 @@
 // 无法在此覆盖的两处（诚实记录，别当成"已覆盖"）：`.preview-error` 与 `.error-popover`
 // 需要"编译失败"才会出现，而 `?browserdev=1` 的假编译没有开关能造出编译失败
 // （`.preview-error` 只在导出 PDF 失败时可达）。它们在 PR #62 里同样受影响，改动这两处时
-// 要按 `docs/实现细则/07-测试与审查.md` 的口径手工量。
+// 要按 `docs/development/testing.md` 的口径手工量。
 
 import { connect, DEV_URL } from "./cdp.mjs";
 import { boot, createChecker, finish, sleep } from "./harness.mjs";

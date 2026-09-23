@@ -7,7 +7,7 @@
 //   ④ `src-tauri/fonts/` 里真有这些文件、真的随 `bundle.resources` 分发
 //
 // 任何一层对不上，**代码都能跑、页面都不报错**，只是悄悄退回系统字体 —— 正是这个仓库最怕的
-// "看着能用、其实没生效"（见 CLAUDE.md 里 0.7.10 的主题）。所以这里静态钉住。
+// "看着能用、其实没生效"（见 docs/development/compiler-backend.md 的字体管线说明）。所以这里静态钉住。
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
