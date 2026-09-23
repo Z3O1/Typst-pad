@@ -116,7 +116,7 @@
 
 <style>
   /* 页面那条 `* { box-sizing: border-box }` 因 Svelte 作用域命中不了子组件，搬出来的组件要自己
-     声明（见 docs/实现细则/07-测试与审查.md）。下面 `.settings-textarea` 的显式声明保留：它是
+     声明（见 docs/development/testing.md）。下面 `.settings-textarea` 的显式声明保留：它是
      拆分前就有的，与这条重复也无害。 */
   * {
     box-sizing: border-box;

@@ -4,7 +4,7 @@
 // 而 CodeMirror 的位置是 **UTF-16 码元偏移**（= JavaScript 字符串下标）。中文一个字
 // 3 字节 / 1 码元，emoji 4 字节 / 2 码元 —— 把字节偏移直接当位置用会整篇错位。
 // （现有的诊断走的是"1-based 行列"，由 CodeMirror 的 line 对象换算，从没碰过字节偏移；
-// 块级渲染是第一次需要它，见 docs/文档模式渲染保真-调研.md。）
+// 块级渲染是第一次需要它，见 docs/development/writing-rendering.md。）
 
 /** 字符串的 UTF-8 字节长度（与 Rust 的 `str::len()` 同义） */
 export function utf8Length(text: string): number {

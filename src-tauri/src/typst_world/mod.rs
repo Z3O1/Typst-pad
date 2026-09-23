@@ -25,7 +25,7 @@
 //! - Diagnostic  -> { message, severity, line, column, endLine, endColumn, path }
 //!   （行列均为 1-based，CodeMirror 波浪线直接消费）
 //!
-//! 本目录（规则见 `CLAUDE.md`「原生编译后端」等小节，实测见 `docs/实现细则/02-编译与后端.md`）：
+//! 本目录（契约见 `docs/development/compiler-backend.md`）：
 //!   * `world.rs`       `World` 实现（主文档 / 相对 include / 包解析）+ 输出与诊断类型
 //!   * `fonts.rs`       字体加载、逐 face 注册、进程内缓存、默认族注入
 //!   * `compile.rs`     预览页宽重排（`preview_page_setup`）+ 整篇编译（`compile_doc`）

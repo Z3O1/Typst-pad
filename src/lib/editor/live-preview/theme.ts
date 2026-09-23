@@ -1,5 +1,5 @@
 // 所见即所得相关样式（块切片 / 公式 widget / 常用标记的排版细节）。
-// 纯样式表、无逻辑依赖 —— 但**别改成 `&dark` 选择器**（见 CLAUDE.md「所见即所得」）。
+// 纯样式表、无逻辑依赖 —— 但**别改成 `&dark` 选择器**（见 docs/development/wysiwyg.md）。
 import { EditorView } from "@codemirror/view";
 
 /** 所见即所得相关样式（公式 widget + 常用标记） */

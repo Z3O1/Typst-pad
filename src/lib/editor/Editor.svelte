@@ -62,7 +62,7 @@
      * 含代码/raw/注释的复杂块显示成引擎自己画的那一块；普通正文与标题始终是真实文本
      * （不建切片，见 live-preview 的 isDirectlyEditableTextBlock）。
      * null / 空 = 关闭（源码模式、后端不支持该命令时都走这条路，行为与加此功能前一致）。
-     * 见 docs/文档模式渲染保真-调研.md。
+     * 见 docs/development/writing-rendering.md。
      */
     blocks?: Block[] | null;
     /**
@@ -715,7 +715,7 @@
     padding-right: 48px;
     /* 滚动条槽位常驻：写作模式的**版心宽是编译期输入**（Rust 侧按列宽注入 #set page），
        如果滚动条出现/消失会让列宽来回变，就形成"重编译 → 内容高度变 → 滚动条变 → 再重编译"
-       的反馈环（预览区当年就是这么闪的，见 docs/WYSIWYG-调研.md 4.3）。 */
+       的反馈环（预览区当年就是这么闪的，见 docs/development/frontend.md 的布局反馈环说明）。 */
     scrollbar-gutter: stable;
   }
   .editor-host.write :global(.cm-content) {

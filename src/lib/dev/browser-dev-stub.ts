@@ -10,7 +10,7 @@
 //    也不做真实排版），于是编辑区与预览区的交互可以完整调试。
 //
 // 明确不提供的能力：真实 Typst 编译、include/包解析、字体度量、PDF 导出落盘。
-// 这些必须回到桌面版（Windows WebView2）验证 —— 见 CLAUDE.md 与 README。
+// 这些必须回到桌面版（Windows WebView2）验证 —— 见 docs/development/testing.md。
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { byteOffsetsToPositions } from "../core/block-offsets";
 import { MATH_TEXT_PT } from "../core/typst-engine";
@@ -579,7 +579,7 @@ async function handleCommand(
       return false;
     // 自动更新：浏览器开发模式没有真实 updater（更没有 Rust 侧的签名校验与安装器）。
     // 返回 null = "没有可用更新"——让"启动静默检查 → 更新状态机"这条链路在验收里安静走通，
-    // 而不是刷一屏未知命令。真实更新行为只能在桌面版验证（见 CLAUDE.md「测试」）。
+    // 而不是刷一屏未知命令。真实更新行为只能在桌面版验证（见 docs/development/testing.md）。
     // 例外：`?browserdev=1&fakeupdate=1` 时返回一个**假的可用更新**，让"发现新版本"弹窗
     // （含更新说明的 Markdown 渲染）也能被验收覆盖——否则这条 UI 只有真发版时才看得到。
     // 另外**记一笔调用次数**（`window.__browserDevUpdaterChecks`）：第 34 组据此断言

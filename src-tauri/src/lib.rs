@@ -12,7 +12,7 @@ use tauri::Manager;
 mod packages;
 mod typst_world;
 
-// 源块 ↔ 版面区域的几何映射 + 写作模式的块级渲染（见 docs/文档模式渲染保真-调研.md）。
+// 源块 ↔ 版面区域的几何映射 + 写作模式的块级渲染（见 docs/development/writing-rendering.md）。
 // 阶段 0 的探针函数只有测试在用，故整体允许"未使用"告警。
 #[allow(dead_code)]
 mod block_geometry;
@@ -103,7 +103,7 @@ pub fn run() {
             Ok(())
         })
         // **命令表就是 IPC 契约**：增删/改名任何一个 `#[tauri::command]` 都必须同步这里；
-        // 漏了不会编译报错，只会在真机上"前端调用没有这个命令"（见 docs/实现细则/02）。
+        // 漏了不会编译报错，只会在真机上"前端调用没有这个命令"（见 docs/development/compiler-backend.md）。
         .invoke_handler(tauri::generate_handler![
             file_commands::read_file,
             file_commands::write_file,

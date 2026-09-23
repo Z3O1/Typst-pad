@@ -4,7 +4,7 @@
 // 那一轮里的"拖放 / 关闭确认 / open-file 接球"已经分别落在 `core/window-events.ts` 与
 // `core/open-file-claim.ts`，所以这里只剩**建窗口**这一件事）。行为零改动。
 //
-// 三条规则（展开见 docs/实现细则/05-窗口与更新.md）：
+// 三条规则（展开见 docs/development/frontend.md）：
 //
 // 1. **label 必须唯一**（Tauri 要求，重名会创建失败）：`editor-<毫秒时间戳>`。
 // 2. **前缀必须与 `capabilities/default.json` 的 `windows: ["main", "editor-*"]` 对得上**，

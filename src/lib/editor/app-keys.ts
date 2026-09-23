@@ -59,7 +59,7 @@ export function topModal(open: Partial<Record<AppModal, boolean>>): AppModal | n
  * 「加入 Ctrl + Shift + -/+ 调整一格的快捷键」）。
  *
  * **为什么要在滚轮之外再做一条键盘通道**（不是重复劳动）：Ctrl+滚轮那条路要穿过 WebView2 自己的
- * 手势处理（见 CLAUDE.md「界面缩放」那节的 WebView2Feedback #1022 —— 引擎可能在手势进行中/结束时
+ * 手势处理（见 docs/development/frontend.md 的缩放说明 —— 引擎可能在手势进行中/结束时
  * 把宿主设的 `ZoomFactor` 抹回手势开始时的值），而键盘不经过任何手势。所以它一身两用：
  * ① 用户反复反馈「缩放调整还是会失败」时，这是一条**能用的替代操作**；
  * ② 它同时是**判据** —— 键盘也推不动布局宽度 ⇒ 问题在 `setZoom` 本身；键盘能推、滚轮不能

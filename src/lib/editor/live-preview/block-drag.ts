@@ -33,7 +33,7 @@ export function createBlockDrag({
    * 这里换成"**把指针位置翻译成源码位置、再由 CM 落选区**"：选区只有一套，Ctrl+C/X、方向键、
    * 输入替换、Shift+方向键全都照旧；代价是**复制出来的是源码**（`= 标题` 而不是"标题"）——
    * 与 Typora 一致（Typora 复制出来也是 markdown 源码）。仍然拿不到的：浏览器 Ctrl+F 查找、
-   * 拼写检查、无障碍，那三样确实要真正的文字层（见 docs/文档模式渲染保真-调研.md 3.4）。
+   * 拼写检查、无障碍，那三样确实要真正的文字层（见 docs/design/rendering-model.md 的文字层取舍）。
    *
    * 位置解析分两种落点（都是"这一点的源码位置"）：
    *  - 落在**切片**上 → 页面坐标（pt）→ Rust 侧命中测试（图片里没有字符位置）；
@@ -200,7 +200,7 @@ export function createBlockDrag({
        * 拖动中：**保持不动**（等松手再落真选区，见 onUp / commit）。
        * 这里返回"当前选区"而不是锚点光标：返回光标会让 CM 立刻把光标放到这一块里 →
        * 那一块当场展开成源码 → 版式变 → 指针底下的内容跟着变（拖选会"倒着走"，
-       * 见 CLAUDE.md 那条红线）。返回当前选区时 CM 的比较会判定"没变化"，一次事务都不发。
+       * 见 docs/development/writing-rendering.md 的拖选版式约束）。返回当前选区时 CM 的比较会判定"没变化"，一次事务都不发。
        */
       if (this.moved) return this.view.state.selection;
       // 注意用 `single` 而不是 `range`：`EditorSelection.range()` 返回的是 **SelectionRange**

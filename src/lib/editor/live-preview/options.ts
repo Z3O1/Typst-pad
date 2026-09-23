@@ -65,7 +65,7 @@ export interface LivePreviewOptions {
    * 写作模式的**块级渲染**：整篇编译出的"每块一张切片"（父组件每次 compile_blocks 后更新）。
    * 返回 null / 空数时整体关闭 —— 那时的行为与加这个功能之前**逐字节一致**
    * （源码模式、浏览器开发桩、后端没有该命令时都走这条路）。
-   * 见 docs/文档模式渲染保真-调研.md。
+   * 见 docs/development/writing-rendering.md。
    */
   blocks?: () => Block[] | null;
   /**

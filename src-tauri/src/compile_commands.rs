@@ -88,7 +88,7 @@ pub async fn compile_doc(
 }
 
 /// 写作模式的块级编译（compile_blocks）：整篇编译一次，把每个源块在版面上的那一块切出来，
-/// 供编辑器把"非光标所在块"显示成**真实 typst 排版**（见 docs/文档模式渲染保真-调研.md）。
+/// 供编辑器把需要切片的复杂块显示成**真实 typst 排版**（见 docs/development/writing-rendering.md）。
 ///
 /// 与 compile_doc 的关系：同一条编译链路（同一把命令层互斥锁 + spawn_blocking），只是产物
 /// 从"每页 SVG"换成"每块 SVG + 几何"；诊断/警告结构与 compile_doc 完全一致，前端可以共用

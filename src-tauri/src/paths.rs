@@ -2,7 +2,7 @@
 //
 // 写盘只有一条路（前端 `handleSave` → `saveTypFile` → `write_file`），所以这里是最后的闸门：
 // 绝对路径、拒绝 `..` 穿越、父目录必须存在且 canonicalize、拒绝写符号链接、扩展名大小写不敏感。
-// **别在别处再抄一份**（CLAUDE.md「文件/安全」：`validate_typ_path` / `validate_write_path` 不许绕过）。
+// **别在别处再抄一份**（docs/development/files-and-security.md：`validate_typ_path` / `validate_write_path` 不许绕过）。
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 

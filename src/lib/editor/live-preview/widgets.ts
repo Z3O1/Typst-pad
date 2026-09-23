@@ -2,7 +2,7 @@
 //
 // 契约：凡是会解析/插入外部产物（SVG、innerHTML）的 `toDOM` 都必须 try/catch 到
 // `fallbackTextDom`，**绝不把异常抛回 CodeMirror 的渲染流程** —— 抛进去会中断这次视图更新，
-// 表现为"编辑区卡死、打字全没反应"（见 CLAUDE.md 红线 3）。
+// 表现为"编辑区卡死、打字全没反应"（见 docs/development/wysiwyg.md 的异常隔离约束）。
 // `TextWidget` 例外且不需要兜底：它只 `createElement` + `textContent`（纯文本节点，无解析步骤），
 // 而 `fallbackTextDom` 本身也是这两个动作 —— 给它加兜底等于用同一件事兜自己。
 import { WidgetType } from "@codemirror/view";

@@ -28,7 +28,7 @@
 <style>
   /* 这个弹窗自己没有特有样式，但**必须**声明这一条：页面那条 `* { box-sizing: border-box }` 会被
      Svelte 的作用域编译成页面的 hash 类，命中不了子组件里的元素（`.modal` 有 padding+border，
-     缺了它外框会多出 50px）。见 docs/实现细则/07-测试与审查.md。 */
+     缺了它外框会多出 50px）。见 docs/development/testing.md。 */
   * {
     box-sizing: border-box;
   }
