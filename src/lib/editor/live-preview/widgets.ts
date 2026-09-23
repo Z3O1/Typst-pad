@@ -10,6 +10,7 @@ import type { EditorView } from "@codemirror/view";
 import type { MathRender } from "../../core/typst-engine";
 import type { Block, BlockCover } from "../../core/block-plan";
 import type { MathRange } from "../../core/math-ranges";
+import { revealSourceAt } from "./reveal";
 
 /**
  * widget 构造失败的兜底：退回纯文本节点。
@@ -91,10 +92,12 @@ export class MathWidget extends WidgetType {
         svg.setAttribute("height", "100%");
         svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
       }
-      // 点击 widget：光标落到公式源码起点 → 选区进入该区间 → 装饰撤掉，源码展开
+      // 点击 widget：光标落到公式源码起点 → 选区进入该区间 → 装饰撤掉，源码展开。
+      // 选区与"钉在鼠标点高度"的滚动目标必须**同一个事务**（见 reveal.ts 的说明）。
+      // 行内公式是单行 widget，第一行就是用户点的那一行，所以不传 widgetTop（总是可钉）。
       wrap.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        view.dispatch({ selection: { anchor: this.range.from } });
+        revealSourceAt(view, this.range.from, e.clientY, { button: e.button });
         view.focus();
       });
       return wrap;
@@ -140,7 +143,12 @@ export class CodeBlockWidget extends WidgetType {
       block.appendChild(pre);
       block.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        view.dispatch({ selection: { anchor: this.range.from } });
+        // 与 MathWidget 同一套：选区 + 滚动目标放同一个事务。**但围栏代码块往往是几十行的高块**：
+        // 只有点在它的第一行上才钉，不然"把首行钉到鼠标处"会让页面向上滚整个块（见 reveal.ts）
+        revealSourceAt(view, this.range.from, e.clientY, {
+          button: e.button,
+          widgetTop: block.getBoundingClientRect().top,
+        });
         view.focus();
       });
       return block;
@@ -276,6 +284,39 @@ export class BlockCropWidget extends WidgetType {
 }
 
 /**
+ * **临时占位**（报告 T4）：已展开的高公式下方补一段不可交互的空白，把"高渲染 → 矮源码"的
+ * 收缩按住（实测独占单行的行间公式 49.66px → 24.2px）。
+ *
+ * 三条纪律：
+ *  - **零交互**：`ignoreEvent() === true`（CM 不处理它身上的事件）、CSS 里 `pointer-events: none`，
+ *    点它既不移动光标也不打断拖选；
+ *  - **高度由 `planEditReserve` 算**（上限 1 个可视高度、且不超过渲染盒），这里只负责画；
+ *  - 它由 **StateField** 提供（块级装饰不许来自 ViewPlugin）—— 见 `buildMathDecorations`。
+ */
+export class ReserveWidget extends WidgetType {
+  constructor(private readonly heightPx: number) {
+    super();
+  }
+
+  eq(other: ReserveWidget): boolean {
+    return other.heightPx === this.heightPx;
+  }
+
+  toDOM(): HTMLElement {
+    const el = document.createElement("div");
+    el.className = "cm-reserve-spacer";
+    el.style.height = `${this.heightPx}px`;
+    el.setAttribute("aria-hidden", "true");
+    return el;
+  }
+
+  /** 不吞事件：它不是可编辑内容，交给编辑器默认处理 */
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+/**
  * 独占整行的行间公式（display）用**块级 widget**：整行替换成居中显示的排版结果，
  * 与 typst 把 `$ ... $` 排成独立居中式子的行为一致（行内 widget 只能贴着文字基线放，
  * 视觉上不像"独立成行的公式"）。
@@ -314,7 +355,9 @@ export class MathBlockWidget extends WidgetType {
 
   toDOM(view: EditorView): HTMLElement {
     try {
-      const block = document.createElement(this.inline ? "span" : "div");
+      // 显式标成 HTMLElement：`createElement(a ? "span" : "div")` 的联合类型会让
+      // addEventListener 的重载解析退化成 Event，拿不到 `clientY`（svelte-check 报错）
+      const block: HTMLElement = document.createElement(this.inline ? "span" : "div");
       const classes = ["cm-math-block"];
       if (this.inline) classes.push("cm-math-block-inline");
       if (this.dark) classes.push("cm-math-dark");
@@ -335,7 +378,12 @@ export class MathBlockWidget extends WidgetType {
       block.appendChild(box);
       block.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        view.dispatch({ selection: { anchor: this.range.from } });
+        // 单行形态（inline）第一行就是点中的那一行；跨行形态与围栏代码块一样是高块 —— 由
+        // `widgetTop` 交给 reveal.ts 判定（见那边的 shouldPin）
+        revealSourceAt(view, this.range.from, e.clientY, {
+          button: e.button,
+          widgetTop: block.getBoundingClientRect().top,
+        });
         view.focus();
       });
       return block;

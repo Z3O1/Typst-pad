@@ -7,8 +7,9 @@ import type { EditorState, Text } from "@codemirror/state";
 import { mathCacheKey, mathRevealDecision } from "../../core/math-ranges";
 import type { MathRange } from "../../core/math-ranges";
 import type { LivePreviewOptions } from "./options";
-import { MathBlockWidget, MathWidget } from "./widgets";
+import { MathBlockWidget, MathWidget, ReserveWidget } from "./widgets";
 import { MATH_TEXT_PT } from "../../core/typst-engine";
+import { planEditReserve, sourceHeightPx } from "./edit-session";
 
 /**
  * 该行间公式是否**独占所在各行**（前后只有空白）。
@@ -52,9 +53,48 @@ export function buildMathDecorations(
     const decision = mathRevealDecision(decorated, selections, {
       inlinePresentation: !asBlockWidget,
     });
-    if (decision.reveal) continue;
     // 落在"已被块切片盖住"的区间里：整块已经由块 widget 呈现，这里不能再叠一层 replace
     if (insideCovered(range.from, range.to, covered)) continue;
+    // **独占单行的行间公式：行级居中要在 reveal 分支之前挂**（报告 V1）。
+    // 以前这枚 `Decoration.line` 只挂在"渲染态"那条分支里（`!decision.reveal && render.ok`），
+    // 于是光标一进公式、widget 一撤，`text-align: center` 跟着消失 —— 实测同一行从
+    // `text-align:center`（行盒 33.5px）变成 `text-align:start`（行盒 24.2px），
+    // 用户看到的就是"点进公式，公式跳到左边、整段还矮了一截"。
+    // 对齐是**行的属性**，不是渲染产物：源码形态与渲染形态必须共用同一个对齐，
+    // 所以它属于"决定展开与否之前"这一步，也不该受渲染缓存到没到货影响。
+    // 条件严格限定 `block !== null && !range.multiline`：多行行间公式走整行 block widget、
+    // 不套单行对齐；与文字同行的 `$ x $`（`block === null`）更不能整行居中（会把正文一起居中）。
+    if (block !== null && !range.multiline) {
+      decorations.push(
+        Decoration.line({ class: "cm-math-line" }).range(state.doc.lineAt(block.from).from),
+      );
+      // **已展开时补一点临时空白**（报告 T4）：高公式（`frac(a,b)`、求和式）展开成一行源码
+      // 会把下方内容整体往上拽（实测 49.66px → 24.2px）。补的规则全在 `planEditReserve` 里：
+      // 上限 1 个可视高度、不超过进进入时的渲染盒、无状态不累积。
+      if (decision.reveal) {
+        const reservePt = opts.mathSizePt?.() ?? MATH_TEXT_PT;
+        const cached = opts.lookup(mathCacheKey(range.body, range.display, context, reservePt));
+        const reserve = planEditReserve({
+          // 公式盒高是 pt，编辑器 CSS 里 1pt = 4/3 px（见 widgets.ts 的说明）
+          renderPx: cached?.ok ? (cached.heightPt * 4) / 3 : 0,
+          sourcePx: sourceHeightPx(
+            state.doc.sliceString(block.from, block.to),
+            opts.lineHeight?.() ?? 0,
+          ),
+          viewportPx: opts.viewportHeight?.() ?? 0,
+        });
+        if (reserve.reservePx > 0) {
+          decorations.push(
+            Decoration.widget({
+              widget: new ReserveWidget(reserve.reservePx),
+              block: true,
+              side: 1,
+            }).range(block.to),
+          );
+        }
+      }
+    }
+    if (decision.reveal) continue;
     const sizePt = opts.mathSizePt?.() ?? MATH_TEXT_PT;
     const render = opts.lookup(mathCacheKey(range.body, range.display, context, sizePt));
     // 未渲染 / 渲染失败 → 保持源码显示
@@ -77,9 +117,7 @@ export function buildMathDecorations(
       // （浏览器删掉它、在同一位置插入文本，CodeMirror 能正常读到改动）。
       // 替换区间用**整行**（block.from..block.to）而不是只盖公式：行内可能有前后空白
       // （`  $ x $  ` 这种写法），一起盖掉才真的居中——widget 是 inline-box，留着空白会被推到一边。
-      decorations.push(
-        Decoration.line({ class: "cm-math-line" }).range(state.doc.lineAt(block.from).from),
-      );
+      // （行级居中的 `Decoration.line` 已经在上面、reveal 之前挂好，这里不再重复挂。）
       decorations.push(
         Decoration.replace({
           widget: new MathBlockWidget(render, range, opts.dark(), decision.selected, true),

@@ -96,6 +96,11 @@ export const mathWidgetTheme = EditorView.theme({
   ".cm-math-line": {
     textAlign: "center",
   },
+  // 展开占位的空白（报告 T4）：只占高度，不参与任何交互（`ReserveWidget.ignoreEvent` 也返回
+  // true，两道保险 —— 点它既不移动光标也不打断拖选）
+  ".cm-reserve-spacer": {
+    pointerEvents: "none",
+  },
   ".cm-math-block:hover": {
     backgroundColor: "rgba(128, 128, 128, 0.12)",
   },

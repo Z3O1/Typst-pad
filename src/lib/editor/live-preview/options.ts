@@ -52,6 +52,16 @@ export interface LivePreviewOptions {
   /** 是否暗色主题（typst 产物是黑字透明底，暗色下需反色；见 mathWidgetTheme） */
   dark: () => boolean;
   /**
+   * 编辑器当前的行高（px，`view.defaultLineHeight`）。
+   * 只给**展开占位**用（报告 T4）：源码的自然高度 = 行数 × 行高。
+   */
+  lineHeight?: () => number;
+  /**
+   * 编辑器的可视高度（px，`scrollDOM.clientHeight`）。
+   * 只给**展开占位**用：占位上限是 1 个可视高度（`MAX_RESERVED_VIEWPORTS`）。
+   */
+  viewportHeight?: () => number;
+  /**
    * 写作模式的**块级渲染**：整篇编译出的"每块一张切片"（父组件每次 compile_blocks 后更新）。
    * 返回 null / 空数时整体关闭 —— 那时的行为与加这个功能之前**逐字节一致**
    * （源码模式、浏览器开发桩、后端没有该命令时都走这条路）。
@@ -66,7 +76,11 @@ export interface LivePreviewOptions {
   onBlocksNeeded?: () => void;
   /**
    * **点击定位**（阶段 2）：点在某张切片上的 `(xPt, yPt)`（页面坐标）→ 返回光标的
-   * CodeMirror 位置；返回 null = 定不了位，调用方退回"光标落到块首"。
+   * CodeMirror 位置。三种返回（报告 T2 / A1）：
+   *  - `number`：命中位置；
+   *  - `null`：**定不了位**（块表不精确、后端没有这份几何、命中不可用）→ 调用方退回"块首"；
+   *  - `"cancelled"`：这次命中在等待期间**作废**（会话/文档/几何编号变了）→ 调用方必须
+   *    整条取消，**不许**把它当 `null` 用（那会落一个明知过时的光标）。
    *
    * 真实实现在父组件（→ Rust 侧 `block_hit_test`，见 block-hit.ts / +page.svelte），
    * 这里只负责"量出点击点在切片里的相对位置"并把结果落在事务里。
@@ -78,7 +92,7 @@ export interface LivePreviewOptions {
     /** 被点那块的源码范围（CodeMirror 位置） */
     from: number;
     to: number;
-  }) => Promise<number | null>;
+  }) => Promise<number | null | "cancelled">;
   /**
    * **点切片里的链接**（阶段 3）：typst 的 `#link("…")[文字]` 在切片上是画出来的文字，
    * 点击时把 URL 交给父组件（→ opener 插件用系统浏览器打开）。不传则链接只是不可点的热区。

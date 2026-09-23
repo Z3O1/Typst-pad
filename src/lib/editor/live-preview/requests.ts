@@ -9,9 +9,8 @@ import { buildBlockCovers } from "./block-decorations";
 import { insideCovered } from "./covered";
 import { blockRangeFor } from "./math-decorations";
 import { notifyBlocksNeeded } from "./block-decorations";
-import { buildMathContext } from "../../core/math-context";
 import { mathCacheKey, mathRevealDecision } from "../../core/math-ranges";
-import { scanMathRanges } from "../../core/math-ranges";
+import { scanDocument } from "./doc-scan";
 import { PREFETCH_MARGIN, refreshLivePreview } from "./options";
 import type { MathRequest } from "./options";
 import type { LivePreviewOptions } from "./options";
@@ -43,7 +42,10 @@ export function createRequester({ opts }: { opts: LivePreviewOptions }) {
     visible: readonly { from: number; to: number }[],
     context: string,
   ) => {
-    const doc = state.doc.toString();
+    // **走文档扫描缓存**（报告 T3 / P1）：这个收集器在**视口变化**（滚动）时每帧都会跑，
+    // 而滚动不改文档 —— 重扫全文纯属浪费。`context` 由调用方给（它已经与扫描同源）。
+    const scan = scanDocument(state, opts.prefix());
+    const doc = scan.docString;
     // 被块切片盖住的公式不用渲染（整块已经由切片呈现）：每个公式都是一次 IPC 往返，
     // 一篇有几十个公式的文档能省掉几十次。展开源码时（选区进入）才需要。
     const covered = buildBlockCovers(state, opts, doc)
@@ -55,7 +57,7 @@ export function createRequester({ opts }: { opts: LivePreviewOptions }) {
     // 而它和整篇编译共用一把锁（用户反馈「输入手感很差（公式）」）。光标离开后
     // selectionSet 会再跑一遍收集，那时才真正去渲。
     const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
-    for (const range of scanMathRanges(doc)) {
+    for (const range of scan.math) {
       // 展开成源码的那些不请求（见上）。**选区完整盖住公式时不展开**，所以那时照样要渲 ——
       // 否则"选中一个还没渲过的公式"会一直停在源码（与 buildMathDecorations 的判定同源，
       // 连"装饰实际盖住的区间"这个细节也必须一致，见那边的注释）。
@@ -93,8 +95,8 @@ export function createRequester({ opts }: { opts: LivePreviewOptions }) {
           visible = [];
         }
         if (visible.length === 0) visible = [{ from: 0, to: view.state.doc.length }];
-        const doc = view.state.doc.toString();
-        collectRequests(view.state, visible, buildMathContext(opts.prefix(), doc));
+        const scan = scanDocument(view.state, opts.prefix());
+        collectRequests(view.state, visible, scan.context);
         notifyBlocksNeeded(opts, visible);
       }
 
@@ -108,12 +110,8 @@ export function createRequester({ opts }: { opts: LivePreviewOptions }) {
         if (!update.docChanged && !update.viewportChanged && !update.selectionSet && !refreshed) {
           return;
         }
-        const doc = update.state.doc.toString();
-        collectRequests(
-          update.state,
-          update.view.visibleRanges,
-          buildMathContext(opts.prefix(), doc),
-        );
+        const scan = scanDocument(update.state, opts.prefix());
+        collectRequests(update.state, update.view.visibleRanges, scan.context);
         notifyBlocksNeeded(opts, update.view.visibleRanges);
       }
     },

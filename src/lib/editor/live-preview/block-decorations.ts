@@ -125,7 +125,11 @@ export function notifyBlocksNeeded(
   for (const block of blocks) {
     // `skipped` = 后端**有意**没给这一块渲图（源码太大）：保持源码显示，**别再要求补渲** ——
     // 否则每 150ms 重编译一次（见 Block.skipped 的说明）。
-    if (!block.found || block.skipped || block.svg !== "") continue;
+    if (!block.found || block.skipped) continue;
+    // "这一轮没拿到图"（`svg === ""`）**或**"手里这张图是沿用来的旧产物"（`stale`）都要补渲。
+    // 只看 `svg === ""` 时，沿用的旧图会让判据永远为假 —— 那一块就再也不会刷新
+    //（报告 T2 / A4：旧图可以暂时留着，但滚到它附近必须去要新图）。
+    if (block.svg !== "" && block.stale !== true) continue;
     const near = visible.some(
       (v) => block.to >= v.from - PREFETCH_MARGIN && block.from <= v.to + PREFETCH_MARGIN,
     );

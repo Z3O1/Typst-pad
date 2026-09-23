@@ -16,13 +16,13 @@ import { MATH_TEXT_PT } from "../core/typst-engine";
 import type { MathRender } from "../core/typst-engine";
 
 /** 假渲染结果：真实契约里 svg 是 Rust 侧产物，这里只需区分不同公式 */
-function render(body: string): MathRender {
+function render(body: string, heightPt = 7): MathRender {
   return {
     ok: true,
-    svg: `<svg viewBox="0 0 10 7" width="10pt" height="7pt"><text>${body}</text></svg>`,
+    svg: `<svg viewBox="0 0 10 ${heightPt}" width="10pt" height="${heightPt}pt"><text>${body}</text></svg>`,
     widthPt: 10,
-    heightPt: 7,
-    baselinePt: 5,
+    heightPt,
+    baselinePt: Math.min(5, heightPt),
   };
 }
 
@@ -42,6 +42,10 @@ describe("livePreview 扩展", () => {
       cursor?: number;
       /** 公式字号（pt）：不给 = 缺省 10.5pt（源码模式）；写作模式由父组件传文档字号 */
       mathSizePt?: number;
+      /** 行高（px）：展开占位（报告 T4）用；jsdom 里缺省是 0 */
+      lineHeight?: number;
+      /** 可视高度（px）：占位上限 1 个可视高度（报告 T4） */
+      viewportHeight?: number;
     } = {},
   ) {
     const enabled = opts.enabled ?? true;
@@ -63,6 +67,10 @@ describe("livePreview 扩展", () => {
             onRequest: (reqs) => requests.push(...reqs),
             dark: () => dark,
             ...(opts.mathSizePt === undefined ? {} : { mathSizePt: () => opts.mathSizePt! }),
+            ...(opts.lineHeight === undefined ? {} : { lineHeight: () => opts.lineHeight! }),
+            ...(opts.viewportHeight === undefined
+              ? {}
+              : { viewportHeight: () => opts.viewportHeight! }),
           }),
         ],
       }),
@@ -298,6 +306,122 @@ describe("livePreview 扩展", () => {
     expect(text()).toContain("$ x^2 $");
   });
 
+  // -------------------------------------------------------------------------
+  // 报告 T1：行级对齐与 widget 点击（V1 / V2）
+  // -------------------------------------------------------------------------
+
+  it("独占单行的行间公式：光标进入（编辑态）时**仍然居中**（报告 T1 / V1）", () => {
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
+    mount("$ x^2 $\n正文");
+    const line = () => host.querySelector(".cm-math-line");
+    expect(line()).not.toBeNull(); // 渲染态：整行居中（Decoration.line）
+    view.dispatch({ selection: { anchor: 3 } }); // 光标进公式内部 → widget 撤、源码露出
+    expect(host.querySelectorAll(".cm-math-block").length).toBe(0);
+    expect(text()).toContain("$ x^2 $");
+    // 改之前这里会变成 null：行级居中挂在"渲染态"那条分支里，widget 一撤就跟着消失，
+    // 实测同一行从 text-align:center（行盒 33.5px）变成 text-align:start（行盒 24.2px）
+    expect(line()).not.toBeNull();
+  });
+
+  it("行级居中与渲染结果无关：还没渲过的行间公式也居中（不然一进一出会先左后中）", () => {
+    mount("$ x^2 $\n正文"); // 不预置缓存：停在源码形态
+    expect(text()).toContain("$ x^2 $");
+    expect(host.querySelector(".cm-math-line")).not.toBeNull();
+  });
+
+  it("多行行间公式不套单行居中（T1 的明确例外）", () => {
+    cache.set(mathCacheKey("a + b", true, "", MATH_TEXT_PT), render("a + b"));
+    mount("$\n  a + b\n$\n正文");
+    expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
+    expect(host.querySelector(".cm-math-line")).toBeNull();
+  });
+
+  it("整段选中行间公式后替换：新文本落进正确位置，装饰随之撤掉（报告 §8 选择/历史）", () => {
+    // 与浏览器套件 wysiwyg.mjs 第 37 组同源：那套走真实输入（选中 → 打字），这里走等价事务。
+    // 这两种"整选替换"曾经都出过事：整行 block widget 是 contenteditable=false 的顶层元素，
+    // 字符会被插到下一行（见 buildMathDecorations 的说明）。
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
+    mount("$ x^2 $\n后文\n");
+    expect(host.querySelectorAll(".cm-math-block").length).toBe(1);
+    // 选区先落在整行公式上（0..7），然后**只派发 changes**：选区由 CodeMirror 自己映射到新文档
+    //（与浏览器里"选中一段再打字"读到的事务形状一致）。同时给 selection 的话那个坐标是按
+    // **新文档**解释的，写 7 会直接抛 "Selection points outside of document"。
+    view.dispatch({ selection: { anchor: 0, head: 7 } });
+    view.dispatch({ changes: { from: 0, to: 7, insert: "z" } });
+    expect(view.state.doc.toString()).toBe("z\n后文\n");
+    expect(view.state.selection.main.head).toBe(1); // 选区被替换、光标跟到新文本之后
+    expect(host.querySelectorAll(".cm-math-block").length).toBe(0);
+    expect(host.querySelector(".cm-math-line")).toBeNull(); // 公式没了，行级居中也要跟着走
+  });
+
+  it("已展开的高公式补临时占位（报告 T4）：补到渲染盒高度为止", () => {
+    // 渲染盒 20pt → 26.67px；源码一行 24.2px → 补 2.47px
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2", 20));
+    mount("$ x^2 $\n正文", { lineHeight: 24.2, viewportHeight: 800 });
+    expect(host.querySelector(".cm-reserve-spacer")).toBeNull(); // 渲染态：不需要
+    view.dispatch({ selection: { anchor: 3 } }); // 进编辑态
+    const spacer = host.querySelector(".cm-reserve-spacer") as HTMLElement | null;
+    expect(spacer).not.toBeNull();
+    expect(Number.parseFloat(spacer!.style.height)).toBeCloseTo(26.6667 - 24.2, 2);
+  });
+
+  it("源码比渲染盒高时不补（真实内容不许压）", () => {
+    // 渲染盒 7pt → 9.33px < 一行源码 24.2px
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2"));
+    mount("$ x^2 $\n正文", { lineHeight: 24.2, viewportHeight: 800 });
+    view.dispatch({ selection: { anchor: 3 } });
+    expect(host.querySelector(".cm-reserve-spacer")).toBeNull();
+  });
+
+  it("占位上限 = 1 个可视高度（报告 T4）", () => {
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2", 500)); // 666px 的盒子
+    mount("$ x^2 $\n正文", { lineHeight: 0, viewportHeight: 120 });
+    view.dispatch({ selection: { anchor: 3 } });
+    const spacer = host.querySelector(".cm-reserve-spacer") as HTMLElement | null;
+    expect(spacer).not.toBeNull();
+    expect(Number.parseFloat(spacer!.style.height)).toBeCloseTo(120, 1); // 一个可视高度
+  });
+
+  it("反复进出不累积：占位只由当前状态决定（无状态纯函数）", () => {
+    cache.set(mathCacheKey("x^2", true, "", MATH_TEXT_PT), render("x^2", 20));
+    mount("$ x^2 $\n正文", { lineHeight: 24.2, viewportHeight: 800 });
+    const heights: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      view.dispatch({ selection: { anchor: 3 } }); // 进
+      heights.push(
+        Number.parseFloat((host.querySelector(".cm-reserve-spacer") as HTMLElement).style.height),
+      );
+      view.dispatch({ selection: { anchor: 10 } }); // 出（光标移到"正文"里）
+    }
+    expect(new Set(heights).size).toBe(1); // 每次都一样，没有越攒越大
+  });
+
+  it("与文字同行的 `$ x $` 不套行级居中（免得把整行正文也居中）", () => {
+    cache.set(mathCacheKey("x", true, "", MATH_TEXT_PT), render("x"));
+    mount("前 $ x $ 后\n");
+    expect(widgetCount()).toBe(1);
+    expect(host.querySelector(".cm-math-line")).toBeNull();
+  });
+
+  it("行内公式所在行不套行级居中", () => {
+    mount("前 $x^2$ 后\n", { cache: true });
+    expect(widgetCount()).toBe(1);
+    expect(host.querySelector(".cm-math-line")).toBeNull();
+  });
+
+  it("点击行内公式 widget：选区与滚动目标在**同一个事务**里（报告 T1 / V2）", () => {
+    mount("前 $x^2$ 后\n", { cache: true });
+    const widget = host.querySelector(".cm-math-widget") as HTMLElement;
+    expect(widget).not.toBeNull();
+    const spy = vi.spyOn(view, "dispatch");
+    widget.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientY: 120 }));
+    const specs = spy.mock.calls.map((c) => c[0] as { selection?: unknown; effects?: unknown });
+    // 关键：**同一次 dispatch** 里既有选区又有滚动目标（分两次会"先跳一下再修正"）
+    expect(specs.some((s) => s?.selection && s.effects)).toBe(true);
+    expect(view.state.selection.main.head).toBe(2); // 公式源码起点（`$`）
+    spy.mockRestore();
+  });
+
   it("暗色主题标记注入 widget（供反色样式匹配）", () => {
     mount("$x^2$\n", { cache: true, dark: true });
     expect(host.querySelector(".cm-math-widget")?.className).toContain("cm-math-dark");
@@ -404,6 +528,46 @@ describe("livePreview 代码块（``` 围栏）", () => {
     expect(host2.querySelectorAll(".cm-raw-block").length).toBe(0);
     expect(host2.querySelector(".cm-content")?.textContent).toContain("```");
   });
+
+  it("点击代码块 widget 的**第一行**：选区与滚动目标在同一个事务里（报告 T1 / V2）", () => {
+    mount2("```\ncode\n```\n");
+    const block = host2.querySelector(".cm-raw-block") as HTMLElement;
+    expect(block).not.toBeNull();
+    const spy = vi.spyOn(view2, "dispatch");
+    // jsdom 里所有 rect 都是 0，所以 clientY=5 就是"离 widget 顶边 5px"= 第一行上
+    block.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientY: 5 }));
+    const specs = spy.mock.calls.map((c) => c[0] as { selection?: unknown; effects?: unknown });
+    expect(specs.some((s) => s?.selection && s.effects)).toBe(true);
+    expect(view2.state.selection.main.head).toBe(0);
+    spy.mockRestore();
+  });
+
+  it("点击**高**代码块 widget 的中下部：只落选区、**不要**滚动目标（否则页面被滚走）", () => {
+    // 回归（PR #77 审查）：选区只能落在块首，而把块首那一行钉到鼠标处 = 视图向上滚整个块的高度
+    //（`y:"start"` 是绝对定位），被夹到 0 时表现成"点一下代码块，页面跳到文档顶部"。
+    mount2("```\n" + Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n") + "\n```\n");
+    const block = host2.querySelector(".cm-raw-block") as HTMLElement;
+    expect(block).not.toBeNull();
+    const spy = vi.spyOn(view2, "dispatch");
+    block.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientY: 400 }));
+    const specs = spy.mock.calls.map((c) => c[0] as { selection?: unknown; effects?: unknown });
+    expect(specs.some((s) => s?.selection)).toBe(true);
+    expect(specs.some((s) => s?.effects)).toBe(false); // 高块：不钉
+    expect(view2.state.selection.main.head).toBe(0);
+    spy.mockRestore();
+  });
+
+  it("右键点 widget：只落选区、不要滚动目标", () => {
+    mount2("```\ncode\n```\n");
+    const block = host2.querySelector(".cm-raw-block") as HTMLElement;
+    const spy = vi.spyOn(view2, "dispatch");
+    // clientY=5 落在第一行上（本来会钉）：这里锁的是"非左键一律不钉"
+    block.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 2, clientY: 5 }));
+    const specs = spy.mock.calls.map((c) => c[0] as { selection?: unknown; effects?: unknown });
+    expect(specs.some((s) => s?.selection)).toBe(true);
+    expect(specs.some((s) => s?.effects)).toBe(false);
+    spy.mockRestore();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -481,6 +645,23 @@ describe("livePreview 块级切片", () => {
       needed += 1;
     });
     expect(needed).toBeGreaterThan(0);
+  });
+
+  it("**沿用来的旧图**（stale）也要补渲（报告 T2 / A4）", () => {
+    // 只看 `svg === ""` 时，沿用的旧图会让判据永远为假 —— 那一块再也不会刷新。
+    let needed = 0;
+    mount("abc\n", [crop(0, 4, { stale: true })], undefined, () => {
+      needed += 1;
+    });
+    expect(needed).toBeGreaterThan(0);
+  });
+
+  it("新渲的块（有图、不 stale）不要求补渲", () => {
+    let needed = 0;
+    mount("abc\n", [crop(0, 4)], undefined, () => {
+      needed += 1;
+    });
+    expect(needed).toBe(0);
   });
 
   afterEach(() => {
@@ -675,6 +856,111 @@ describe("livePreview 块级切片", () => {
     expect(last).toMatchObject({ from: 0, to: 3 });
     // ② 光标落在回调给的位置（而不是块首 0）
     expect(view.state.selection.main.head).toBe(7);
+    spy.mockRestore();
+  });
+
+  it("命中作废（返回 `cancelled`）→ **什么都不提交**（不能当 null 退回块首）（报告 T2 / A1）", async () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    const geo = { page: 1, xPt: 58, yPt: 100, widthPt: 371.25, heightPt: 20 };
+    const rect = {
+      left: 0,
+      top: 0,
+      width: 100,
+      height: 50,
+      right: 100,
+      bottom: 50,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    };
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(rect as DOMRect);
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3, geo), crop(5, 8, geo), crop(10, 13, geo)],
+            onCropClick: async () => "cancelled",
+          }),
+        ],
+      }),
+    });
+    const dispatchSpy = vi.spyOn(view, "dispatch");
+    const first = crops()[0] as HTMLElement;
+    first.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 75, clientY: 25 }));
+    // 按下那一瞬间 CM 自己会问一次 get()（那一步把光标放到块首，是既有行为）
+    const dispatchesAfterPress = dispatchSpy.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 0));
+    // 作废的语义是"迟到的那次结果什么都不提交"：既不落到命中位置（7），
+    // 也不许再补一次退回块首的提交
+    expect(dispatchSpy.mock.calls.length).toBe(dispatchesAfterPress);
+    expect(view.state.selection.main.head).not.toBe(7);
+    dispatchSpy.mockRestore();
+    spy.mockRestore();
+  });
+
+  it("命中往返期间文档变了 → 这次点击作废（不提交旧坐标）", async () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    const geo = { page: 1, xPt: 58, yPt: 100, widthPt: 371.25, heightPt: 20 };
+    const rect = {
+      left: 0,
+      top: 0,
+      width: 100,
+      height: 50,
+      right: 100,
+      bottom: 50,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    };
+    const spy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(rect as DOMRect);
+    let viewRef: EditorView | null = null;
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => [crop(0, 3, geo), crop(5, 8, geo), crop(10, 13, geo)],
+            onCropClick: async () => {
+              // 命中还没回来时文档被改了（IME、异步替换、别处的编辑）
+              viewRef?.dispatch({ changes: { from: 0, to: 0, insert: "x" } });
+              return 7;
+            },
+          }),
+        ],
+      }),
+    });
+    viewRef = view;
+    const first = crops()[0] as HTMLElement;
+    first.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 75, clientY: 25 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 75, clientY: 25 }));
+    await new Promise((r) => setTimeout(r, 0));
+    // 文档变了 -> 命中的位置（7）在新文档里指向别的字：不能提交
+    expect(view.state.doc.toString()).toBe("xaaa\n\nbbb\n\nccc\n");
+    expect(view.state.selection.main.head).not.toBe(7);
     spy.mockRestore();
   });
 

@@ -42,6 +42,39 @@ export function anchorYMargin(
 }
 
 /**
+ * 只读布局：算出"要让行盒顶部落在 `targetClientY` 这个视口高度"所需的 yMargin。
+ * 拿不到滚动容器（视图未挂载 / 被拆掉）时返回 null。
+ *
+ * 与 `anchorPosEffect` 分开是为了**把读布局和写事务放进两个阶段**：写事务落在
+ * CodeMirror 的 `requestMeasure().write` 里时不该再去读 `getBoundingClientRect`
+ *（那会逼出一次计划外的重排）。见 Editor.svelte 的 restoreCaretAnchor。
+ */
+export function measureAnchorYMargin(
+  view: View,
+  targetClientY: number,
+  mode: AnchorMode = "top",
+): number | null {
+  try {
+    const box = view.scrollDOM.getBoundingClientRect();
+    return anchorYMargin(targetClientY, box.top, box.height, view.defaultLineHeight, mode);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 用**已经算好的** yMargin 构造滚动目标（不读布局）。
+ *
+ * 注意：它是"构造"，派发仍要挑时机 —— **不要**在 CodeMirror `requestMeasure().write`
+ * 里直接 `view.dispatch`，那时 `updateState` 还是 Updating，会抛
+ * `Calls to EditorView.update are not allowed while an update is in progress`
+ * （实测踩过：模式切换那次调回整条静默失效）。见 Editor.svelte 的 restoreCaretAnchor。
+ */
+export function anchorEffectAt(pos: number, yMargin: number): StateEffect<unknown> {
+  return EditorView.scrollIntoView(EditorSelection.cursor(pos), { y: "start", yMargin });
+}
+
+/**
  * "把 `pos` 钉在屏幕的某个高度"的滚动目标（放进 `view.dispatch({ effects })` 里，
  * **与选区变更同一个事务**：这样 CM 的测量循环一次算准，不会出现"先跳一下再修正"）。
  *
@@ -53,12 +86,6 @@ export function anchorPosEffect(
   targetClientY: number,
   mode: AnchorMode = "top",
 ): StateEffect<unknown> | null {
-  try {
-    const scroller = view.scrollDOM;
-    const box = scroller.getBoundingClientRect();
-    const yMargin = anchorYMargin(targetClientY, box.top, box.height, view.defaultLineHeight, mode);
-    return EditorView.scrollIntoView(EditorSelection.cursor(pos), { y: "start", yMargin });
-  } catch {
-    return null;
-  }
+  const yMargin = measureAnchorYMargin(view, targetClientY, mode);
+  return yMargin === null ? null : anchorEffectAt(pos, yMargin);
 }

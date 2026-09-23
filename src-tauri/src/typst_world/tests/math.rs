@@ -1,5 +1,4 @@
 // 公式渲染（`compile_math`）：尺寸/基线/墨迹、上下文与前缀、多行 body、字号对齐、语法错误。
-use super::super::*;
 use super::*;
 
 /// 公式渲染（compile_math）：行内公式成功，SVG 贴边且透明，

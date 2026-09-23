@@ -77,6 +77,12 @@ describe("planLinePrefix 行首标记", () => {
     expect(apply(doc, planLinePrefix(doc, 3, "= ")).doc).toBe("= 列表项\n");
   });
 
+  it("取消**带缩进的**同类标记：只删标记、保留缩进（报告 T5 的代码确定性修复）", () => {
+    // 原来从行首删 markerLen 个字符 → `  - 项` 变成 `- 项`（标记还在、缩进没了）
+    const doc = "  - 缩进的列表项\n";
+    expect(apply(doc, planLinePrefix(doc, 7, "- ")).doc).toBe("  缩进的列表项\n");
+  });
+
   it("保留缩进；正文（空前缀）清掉任何标记", () => {
     const doc = "  - 缩进的列表项\n";
     expect(apply(doc, planLinePrefix(doc, 5, "= ")).doc).toBe("  = 缩进的列表项\n");
@@ -97,7 +103,10 @@ describe("planBlockMath / planCodeBlock", () => {
     const doc = "前文\n后文";
     const plan = planBlockMath(doc, 0);
     expect(apply(doc, plan).doc).toBe("$\n  前文\n$\n\n后文");
-    expect(plan.anchor).toBe(3); // `$\n  ` 之后
+    // 断言"选中的就是原正文"（报告 T5：别继续锁错误的常量）。
+    // 原来写死 `anchor === 3`，而前缀 `$\n  ` 是 4 个字符 —— 光标落在公式体前一个字符上。
+    expect(plan.anchor).toBe("$\n  ".length);
+    expect(apply(doc, plan).selected).toBe("前文");
   });
 
   it("行间公式（有选区）：只替换选区，行内其它文字保留", () => {
