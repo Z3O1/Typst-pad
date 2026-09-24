@@ -56,12 +56,43 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 | `wysiwyg-visual.mjs` | 真实公式的基线、pt 尺寸、居中、暗色与墨迹边界 |
 | `writing-stability.mjs` | 点击/键盘进入公式与复杂块、模式往返、过期命中、调度、输入法与逐帧几何 |
 | `computed-style.mjs` | 作用域 box-sizing、窄视口溢出、CSS 源序与原有 content-box 边界 |
+| `writing-pku-docs.mjs` | PKU 真实作业（`PKU_ROOT`）的逐块几何：正文/标题/列表/公式切片同一张位置表，同页相邻锚点 ≤2px、页内累计 ≤5px；夹具缺失/原文哈希不符直接失败 |
+
+### PKU 真实作业验收（需要本机作业原文）
+
+```bash
+PKU_ROOT="$HOME/PKU" npm run fixtures:pku-writing   # 真实后端按源文件路径编译四份作业 + 公式产物
+PKU_ROOT="$HOME/PKU" npm run verify:pku-writing     # 上面两条 + 只跑 writing-pku-docs.mjs
+PKU_ROOT="$HOME/PKU" ONLY=writing-pku-docs.mjs npm run verify:browser
+```
+
+原文不复制进仓库；夹具、测量 JSON 与截图写在已忽略的 `.browser-check/pku-writing/`。命令日志会列出实际加载的路径、SHA-256 与样本数。`verify:browser` 没有 `PKU_ROOT` 也没在 `ONLY` 里点名时，这一套**跳过并明说**（不是悄悄报绿）。几何判据用文档**真实列宽**（文档自带 `#set page(...)` 会覆盖注入页设置），浏览器列宽被钉到同一宽度。
+
+编辑回放（P0）：Rust 为同一段落的四个状态（原始 / Enter / 输入两字 / Backspace）各导一份真实编译夹具（`replay.json`），浏览器用**真实按键**驱动并逐步断言"文本与夹具逐字相同 + 命中真实夹具（`__browserDevBlocksMatched`，绝不静默退回假切片）+ 光标统一放在锚点后再量、撤销后后续行基线回到编辑前"。加新状态时 Rust 与夹具包装层要一起加，否则该状态会命中不到几何而失败（设计如此）。`PKU_REPLAY_ONLY=1` 只跑回放段（调试用）；CDP 调用有 `CDP_TIMEOUT_MS`（默认 30s）超时，避免浏览器崩了以后整段死等。
+
+对账锚点两边都用**首行主基线**：Rust 侧从帧里取（`anchorBaselinePt`），浏览器侧用"行盒顶端 + 半 leading + 字体 ascent"算。浏览器坐标必须走 **DOM**（扫描已渲染的 `.cm-line`、用 `posAtDOM` 精确匹配目标行、`getBoundingClientRect` 取位置，文档坐标 = 元素视口顶端 − content 顶端 − padding-top），**不要用 `lineBlockAt`/`coordsAtPos` 或 `scrollTop` 换算**：高度图在长文档里会给出偏差 200px 级的位置，滚动锚定也会让 `scrollTop` 与 DOM 不同步。夹具还导出每块的 `lineSpans`（逐行源区间 + 右缘），`PKU_BREAK=1` 用它逐断点对比"Typst 折在哪 vs 浏览器折在哪"（浏览器侧用逐字符 `coordsAtPos` 看 y 何时增大——这个 CodeMirror 版本没有 `visualLineAt`）；`PKU_MATH_WIDTH=1` 打印行内公式 widget 的渲染宽与 SVG 宽（用来区分"宽度不对"与"不可断"）。`PKU_PLACEMENT=1` 做**逐块落位自检**：同一批块「逐个滚进视口量」与「滚到首块后一次性量」各量一遍（两者应完全一致，否则说明落位受滚动状态影响），并与「前面所有块带高之和」对账、打印 DOM 行高直方图与未被压缩的空行（本轮据此定位到「贴着规则行/行间公式的空行按整行渲染」）。`PKU_DIAG=1` 会打印最大偏差块附近的逐行 DOM 坐标，`PKU_LINE_SPACING=1` 是对照实验开关（把编辑器行高换成夹具量出的 `lineSpacingPt`，尚未并入产品）。
+
+### PKU 写作模式桌面抽查清单（Tauri，需有桌面 WebView 的机器）
+
+浏览器套件用 dev 桩跑的是"同一套产物 + 同一套前端"，**不能**替代真机：真机的字体来自 `bundled_font` IPC、编译在 Rust 侧同一进程、PDF 资源从作业原目录读。所以每次改写作链路（装饰、公式、块几何、分页）都要在一台有桌面环境的机器上按下面清单抽查一次，并把结论（通过/差异/截图）记进验收报告。
+
+准备：`npm run tauri dev`；作业原文放在 `~/PKU/26fall/...`（只读，不复制进仓库）。
+
+1. **加载与分页**：打开 `高等代数/week2-2026.9.24/1.typ`。逐页核对页面尺寸、页边距与 PDF 预览一致；`#set page(margin: 2.5cm)` 生效（不是注入页设置）。
+2. **资源**：同一篇里的 `#image("高等代数260916计算题.pdf", page: 1, ...)` 能从**原目录**加载并显示（相对路径解析根 = 文档所在目录，不是应用目录）。
+3. **切片与公式**：正文、标题、列表、行内/行间公式的呈现与浏览器套件截图一致；长行内公式在运算符处折行（`segments`），不是整块挤到下一行。
+4. **模式切换**：源码 ↔ 写作来回切两次，块表与公式不残留旧产物（无"旧图配新几何"的错位）；滚动到未渲染区域会补渲而不是停留源码。
+5. **输入回放**：在正文段末按 Enter（写两个换行）、Shift+Enter（写 `\` + 换行）、输入两个汉字、连按 Backspace、Ctrl+Z，表现与浏览器端 `writing-pku-docs.mjs` 的 13 项编辑回放一致（无不可解释的空行变化、无光标跳动）。
+6. **打开作业目录**：从侧栏打开 `~/PKU` 下的另外三篇（数分周一/周二、高代周一），确认都能编译、无诊断、页数与 PDF 预览一致。
+7. **记录**：把每步的结论与截图放进 `.browser-check/pku-writing/`，并在 `REPORT.md` 的"Tauri 抽查"一节写结论（本仓库当前的结论是"环境受限、未执行"，见报告）。
 
 ## 真实夹具与覆盖边界
 
 `npm run fixtures:blocks` / `npm run fixtures:math` 从 Rust 的 ignored 探针提取真实产物。Cargo 必须在 PATH 上；过滤器未命中任何用例仍可能返回成功，因此生成器和消费者必须在空夹具/空探针时硬失败，不能跑零次断言而报告通过。公式夹具注入桩时须补 `{ ok: true, ...fixture }`。
 
 块几何验收比较相邻带、纵向位置与比例，不能只检查 widget 存在；直接可编辑正文已经不是切片，不应强求每篇/每块都有 SVG。复杂块集合必须有非零断言下界。公式验收使用多字号真实产物，核对 pt × 4/3 的 CSS 尺寸、行内基线（误差小于 1px）与墨迹范围。
+
+PKU 夹具把正文、标题、列表与公式切片放进同一张逐块位置表，用真实 Typst 的**首行锚点**对账。硬判据：同页相邻锚点 ≤2px、页内累计 ≤5px，以及**可编辑正文的视觉行数与 Typst 一致**（行数 oracle = 按 Rust 侧实测行距的 0.75 倍聚类主基线，`lineCount`；编辑块现在都是单源码行，两边比的是折行位置）。一条已知的 oracle 弱点必须写进结果、不能拿来绿：文档内的 `#let` 宏内容在使用处的字形 `Span` 指回定义处，无输出块必须按 `no_output` 跳过几何匹配（见 `SourceBlock::no_output`），否则定义块会拿到跨页假包围盒。
 
 动态稳定性输出在 `.browser-check/writing-stability.json`。每条测量标明 `real-static` 或 `fake`；桩不能提供真实动态重编译 `real-dynamic`，应把它列为未覆盖而非通过。当前点击/模式切换的逐帧最大锚点漂移判据为 8px；改阈值必须给出几何证据，不能靠扩大容忍度掩盖回归。行盒与文字盒的固定差异可解释稳态偏移，不能与意外滚动混为一谈。高 widget 中下部点击与无滚动余量是单独边界，详见[公式与揭示](wysiwyg.md)。
 

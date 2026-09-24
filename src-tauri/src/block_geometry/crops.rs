@@ -77,6 +77,13 @@ pub struct BlockCrop {
     pub height_pt: f64,
     /// 占了几行（行带数），调试用
     pub bands: usize,
+    /// **首行主基线相对带顶的偏移**（pt，页面坐标；`None` = 这块没有文本基线，如纯图片）。
+    ///
+    /// 写作模式要让可编辑块按"带高"占位时，光占高度不够：首行基线的带内偏移也必须对上，
+    /// 否则整块会整体偏移。这里把该偏移交给前端（浏览器侧同一行的基线可用
+    /// "行盒顶 + 半 leading + 字体 ascent"算出来，见 `writing-pku-docs.mjs`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_baseline_pt: Option<f64>,
     /// 该块 SVG **内部**的链接热区（相对裁剪带左上角，pt）：前端据此贴一层可点的透明方块。
     /// 只有窗口内的块才有（与 svg 同步取舍），没有链接时为空数组。
     pub links: Vec<CropLink>,
@@ -226,6 +233,13 @@ pub fn compile_blocks(
     }
     let mut geoms: Vec<Option<Found>> = Vec::with_capacity(blocks.len());
     for (idx, block) in blocks.iter().enumerate() {
+        // **无输出语句（#let/#set/#show/#import）不做几何匹配**：这些语句里的内容值在使用处
+        // 的字形 span 指回定义处，按区间匹配会把整篇用到该宏的字形都算进来，得到跨页假包围盒。
+        // 跳过 = 该块 found:false → 前端整格隐藏、光标进去展开源码（与 PDF 行为一致）。
+        if block.no_output {
+            geoms.push(None);
+            continue;
+        }
         let injected_range = (block.range.start + doc_start)..(block.range.end + doc_start);
         geoms.push(geometry_for_range(&items, injected_range).map(|g| Found {
             idx,
@@ -381,6 +395,11 @@ pub fn compile_blocks(
             width_pt: rect.size().x.to_pt(),
             height_pt: height,
             bands: g.bands,
+            anchor_baseline_pt: first_line_baseline(
+                &items,
+                (blocks[*idx].range.start + doc_start)..(blocks[*idx].range.end + doc_start),
+                g.page,
+            ),
             links,
             svg,
         });
@@ -402,6 +421,7 @@ pub fn compile_blocks(
             width_pt: content_width_pt,
             height_pt: 0.0,
             bands: 0,
+            anchor_baseline_pt: None,
             links: Vec::new(),
             svg: String::new(),
         }));

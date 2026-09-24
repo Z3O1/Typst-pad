@@ -46,8 +46,16 @@ const SUITES = [
   ["writing-stability.mjs", 107],
   // 计算样式守卫（box-sizing 作用域 / CSS 源序）：两种回归都躲得过交互断言，只能按 computed style 量
   ["computed-style.mjs", 17],
+  // **PKU 真实作业逐块几何**（P0 主样本 + 三份 P1）。这一套要 `PKU_ROOT` 指到本地作业目录，
+  // 原文不进仓库 ⇒ 没有 `PKU_ROOT` 时**跳过并明说**（不是悄悄报绿），见下面的 pkuRequested。
+  ["writing-pku-docs.mjs", 56],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
+/**
+ * PKU 真实作业那一套要不要跑：显式设了 `PKU_ROOT`，或 `ONLY` 里点名了它。
+ * 两者都没有时**跳过**（原文不进仓库，别的机器上没有作业目录），绝不假装通过。
+ */
+const pkuRequested = !!process.env.PKU_ROOT || (only?.has("writing-pku-docs.mjs") ?? false);
 /** 实际进入循环的套件数：用来发现 `ONLY=` 写错（一个都没匹配上却报"全部通过"） */
 let ran = 0;
 
@@ -178,10 +186,19 @@ const env = { ...process.env, CDP_PORT, BROWSER_CHECK_PORT: PORT, BROWSER_CHECK_
 if (!SKIP_FIXTURES) {
   runStep("fixtures-blocks", "npm", ["run", "fixtures:blocks"]);
   runStep("fixtures-math", "npm", ["run", "fixtures:math"]);
+  // PKU 真实作业夹具要作业原文（`PKU_ROOT`，默认 `$HOME/PKU`）；只有显式要求那一套时才导，
+  // 否则默认 `verify:browser` 会在没有作业的机器上红掉 —— 但那不是产品回归。
+  if (pkuRequested) runStep("fixtures-pku-writing", "npm", ["run", "fixtures:pku-writing"]);
 }
 
 for (const [file, expectCount] of SUITES) {
   if (only && !only.has(file)) continue;
+  if (file === "writing-pku-docs.mjs" && !pkuRequested) {
+    // 明确以"跳过"记录（不计数、不算通过）：没有 PKU_ROOT 就没法验真实作业几何
+    console.log(`⊘ ${file} — 跳过（未提供 PKU_ROOT / 未在 ONLY 里点名）`);
+    results.push({ name: file, ok: true, note: "跳过：未提供 PKU_ROOT" });
+    continue;
+  }
   ran += 1;
   const full = join(HERE, file);
   if (!existsSync(full)) {

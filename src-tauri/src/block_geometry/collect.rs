@@ -18,6 +18,12 @@ pub struct PlacedItem {
     pub page: usize,
     pub range: Range<usize>,
     pub rect: Rect,
+    /// 文本项的**基线** y（页面坐标）；图形/图片取 rect 顶端。
+    ///
+    /// 为什么单列出来：墨迹顶（`rect.min.y`）在同一行里会被上标、分式、矩阵拉得很散
+    /// （实测同一段的两行之间，行内最矮墨迹顶差 26pt，比行距还大），按墨迹顶数"占了几行"
+    /// 会把同一行拆开、把相邻行并起来。基线才是"一行一条"的稳定信号。
+    pub baseline_pt: f64,
 }
 
 /// 帧遍历的统计（用来判断"映射漏了多少"而不是只看最终覆盖率）
@@ -103,7 +109,7 @@ fn walk_frame(
                             Point::new(origin.x + x, origin.y - up),
                             Point::new(origin.x + x + advance, origin.y + down),
                         );
-                        out.push(PlacedItem { page, range, rect });
+                        out.push(PlacedItem { page, range, rect, baseline_pt: origin.y.to_pt() });
                         stats.glyphs_mapped += 1;
                     }
                     x += advance;
@@ -137,14 +143,14 @@ fn walk_frame(
                         Point::new(origin.x + bb.min.x, origin.y + bb.min.y),
                         Point::new(origin.x + bb.max.x, origin.y + bb.max.y),
                     );
-                    out.push(PlacedItem { page, range, rect });
+                    out.push(PlacedItem { page, range, rect, baseline_pt: rect.min.y.to_pt() });
                 }
             }
             FrameItem::Image(_, size, span) => {
                 stats.images += 1;
                 if let Some(range) = world.range(*span) {
                     let rect = Rect::new(origin, Point::new(origin.x + size.x, origin.y + size.y));
-                    out.push(PlacedItem { page, range, rect });
+                    out.push(PlacedItem { page, range, rect, baseline_pt: origin.y.to_pt() });
                 }
             }
             FrameItem::Link(dest, size) => {
@@ -242,6 +248,36 @@ pub struct BlockGeom {
     /// 占了几行（y 去重后的"行带"数）
     pub bands: usize,
     pub items: usize,
+}
+
+/// 块内**首行主基线**（页面坐标 pt）：取首行墨迹带（与最小墨迹顶相差 ≤1pt）里基线的众数。
+///
+/// 写作模式"可编辑块按带高占位"除了高度，还要知道首行基线在带内的偏移；浏览器侧对应量法见
+/// `scripts/browser-check/writing-pku-docs.mjs`（行盒顶 + 半 leading + 字体 ascent）。
+pub fn first_line_baseline(
+    items: &[PlacedItem],
+    range: Range<usize>,
+    page: usize,
+) -> Option<f64> {
+    let mut min_y = f64::INFINITY;
+    for i in items.iter().filter(|i| {
+        i.page == page && i.range.start < range.end && i.range.end >= range.start
+    }) {
+        min_y = min_y.min(i.rect.min.y.to_pt());
+    }
+    if !min_y.is_finite() {
+        return None;
+    }
+    let mut bins: std::collections::BTreeMap<i64, usize> = std::collections::BTreeMap::new();
+    for i in items.iter().filter(|i| {
+        i.page == page
+            && i.range.start < range.end
+            && i.range.end >= range.start
+            && i.rect.min.y.to_pt() - min_y <= 1.0
+    }) {
+        *bins.entry((i.baseline_pt * 2.0).round() as i64).or_insert(0) += 1;
+    }
+    bins.iter().max_by_key(|(_, c)| **c).map(|(k, _)| *k as f64 / 2.0)
 }
 
 /// 给定源字节区间，算出它在版面上的**外接矩形**（None = 该区间没有任何渲染结果）

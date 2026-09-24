@@ -61,10 +61,27 @@ export async function connect() {
     }
   };
 
+  // 每次 CDP 调用都有超时：Chrome 崩了 / WebSocket 断了时，`pending` 里的 Promise 永远不会
+  // settle，调用方（尤其 `waitFor` 的轮询）会**死等**——表现是整个套件挂住而不是报错。
+  // 2026-09-24 编辑回放段实测卡死过一次，所以这里兜住。
+  const CALL_TIMEOUT_MS = Number(process.env.CDP_TIMEOUT_MS ?? 30000);
   const send = (method, params = {}) =>
     new Promise((res, rej) => {
       const mid = ++id;
-      pending.set(mid, { res, rej });
+      const timer = setTimeout(() => {
+        pending.delete(mid);
+        rej(new Error(`CDP 调用超时（${CALL_TIMEOUT_MS}ms）：${method}`));
+      }, CALL_TIMEOUT_MS);
+      pending.set(mid, {
+        res: (v) => {
+          clearTimeout(timer);
+          res(v);
+        },
+        rej: (e) => {
+          clearTimeout(timer);
+          rej(e);
+        },
+      });
       ws.send(JSON.stringify({ id: mid, method, params }));
     });
 

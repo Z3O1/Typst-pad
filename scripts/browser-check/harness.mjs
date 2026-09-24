@@ -88,24 +88,42 @@ export function loadFixtures(
  * 3. 清完存档**再导航一次**，否则上一轮遗留的"源代码模式"会让页面根本不渲染公式，
  *    第一条断言莫名超时（实测踩过）。
  */
+/**
+ * 上一次 `boot` 注册的注入脚本（`Page.addScriptToEvaluateOnNewDocument` 返回的编号）。
+ * **每次 boot 前必须删掉上一次的**：注册是会话级的，不清就会在每次导航时把之前所有夹具
+ * 再注入一遍（PKU 套件一次跑 5 个 boot，最后一个页面上要跑 5 份夹具脚本，实测把浏览器拖到
+ * `Page.navigate` 30s 不响应）。
+ */
+let lastInjectedScriptIds = [];
+
 export async function boot(
   c,
   url,
   { blockFixtures = null, mathFixtures = null, runtime = false, settleMs = 800 } = {},
 ) {
   await c.send("Page.enable");
+  for (const identifier of lastInjectedScriptIds) {
+    try {
+      await c.send("Page.removeScriptToEvaluateOnNewDocument", { identifier });
+    } catch {
+      /* 页面已关闭等：忽略 */
+    }
+  }
+  lastInjectedScriptIds = [];
   // 只有要读控制台事件的套件才需要（writing-blocks 查"装饰重建失败 / 插件崩了"）
   if (runtime) await c.send("Runtime.enable");
   await c.goto(url);
   if (blockFixtures) {
-    await c.send("Page.addScriptToEvaluateOnNewDocument", {
+    const res = await c.send("Page.addScriptToEvaluateOnNewDocument", {
       source: `window.__DEV_BLOCK_FIXTURES = ${JSON.stringify(blockFixtures)};`,
     });
+    if (res?.identifier) lastInjectedScriptIds.push(res.identifier);
   }
   if (mathFixtures) {
-    await c.send("Page.addScriptToEvaluateOnNewDocument", {
+    const res = await c.send("Page.addScriptToEvaluateOnNewDocument", {
       source: `window.__DEV_MATH_FIXTURES = ${JSON.stringify(mathFixtures)};`,
     });
+    if (res?.identifier) lastInjectedScriptIds.push(res.identifier);
   }
   await c.evaluate(`localStorage.clear()`);
   await c.goto(url);

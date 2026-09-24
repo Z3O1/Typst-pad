@@ -77,20 +77,46 @@ export class MathWidget extends WidgetType {
       const classes = ["cm-math-widget"];
       if (this.dark) classes.push("cm-math-dark");
       if (this.selected) classes.push("cm-math-selected");
-      wrap.className = classes.join(" ");
       // 尺寸直接用 pt：Rust 侧按编辑器字号（14px = 10.5pt）编译，故 pt 与编辑器 CSS pt 1:1
-      wrap.style.width = `${this.render.widthPt}pt`;
-      wrap.style.height = `${this.render.heightPt}pt`;
-      // 基线对齐：盒底到基线的距离 = height - baseline，整体下移这么多
-      const depth = Math.max(0, this.render.heightPt - this.render.baselinePt);
-      wrap.style.verticalAlign = `${-depth}pt`;
+      const segments = this.render.segments ?? [];
+      const split = segments.length > 1 && !this.selected;
       wrap.title = `$${this.range.body}$（点击编辑源码）`;
-      wrap.innerHTML = this.render.svg;
-      const svg = wrap.querySelector("svg");
-      if (svg) {
-        svg.setAttribute("width", "100%");
-        svg.setAttribute("height", "100%");
-        svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      if (split) {
+        // **长行内公式：片段依次渲染、片段之间留可断点**，浏览器才能像 Typst 一样在运算符处折行
+        // （整块 SVG 是不可断的原子，会把临界行挤到下一行，见 Rust `split_inline_math`）。
+        classes.push("cm-math-split");
+        wrap.className = classes.join(" ");
+        for (const [i, seg] of segments.entries()) {
+          if (i > 0) wrap.appendChild(document.createElement("wbr"));
+          const part = document.createElement("span");
+          part.className = "cm-math-seg";
+          part.style.width = `${seg.widthPt}pt`;
+          part.style.height = `${seg.heightPt}pt`;
+          const segDepth = Math.max(0, seg.heightPt - seg.baselinePt);
+          part.style.verticalAlign = `${-segDepth}pt`;
+          part.innerHTML = seg.svg;
+          const segSvg = part.querySelector("svg");
+          if (segSvg) {
+            segSvg.setAttribute("width", "100%");
+            segSvg.setAttribute("height", "100%");
+            segSvg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+          }
+          wrap.appendChild(part);
+        }
+      } else {
+        wrap.className = classes.join(" ");
+        wrap.style.width = `${this.render.widthPt}pt`;
+        wrap.style.height = `${this.render.heightPt}pt`;
+        // 基线对齐：盒底到基线的距离 = height - baseline，整体下移这么多
+        const depth = Math.max(0, this.render.heightPt - this.render.baselinePt);
+        wrap.style.verticalAlign = `${-depth}pt`;
+        wrap.innerHTML = this.render.svg;
+        const svg = wrap.querySelector("svg");
+        if (svg) {
+          svg.setAttribute("width", "100%");
+          svg.setAttribute("height", "100%");
+          svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+        }
       }
       // 点击 widget：光标落到公式源码起点 → 选区进入该区间 → 装饰撤掉，源码展开。
       // 选区与"钉在鼠标点高度"的滚动目标必须**同一个事务**（见 reveal.ts 的说明）。

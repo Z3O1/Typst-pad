@@ -4,7 +4,12 @@
 // 这里验的是**策略**（逐份独立兜底、装不上不抛、返回真正装上的族名），
 // 真字体字节那份由 `scripts/editor-fonts.test.mjs`（静态对齐）与浏览器验收负责。
 import { describe, it, expect, vi } from "vitest";
-import { EDITOR_FONT_FACES, WRITE_FONT_STACK, installEditorFonts } from "./editor-font";
+import {
+  EDITOR_FONT_FACES,
+  WRITE_FONT_STACK,
+  installEditorFonts,
+  measureWriteLetterSpacing,
+} from "./editor-font";
 
 const bytes = new ArrayBuffer(16);
 
@@ -98,5 +103,16 @@ describe("WRITE_FONT_STACK（写作模式的字体栈）", () => {
     for (const face of EDITOR_FONT_FACES) {
       expect(WRITE_FONT_STACK).toContain(`"${face.family}"`);
     }
+  });
+});
+
+describe("measureWriteLetterSpacing（CJK 前进宽度补偿）", () => {
+  it("量不出 2D 上下文（jsdom / 无 canvas）时返回 0，不抛异常", () => {
+    expect(measureWriteLetterSpacing(WRITE_FONT_STACK, (11 * 4) / 3)).toBe(0);
+  });
+
+  it("字号非法时返回 0", () => {
+    expect(measureWriteLetterSpacing(WRITE_FONT_STACK, 0)).toBe(0);
+    expect(measureWriteLetterSpacing(WRITE_FONT_STACK, Number.NaN)).toBe(0);
   });
 });

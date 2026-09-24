@@ -28,6 +28,25 @@ pub struct MathOutput {
     pub height_pt: f64,
     pub baseline_pt: f64,
     pub error: Option<String>,
+    /// **可断行的片段**（只有长行内公式才有；空数组 = 只能整块渲染）。
+    ///
+    /// Typst 会在行内公式的运算符处折行，而浏览器把整块 SVG 当不可断的原子 → 临界行比引擎
+    /// 早折一行（PKU 实测：同一段浏览器折 4 行、Typst 3 行，位置与行数两条门槛同时红）。
+    /// 前端把片段依次渲染、片段之间留一个可断点，行宽就能与引擎一致。
+    #[serde(default)]
+    pub segments: Vec<MathSegment>,
+}
+
+/// 行内公式的一个可断行片段（坐标系与 `MathOutput` 一致）
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MathSegment {
+    /// 片段源码（下一个片段以运算符开头；拼起来等于原公式）
+    pub body: String,
+    pub svg: String,
+    pub width_pt: f64,
+    pub height_pt: f64,
+    pub baseline_pt: f64,
 }
 
 impl MathOutput {
@@ -40,6 +59,7 @@ impl MathOutput {
             height_pt: 0.0,
             baseline_pt: 0.0,
             error: Some(message.into()),
+            segments: Vec::new(),
         }
     }
 
@@ -63,7 +83,7 @@ impl MathOutput {
 /// `#let` 宏等对公式同样生效；公式字号由本函数**随后强制**为 MATH_TEXT_PT，
 /// 保证编辑器内公式与编辑器正文字号一致（前缀里的 `#set text(size:)` 不会带偏公式）。
 /// document_path 语义与 compile 一致（相对 include 的解析根；None = 未保存文档）。
-pub fn compile_math(
+fn compile_math_once(
     body: &str,
     display: bool,
     context: &str,
@@ -150,7 +170,109 @@ pub fn compile_math(
         height_pt,
         baseline_pt: (ascent_pt + pad_top_pt).clamp(0.0, height_pt),
         error: None,
+        segments: Vec::new(),
     }
+}
+
+/// 顶层运算符（Typst 行内公式可以在这些位置折行）——按长到短匹配前缀。
+const BREAK_OPERATORS: &[&str] = &[
+    "<=", ">=", "!=", "==", "->", "<-", "<", ">", "=", "+", "-",
+];
+
+/// 把**行内**公式按顶层运算符切成可断行的片段（切在运算符**之前**）。
+///
+/// 只在够长的公式上切（`MIN_SEGMENT_CHARS`），否则会为短公式白跑好几次编译。
+/// 括号 / 方括号 / 花括号里的运算符不算顶层（`sum_(i=1)^n` 的 `=` 不会被切）。
+pub fn split_inline_math(body: &str) -> Vec<String> {
+    /// 单个片段的最少源码字符数：太短的片段攒在一起再切
+    const MIN_SEGMENT_CHARS: usize = 20;
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let chars: Vec<char> = body.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && !current.trim().is_empty() && current.chars().count() >= MIN_SEGMENT_CHARS {
+            let rest: String = chars[i..].iter().collect();
+            if let Some(op) = BREAK_OPERATORS.iter().find(|op| rest.starts_with(**op)) {
+                // 片段以运算符开头；`current` 末尾的空格留给下一段，避免丢间距
+                parts.push(current.trim_end().to_string());
+                current = String::new();
+                let _ = op;
+            }
+        }
+        current.push(ch);
+        i += 1;
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim_end().to_string());
+    }
+    parts.retain(|p| !p.trim().is_empty());
+    parts
+}
+
+/// 单个公式 → 紧致 SVG + 尺寸与基线；长行内公式额外给出**可断行片段**（`segments`）。
+///
+/// 片段是"同一公式按顶层运算符切开、各自编译"的结果：前端依次渲染、片段之间留一个可断点，
+/// 浏览器就能像 Typst 一样在运算符处折行（见 `MathOutput::segments` 的说明）。
+pub fn compile_math(
+    body: &str,
+    display: bool,
+    context: &str,
+    document_path: Option<String>,
+    fonts_dir: &Path,
+    font_config: &FontConfig,
+    size_pt: f64,
+) -> MathOutput {
+    let mut out = compile_math_once(
+        body,
+        display,
+        context,
+        document_path.clone(),
+        fonts_dir,
+        font_config,
+        size_pt,
+    );
+    if out.ok && !display {
+        let parts = split_inline_math(body);
+        if parts.len() > 1 {
+            let mut segments = Vec::with_capacity(parts.len());
+            let mut all_ok = true;
+            for part in parts {
+                let one = compile_math_once(
+                    &part,
+                    false,
+                    context,
+                    document_path.clone(),
+                    fonts_dir,
+                    font_config,
+                    size_pt,
+                );
+                if !one.ok {
+                    all_ok = false;
+                    break;
+                }
+                segments.push(MathSegment {
+                    body: part,
+                    svg: one.svg,
+                    width_pt: one.width_pt,
+                    height_pt: one.height_pt,
+                    baseline_pt: one.baseline_pt,
+                });
+            }
+            // 有片段编不出来就整体不分段（宁可整块渲染，也不要半截公式）
+            if all_ok {
+                out.segments = segments;
+            }
+        }
+    }
+    out
 }
 
 /// 公式探针文档的源码（两遍编译共用）。

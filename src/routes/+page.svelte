@@ -65,7 +65,12 @@
   } from "$lib/core/document-session";
   import type { DocumentState } from "$lib/core/document-session";
   import { failureStatus } from "$lib/core/failure-text";
-  import { installEditorFonts, loadBundledFont } from "$lib/editor/editor-font";
+  import {
+    installEditorFonts,
+    loadBundledFont,
+    measureWriteLetterSpacing,
+    WRITE_FONT_STACK,
+  } from "$lib/editor/editor-font";
   import MenuBar from "$lib/ui/MenuBar.svelte";
   import type { MenuGroup } from "$lib/ui/MenuBar.svelte";
   import { buildMenuGroups } from "$lib/ui/menu-model";
@@ -399,6 +404,18 @@
    * （用户：「不要光标在哪里哪里就变大了」）。后端没给（旧版本/桩/源码模式）时用 typst 默认 11pt。
    */
   let writingTextPt = $state(TYPST_DEFAULT_TEXT_PT);
+  /**
+   * **写作模式正文字体的 CJK 前进宽度补偿**（px）：浏览器量到的 advance 比 Typst 的 1em 宽约
+   * 2.3%，不补偿时临界行比引擎早折一行（见 `measureWriteLetterSpacing`）。字体装上后再量一次。
+   */
+  let writingLetterSpacingPx = $state(0);
+  const refreshWritingLetterSpacing = () => {
+    writingLetterSpacingPx = measureWriteLetterSpacing(WRITE_FONT_STACK, (writingTextPt * 4) / 3);
+  };
+  $effect(() => {
+    writingTextPt;
+    refreshWritingLetterSpacing();
+  });
   let writingReflowTimer: ReturnType<typeof setTimeout> | undefined;
   /** 量不到列宽时的兜底版心宽（495px = 371.25pt，写作模式常见列宽） */
   const DEFAULT_WRITING_WIDTH_PT = 371.25;
@@ -1879,6 +1896,8 @@
     void installEditorFonts({ load: loadBundledFont })
       .then((families) => {
         if (families.length > 0) dbg.log("font", `写作模式已装上打包字体：${families.join(" / ")}`);
+        // 字体装上后再量一次前进宽度补偿（装上前量到的是系统回退族）
+        refreshWritingLetterSpacing();
       })
       .catch((e) => dbg.log("font", "打包字体没装上（保持系统字体栈）：", e));
 
@@ -2062,6 +2081,7 @@
             blocks={writingBlocks}
             {blocksVersion}
             docTextPt={writingTextPt}
+            docLetterSpacingPx={writingLetterSpacingPx}
             onBlocksNeeded={handleBlocksNeeded}
             onCropClick={handleCropClick}
             onOpenLink={handleOpenLink}

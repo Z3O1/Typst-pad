@@ -65,6 +65,11 @@ export interface Block {
   page: number;
   xPt: number;
   yPt: number;
+  /**
+   * **首行主基线相对带顶的偏移**（pt；`null` = 这块没有文本基线）。
+   * 带高占位（让可编辑块占满 Typst 的块带）需要它把首行基线也放到带内正确位置。
+   */
+  anchorBaselinePt: number | null;
   /** 切片内部的可点链接热区（相对裁剪带左上角，pt）；空数组 = 这一块没有链接 */
   links: CropLink[];
 }
@@ -109,6 +114,7 @@ export function toBlockTable(
     | "page"
     | "xPt"
     | "yPt"
+    | "anchorBaselinePt"
     | "links"
   >[],
 ): BlockTable {
@@ -138,6 +144,10 @@ export function toBlockTable(
       page: typeof b.page === "number" && b.page > 0 ? b.page : 1,
       xPt: typeof b.xPt === "number" ? b.xPt : 0,
       yPt: typeof b.yPt === "number" ? b.yPt : 0,
+      anchorBaselinePt:
+        typeof b.anchorBaselinePt === "number" && Number.isFinite(b.anchorBaselinePt)
+          ? b.anchorBaselinePt
+          : null,
       // 链接热区的 href：Rust 侧已经按白名单过滤过（见 block_geometry 的链接收集），
       // 这里**再挡一层**（PR #60 审查第 6 条的附带项）：前端是"点一下就交给系统打开"的那一端，
       // 不该只依赖上游的判断 —— `javascript:` / `data:` 这类伪协议落到 `<a href>` 上很危险。

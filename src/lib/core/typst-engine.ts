@@ -250,6 +250,11 @@ export interface BlockCrop {
   widthPt: number;
   heightPt: number;
   bands: number;
+  /**
+   * **首行主基线相对带顶的偏移**（pt；缺省 = 这块没有文本基线，如纯图片）。
+   * 写作模式要让可编辑块按"带高"占位时，首行基线的带内偏移也要对上（见 `Block.anchorBaselinePt`）。
+   */
+  anchorBaselinePt?: number | null;
   /** 切片 SVG；空串 = 没有渲染结果 */
   svg: string;
   /**
@@ -453,6 +458,20 @@ export interface MathRender {
   heightPt: number;
   baselinePt: number;
   error?: string;
+  /**
+   * **可断行片段**（只有长行内公式才有，见 Rust `split_inline_math`）。
+   * 前端把片段依次渲染、片段之间留可断点，浏览器就能像 Typst 一样在运算符处折行。
+   */
+  segments?: MathSegment[];
+}
+
+/** 行内公式的一个可断行片段（坐标系与 `MathRender` 一致） */
+export interface MathSegment {
+  body: string;
+  svg: string;
+  widthPt: number;
+  heightPt: number;
+  baselinePt: number;
 }
 
 /**
@@ -497,6 +516,8 @@ export async function compileMath(
       heightPt: out.heightPt ?? 0,
       baselinePt: out.baselinePt ?? 0,
       error: out.error,
+      // 长行内公式的可断行片段必须原样带出去：这里逐字段重建对象，漏掉就等于整条链路白做
+      segments: Array.isArray(out.segments) ? out.segments : undefined,
     };
   } catch (e) {
     return {

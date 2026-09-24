@@ -384,3 +384,795 @@ fn dump_block_fixtures() {
         println!("BLOCKFIXTURE:{}", json);
     }
 }
+
+/// 递归收集语法树里的 `Math` 节点（未 numberize 的树按子节点字节长度累加出区间）。
+/// **定义/规则/普通代码里的公式不收集**：`#let vec(x) = $accent(#x, arrow)$` 里那个 `$...$`
+/// 是宏体（`x` 是形参），既不会在正文里当公式渲染，单独编译也只会报 unknown variable。
+fn pku_walk_math(node: &SyntaxNode, base: usize, out: &mut Vec<(usize, usize)>) {
+    let mut cursor = base;
+    for child in node.children() {
+        let start = cursor;
+        let end = start + child.len();
+        cursor = end;
+        // **Equation**（`$…$`，含定界符）才是前端 `math-ranges.ts` 扫到的东西；
+        // `SyntaxKind::Math` 只是定界符里的内容，范围不含 `$` 与内侧空白，
+        // 拿它当 raw 会算出与前端不同的 display/body（真实作业上量到过：行间公式被当成行内）。
+        if child.kind() == SyntaxKind::Equation {
+            out.push((start, end));
+            continue;
+        }
+        if is_no_output_node(child.kind()) || child.kind() == SyntaxKind::Code {
+            continue;
+        }
+        pku_walk_math(child, start, out);
+    }
+}
+
+/// 从文档里提取可用于公式编译的顶层单行 `#let` 定义（与前端 `math-context.ts` 的
+/// `extractMathDefinitions` 同口径：单行、有非空值、值里不含内容块 `[`；同名保留最后一次）。
+/// 少了它，`$va_1$` 这类用文档宏的行内公式在浏览器里会退回源码，量到的排版就不是真实的。
+fn pku_let_context(src: &str) -> String {
+    let mut order: Vec<String> = Vec::new();
+    let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for line in src.lines() {
+        let line = line.trim();
+        if !line.starts_with("#let") || line.contains('[') {
+            continue;
+        }
+        let rest = line["#let".len()..].trim_start();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        let Some((_, value)) = line.split_once('=') else {
+            continue;
+        };
+        if value.trim().is_empty() {
+            continue;
+        }
+        if !map.contains_key(&name) {
+            order.push(name.clone());
+        }
+        map.insert(name, line.to_string());
+    }
+    order
+        .iter()
+        .filter_map(|n| map.get(n).cloned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 解析 Typst 长度字面量（pt/cm/mm/in）→ pt。
+fn pku_len_pt(s: &str) -> Option<f64> {
+    let s = s.trim();
+    for (unit, scale) in [("pt", 1.0), ("cm", 28.346_456_7), ("mm", 2.834_645_67), ("in", 72.0)] {
+        if let Some(v) = s.strip_suffix(unit) {
+            return v.trim().parse::<f64>().ok().map(|x| x * scale);
+        }
+    }
+    None
+}
+
+/// 取 `#set <name>(` 到配对右括号之间的实参文本（**跳过注释行**；同一 set 出现多次取最后一次，
+/// 与 Typst 的累积覆盖一致）。
+fn pku_set_args(src: &str, name: &str) -> Option<String> {
+    let needle = format!("#set {name}(");
+    let mut last: Option<String> = None;
+    let mut from = 0usize;
+    while let Some(pos) = src[from..].find(&needle) {
+        let start = from + pos + needle.len();
+        // 前面这一行的前缀若在注释里就跳过（`// #set page(` 之类的示例不算活动规则）
+        let line_start = src[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        if src[line_start..start].trim_start().starts_with("//") {
+            from = start;
+            continue;
+        }
+        let mut depth = 1i32;
+        let mut end = start;
+        for (i, ch) in src[start..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            last = Some(src[start..end].to_string());
+            from = end;
+        } else {
+            break;
+        }
+    }
+    last
+}
+
+/// 取实参文本里 `key:` 之后的"裸值"（到逗号 / 顶层右括号为止）。**不解析嵌套括号的值**。
+fn pku_arg_value(args: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}:");
+    let mut from = 0usize;
+    while let Some(pos) = args[from..].find(&needle) {
+        let at = from + pos + needle.len();
+        let rest = &args[at..];
+        let value: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|c| *c != ',' && *c != ')' && *c != '\n')
+            .collect();
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+        from = at;
+    }
+    None
+}
+
+/// 取 `margin: (...)` 里的 `x:`（没有括号形式时返回整段）。
+fn pku_margin_x_pt(args: &str) -> Option<f64> {
+    let at = args.find("margin:")? + "margin:".len();
+    let rest = args[at..].trim_start();
+    if let Some(inner) = rest.strip_prefix('(') {
+        let inner = inner.split(')').next().unwrap_or("");
+        pku_arg_value(inner, "x").and_then(|v| pku_len_pt(&v))
+    } else {
+        pku_len_pt(&rest.chars().take_while(|c| *c != ',' && *c != ')').collect::<String>())
+    }
+}
+
+/// 文档自身页面设置带来的**真实正文列宽**（pt）。
+///
+/// `compile_blocks` 注入的 `#set page(width:…, height:auto, margin:…)` 会被文档后面的
+/// `#set page(...)` 覆盖：只写 margin 的文档保留注入页宽但换了页边距，写 `paper: "a4"` 的
+/// 则整页都换成 A4。两种情况下裁剪带的宽度字段都**不等于**文档真实列宽 —— 浏览器要按真实
+/// 列宽排版，才能和夹具里的锚点/行数对账。
+fn pku_true_content_pt(src: &str, injected_page_w_pt: f64, injected_margin_pt: f64) -> f64 {
+    let mut page_w = injected_page_w_pt;
+    let mut margin = injected_margin_pt;
+    if let Some(args) = pku_set_args(src, "page") {
+        if let Some(paper) = pku_arg_value(&args, "paper") {
+            if paper.contains("a4") {
+                page_w = 595.28;
+            } else if paper.contains("a5") {
+                page_w = 419.53;
+            }
+        }
+        if let Some(w) = pku_arg_value(&args, "width").and_then(|v| pku_len_pt(&v)) {
+            page_w = w;
+        }
+        if let Some(m) = pku_margin_x_pt(&args) {
+            margin = m;
+        }
+    }
+    (page_w - 2.0 * margin).max(60.0)
+}
+
+/// 文档自身的 `#set par(leading: …)`（em 倍数，默认 0.65 = typst 的默认行距）。
+fn pku_par_leading(src: &str) -> f64 {
+    pku_set_args(src, "par")
+        .and_then(|args| pku_arg_value(&args, "leading"))
+        .and_then(|v| v.trim().strip_suffix("em").map(|x| x.trim().to_string()))
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(0.65)
+}
+
+/// **PKU 真实作业验收夹具**（按需导出；消费方 `scripts/browser-check/writing-pku-docs.mjs`）。
+///   `PKU_ROOT="$HOME/PKU" npm run fixtures:pku-writing`
+///
+/// 与 `dump_block_fixtures` 的区别：样本是**磁盘上的真实作业**（原文不复制进仓库），
+/// 用**源文件实际路径**当 Typst 文档路径，于是 `#image("….pdf")` 这类相对资源能解析；
+/// 并且除块带几何外还导出**可比较锚点**——每块首页首行的墨迹顶端 `anchorYpt` 与该行左缘
+/// `anchorXpt`。浏览器侧把可编辑正文的首行 DOM 位置与它对账，而不是拿 `.cm-block-crop`
+/// 的带顶去和字形顶端硬比（带顶是"与相邻块取中点"的结果，与首行文字不是同一个含义）。
+///
+/// 任何一份样本读不到 / 编译失败 / 一个几何都没有 → 断言失败（退出码非零），
+/// 由 npm 包装层拒绝写出空夹具（"生成空 JSON 后报绿"是明确禁止的失败模式）。
+#[test]
+#[ignore = "按需运行：导出 PKU 真实作业的写作模式夹具"]
+fn dump_pku_writing_fixtures() {
+    // (显示名, 优先级, 相对 PKU_ROOT 的路径)——顺序即验收报告的优先级顺序
+    const SAMPLES: &[(&str, &str, &str)] = &[
+        ("高等代数周二 2026-09-24", "P0", "26fall/高等代数/week2-2026.9.24/1.typ"),
+        ("高等代数周一 2026-09-17", "P1", "26fall/高等代数/week1-2026.9.17/1.typ"),
+        ("数学分析周一 2026-09-14", "P1", "26fall/数学分析/week1-2026.9.14/1.typ"),
+        ("数学分析周二 2026-09-21", "P1", "26fall/数学分析/week2-2026.9.21/1.typ"),
+    ];
+    let root = std::env::var("PKU_ROOT").unwrap_or_else(|_| {
+        format!("{}/PKU", std::env::var("HOME").unwrap_or_default())
+    });
+    let requested_column_pt = std::env::var("PKU_WRITING_COLUMN_PT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(371.25);
+    // 与 `compile_blocks` 逐字一致的口径（夹紧 + 页宽反推），锚点那一趟必须用同一个版心，
+    // 否则两趟排版宽度不同、行断位置都变了，锚点对不上几何。
+    let content_pt = requested_column_pt.clamp(120.0, 2000.0);
+    let margin_ratio = 70.87 / crate::typst_world::A4_WIDTH_PT;
+    let page_width_pt = content_pt / (1.0 - 2.0 * margin_ratio);
+    let margin_pt = page_width_pt * margin_ratio;
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut emitted = 0usize;
+    for (name, priority, rel) in SAMPLES {
+        let path = Path::new(&root).join(rel);
+        let abs = path.to_string_lossy().to_string();
+        if !path.is_file() {
+            println!("PKUERROR:{name}\t文件不存在：{abs}");
+            failures.push(format!("{name}：文件不存在（{abs}）"));
+            continue;
+        }
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("PKUERROR:{name}\t读文件失败：{abs}：{e}");
+                failures.push(format!("{name}：读文件失败 {e}"));
+                continue;
+            }
+        };
+        let out = compile_blocks(
+            src.clone(),
+            0,
+            Some(abs.clone()),
+            &fonts_dir(),
+            &FontConfig::default(),
+            content_pt,
+            None,
+            None,
+        );
+        for d in &out.diagnostics {
+            println!(
+                "PKUDIAG:{name}\t[{}] 行{} 列{} {}",
+                d.severity, d.line, d.column, d.message
+            );
+        }
+        if !out.ok {
+            failures.push(format!("{name}：真实编译失败（{} 条诊断）", out.diagnostics.len()));
+        }
+
+        // 锚点那一趟：同一版心、同一 document_path、同一套字体重新编译，从帧里取每块首行墨迹顶。
+        let injected = format!(
+            "#set page(width: {page_width_pt:.2}pt, height: auto, margin: {margin_pt:.2}pt)\n"
+        );
+        let doc_start = injected.len();
+        let compiled = format!("{injected}{src}");
+        let world = TypstWorld::new(
+            compiled,
+            Some(abs.clone()),
+            &fonts_dir(),
+            &FontConfig::default(),
+        );
+        let items: Vec<PlacedItem> = if let typst::diag::Warned {
+            output: Ok(doc), ..
+        } = typst::compile::<PagedDocument>(&world)
+        {
+            collect_geometry_with_links(&world, &doc).0 .0
+        } else {
+            Vec::new()
+        };
+
+        // 文档自身页面设置带来的真实列宽：占位切片的 viewBox 用它，浏览器把切片铺到同一列宽时
+        // 高度就恰好等于 `heightPt`（几何来自真实帧，像素不是）。
+        let true_content_pt = pku_true_content_pt(&src, page_width_pt, margin_pt);
+        // **行距 = 基线直方图的自相关峰**：多数字形落在每行的主基线上，把整个基线集合平移
+        // 一个真实行距后重叠最多；分式/上下标是少数，不会赢。这比"逐块算"稳（逐块依赖行数，
+        // 行数本身由主峰数得出，误差会被 span/(n-1) 放大；实测数分周二被带成 11.5/21pt）。
+        let line_spacing_pt: Option<f64> = {
+            let mut bins: std::collections::BTreeMap<i64, usize> =
+                std::collections::BTreeMap::new();
+            for i in &items {
+                *bins.entry((i.baseline_pt * 2.0).round() as i64).or_insert(0) += 1;
+            }
+            if bins.len() < 3 {
+                None
+            } else {
+                let mut best = (0i64, 0usize);
+                for step in 16i64..=60 {
+                    let mut overlap = 0usize;
+                    for (b, c) in &bins {
+                        if bins.contains_key(&(b + step)) {
+                            overlap += c;
+                        }
+                    }
+                    if overlap > best.1 {
+                        best = (step, overlap);
+                    }
+                }
+                (best.1 > 0).then(|| best.0 as f64 / 2.0)
+            }
+        };
+        let mut block_json: Vec<serde_json::Value> = Vec::with_capacity(out.blocks.len());
+        let mut found_geometry = 0usize;
+        // 每块首行主基线（页面坐标，pt）：段距 = 相邻普通段落的首行基线差
+        let mut first_baselines: Vec<Option<f64>> = Vec::with_capacity(out.blocks.len());
+        for b in &out.blocks {
+            let range = (b.start + doc_start)..(b.end + doc_start);
+            // 只对"确实有渲染结果"的块算锚点。无输出块（#let/#set/#show）现在 found=false，
+            // 但它们的宏内容在使用处的 span 仍指回定义处 —— 不排除就会拿到跨页假锚点。
+            let hit: Vec<&PlacedItem> = if b.found {
+                items
+                    .iter()
+                    .filter(|i| i.range.start < range.end && i.range.end >= range.start)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let page = hit.iter().map(|i| i.page).min();
+            let mut anchor_y: Option<f64> = None;
+            let mut anchor_x: Option<f64> = None;
+            let mut block_first_baseline: Option<f64> = None;
+            let mut line_spans: Vec<serde_json::Value> = Vec::new();
+            let mut line_tops: Vec<f64> = Vec::new();
+            let mut line_count = 0usize;
+            if let Some(page) = page {
+                let on_page: Vec<&&PlacedItem> = hit.iter().filter(|i| i.page == page).collect();
+                if !on_page.is_empty() {
+                    let min_y = on_page
+                        .iter()
+                        .map(|i| i.rect.min.y.to_pt())
+                        .fold(f64::INFINITY, f64::min);
+                    // 首行带 = y 与顶端相差不超过 1pt 的项（与 blocks.rs 的 0.5pt 去重同一量级）
+                    let first: Vec<&&&PlacedItem> = on_page
+                        .iter()
+                        .filter(|i| i.rect.min.y.to_pt() - min_y <= 1.0)
+                        .collect();
+                    let min_x = first
+                        .iter()
+                        .map(|i| i.rect.min.x.to_pt())
+                        .fold(f64::INFINITY, f64::min);
+                    anchor_y = Some(min_y);
+                    anchor_x = Some(min_x);
+                    // 首行主基线（计数最多的基线）：段距按相邻普通段落的首行基线差量。
+                    let mut first_bins: std::collections::BTreeMap<i64, usize> =
+                        std::collections::BTreeMap::new();
+                    for i in on_page
+                        .iter()
+                        .filter(|i| i.rect.min.y.to_pt() - min_y <= 1.0)
+                    {
+                        *first_bins
+                            .entry((i.baseline_pt * 2.0).round() as i64)
+                            .or_insert(0) += 1;
+                    }
+                    block_first_baseline = first_bins
+                        .iter()
+                        .max_by_key(|(_, c)| **c)
+                        .map(|(k, _)| *k as f64 / 2.0);
+                    let mut ys: Vec<f64> = on_page
+                        .iter()
+                        .map(|i| (i.rect.min.y.to_pt() * 2.0).round() / 2.0)
+                        .collect();
+                    ys.sort_by(|a, b| a.total_cmp(b));
+                    ys.dedup();
+                    line_tops = ys;
+                    // **行数 = 主基线聚类**：阈值为实测行距的 0.75 倍（上下标/分式把基线拉开
+                    // 约 ±5~8pt，行距 15~18pt，0.75 倍能分开"行"与"行内偏移"）。量不到行距时
+                    // 退回"基线上有个字形就算一行"。
+                    let mut bs: Vec<f64> = on_page.iter().map(|i| i.baseline_pt).collect();
+                    bs.sort_by(|a, b| a.total_cmp(b));
+                    let threshold = line_spacing_pt.map(|sp| sp * 0.75).unwrap_or(0.0);
+                    if !bs.is_empty() {
+                        line_count = 1;
+                        let mut last = bs[0];
+                        for v in bs.iter().skip(1) {
+                            if *v - last > threshold {
+                                line_count += 1;
+                                last = *v;
+                            }
+                        }
+                    }
+                    // 逐行拆：按同一阈值把字形分到各行，记录源区间与右缘
+                    {
+                        let mut sorted: Vec<&&PlacedItem> = on_page.clone();
+                        sorted.sort_by(|a, b| a.baseline_pt.total_cmp(&b.baseline_pt));
+                        let mut cur: Vec<&&PlacedItem> = Vec::new();
+                        let mut flush = |cur: &mut Vec<&&PlacedItem>,
+                                         spans: &mut Vec<serde_json::Value>| {
+                            if cur.is_empty() {
+                                return;
+                            }
+                            let start = cur.iter().map(|i| i.range.start).min().unwrap();
+                            let end = cur.iter().map(|i| i.range.end).max().unwrap();
+                            let x1 = cur
+                                .iter()
+                                .map(|i| i.rect.max.x.to_pt())
+                                .fold(f64::NEG_INFINITY, f64::max);
+                            let y = cur
+                                .iter()
+                                .map(|i| i.rect.min.y.to_pt())
+                                .fold(f64::INFINITY, f64::min);
+                            spans.push(serde_json::json!({
+                                "start": start.saturating_sub(doc_start),
+                                "end": end.saturating_sub(doc_start),
+                                "x1Pt": (x1 * 10.0).round() / 10.0,
+                                "yPt": (y * 10.0).round() / 10.0,
+                            }));
+                            cur.clear();
+                        };
+                        let mut spans: Vec<serde_json::Value> = Vec::new();
+                        let mut last_b: Option<f64> = None;
+                        for i in sorted {
+                            if let Some(lb) = last_b {
+                                if i.baseline_pt - lb > threshold {
+                                    flush(&mut cur, &mut spans);
+                                }
+                            }
+                            last_b = Some(i.baseline_pt);
+                            cur.push(i);
+                        }
+                        flush(&mut cur, &mut spans);
+                        line_spans = spans;
+                    }
+                }
+            }
+            if b.found && anchor_y.is_some() {
+                found_geometry += 1;
+            }
+            block_json.push(serde_json::json!({
+                "start": b.start,
+                "end": b.end,
+                "kind": b.kind,
+                "found": b.found,
+                "skipped": b.skipped,
+                "pages": b.pages,
+                "page": b.page,
+                "xPt": b.x_pt,
+                "yPt": b.y_pt,
+                "widthPt": b.width_pt,
+                "heightPt": b.height_pt,
+                "bands": b.bands,
+                "anchorYpt": anchor_y,
+                "anchorXpt": anchor_x,
+                // 首行**主基线**（页面坐标）：比"墨迹顶端"更适合与浏览器对账 ——
+                // 两者对同一行文字的含义一致，不受行高（半 leading）与首字形高低影响。
+                "anchorBaselinePt": block_first_baseline,
+                // **逐行的源区间与右缘**（诊断折行差异用）：按基线聚类成行，每行给
+                // `start/end`（文档字节，取自该行字形）与 `x1Pt`（该行最右墨迹）。
+                // 浏览器侧用 `visualLineAt` 数出视觉行与断点，与这里逐行比，能指出"从哪个字开始折行不同"。
+                "lineSpans": line_spans,
+                "lineTopsPt": line_tops,
+                "lineCount": line_count,
+                // **等比例占位切片**（不是真渲染像素）：真 SVG 在图片/公式密集的作业里单份 5MB+，
+                // 注入浏览器会卡死；而这一套要验的是**几何**（带高、锚点、行数），带高由 viewBox
+                // 的宽高比决定，占位就足够。真实 SVG 的像素几何由 `writing-blocks-visual.mjs` 覆盖。
+                "svg": if b.found && !b.skipped && b.height_pt > 0.5 {
+                    format!(
+                        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {true_content_pt:.2} {:.2}\"></svg>",
+                        b.height_pt
+                    )
+                } else {
+                    String::new()
+                },
+            }));
+            first_baselines.push(block_first_baseline);
+        }
+        // **段距**：相邻两个普通段落（源码之间恰好一条空白行）首行主基线的差。
+        // 编辑器里两段之间的距离由"上一个段落的行盒 + 空白行"表示，所以空白行目标高度
+        // = 段距 − 真实行距（行高跟文档走之后必须一起改，否则每条段落分隔会短一截）。
+        let par_gap_pt: Option<f64> = {
+            let mut samples: Vec<f64> = Vec::new();
+            for i in 0..out.blocks.len().saturating_sub(1) {
+                let (a, c) = (&out.blocks[i], &out.blocks[i + 1]);
+                if a.kind != "Paragraph" || c.kind != "Paragraph" {
+                    continue;
+                }
+                let between = src.get(a.end..c.start).unwrap_or("");
+                if between.matches('\n').count() != 2 || !between.trim().is_empty() {
+                    continue;
+                }
+                if let (Some(x), Some(y)) = (first_baselines[i], first_baselines[i + 1]) {
+                    let d = y - x;
+                    if (12.0..=40.0).contains(&d) {
+                        samples.push(d);
+                    }
+                }
+            }
+            if samples.len() < 3 {
+                None
+            } else {
+                // 取 **20% 分位**而不是中位数：首行带分式/矩阵时"主基线"会被拉偏，只会把差拉**大**，
+                // 不会拉小；真实段距是最小的那批（实测数分周二中位数被带成 30pt、下沿 20.5pt）。
+                samples.sort_by(|a, b| a.total_cmp(b));
+                let idx = ((samples.len() as f64 * 0.2) as usize).min(samples.len() - 1);
+                Some((samples[idx] * 2.0).round() / 2.0)
+            }
+        };
+        if !out.ok || found_geometry == 0 {
+            failures.push(format!(
+                "{name}：没有可用几何（ok={}，有锚点块 {}）",
+                out.ok, found_geometry
+            ));
+        }
+        // **公式夹具**：可编辑正文里的行内公式由 `compile_math` 渲染成 widget，其高度会影响
+        // 段落行高。桩没有真产物就退回假 SVG（高度写死 7.2pt），量到的行高就不是引擎的 ——
+        // 所以这里把文档里每个公式按**同一份文档宏上下文**真编译一份，供浏览器注入。
+        let context = pku_let_context(&src);
+        let mut math_nodes: Vec<(usize, usize)> = Vec::new();
+        pku_walk_math(&typst_syntax::parse(&src), 0, &mut math_nodes);
+        let mut seen: std::collections::BTreeSet<(String, bool)> = std::collections::BTreeSet::new();
+        let mut math_json: Vec<serde_json::Value> = Vec::new();
+        let mut math_failed = 0usize;
+        for (start, end) in math_nodes {
+            let raw = &src[start..end];
+            let inner = raw.strip_prefix('$').unwrap_or(raw);
+            let inner = inner.strip_suffix('$').unwrap_or(inner);
+            let display = inner.chars().next().is_some_and(char::is_whitespace)
+                && inner.chars().last().is_some_and(char::is_whitespace)
+                && !inner.trim().is_empty();
+            // 与前端 `math-ranges.ts` 逐字一致：行间公式取 trim 后的 body，**行内公式取原样的
+            // `raw`（首尾空格也算 body 的一部分）**。差一个空格，桩就命中不到真产物、退回假 SVG，
+            // 行内公式宽度失真 → 正文断行位置全变（真实作业上实测过）。
+            let body = if display { inner.trim() } else { inner };
+            if body.trim().is_empty() {
+                continue;
+            }
+            let key = (body.to_string(), display);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let m = crate::typst_world::compile_math(
+                &key.0,
+                key.1,
+                &context,
+                Some(abs.clone()),
+                &fonts_dir(),
+                &FontConfig::default(),
+                out.text_pt,
+            );
+            if !m.ok {
+                math_failed += 1;
+                println!(
+                    "PKUMATHERR:{name}\t{} :: {}",
+                    key.0.replace('\n', "\\n"),
+                    m.error.unwrap_or_default()
+                );
+                continue;
+            }
+            math_json.push(serde_json::json!({
+                "body": key.0,
+                "display": key.1,
+                "sizePt": out.text_pt,
+                "svg": m.svg,
+                "widthPt": m.width_pt,
+                "heightPt": m.height_pt,
+                "baselinePt": m.baseline_pt,
+                // 长行内公式的可断行片段（前端据此在运算符处折行，见 split_inline_math）
+                "segments": m.segments,
+            }));
+        }
+        let json = serde_json::json!({
+            "name": name,
+            "priority": priority,
+            "relPath": rel,
+            "absPath": abs,
+            // 浏览器要按**文档真实列宽**排版（文档自带的 #set page 会覆盖注入页设置）
+            "contentWidthPt": true_content_pt,
+            "injectedContentPt": content_pt,
+            "parLeading": pku_par_leading(&src),
+            "lineSpacingPt": line_spacing_pt,
+            "parGapPt": par_gap_pt,
+            "ownPage": pku_set_args(&src, "page").is_some(),
+            "pageWidthPt": out.page_width_pt,
+            "textPt": out.text_pt,
+            "ok": out.ok,
+            "pages": out.pages,
+            "diagnostics": out.diagnostics,
+            "warnings": out.warnings,
+            "blocks": block_json,
+            "math": math_json,
+            "domMathCount": seen.len(),
+            "failedMath": math_failed,
+            "doc": src,
+        });
+        println!(
+            "PKUSUMMARY:{name}\tok={}\tpages={:?}\t块={}\t有几何={}\t公式={}\t公式失败={}\t诊断={}\t源码字节={}",
+            out.ok,
+            out.pages,
+            out.blocks.len(),
+            found_geometry,
+            seen.len(),
+            math_failed,
+            out.diagnostics.len(),
+            src.len()
+        );
+        println!("PKUFIXTURE:{json}");
+        emitted += 1;
+    }
+    // ---- 编辑回放夹具（P0）：Enter / 输入 / Backspace / Undo 的确定状态 ----
+    //
+    // 浏览器桩只在"文档全文与夹具逐字相同"时返回真实块几何；编辑态没有对应夹具就会静默退回
+    // 假切片。所以每个回放状态都要有**真实编译**的夹具（`PKUREPLAY:`），由 npm 包装层收集。
+    {
+        let path = Path::new(&root).join(SAMPLES[0].2);
+        match std::fs::read_to_string(&path) {
+            Ok(src) => {
+                let abs = path.to_string_lossy().to_string();
+                let true_content_pt = pku_true_content_pt(&src, page_width_pt, margin_pt);
+                let anchor = source_blocks(&src)
+                    .into_iter()
+                    .find(|b| {
+                        b.kind == "Paragraph"
+                            && !src[b.range.clone()].contains('\n')
+                            && b.range.end.saturating_sub(b.range.start) > 20
+                    })
+                    .map(|b| b.range.end);
+                if let Some(pos) = anchor {
+                    if src.as_bytes().get(pos) != Some(&b'\n') {
+                        failures.push("编辑回放：锚点不在行尾换行符上".to_string());
+                    } else {
+                        let char_len = src[..pos]
+                            .chars()
+                            .next_back()
+                            .map(|c| c.len_utf8())
+                            .unwrap_or(0);
+                        let enter_doc = format!("{}{}{}", &src[..pos], "\n", &src[pos..]);
+                        let type_doc = format!("{}{}{}", &src[..pos], "测试", &src[pos..]);
+                        let back_doc = if char_len > 0 {
+                            format!("{}{}", &src[..pos - char_len], &src[pos..])
+                        } else {
+                            src.clone()
+                        };
+                        let state_json = |name: &str, doc: &str| -> serde_json::Value {
+                            let out = compile_blocks(
+                                doc.to_string(),
+                                0,
+                                Some(abs.clone()),
+                                &fonts_dir(),
+                                &FontConfig::default(),
+                                content_pt,
+                                None,
+                                None,
+                            );
+                            let injected = format!(
+                                "#set page(width: {page_width_pt:.2}pt, height: auto, margin: {margin_pt:.2}pt)\n"
+                            );
+                            let doc_start = injected.len();
+                            let world = TypstWorld::new(
+                                format!("{injected}{doc}"),
+                                Some(abs.clone()),
+                                &fonts_dir(),
+                                &FontConfig::default(),
+                            );
+                            let items: Vec<PlacedItem> = if let typst::diag::Warned {
+                                output: Ok(d), ..
+                            } = typst::compile::<PagedDocument>(&world)
+                            {
+                                collect_geometry_with_links(&world, &d).0 .0
+                            } else {
+                                Vec::new()
+                            };
+                            let mut arr: Vec<serde_json::Value> = Vec::new();
+                            for b in &out.blocks {
+                                let range = (b.start + doc_start)..(b.end + doc_start);
+                                let hit: Vec<&PlacedItem> = if b.found {
+                                    items
+                                        .iter()
+                                        .filter(|i| {
+                                            i.range.start < range.end && i.range.end >= range.start
+                                        })
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                };
+                                let page = hit.iter().map(|i| i.page).min();
+                                let mut anchor_y: Option<f64> = None;
+                                let mut anchor_baseline: Option<f64> = None;
+                                if let Some(pg) = page {
+                                    let on_page: Vec<&&PlacedItem> =
+                                        hit.iter().filter(|i| i.page == pg).collect();
+                                    if !on_page.is_empty() {
+                                        let min_y = on_page
+                                            .iter()
+                                            .map(|i| i.rect.min.y.to_pt())
+                                            .fold(f64::INFINITY, f64::min);
+                                        anchor_y = Some(min_y);
+                                        let mut bins: std::collections::BTreeMap<i64, usize> =
+                                            std::collections::BTreeMap::new();
+                                        for i in on_page
+                                            .iter()
+                                            .filter(|i| i.rect.min.y.to_pt() - min_y <= 1.0)
+                                        {
+                                            *bins.entry((i.baseline_pt * 2.0).round() as i64)
+                                                .or_insert(0) += 1;
+                                        }
+                                        anchor_baseline = bins
+                                            .iter()
+                                            .max_by_key(|(_, c)| **c)
+                                            .map(|(k, _)| *k as f64 / 2.0);
+                                    }
+                                }
+                                arr.push(serde_json::json!({
+                                    "start": b.start,
+                                    "end": b.end,
+                                    "kind": b.kind,
+                                    "found": b.found,
+                                    "skipped": b.skipped,
+                                    "pages": b.pages,
+                                    "page": b.page,
+                                    "xPt": b.x_pt,
+                                    "yPt": b.y_pt,
+                                    "widthPt": b.width_pt,
+                                    "heightPt": b.height_pt,
+                                    "bands": b.bands,
+                                    "anchorYpt": anchor_y,
+                                    "anchorBaselinePt": anchor_baseline,
+                                    "svg": if b.found && !b.skipped && b.height_pt > 0.5 {
+                                        format!(
+                                            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {true_content_pt:.2} {:.2}\"></svg>",
+                                            b.height_pt
+                                        )
+                                    } else {
+                                        String::new()
+                                    },
+                                }));
+                            }
+                            serde_json::json!({
+                                "name": name,
+                                "doc": doc,
+                                "contentWidthPt": true_content_pt,
+                                "pageWidthPt": out.page_width_pt,
+                                "textPt": out.text_pt,
+                                "ok": out.ok,
+                                "pages": out.pages,
+                                "diagnostics": out.diagnostics,
+                                "blocks": arr,
+                                "replay": true,
+                            })
+                        };
+                        for (key, name, doc) in [
+                            ("A", "原始", &src),
+                            ("B", "Enter 分段", &enter_doc),
+                            ("C", "输入两字", &type_doc),
+                            ("D", "Backspace", &back_doc),
+                        ] {
+                            let json = state_json(name, doc);
+                            println!("PKUREPLAY:{}", serde_json::json!({ "key": key, "fixture": json }));
+                        }
+                        println!("PKUREPLAYANCHOR:{}", pos);
+                    }
+                } else {
+                    failures.push("编辑回放：找不到合适的单行段落锚点".to_string());
+                }
+            }
+            Err(e) => failures.push(format!("编辑回放：读不到 P0：{e}")),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "PKU 夹具导出失败（不允许产出空/残缺夹具）：{failures:#?}"
+    );
+    assert_eq!(emitted, SAMPLES.len(), "样本数与预期不符");
+    println!("PKUCOUNT:{}", SAMPLES.len());
+}
+
+#[test]
+fn tmp_leading_probe() {
+    for (label, src) in [
+        ("default", format!("\n\n{}", "字".repeat(90))),
+        ("leading0.9", format!("#set par(leading: 0.9em)\n\n{}", "字".repeat(90))),
+        ("leading1.5", format!("#set par(leading: 1.5em)\n\n{}", "字".repeat(90))),
+    ] {
+        let injected = "#set page(width: 487.30pt, height: auto, margin: 58.02pt)\n";
+        let world = TypstWorld::new(format!("{injected}{src}"), None, &fonts_dir(), &FontConfig::default());
+        let doc = match typst::compile::<PagedDocument>(&world) {
+            typst::diag::Warned { output: Ok(d), .. } => d,
+            _ => { println!("TMPL {label}: 编译失败"); continue; }
+        };
+        let (items, _) = collect_geometry(&world, &doc);
+        let mut bins: std::collections::BTreeMap<i64, usize> = std::collections::BTreeMap::new();
+        for i in &items {
+            if i.rect.min.y.to_pt() > 50.0 { *bins.entry((i.baseline_pt * 2.0).round() as i64).or_insert(0) += 1; }
+        }
+        let mut counts: Vec<(f64, usize)> = bins.iter().map(|(k, c)| (*k as f64 / 2.0, *c)).collect();
+        counts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        println!("TMPL {label}: 基线分箱 {}（前 12 个按值）: {:?}", counts.len(), &counts[..counts.len().min(12)]);
+    }
+}

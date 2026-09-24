@@ -36,9 +36,12 @@ const directlyEditable = (fx, block) => {
   if (!block.found || block.skipped || !["Paragraph", "Heading"].includes(block.kind)) return false;
   const from = byteToPos(fx.doc, block.start);
   const to = byteToPos(fx.doc, block.end);
+  const src = fx.doc.slice(from, to);
+  // 段内有单 LF 的段落走切片（Typst 当空白连排，逐源码行呈现必然多出行盒）
+  if (src.includes("\n")) return false;
   // 与前端同口径：只有 code / raw / comment 算复杂；markup 里的直引号（lexer 登记的 string
   // 区域）不算（见 live-preview/block-decorations.ts 的 isDirectlyEditableTextBlock）。
-  return !/(#|`|\/\/|\/\*)/.test(fx.doc.slice(from, to));
+  return !/(#|`|\/\/|\/\*)/.test(src);
 };
 
 /** 输入一篇文档（替换整篇），返回量到的切片几何 */

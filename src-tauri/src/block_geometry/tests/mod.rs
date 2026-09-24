@@ -39,6 +39,8 @@ fn item(page: usize, range: Range<usize>, x0: f64, y0: f64, x1: f64, y1: f64) ->
             Point::new(Abs::pt(x0), Abs::pt(y0)),
             Point::new(Abs::pt(x1), Abs::pt(y1)),
         ),
+        // 测试造的字形项按"底边即基线"近似（几何用例只读 rect，不读基线）
+        baseline_pt: y1,
     }
 }
 

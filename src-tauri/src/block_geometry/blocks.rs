@@ -6,7 +6,46 @@ use super::*;
 pub struct SourceBlock {
     pub kind: &'static str,
     pub range: Range<usize>,
+    /// **这块在 Typst 里不产生任何版面内容**（`#let` / `#set` / `#show` / `#import`）。
+    ///
+    /// 为什么需要它：这些语句里的**内容值**（如 `#let va = $v$` 里的公式）在使用处的字形，
+    /// 其 `Span` 仍指回**定义处**（typst 的内容值保留定义点 span）。于是"按源区间匹配帧项"
+    /// 会把文档里所有用到该宏的字形都算进定义块 —— 实测高代作业里 `#let va` 那一块因此
+    /// 拿到了跨 500pt 的假包围盒，前端把它当成一张大切片画出来，正文重复出现。
+    /// 这类块必须按"无输出"处理（前端会整格隐藏、光标进去才展开源码），不做几何匹配。
+    pub no_output: bool,
 }
+
+/// 这些语法树顶层节点在 Typst 里**不产生版面内容**（定义/规则/导入）。
+/// `SyntaxKind::Code`（`#table(...)` / `#figure(...)`）**不在此列**：它们会画东西。
+pub(crate) fn is_no_output_node(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::LetBinding | SyntaxKind::SetRule | SyntaxKind::ShowRule | SyntaxKind::ModuleImport
+    )
+}
+
+/// 这段源码是否**整段都是无输出语句**（每个非空行都以 `#let/#set/#show/#import/#include` 开头）。
+/// 用于补 `#` + `LetBinding` 那种"节点 kind 判不出来"的情况（见 `close_para` 的说明）。
+fn text_is_no_output_statements(text: &str) -> bool {
+    let mut any = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        any = true;
+        let ok = ["#let", "#set", "#show", "#import", "#include"].iter().any(|kw| {
+            t.strip_prefix(kw)
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_whitespace()) || rest.starts_with('('))
+        });
+        if !ok {
+            return false;
+        }
+    }
+    any
+}
+
 
 /// 这些语法树顶层节点各自**独占一个流式块**（typst 的排版也是以它们分块的）
 const BLOCK_KINDS: &[SyntaxKind] = &[
@@ -32,18 +71,29 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
     let mut out: Vec<SourceBlock> = Vec::new();
     // 当前段落块的范围（None = 还没有开始）
     let mut para: Option<Range<usize>> = None;
+    // 当前段落是否**只由无输出语句组成**（见 SourceBlock::no_output）
+    let mut para_no_output = false;
     // 子节点字节偏移的累加游标（见下面循环里的说明）
     let mut cursor = 0usize;
 
-    let close_para = |para: &mut Option<Range<usize>>, out: &mut Vec<SourceBlock>| {
+    let close_para = |para: &mut Option<Range<usize>>,
+                      no_output: &mut bool,
+                      out: &mut Vec<SourceBlock>| {
         if let Some(r) = para.take() {
             if r.end > r.start {
+                // 文本兜底：`#let ... = $...$` 这类语句在语法树里是 `#` + `LetBinding`，
+                // 只看 `is_no_output_node(节点kind)` 会漏掉（`#` 那个 Hash 节点不是无输出），
+                // 于是宏定义块仍会被宏内容在使用处的 span 污染。这里按源码行再判一次：
+                // 整段每一非空行都以 `#let/#set/#show/#import/#include` 开头 ⇒ 无输出。
+                let no_output = *no_output || text_is_no_output_statements(&src[r.clone()]);
                 out.push(SourceBlock {
-                    kind: "Paragraph",
+                    kind: if no_output { "Code" } else { "Paragraph" },
                     range: r,
+                    no_output,
                 });
             }
         }
+        *no_output = false;
     };
 
     for node in root.children() {
@@ -61,7 +111,7 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
 
         // 空行 / 注释 / 空白：不算块内容，但空行要断开段落
         if matches!(kind, SyntaxKind::Parbreak) {
-            close_para(&mut para, &mut out);
+            close_para(&mut para, &mut para_no_output, &mut out);
             continue;
         }
         if matches!(
@@ -83,20 +133,29 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
             || (LINE_ONLY_KINDS.contains(&kind) && is_alone_on_line(src, range.start, range.end));
 
         if own_block {
-            close_para(&mut para, &mut out);
+            close_para(&mut para, &mut para_no_output, &mut out);
             out.push(SourceBlock {
                 kind: kind_name(kind),
                 range,
+                no_output: is_no_output_node(kind),
             });
             continue;
         }
 
+        let this_no_output = is_no_output_node(kind);
         para = match para {
-            Some(r) => Some(r.start..r.end.max(range.end)),
-            None => Some(range.start..range.end),
+            Some(r) => {
+                // 混进任何会画东西的节点（Text / Strong / Equation …）就不再是"无输出块"
+                para_no_output = para_no_output && this_no_output;
+                Some(r.start..r.end.max(range.end))
+            }
+            None => {
+                para_no_output = this_no_output;
+                Some(range.start..range.end)
+            }
         };
     }
-    close_para(&mut para, &mut out);
+    close_para(&mut para, &mut para_no_output, &mut out);
     out
 }
 

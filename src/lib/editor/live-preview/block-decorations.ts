@@ -32,14 +32,23 @@ import { applyBlockSelection } from "../../core/block-plan";
  *
  * 公式不属于 opaque 区域，因此“普通文字 + 行内公式”仍是可编辑正文，公式本身继续由
  * math decoration 局部替换。粗体 / 斜体也属于 markup，直接作用在真实文本上。
+ *
+ * **段内有单 LF 的段落也不再直接编辑**（`docString` 里含换行）：Typst 把段落内的单换行当空白、
+ * 整段连排（实测数分作业一块源 6 行 → 引擎 5 个视觉行），而逐源码行的可编辑文本每行必占一个
+ * 行盒（同一块浏览器 9 行），纵向位置从这一段起就再也对不上。这类块改用引擎切片呈现，
+ * 光标进入时照旧展开成源码（与复杂块同一条路径）。编辑器自己的 Enter 写的是两个换行（新段落）、
+ * Shift+Enter 写的是 `\` + 换行（Typst 显式换行），都不会产生"段内单 LF"，所以这条只影响
+ * 粘贴/手写的硬折行文本。
  */
 export function isDirectlyEditableTextBlock(
   block: Pick<Block, "from" | "to" | "kind" | "found" | "skipped">,
   opaque: readonly Region[],
+  docString = "",
 ): boolean {
   if ((block.kind !== "Paragraph" && block.kind !== "Heading") || !block.found || block.skipped) {
     return false;
   }
+  if (docString.slice(block.from, block.to).includes("\n")) return false;
   return !overlapsComplexRegion(block.from, block.to, opaque);
 }
 
@@ -100,7 +109,7 @@ export function buildBlockCovers(
   // 普通正文与标题始终保留为真实文本：光标进出不会再触发整块图片/源码切换。
   // 复杂 Paragraph / Heading（含代码、raw、注释等）不命中此规则，仍保留原来的可靠退路。
   for (const cover of covers) {
-    if (isDirectlyEditableTextBlock(cover.block, opaque)) cover.revealed = true;
+    if (isDirectlyEditableTextBlock(cover.block, opaque, doc)) cover.revealed = true;
   }
   return covers;
 }

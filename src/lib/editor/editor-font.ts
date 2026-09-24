@@ -79,6 +79,28 @@ export async function installEditorFonts(
   return [...new Set(loaded)];
 }
 
+/**
+ * 写作模式正文字体的 **CJK 前进宽度补偿**（px，通常为负；量不出来返回 0）。
+ *
+ * 为什么需要：Chromium 对打包思源宋体量到的 CJK advance ≈ 字号 ×1.023（14.667px → 15.00px），
+ * 而 Typst 的 CJK advance 是 1em。不补偿时编辑器每行少容约 2% 的字，临界行比引擎**早折一行**
+ * （PKU 四份真实作业实测：可编辑正文行数不一致的块 11/2/0/8 → 7/0/0/6）。
+ *
+ * 用 canvas 量一次（与 `--write-doc-px` 同一字号、同一字体栈），返回 `字号 − 实际 advance`，
+ * 作为 `letter-spacing` 挂在 `.cm-content` 上：每个字的前进宽度回到 1em。差 ≤0.1px 时不干预。
+ */
+export function measureWriteLetterSpacing(stack: string, fontSizePx: number): number {
+  if (typeof document === "undefined" || !(fontSizePx > 0)) return 0;
+  const ctx = document.createElement("canvas").getContext("2d");
+  if (!ctx) return 0;
+  ctx.font = `${fontSizePx}px ${stack}`;
+  const advance = ctx.measureText("字").width;
+  if (!(advance > 0)) return 0;
+  const delta = fontSizePx - advance;
+  // 阈值取 0.1px：典型差值是 0.33px（14.667 → 15.00），用 0.5 会把它当噪声吃掉
+  return Math.abs(delta) > 0.1 ? delta : 0;
+}
+
 /** 从 Rust 侧取打包字体的字节（真机路径；浏览器开发模式由 stub 顶上） */
 export async function loadBundledFont(file: string): Promise<ArrayBuffer> {
   const bytes = await invoke<ArrayBuffer | number[] | Uint8Array>("bundled_font", { name: file });

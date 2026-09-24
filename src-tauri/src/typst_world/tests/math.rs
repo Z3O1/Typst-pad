@@ -343,3 +343,77 @@ fn compile_math_syntax_error() {
         "失败应带错误消息"
     );
 }
+
+/// 行内公式按顶层运算符切段：短公式不切，长公式切在运算符前、拼接后运算符不丢。
+#[test]
+fn split_inline_math_keeps_operators_and_ignores_nested() {
+    assert_eq!(split_inline_math("a + b"), vec!["a + b"], "短公式不该切");
+
+    let long = "a_1 + a_2 + a_3 + a_4 + a_5 <= b_1 + b_2 + b_3 + b_4 + b_5 = c";
+    let parts = split_inline_math(long);
+    assert!(parts.len() >= 2, "长公式应切成多段：{parts:?}");
+    let joined = parts.join("");
+    for token in ["<=", "+", "="] {
+        assert!(joined.contains(token), "拼接后不应丢 {token}：{joined}");
+    }
+    // 每一段都以运算符开头（除第一段）
+    for part in parts.iter().skip(1) {
+        let head: String = part.chars().take(2).collect();
+        assert!(
+            ["<=", ">=", "!=", "==", "->", "<-", "<", ">", "=", "+", "-"]
+                .iter()
+                .any(|op| head.starts_with(op)),
+            "后续片段应以运算符开头：{part:?}"
+        );
+    }
+
+    // 括号里的运算符不算顶层：`sum_(i=1)^n` 的 `=` 不能被用来切
+    let nested = "sum_(i=1)^n i + sum_(j=1)^m j + sum_(k=1)^p k + sum_(l=1)^q l";
+    let nparts = split_inline_math(nested);
+    for part in &nparts {
+        assert!(
+            !part.starts_with('='),
+            "括号内的 `=` 不该成为断点：{part:?}"
+        );
+    }
+}
+
+/// 长行内公式的整块尺寸 ≈ 各片段尺寸之和（片段之间只少了运算符左侧的一点间距）。
+#[test]
+fn compile_math_inline_segments_match_total_width() {
+    let body = "a_1 + a_2 + a_3 + a_4 + a_5 + a_6 + a_7 + a_8 + a_9 + a_10";
+    let out = compile_math(
+        body,
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
+    assert!(out.ok, "整块应渲染成功: {:?}", out.error);
+    assert!(out.segments.len() >= 2, "长公式应给出片段：{}", out.segments.len());
+    let sum: f64 = out.segments.iter().map(|s| s.width_pt).sum();
+    assert!(
+        (sum - out.width_pt).abs() < 12.0,
+        "片段宽度之和 {sum} 应接近整块宽度 {}（差 {}）",
+        out.width_pt,
+        (sum - out.width_pt).abs()
+    );
+    for seg in &out.segments {
+        assert!(seg.width_pt > 0.0 && seg.height_pt > 0.0, "片段尺寸应为正");
+        assert!(!seg.svg.is_empty(), "片段应有 SVG");
+    }
+
+    // 短公式不产生片段（前端照旧整块渲染）
+    let short = compile_math(
+        "x^2",
+        false,
+        "",
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        MATH_TEXT_PT,
+    );
+    assert!(short.segments.is_empty(), "短公式不该分段");
+}

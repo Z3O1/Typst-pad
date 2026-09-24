@@ -467,6 +467,8 @@ async function handleCommand(
           notify(command);
           // 记下来：假命中测试要按这份产物回答（见 fixtureHit）
           lastFake = { doc, blocks: hit.blocks as FakeBlockRecord[] };
+          // 夹具命中标记：编辑回放验收据此断言"编辑态没有静默退回假切片"（见 writing-pku-docs.mjs）
+          (window as unknown as Record<string, unknown>).__browserDevBlocksMatched = true;
           return {
             ok: true,
             blocks: hit.blocks,
@@ -477,6 +479,7 @@ async function handleCommand(
           };
         }
       }
+      (window as unknown as Record<string, unknown>).__browserDevBlocksMatched = false;
       const out = fakeBlocks(doc);
       lastFake = { doc, blocks: out.blocks as FakeBlockRecord[] };
       // 窗口化：桩也要遵守（否则验收会以为"窗口过滤"没生效）
@@ -508,6 +511,25 @@ async function handleCommand(
       // （实测踩过：页面里公式一直停在源码，看不出是夹具的问题）。
       const sizePt = typeof a.sizePt === "number" ? a.sizePt : MATH_TEXT_PT;
       const real = realMath(body, a.display === true, sizePt);
+      // 记一笔"真产物命中 / 退回假 SVG"：PKU 逐块几何验收据此断言"行内公式没有退回假宽度"
+      // （假 SVG 的宽度是 body 长度乘常数，会改变正文断行位置，量到的几何就不是引擎的）。
+      const mathHost = window as unknown as Record<string, unknown>;
+      const mathHits = (mathHost.__browserDevMathHits ??= { real: 0, fake: 0 }) as {
+        real: number;
+        fake: number;
+      };
+      if (real) mathHits.real++;
+      else {
+        mathHits.fake++;
+        // 记下退回假 SVG 的请求（body/display/sizePt）：PKU 验收拿它对出"哪条公式没命中夹具"，
+        // 而不是只看一个数字（差一个空格/换行就会走到这里，宽度失真、断行位置全变）。
+        const fakeList = (mathHost.__browserDevMathFake ??= []) as unknown[];
+        fakeList.push({
+          body,
+          display: a.display === true,
+          sizePt,
+        });
+      }
       return real ? { ok: true, ...real } : fakeMath(body, a.display === true);
     }
     // 点击定位（阶段 2）：真实实现在 Rust 侧（帧里找最近字形），这里按上面两条路模拟

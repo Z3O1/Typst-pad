@@ -71,6 +71,7 @@
      * （用户：「不要光标在哪里哪里就变大了」）。缺省用 typst 默认 11pt。
      */
     docTextPt?: number;
+    docLetterSpacingPx?: number;
     /** 块切片代次：变化时重整块装饰（父组件收到新编译结果后自增） */
     blocksVersion?: number;
     /** 视口内出现"能渲染但还没有切片"的块：父组件去抖后按新窗口重编译 */
@@ -122,6 +123,8 @@
     blocks = null,
     blocksVersion = 0,
     docTextPt = 11,
+    /** 写作模式正文字体的 CJK 前进宽度补偿（px，通常为负；0 = 不干预，见 editor-font.ts） */
+    docLetterSpacingPx = 0,
     onBlocksNeeded,
     onCropClick,
     onOpenLink,
@@ -635,6 +638,7 @@
   class="editor-host"
   class:write={mode === "write"}
   style:--write-doc-px={`${(docTextPt * 4) / 3}px`}
+  style:--write-letter-spacing={`${docLetterSpacingPx}px`}
   style:--write-font-stack={WRITE_FONT_STACK}
   bind:this={host}
 ></div>
@@ -723,6 +727,11 @@
     padding: 40px 0 160px;
     /* typst 的 `par.leading` 默认 0.65em ⇒ 行高 1.65em（与切片里的行距一致，见上） */
     line-height: 1.65;
+    /* 字体度量跟引擎对齐：浏览器量到的 CJK advance 比 1em 宽约 2.3%，用负 letter-spacing
+       补回来，临界行才不会比 Typst 早折一行（见 editor-font.ts 的 measureWriteLetterSpacing）；
+       geometricPrecision 关掉字形 advance 的取整/优化，断行更接近引擎。 */
+    letter-spacing: var(--write-letter-spacing, normal);
+    text-rendering: geometricPrecision;
     caret-color: var(--typora-caret, currentColor);
   }
 
@@ -779,6 +788,15 @@
   .editor-host.write :global(.cm-math-widget),
   .editor-host.write :global(.cm-math-block) {
     font-size: 1em;
+  }
+
+  /* 长行内公式的**可断行片段**：每个片段是独立的 inline-block，片段之间的 <wbr> 给浏览器
+     一个断点，于是折行位置与 Typst 的"运算符处折行"一致（见 widgets.ts 的 MathWidget）。 */
+  .editor-host.write :global(.cm-math-widget.cm-math-split) {
+    display: inline;
+  }
+  .editor-host.write :global(.cm-math-seg) {
+    display: inline-block;
   }
 
   .editor-host :global(.cm-editor.cm-focused) {
