@@ -1457,6 +1457,75 @@ for (const fx of fixtures) {
     }
   }
 
+  // 诊断（`PKU_CHARWIDTH=1`）：逐字符量浏览器里一行文本的前进宽度（含标点），
+  // 用来确认"浏览器比 Typst 早折一行"是不是全角标点/某类字符的前进宽度更大。
+  if (process.env.PKU_CHARWIDTH === "1") {
+    const target = rowFails[0];
+    if (target) {
+      await c.evaluate(
+        `(() => {
+          const view = document.querySelector('.cm-content').cmTile.root.view;
+          view.scrollDOM.scrollTop = Math.max(0, view.lineBlockAt(${byteToPos(fx.doc, target.start)}).top - 120);
+          return true;
+        })()`,
+      );
+      await sleep(400);
+      const lineTexts = await c.evaluate(`(() => {
+        const content = document.querySelector('.cm-content');
+        const view = content.cmTile.root.view;
+        const doc = view.state.doc;
+        const from = ${byteToPos(fx.doc, 0)};
+        void from;
+        const start = ${byteToPos(fx.doc, target.start)};
+        const end = ${byteToPos(fx.doc, target.end)};
+        // 找出该块渲染出来的行元素
+        const els = [];
+        for (const el of document.querySelectorAll('.cm-line')) {
+          let p = -1;
+          try { p = view.posAtDOM(el, 0); } catch (e) { continue; }
+          if (p >= start && p < end) els.push(el);
+        }
+        if (!els.length) return null;
+        const out = [];
+        for (const el of els) {
+          const lf = view.posAtDOM(el, 0);
+          const lt = lf + el.textContent.length;
+          const chars = [];
+          let prevLeft = null;
+          for (let p = lf; p <= Math.min(lt, doc.length); p++) {
+            const co = view.coordsAtPos(p);
+            const ch = p < lt ? doc.sliceString(p, p + 1) : '';
+            if (prevLeft != null && co) chars.push({ ch, adv: +(co.left - prevLeft).toFixed(2) });
+            prevLeft = co ? co.left : prevLeft;
+          }
+          out.push({
+            text: el.textContent.slice(0, 40),
+            sum: +chars.reduce((a, c) => a + c.adv, 0).toFixed(2),
+            chars: chars.slice(0, 200),
+          });
+        }
+        return out;
+      })()`);
+      const block = fx.blocks.find((b) => b.start === target.start);
+      const spans = block?.lineSpans ?? [];
+      console.log(
+        `  · CHARWIDTH L${target.line}（typst=${target.typstLines}/browser=${target.browserRows}；块左缘=${block?.xPt}pt）：`,
+      );
+      (lineTexts ?? []).forEach((ln, i) => {
+        const typstW = spans[i] ? (spans[i].x1Pt - (block?.xPt ?? 0)) * (4 / 3) : null;
+        console.log(
+          `      行${i}「${ln.text}」浏览器宽=${ln.sum}px${typstW != null ? ` typst宽=${typstW.toFixed(1)}px 差=${(ln.sum - typstW).toFixed(1)}px` : ""}`,
+        );
+        console.log(
+          `      前进宽度：${ln.chars
+            .slice(0, 60)
+            .map((c) => `${JSON.stringify(c.ch)}:${c.adv}`)
+            .join(" ")}`,
+        );
+      });
+    }
+  }
+
   // 记录首处失败（报告里直接指到行）
   const firstFailure = [...adjFails, ...cumFails, ...missingMeasured].sort(
     (a, b) => (anchorOf(a).t ?? 0) - (anchorOf(b).t ?? 0),

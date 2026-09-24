@@ -948,6 +948,89 @@ fn dump_pku_writing_fixtures() {
                 "segments": m.segments,
             }));
         }
+        // 诊断：Typst 在**真实文档里**的 CJK 前进宽度（相邻同基线字形的 x 差 / 字符数）。
+        // 编辑器的补偿是按"1em"补的，这个数才是引擎的实际值 —— 两者不一致就说明补偿模型错了。
+        {
+            let mut samples: Vec<f64> = Vec::new();
+            let mut punct_samples: Vec<(String, f64)> = Vec::new();
+            let mut sorted: Vec<&PlacedItem> = items.iter().filter(|i| i.page == 1).collect();
+            sorted.sort_by(|a, b| {
+                a.rect
+                    .min
+                    .y
+                    .to_pt()
+                    .total_cmp(&b.rect.min.y.to_pt())
+                    .then(a.rect.min.x.to_pt().total_cmp(&b.rect.min.x.to_pt()))
+            });
+            for w in sorted.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if (a.rect.min.y.to_pt() - b.rect.min.y.to_pt()).abs() > 0.5 {
+                    continue;
+                }
+                if a.range.end != b.range.start {
+                    continue;
+                }
+                // items 的 range 是**注入后文档**的坐标，要减掉前缀才是原文
+                let (s0, e0) = (
+                    a.range.start.saturating_sub(doc_start),
+                    a.range.end.saturating_sub(doc_start),
+                );
+                if e0 > src.len() || s0 >= e0 {
+                    continue;
+                }
+                let text = &src[s0..e0];
+                let n = text.chars().count();
+                if n == 0 {
+                    continue;
+                }
+                let is_han = text.chars().all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+                let is_punct = text.chars().all(|c| {
+                    ('\u{3000}'..='\u{303f}').contains(&c) || ('\u{ff00}'..='\u{ff65}').contains(&c)
+                });
+                let is_latin = text.chars().all(|c| c.is_ascii_alphanumeric());
+                if !is_han && !is_punct && !is_latin {
+                    continue;
+                }
+                let dx = b.rect.min.x.to_pt() - a.rect.min.x.to_pt();
+                if dx > 0.5 && dx < 40.0 {
+                    let kind = if is_han {
+                        "han"
+                    } else if is_punct {
+                        "punct"
+                    } else {
+                        "latin"
+                    };
+                    punct_samples.push((kind.to_string(), dx / n as f64));
+                    samples.push(dx / n as f64);
+                }
+            }
+            samples.sort_by(|a, b| a.total_cmp(b));
+            if !samples.is_empty() {
+                let median = samples[samples.len() / 2];
+                let cls_median = |kind: &str| -> Option<(usize, f64)> {
+                    let mut v: Vec<f64> = punct_samples
+                        .iter()
+                        .filter(|(k, _)| k == kind)
+                        .map(|(_, x)| *x)
+                        .collect();
+                    if v.is_empty() {
+                        return None;
+                    }
+                    v.sort_by(|a, b| a.total_cmp(b));
+                    Some((v.len(), v[v.len() / 2]))
+                };
+                println!(
+                    "PKUCJKADV:{name}\t中位={median:.3}pt 样本={}（字号 {}pt → 比率 {:.4}）han={:?} punct={:?} latin={:?}",
+                    samples.len(),
+                    out.text_pt,
+                    median / out.text_pt,
+                    cls_median("han"),
+                    cls_median("punct"),
+                    cls_median("latin")
+                );
+            }
+        }
+
         let json = serde_json::json!({
             "name": name,
             "priority": priority,
