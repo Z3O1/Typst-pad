@@ -175,9 +175,7 @@ fn compile_math_once(
 }
 
 /// 顶层运算符（Typst 行内公式可以在这些位置折行）——按长到短匹配前缀。
-const BREAK_OPERATORS: &[&str] = &[
-    "<=", ">=", "!=", "==", "->", "<-", "<", ">", "=", "+", "-",
-];
+const BREAK_OPERATORS: &[&str] = &["<=", ">=", "!=", "==", "->", "<-", "<", ">", "=", "+", "-"];
 
 /// 把**行内**公式按顶层运算符切成可断行的片段（切在运算符**之前**）。
 ///
@@ -198,7 +196,8 @@ pub fn split_inline_math(body: &str) -> Vec<String> {
             ')' | ']' | '}' => depth = depth.saturating_sub(1),
             _ => {}
         }
-        if depth == 0 && !current.trim().is_empty() && current.chars().count() >= MIN_SEGMENT_CHARS {
+        if depth == 0 && !current.trim().is_empty() && current.chars().count() >= MIN_SEGMENT_CHARS
+        {
             let rest: String = chars[i..].iter().collect();
             if let Some(op) = BREAK_OPERATORS.iter().find(|op| rest.starts_with(**op)) {
                 // 片段以运算符开头；`current` 末尾的空格留给下一段，避免丢间距

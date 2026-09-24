@@ -109,7 +109,12 @@ fn walk_frame(
                             Point::new(origin.x + x, origin.y - up),
                             Point::new(origin.x + x + advance, origin.y + down),
                         );
-                        out.push(PlacedItem { page, range, rect, baseline_pt: origin.y.to_pt() });
+                        out.push(PlacedItem {
+                            page,
+                            range,
+                            rect,
+                            baseline_pt: origin.y.to_pt(),
+                        });
                         stats.glyphs_mapped += 1;
                     }
                     x += advance;
@@ -143,14 +148,24 @@ fn walk_frame(
                         Point::new(origin.x + bb.min.x, origin.y + bb.min.y),
                         Point::new(origin.x + bb.max.x, origin.y + bb.max.y),
                     );
-                    out.push(PlacedItem { page, range, rect, baseline_pt: rect.min.y.to_pt() });
+                    out.push(PlacedItem {
+                        page,
+                        range,
+                        rect,
+                        baseline_pt: rect.min.y.to_pt(),
+                    });
                 }
             }
             FrameItem::Image(_, size, span) => {
                 stats.images += 1;
                 if let Some(range) = world.range(*span) {
                     let rect = Rect::new(origin, Point::new(origin.x + size.x, origin.y + size.y));
-                    out.push(PlacedItem { page, range, rect, baseline_pt: origin.y.to_pt() });
+                    out.push(PlacedItem {
+                        page,
+                        range,
+                        rect,
+                        baseline_pt: origin.y.to_pt(),
+                    });
                 }
             }
             FrameItem::Link(dest, size) => {
@@ -254,15 +269,12 @@ pub struct BlockGeom {
 ///
 /// 写作模式"可编辑块按带高占位"除了高度，还要知道首行基线在带内的偏移；浏览器侧对应量法见
 /// `scripts/browser-check/writing-pku-docs.mjs`（行盒顶 + 半 leading + 字体 ascent）。
-pub fn first_line_baseline(
-    items: &[PlacedItem],
-    range: Range<usize>,
-    page: usize,
-) -> Option<f64> {
+pub fn first_line_baseline(items: &[PlacedItem], range: Range<usize>, page: usize) -> Option<f64> {
     let mut min_y = f64::INFINITY;
-    for i in items.iter().filter(|i| {
-        i.page == page && i.range.start < range.end && i.range.end >= range.start
-    }) {
+    for i in items
+        .iter()
+        .filter(|i| i.page == page && i.range.start < range.end && i.range.end >= range.start)
+    {
         min_y = min_y.min(i.rect.min.y.to_pt());
     }
     if !min_y.is_finite() {
@@ -275,9 +287,60 @@ pub fn first_line_baseline(
             && i.range.end >= range.start
             && i.rect.min.y.to_pt() - min_y <= 1.0
     }) {
-        *bins.entry((i.baseline_pt * 2.0).round() as i64).or_insert(0) += 1;
+        *bins
+            .entry((i.baseline_pt * 2.0).round() as i64)
+            .or_insert(0) += 1;
     }
-    bins.iter().max_by_key(|(_, c)| **c).map(|(k, _)| *k as f64 / 2.0)
+    bins.iter()
+        .max_by_key(|(_, c)| **c)
+        .map(|(k, _)| *k as f64 / 2.0)
+}
+
+/// 块内**每一行的源码终点**（升序，**不含最后一行的块尾**；绝对源字节偏移）。
+///
+/// 用途：让浏览器按 Typst 的断点折行 —— 前端在这些位置插一个 `display: block; height: 0`
+/// 的行内 widget 就能强制换行，断点落在 `$…$` 之类原子区间里的项由前端丢弃
+/// （见 docs/development/writing-rendering.md 的"折行"一节）。
+///
+/// 判据是**基线聚类**：同一行的上下标/分式会把基线拉开约 0.35em，而 Typst 的行距通常 ≥1em，
+/// 取 0.75em 当阈值能把"行内偏移"与"行"分开（与 `lineCount` 同一套口径）。一行里取最大的
+/// `range.end` 当终点。
+///
+/// **这是"提示"而不是"真值"**（实测四份作业 327 个块里 27 个与 `lineCount - 1` 不一致）：
+/// 行内矩阵/多重分式的子基线能超过 0.75em（把一行拆开），同一个 `$…$` 里多个字形也可能共用一个
+/// 源区间（取 max + dedup 之后条数变少）。所以前端消费时必须自己校验：严格递增、不落在
+/// `$…$`/raw 之类的原子区间里、且与这一块的视觉行数自洽 —— 不自洽就整块不用断点。
+pub fn line_break_offsets(
+    items: &[PlacedItem],
+    range: Range<usize>,
+    page: usize,
+    text_pt: f64,
+) -> Vec<usize> {
+    let mut hit: Vec<&PlacedItem> = items
+        .iter()
+        .filter(|i| i.page == page && i.range.start < range.end && i.range.end >= range.start)
+        .collect();
+    if hit.len() < 2 {
+        return Vec::new();
+    }
+    hit.sort_by(|a, b| a.baseline_pt.total_cmp(&b.baseline_pt));
+    let threshold = (text_pt * 0.75).max(0.5);
+    let mut offsets: Vec<usize> = Vec::new();
+    let mut line_start = 0usize;
+    for i in 1..=hit.len() {
+        let boundary = i == hit.len() || hit[i].baseline_pt - hit[i - 1].baseline_pt > threshold;
+        if boundary {
+            if let Some(end) = hit[line_start..i].iter().map(|it| it.range.end).max() {
+                offsets.push(end);
+            }
+            line_start = i;
+        }
+    }
+    // 最后一项是块尾（不需要断点）；再去掉越界、重复与不递增的项
+    offsets.pop();
+    offsets.retain(|o| *o > range.start && *o < range.end);
+    offsets.dedup();
+    offsets
 }
 
 /// 给定源字节区间，算出它在版面上的**外接矩形**（None = 该区间没有任何渲染结果）

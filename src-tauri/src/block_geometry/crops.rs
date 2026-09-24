@@ -84,6 +84,14 @@ pub struct BlockCrop {
     /// "行盒顶 + 半 leading + 字体 ascent"算出来，见 `writing-pku-docs.mjs`）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_baseline_pt: Option<f64>,
+    /// **每一行的源码终点**（相对块起点的字节偏移，升序，不含块尾）。
+    ///
+    /// 给浏览器"按 Typst 的断点折行"用：前端在这些位置插 `display: block; height: 0` 的
+    /// 行内 widget 就能强制换行，段落折行数不再取决于浏览器的贪心断行
+    /// （见 docs/development/writing-rendering.md 的"折行"一节）。空 = 拿不到（没有文本 /
+    /// 单行 / 老后端），前端按没有它处理。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub line_breaks: Vec<usize>,
     /// 该块 SVG **内部**的链接热区（相对裁剪带左上角，pt）：前端据此贴一层可点的透明方块。
     /// 只有窗口内的块才有（与 svg 同步取舍），没有链接时为空数组。
     pub links: Vec<CropLink>,
@@ -287,6 +295,10 @@ pub fn compile_blocks(
         }
     }
 
+    // 文档正文实际字号：**必须在 `store_hit_geometry` 之前算**（stats 与 items 一起被消费掉），
+    // 行断点聚类也要拿它当阈值，所以提到切片循环之前。
+    let text_pt = document_text_pt(&stats);
+
     let mut crops: Vec<Option<BlockCrop>> = Vec::with_capacity(blocks.len());
     crops.resize_with(blocks.len(), || None);
     for (pos, idx) in order.iter().enumerate() {
@@ -400,6 +412,16 @@ pub fn compile_blocks(
                 (blocks[*idx].range.start + doc_start)..(blocks[*idx].range.end + doc_start),
                 g.page,
             ),
+            // 行断点：绝对源偏移 → 块内相对偏移（前端再按块起点换算成 CodeMirror 位置）
+            line_breaks: line_break_offsets(
+                &items,
+                (blocks[*idx].range.start + doc_start)..(blocks[*idx].range.end + doc_start),
+                g.page,
+                text_pt,
+            )
+            .into_iter()
+            .filter_map(|abs| abs.checked_sub(doc_start + blocks[*idx].range.start))
+            .collect(),
             links,
             svg,
         });
@@ -414,6 +436,7 @@ pub fn compile_blocks(
             kind: block.kind.to_string(),
             found: false, // 没有几何 = 引擎这块没画（前端整格隐藏，见 noOutput）
             skipped: false,
+            line_breaks: Vec::new(),
             pages: 0,
             page: 0,
             x_pt: 0.0,

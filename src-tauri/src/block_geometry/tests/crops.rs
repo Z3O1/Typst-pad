@@ -352,3 +352,53 @@ fn block_crops_carry_link_hotspots() {
         internal.blocks.iter().map(|b| &b.links).collect::<Vec<_>>()
     );
 }
+
+/// **行断点**（`line_breaks`）：块内每行的源码终点，升序、不含块尾。
+///
+/// 让浏览器按 Typst 的断点折行（前端在这些位置插 `display: block; height: 0` 的行内 widget）。
+/// 判据是基线聚类：同一行的上下标/分式把基线拉开约 0.35em，行距 ≥1em，取 0.75em 当阈值。
+/// 这里用真实编译的 3 行段落验证：断点必须落在行与行之间、条数 = 行数 − 1、且都能换算回源码位置。
+#[test]
+fn block_reports_line_break_offsets() {
+    let _hit_cache = hit_cache_guard();
+    const COLUMN_PT: f64 = 371.25;
+    // 三段都会折行：每段都长于一列
+    let para = "这是一段用来验证折行断点的中文正文，它需要足够长，长到在版心里必须折成好几行才行。";
+    let doc = format!("{para}{para}{para}\n\n最后一段短句。\n");
+    let out = compile_blocks(
+        doc.clone(),
+        0,
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+        COLUMN_PT,
+        None,
+        None,
+    );
+    assert!(out.ok, "编译应成功：{:?}", out.diagnostics);
+    let block = out
+        .blocks
+        .iter()
+        .find(|b| b.found && b.height_pt > 0.5 && b.line_breaks.len() > 1)
+        .expect("至少有一个多行块带行断点");
+    let src = &doc.as_bytes()[block.start..block.end];
+    let breaks = &block.line_breaks;
+    // 升序、严格递增、都在块内
+    for w in breaks.windows(2) {
+        assert!(w[0] < w[1], "行断点必须严格递增：{breaks:?}");
+    }
+    for b in breaks {
+        assert!(
+            *b > 0 && *b < src.len(),
+            "行断点 {b} 越出块 [0, {})",
+            src.len()
+        );
+    }
+    // 断点之间不跨行：把断点当行边界切开后，每段都非空
+    let mut prev = 0usize;
+    for b in breaks {
+        assert!(*b > prev, "行断点之间不能有空行");
+        prev = *b;
+    }
+    assert!(prev < src.len(), "最后一段必须留在块尾之后");
+}

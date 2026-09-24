@@ -448,7 +448,12 @@ fn pku_let_context(src: &str) -> String {
 /// 解析 Typst 长度字面量（pt/cm/mm/in）→ pt。
 fn pku_len_pt(s: &str) -> Option<f64> {
     let s = s.trim();
-    for (unit, scale) in [("pt", 1.0), ("cm", 28.346_456_7), ("mm", 2.834_645_67), ("in", 72.0)] {
+    for (unit, scale) in [
+        ("pt", 1.0),
+        ("cm", 28.346_456_7),
+        ("mm", 2.834_645_67),
+        ("in", 72.0),
+    ] {
         if let Some(v) = s.strip_suffix(unit) {
             return v.trim().parse::<f64>().ok().map(|x| x * scale);
         }
@@ -524,7 +529,12 @@ fn pku_margin_x_pt(args: &str) -> Option<f64> {
         let inner = inner.split(')').next().unwrap_or("");
         pku_arg_value(inner, "x").and_then(|v| pku_len_pt(&v))
     } else {
-        pku_len_pt(&rest.chars().take_while(|c| *c != ',' && *c != ')').collect::<String>())
+        pku_len_pt(
+            &rest
+                .chars()
+                .take_while(|c| *c != ',' && *c != ')')
+                .collect::<String>(),
+        )
     }
 }
 
@@ -581,14 +591,29 @@ fn pku_par_leading(src: &str) -> f64 {
 fn dump_pku_writing_fixtures() {
     // (显示名, 优先级, 相对 PKU_ROOT 的路径)——顺序即验收报告的优先级顺序
     const SAMPLES: &[(&str, &str, &str)] = &[
-        ("高等代数周二 2026-09-24", "P0", "26fall/高等代数/week2-2026.9.24/1.typ"),
-        ("高等代数周一 2026-09-17", "P1", "26fall/高等代数/week1-2026.9.17/1.typ"),
-        ("数学分析周一 2026-09-14", "P1", "26fall/数学分析/week1-2026.9.14/1.typ"),
-        ("数学分析周二 2026-09-21", "P1", "26fall/数学分析/week2-2026.9.21/1.typ"),
+        (
+            "高等代数周二 2026-09-24",
+            "P0",
+            "26fall/高等代数/week2-2026.9.24/1.typ",
+        ),
+        (
+            "高等代数周一 2026-09-17",
+            "P1",
+            "26fall/高等代数/week1-2026.9.17/1.typ",
+        ),
+        (
+            "数学分析周一 2026-09-14",
+            "P1",
+            "26fall/数学分析/week1-2026.9.14/1.typ",
+        ),
+        (
+            "数学分析周二 2026-09-21",
+            "P1",
+            "26fall/数学分析/week2-2026.9.21/1.typ",
+        ),
     ];
-    let root = std::env::var("PKU_ROOT").unwrap_or_else(|_| {
-        format!("{}/PKU", std::env::var("HOME").unwrap_or_default())
-    });
+    let root = std::env::var("PKU_ROOT")
+        .unwrap_or_else(|_| format!("{}/PKU", std::env::var("HOME").unwrap_or_default()));
     let requested_column_pt = std::env::var("PKU_WRITING_COLUMN_PT")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
@@ -636,7 +661,10 @@ fn dump_pku_writing_fixtures() {
             );
         }
         if !out.ok {
-            failures.push(format!("{name}：真实编译失败（{} 条诊断）", out.diagnostics.len()));
+            failures.push(format!(
+                "{name}：真实编译失败（{} 条诊断）",
+                out.diagnostics.len()
+            ));
         }
 
         // 锚点那一趟：同一版心、同一 document_path、同一套字体重新编译，从帧里取每块首行墨迹顶。
@@ -670,7 +698,9 @@ fn dump_pku_writing_fixtures() {
             let mut bins: std::collections::BTreeMap<i64, usize> =
                 std::collections::BTreeMap::new();
             for i in &items {
-                *bins.entry((i.baseline_pt * 2.0).round() as i64).or_insert(0) += 1;
+                *bins
+                    .entry((i.baseline_pt * 2.0).round() as i64)
+                    .or_insert(0) += 1;
             }
             if bins.len() < 3 {
                 None
@@ -774,29 +804,29 @@ fn dump_pku_writing_fixtures() {
                         let mut sorted: Vec<&&PlacedItem> = on_page.clone();
                         sorted.sort_by(|a, b| a.baseline_pt.total_cmp(&b.baseline_pt));
                         let mut cur: Vec<&&PlacedItem> = Vec::new();
-                        let flush = |cur: &mut Vec<&&PlacedItem>,
-                                         spans: &mut Vec<serde_json::Value>| {
-                            if cur.is_empty() {
-                                return;
-                            }
-                            let start = cur.iter().map(|i| i.range.start).min().unwrap();
-                            let end = cur.iter().map(|i| i.range.end).max().unwrap();
-                            let x1 = cur
-                                .iter()
-                                .map(|i| i.rect.max.x.to_pt())
-                                .fold(f64::NEG_INFINITY, f64::max);
-                            let y = cur
-                                .iter()
-                                .map(|i| i.rect.min.y.to_pt())
-                                .fold(f64::INFINITY, f64::min);
-                            spans.push(serde_json::json!({
-                                "start": start.saturating_sub(doc_start),
-                                "end": end.saturating_sub(doc_start),
-                                "x1Pt": (x1 * 10.0).round() / 10.0,
-                                "yPt": (y * 10.0).round() / 10.0,
-                            }));
-                            cur.clear();
-                        };
+                        let flush =
+                            |cur: &mut Vec<&&PlacedItem>, spans: &mut Vec<serde_json::Value>| {
+                                if cur.is_empty() {
+                                    return;
+                                }
+                                let start = cur.iter().map(|i| i.range.start).min().unwrap();
+                                let end = cur.iter().map(|i| i.range.end).max().unwrap();
+                                let x1 = cur
+                                    .iter()
+                                    .map(|i| i.rect.max.x.to_pt())
+                                    .fold(f64::NEG_INFINITY, f64::max);
+                                let y = cur
+                                    .iter()
+                                    .map(|i| i.rect.min.y.to_pt())
+                                    .fold(f64::INFINITY, f64::min);
+                                spans.push(serde_json::json!({
+                                    "start": start.saturating_sub(doc_start),
+                                    "end": end.saturating_sub(doc_start),
+                                    "x1Pt": (x1 * 10.0).round() / 10.0,
+                                    "yPt": (y * 10.0).round() / 10.0,
+                                }));
+                                cur.clear();
+                            };
                         let mut spans: Vec<serde_json::Value> = Vec::new();
                         let mut last_b: Option<f64> = None;
                         for i in sorted {
@@ -840,6 +870,20 @@ fn dump_pku_writing_fixtures() {
                 "lineSpans": line_spans,
                 "lineTopsPt": line_tops,
                 "lineCount": line_count,
+                // **每一行的源码终点**（块内相对字节偏移，不含块尾）：前端据此强制换行，
+                // 与产品 `BlockCrop::line_breaks` 同源同口径。
+                "lineBreaks": match page {
+                    Some(page) => crate::block_geometry::line_break_offsets(
+                        &items,
+                        range.clone(),
+                        page,
+                        out.text_pt,
+                    )
+                    .into_iter()
+                    .filter_map(|abs| abs.checked_sub(doc_start + b.start))
+                    .collect::<Vec<usize>>(),
+                    None => Vec::new(),
+                },
                 // **等比例占位切片**（不是真渲染像素）：真 SVG 在图片/公式密集的作业里单份 5MB+，
                 // 注入浏览器会卡死；而这一套要验的是**几何**（带高、锚点、行数），带高由 viewBox
                 // 的宽高比决定，占位就足够。真实 SVG 的像素几何由 `writing-blocks-visual.mjs` 覆盖。
@@ -897,7 +941,8 @@ fn dump_pku_writing_fixtures() {
         let context = pku_let_context(&src);
         let mut math_nodes: Vec<(usize, usize)> = Vec::new();
         pku_walk_math(&typst_syntax::parse(&src), 0, &mut math_nodes);
-        let mut seen: std::collections::BTreeSet<(String, bool)> = std::collections::BTreeSet::new();
+        let mut seen: std::collections::BTreeSet<(String, bool)> =
+            std::collections::BTreeSet::new();
         let mut math_json: Vec<serde_json::Value> = Vec::new();
         let mut math_failed = 0usize;
         for (start, end) in math_nodes {
@@ -1124,14 +1169,14 @@ fn dump_pku_writing_fixtures() {
                                 &fonts_dir(),
                                 &FontConfig::default(),
                             );
-                            let items: Vec<PlacedItem> = if let typst::diag::Warned {
-                                output: Ok(d), ..
-                            } = typst::compile::<PagedDocument>(&world)
-                            {
-                                collect_geometry_with_links(&world, &d).0 .0
-                            } else {
-                                Vec::new()
-                            };
+                            let items: Vec<PlacedItem> =
+                                if let typst::diag::Warned { output: Ok(d), .. } =
+                                    typst::compile::<PagedDocument>(&world)
+                                {
+                                    collect_geometry_with_links(&world, &d).0 .0
+                                } else {
+                                    Vec::new()
+                                };
                             let mut arr: Vec<serde_json::Value> = Vec::new();
                             for b in &out.blocks {
                                 let range = (b.start + doc_start)..(b.end + doc_start);
@@ -1163,7 +1208,8 @@ fn dump_pku_writing_fixtures() {
                                             .iter()
                                             .filter(|i| i.rect.min.y.to_pt() - min_y <= 1.0)
                                         {
-                                            *bins.entry((i.baseline_pt * 2.0).round() as i64)
+                                            *bins
+                                                .entry((i.baseline_pt * 2.0).round() as i64)
                                                 .or_insert(0) += 1;
                                         }
                                         anchor_baseline = bins
@@ -1217,7 +1263,10 @@ fn dump_pku_writing_fixtures() {
                             ("D", "Backspace", &back_doc),
                         ] {
                             let json = state_json(name, doc);
-                            println!("PKUREPLAY:{}", serde_json::json!({ "key": key, "fixture": json }));
+                            println!(
+                                "PKUREPLAY:{}",
+                                serde_json::json!({ "key": key, "fixture": json })
+                            );
                         }
                         println!("PKUREPLAYANCHOR:{}", pos);
 
@@ -1245,16 +1294,17 @@ fn dump_pku_writing_fixtures() {
                         match multiline_anchor {
                             Some(ml_pos) => {
                                 if src.as_bytes().get(ml_pos) != Some(&b'\n') {
-                                    failures.push("编辑回放：单 LF 段落锚点不在换行符上".to_string());
+                                    failures
+                                        .push("编辑回放：单 LF 段落锚点不在换行符上".to_string());
                                 } else {
                                     // Enter：复用行尾换行再插一个 → 净增 1 个字符（与单行锚点同一套规则）
-                                    let ml_enter = format!("{}{}{}", &src[..ml_pos], "\n", &src[ml_pos..]);
+                                    let ml_enter =
+                                        format!("{}{}{}", &src[..ml_pos], "\n", &src[ml_pos..]);
                                     // Enter 的**两种**合法结果都要有夹具：光标正好压在换行字符上时复用那个换行
                                     // （净增 1），否则在光标处插入两个换行（净增 2）。CodeMirror 的行边界语义在这
                                     // 两种情况间切换，前端两种都可能走到，夹具两套都备着。
                                     // Shift+Enter：复用行尾换行 → `\` + 换行（净增 1）；否则插入 `\` + 换行（净增 2）
-                                    let ml_soft =
-                                        format!("{}\\{}", &src[..ml_pos], &src[ml_pos..]);
+                                    let ml_soft = format!("{}\\{}", &src[..ml_pos], &src[ml_pos..]);
                                     // M 与 A 是同一篇原文（不必重复导出）；P/T 那两种"插入"变体在当前
                                     // 断言里用不到（Enter/Shift+Enter 走语义断言），也不导出——夹具越小，
                                     // 一次性注入越不容易把浏览器拖死。
@@ -1293,22 +1343,45 @@ fn dump_pku_writing_fixtures() {
 fn tmp_leading_probe() {
     for (label, src) in [
         ("default", format!("\n\n{}", "字".repeat(90))),
-        ("leading0.9", format!("#set par(leading: 0.9em)\n\n{}", "字".repeat(90))),
-        ("leading1.5", format!("#set par(leading: 1.5em)\n\n{}", "字".repeat(90))),
+        (
+            "leading0.9",
+            format!("#set par(leading: 0.9em)\n\n{}", "字".repeat(90)),
+        ),
+        (
+            "leading1.5",
+            format!("#set par(leading: 1.5em)\n\n{}", "字".repeat(90)),
+        ),
     ] {
         let injected = "#set page(width: 487.30pt, height: auto, margin: 58.02pt)\n";
-        let world = TypstWorld::new(format!("{injected}{src}"), None, &fonts_dir(), &FontConfig::default());
+        let world = TypstWorld::new(
+            format!("{injected}{src}"),
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+        );
         let doc = match typst::compile::<PagedDocument>(&world) {
             typst::diag::Warned { output: Ok(d), .. } => d,
-            _ => { println!("TMPL {label}: 编译失败"); continue; }
+            _ => {
+                println!("TMPL {label}: 编译失败");
+                continue;
+            }
         };
         let (items, _) = collect_geometry(&world, &doc);
         let mut bins: std::collections::BTreeMap<i64, usize> = std::collections::BTreeMap::new();
         for i in &items {
-            if i.rect.min.y.to_pt() > 50.0 { *bins.entry((i.baseline_pt * 2.0).round() as i64).or_insert(0) += 1; }
+            if i.rect.min.y.to_pt() > 50.0 {
+                *bins
+                    .entry((i.baseline_pt * 2.0).round() as i64)
+                    .or_insert(0) += 1;
+            }
         }
-        let mut counts: Vec<(f64, usize)> = bins.iter().map(|(k, c)| (*k as f64 / 2.0, *c)).collect();
+        let mut counts: Vec<(f64, usize)> =
+            bins.iter().map(|(k, c)| (*k as f64 / 2.0, *c)).collect();
         counts.sort_by(|a, b| a.0.total_cmp(&b.0));
-        println!("TMPL {label}: 基线分箱 {}（前 12 个按值）: {:?}", counts.len(), &counts[..counts.len().min(12)]);
+        println!(
+            "TMPL {label}: 基线分箱 {}（前 12 个按值）: {:?}",
+            counts.len(),
+            &counts[..counts.len().min(12)]
+        );
     }
 }

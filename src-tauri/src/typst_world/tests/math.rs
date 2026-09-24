@@ -392,7 +392,11 @@ fn compile_math_inline_segments_match_total_width() {
         MATH_TEXT_PT,
     );
     assert!(out.ok, "整块应渲染成功: {:?}", out.error);
-    assert!(out.segments.len() >= 2, "长公式应给出片段：{}", out.segments.len());
+    assert!(
+        out.segments.len() >= 2,
+        "长公式应给出片段：{}",
+        out.segments.len()
+    );
     let sum: f64 = out.segments.iter().map(|s| s.width_pt).sum();
     assert!(
         (sum - out.width_pt).abs() < 12.0,

@@ -21,7 +21,10 @@ pub struct SourceBlock {
 pub(crate) fn is_no_output_node(kind: SyntaxKind) -> bool {
     matches!(
         kind,
-        SyntaxKind::LetBinding | SyntaxKind::SetRule | SyntaxKind::ShowRule | SyntaxKind::ModuleImport
+        SyntaxKind::LetBinding
+            | SyntaxKind::SetRule
+            | SyntaxKind::ShowRule
+            | SyntaxKind::ModuleImport
     )
 }
 
@@ -35,17 +38,19 @@ fn text_is_no_output_statements(text: &str) -> bool {
             continue;
         }
         any = true;
-        let ok = ["#let", "#set", "#show", "#import", "#include"].iter().any(|kw| {
-            t.strip_prefix(kw)
-                .is_some_and(|rest| rest.starts_with(|c: char| c.is_whitespace()) || rest.starts_with('('))
-        });
+        let ok = ["#let", "#set", "#show", "#import", "#include"]
+            .iter()
+            .any(|kw| {
+                t.strip_prefix(kw).is_some_and(|rest| {
+                    rest.starts_with(|c: char| c.is_whitespace()) || rest.starts_with('(')
+                })
+            });
         if !ok {
             return false;
         }
     }
     any
 }
-
 
 /// 这些语法树顶层节点各自**独占一个流式块**（typst 的排版也是以它们分块的）
 const BLOCK_KINDS: &[SyntaxKind] = &[
@@ -76,25 +81,24 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
     // 子节点字节偏移的累加游标（见下面循环里的说明）
     let mut cursor = 0usize;
 
-    let close_para = |para: &mut Option<Range<usize>>,
-                      no_output: &mut bool,
-                      out: &mut Vec<SourceBlock>| {
-        if let Some(r) = para.take() {
-            if r.end > r.start {
-                // 文本兜底：`#let ... = $...$` 这类语句在语法树里是 `#` + `LetBinding`，
-                // 只看 `is_no_output_node(节点kind)` 会漏掉（`#` 那个 Hash 节点不是无输出），
-                // 于是宏定义块仍会被宏内容在使用处的 span 污染。这里按源码行再判一次：
-                // 整段每一非空行都以 `#let/#set/#show/#import/#include` 开头 ⇒ 无输出。
-                let no_output = *no_output || text_is_no_output_statements(&src[r.clone()]);
-                out.push(SourceBlock {
-                    kind: if no_output { "Code" } else { "Paragraph" },
-                    range: r,
-                    no_output,
-                });
+    let close_para =
+        |para: &mut Option<Range<usize>>, no_output: &mut bool, out: &mut Vec<SourceBlock>| {
+            if let Some(r) = para.take() {
+                if r.end > r.start {
+                    // 文本兜底：`#let ... = $...$` 这类语句在语法树里是 `#` + `LetBinding`，
+                    // 只看 `is_no_output_node(节点kind)` 会漏掉（`#` 那个 Hash 节点不是无输出），
+                    // 于是宏定义块仍会被宏内容在使用处的 span 污染。这里按源码行再判一次：
+                    // 整段每一非空行都以 `#let/#set/#show/#import/#include` 开头 ⇒ 无输出。
+                    let no_output = *no_output || text_is_no_output_statements(&src[r.clone()]);
+                    out.push(SourceBlock {
+                        kind: if no_output { "Code" } else { "Paragraph" },
+                        range: r,
+                        no_output,
+                    });
+                }
             }
-        }
-        *no_output = false;
-    };
+            *no_output = false;
+        };
 
     for node in root.children() {
         // `typst_syntax::parse` 的树是**未 numberize** 的（span 要等 `Source::new` 才编上号），
