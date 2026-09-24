@@ -74,13 +74,6 @@ export interface LivePreviewOptions {
    */
   headingLineHeightPx?: (from: number, level: number) => number | null;
   /**
-   * 某条**空白分隔行**应收的高度（px，`null` = 用默认压缩高度）。
-   * 页面按"上一块是切片（盒高精确）+ 下一块的首行基线"反算，把锚点重新钉回 Typst 的位置。
-   */
-  gapRowHeightPx?: (rowFrom: number) => number | null;
-  /** 编辑区正文列当前像素宽（块几何是 pt，标题按带高收行高要换算成 px） */
-  contentWidthPx?: () => number;
-  /**
    * 视口内出现了"**能渲染但还没有切片**"的块（窗口化渲染的正常中间态）：
    * 父组件去抖后按新的视口窗口重编译一次。不传则永远等着下一次按键 —— 长文档里
    * 滚动到没渲过的区域会一直显示源码。

@@ -27,7 +27,7 @@
   import { planForCommand } from "../core/write-commands";
   import type { WriteCommand } from "../core/write-commands";
   import { mark } from "../core/startup-timing";
-  import { WRITE_FONT_STACK, measureWriteBaselineOffset } from "./editor-font";
+  import { WRITE_FONT_STACK } from "./editor-font";
   import { dbg } from "../core/debug";
   import { anchorEffectAt, measureAnchorYMargin } from "./scroll-anchor";
   // 浏览器验收用的测试钩子（只在 `?browserdev=1` 下真的挂到 window 上，桌面版是空操作）
@@ -146,11 +146,6 @@
   let diagState: { list: CompileErrorLocation[]; prefix: string } = { list: [], prefix: "" };
 
   /** 所见即所得扩展的实时选项：用闭包读最新 prop，避免重建扩展时丢状态 */
-  /** 行盒内"盒顶→首行基线"的距离（px）：空白行反算高度要用（见下面的 gapRowHeightPx） */
-  const writeBaselineOffsetPx = $derived(
-    measureWriteBaselineOffset(WRITE_FONT_STACK, (docTextPt * 4) / 3, ((docTextPt * 4) / 3) * 1.65),
-  );
-
   const livePreviewOptions = {
     // 内联渲染只在写作模式开启：源码模式下要看到真正的 Typst 源码
     enabled: () => mode === "write",
@@ -174,36 +169,6 @@
     // 空白分隔行"反算高度"：上一块是**切片**（盒高精确）、下一块首行基线已知时，
     // 把这条空行的高度定成"目标基线差 − 上一块盒高 − 下一块盒内基线偏移"，让下一块的首行基线
     // 精确落回 Typst 的位置（相邻/累计偏差都从这里长出来，见 REPORT 的落位自检）。
-    gapRowHeightPx: (rowFrom: number) => {
-      const list = mode === "write" ? (blocks ?? []) : [];
-      if (list.length === 0 || !(writeBaselineOffsetPx > 0)) return null;
-      let prev: (typeof list)[number] | null = null;
-      let next: (typeof list)[number] | null = null;
-      for (const b of list) {
-        if (b.from > rowFrom && (next === null || b.from < next.from)) next = b;
-        if (b.to <= rowFrom && (prev === null || b.to > prev.to)) prev = b;
-      }
-      if (!prev || !next || !prev.found || !next.found) return null;
-      if (prev.page !== next.page) return null;
-      if (prev.anchorBaselinePt == null || next.anchorBaselinePt == null) return null;
-      // 上一块必须是**切片**：可编辑正文在编辑器里占自然行盒，高度不是 heightPt
-      const prevIsCrop = !(
-        (prev.kind === "Paragraph" || prev.kind === "Heading") &&
-        prev.kind &&
-        prev.svg !== ""
-      );
-      if (!prevIsCrop) return null;
-      const PX = 4 / 3;
-      const deltaPx = (next.anchorBaselinePt - prev.anchorBaselinePt) * PX;
-      const prevBoxPx = prev.heightPt * PX;
-      const nextIsCrop = next.svg !== "" && next.kind !== "Paragraph" && next.kind !== "Heading";
-      const nextBaselineOffsetPx = nextIsCrop
-        ? (next.anchorBaselinePt - next.yPt) * PX
-        : writeBaselineOffsetPx;
-      const rowPx = deltaPx - prevBoxPx - nextBaselineOffsetPx;
-      if (!Number.isFinite(rowPx) || rowPx < 0 || rowPx > 4 * writeBaselineOffsetPx) return null;
-      return rowPx;
-    },
     headingLineHeightPx: (from: number, level: number) => {
       const b = (blocks ?? []).find((x) => x.kind === "Heading" && from >= x.from && from <= x.to);
       if (!b || !(b.heightPt > 0.5)) return null;
@@ -212,8 +177,6 @@
       const bandPx = b.heightPt * (4 / 3);
       return bandPx > 8 && bandPx < naturalPx - 0.5 ? bandPx : null;
     },
-    // 标题"只压不撑"地收行高要用列宽把 pt 换成 px（见 buildHeadingShrinkDecorations）
-    contentWidthPx: () => view?.contentDOM.clientWidth ?? 0,
     onBlocksNeeded: () => onBlocksNeeded?.(),
     // 点击定位（阶段 2）：父组件换算成字节偏移后问 Rust，编辑器只负责落光标
     onCropClick: (req: { page: number; xPt: number; yPt: number; from: number; to: number }) =>

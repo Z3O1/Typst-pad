@@ -101,29 +101,6 @@ export function measureWriteLetterSpacing(stack: string, fontSizePx: number): nu
   return Math.abs(delta) > 0.1 ? delta : 0;
 }
 
-/**
- * 行盒内**基线到盒顶**的距离（px）：`(行高 − (ascent + descent)) / 2 + ascent`。
- * 写作模式给"空行"定高时要用它把下一块的首行基线放到目标位置（见 Editor 的 gapRowHeightPx）。
- * 量不出来（jsdom / 无 canvas）时按 0.8 × 行高估一个值，宁可估也不返回 0。
- */
-export function measureWriteBaselineOffset(
-  stack: string,
-  fontSizePx: number,
-  lineHeightPx: number,
-): number {
-  if (typeof document === "undefined" || !(fontSizePx > 0) || !(lineHeightPx > 0)) {
-    return lineHeightPx > 0 ? lineHeightPx * 0.8 : 0;
-  }
-  const ctx = document.createElement("canvas").getContext("2d");
-  if (!ctx) return lineHeightPx * 0.8;
-  ctx.font = `${fontSizePx}px ${stack}`;
-  const m = ctx.measureText("字Hg");
-  const asc = m.fontBoundingBoxAscent || 0;
-  const desc = m.fontBoundingBoxDescent || 0;
-  if (!(asc > 0)) return lineHeightPx * 0.8;
-  return (lineHeightPx - (asc + desc)) / 2 + asc;
-}
-
 /** 从 Rust 侧取打包字体的字节（真机路径；浏览器开发模式由 stub 顶上） */
 export async function loadBundledFont(file: string): Promise<ArrayBuffer> {
   const bytes = await invoke<ArrayBuffer | number[] | Uint8Array>("bundled_font", { name: file });
