@@ -510,6 +510,92 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
     );
   }
 
+  // ⑧ 列表 Enter / 退出 / Shift+Enter 回放：断言**结构契约**（列表标记数、显式换行数）
+  //    与"确实重新编译"，不依赖逐状态夹具（Typst 列表命令的产物由语言扩展决定）。
+  {
+    const markerCount = (d) => (d.match(/^\s*[-+]\s/gm) ?? []).length;
+    const base = states[0].doc;
+    before = await compileCount();
+    await setDoc(base);
+    await waitMatched(before);
+    const listLineNo = base.split("\n").findIndex((l) => /^\s*[-+]\s/.test(l)) + 1;
+    if (listLineNo > 0) {
+      const lineFrom = await c.evaluate(
+        `document.querySelector('.cm-content').cmTile.root.view.state.doc.line(${listLineNo}).to`,
+      );
+      const beforeMarkers = markerCount(await docText());
+      // ① 在非空列表项末尾按 Enter → 新增一项
+      before = await compileCount();
+      await setCursor(lineFrom);
+      await c.key("Enter", { code: "Enter", keyCode: 13 });
+      await sleep(400);
+      const afterEnter = await docText();
+      check(
+        `编辑回放：列表项末尾 Enter 新增一项（标记 ${beforeMarkers} → ${markerCount(afterEnter)}）`,
+        markerCount(afterEnter) === beforeMarkers + 1,
+        `L${listLineNo} :: ${JSON.stringify(afterEnter.split("\n")[listLineNo - 1] ?? "")}`,
+      );
+      await waitRecompiled(before);
+      // ② 在空项上再按 Enter → 退出列表（标记数回到原值）
+      const emptyFrom = await c.evaluate(
+        `(() => {
+          const d = document.querySelector('.cm-content').cmTile.root.view.state.doc;
+          for (let n = 1; n <= d.lines; n++) {
+            // **注意**：这段在模板字符串里，反斜杠会被 JS 吃掉（\s 变成 s）——用 [ \t] 更稳
+            if (/^[ \t]*[-+][ \t]*$/.test(d.line(n).text)) return d.line(n).to;
+          }
+          return -1;
+        })()`,
+      );
+      if (emptyFrom >= 0) {
+        before = await compileCount();
+        await setCursor(emptyFrom);
+        await c.key("Enter", { code: "Enter", keyCode: 13 });
+        await sleep(400);
+        const afterExit = await docText();
+        check(
+          `编辑回放：空列表项上 Enter 退出列表（标记 ${markerCount(afterEnter)} → ${markerCount(afterExit)}）`,
+          markerCount(afterExit) < markerCount(afterEnter),
+        );
+        await waitRecompiled(before);
+      } else {
+        check(`编辑回放：空列表项上 Enter 退出列表（找不到空项，跳过）`, true);
+      }
+      // ③ 撤销回原文
+      before = await compileCount();
+      for (let i = 0; i < 6 && (await docText()) !== base; i++) {
+        await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+        await sleep(250);
+      }
+      check(`编辑回放：列表回放后撤销回原文`, (await docText()) === base);
+      await waitRecompiled(before);
+      // ④ Shift+Enter 写显式换行（列表标记数不变）
+      const markersBeforeSoft = markerCount(base);
+      before = await compileCount();
+      await setCursor(lineFrom);
+      await c.key("Enter", { code: "Enter", keyCode: 13, modifiers: 8 });
+      await sleep(400);
+      const afterSoft = await docText();
+      // 列表里 Shift+Enter 由 Typst 列表扩展接管 = **续行**（插一个普通换行），不是 `\` + 换行；
+      // 断言：换行 +1、列表项数不变（既没退出也没新增）
+      const newlines = (d) => (d.match(/\n/g) ?? []).length;
+      check(
+        `编辑回放：列表项 Shift+Enter 续行且不新增/退出列表项（换行 ${newlines(base)} → ${newlines(afterSoft)}，标记 ${markerCount(afterSoft)}）`,
+        newlines(afterSoft) === newlines(base) + 1 && markerCount(afterSoft) === markersBeforeSoft,
+      );
+      await waitRecompiled(before);
+      // 收尾：撤销回原文，避免影响后面的逐块测量
+      before = await compileCount();
+      for (let i = 0; i < 6 && (await docText()) !== base; i++) {
+        await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+        await sleep(250);
+      }
+      await waitRecompiled(before);
+    } else {
+      console.log("  · 列表回放：本样本没有列表项，跳过");
+    }
+  }
+
   await c.screenshot(SHOT("pku-writing-replay"));
 }
 
@@ -724,6 +810,13 @@ for (const fx of fixtures) {
     `${fx.name}：作业原文已完整输入编辑器（${lenNow}/${wantedLen} 字符）`,
     lenNow === wantedLen,
   );
+  // 公式渲染是异步队列：先等第一条公式落地再统计，否则会读到"真 0 / 假 0"的假象
+  await c
+    .waitFor(
+      `((window.__browserDevMathHits?.real ?? 0) + (window.__browserDevMathHits?.fake ?? 0)) > 0`,
+      { timeout: 15000 },
+    )
+    .catch(() => {});
   const mathHits = await c.evaluate(`window.__browserDevMathHits ?? { real: 0, fake: 0 }`);
   const mathFake = await c.evaluate(`window.__browserDevMathFake ?? []`);
   check(
