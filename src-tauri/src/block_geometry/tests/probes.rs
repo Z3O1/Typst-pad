@@ -1169,19 +1169,15 @@ fn dump_pku_writing_fixtures() {
                                     // Enter 的**两种**合法结果都要有夹具：光标正好压在换行字符上时复用那个换行
                                     // （净增 1），否则在光标处插入两个换行（净增 2）。CodeMirror 的行边界语义在这
                                     // 两种情况间切换，前端两种都可能走到，夹具两套都备着。
-                                    let ml_enter_insert =
-                                        format!("{}{}{}", &src[..ml_pos], "\n\n", &src[ml_pos..]);
                                     // Shift+Enter：复用行尾换行 → `\` + 换行（净增 1）；否则插入 `\` + 换行（净增 2）
                                     let ml_soft =
                                         format!("{}\\{}", &src[..ml_pos], &src[ml_pos..]);
-                                    let ml_soft_insert =
-                                        format!("{}\\{}{}", &src[..ml_pos], "\n", &src[ml_pos..]);
+                                    // M 与 A 是同一篇原文（不必重复导出）；P/T 那两种"插入"变体在当前
+                                    // 断言里用不到（Enter/Shift+Enter 走语义断言），也不导出——夹具越小，
+                                    // 一次性注入越不容易把浏览器拖死。
                                     for (key, name, doc) in [
-                                        ("M", "单LF段落 原始", &src),
                                         ("N", "单LF段落 Enter 复用换行", &ml_enter),
-                                        ("P", "单LF段落 Enter 插入分段", &ml_enter_insert),
                                         ("S", "单LF段落 Shift+Enter 复用换行", &ml_soft),
-                                        ("T", "单LF段落 Shift+Enter 插入", &ml_soft_insert),
                                     ] {
                                         let json = state_json(name, doc);
                                         println!(

@@ -101,7 +101,7 @@ const replayAnchor = Number(
 const replayAnchor2 = Number(
   lines.find((l) => l.startsWith("PKUREPLAYANCHOR2:"))?.slice("PKUREPLAYANCHOR2:".length),
 );
-const REPLAY_KEYS = ["A", "B", "C", "D", "M", "N", "P", "S", "T"];
+const REPLAY_KEYS = ["A", "B", "C", "D", "N", "S"];
 const replayByKey = new Map(replay.map((r) => [r.key, r.fixture]));
 if (REPLAY_KEYS.some((k) => !replayByKey.has(k)) || !(replayAnchor > 0)) {
   console.error(

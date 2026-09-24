@@ -404,11 +404,10 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
 
   // ⑦ 含单 LF 的段落（编辑器里走切片）：聚焦要**揭示成源码**、行数正确、不误改文本；
   //    再回放 Enter 分段与 Shift+Enter（`\` + 换行）两种输入。
-  const ml = states[4];
-  // Enter / Shift+Enter 各有"复用行尾换行"与"插入"两种合法结果，夹具两套都有，
-  // 断言"实际等于其中之一"（几何仍由该状态的夹具保证，不会退回假切片）。
-  const mlEnterVariants = [states[5], states[6]];
-  const mlSoftVariants = [states[7], states[8]];
+  // M 就是 A（同一篇原文），直接用第一个状态；Enter/Shift+Enter 各备一份规范夹具
+  const ml = states[0];
+  const mlEnterVariants = [states[4]];
+  const mlSoftVariants = [states[5]];
   if (replay.anchor2 > 0 && ml && mlEnterVariants.every(Boolean) && mlSoftVariants.every(Boolean)) {
     const mlPos = byteToPos(ml.doc, replay.anchor2);
     // 段落边界直接从 M 态夹具的块表取（比按换行回溯稳）：段末 == anchor2 的那个可编辑段
