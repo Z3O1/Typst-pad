@@ -40,6 +40,8 @@ export function buildMarkupDecorations(
     paragraphGapRows: ParagraphGapRow[];
   },
   covered: readonly { from: number; to: number }[] = [],
+  headingLineHeightPx?: (from: number, level: number) => number | null,
+  gapRowHeightPx?: (rowFrom: number) => number | null,
 ): Range<Decoration>[] {
   const doc = scan.docString;
   const marks = scan.markup;
@@ -58,12 +60,16 @@ export function buildMarkupDecorations(
     // 空行起点比上一块的终点晚一个换行（块终点在第一个 `\n` 上，空行从第二个 `\n` 起算）
     const afterBand = coverEnds.has(row.from - 1) || coverEnds.has(row.from);
     const em = (TYPOGRAPHIC_PARBREAK_ROW_EM / row.count) * (afterBand ? 0.5 : 1);
+    // 页面能反算出这条空行的精确高度时优先用它（把下一块的首行基线钉回 Typst 的位置）
+    const fitted = row.count === 1 ? (gapRowHeightPx?.(row.from) ?? null) : null;
+    const style =
+      fitted != null && fitted >= 0
+        ? `--write-parbreak-height: ${fitted.toFixed(2)}px`
+        : `--write-parbreak-height: ${em.toFixed(6)}em`;
     decorations.push(
       Decoration.line({
         class: "cm-write-parbreak",
-        attributes: {
-          style: `--write-parbreak-height: ${em.toFixed(6)}em`,
-        },
+        attributes: { style },
       }).range(row.from),
     );
   }
@@ -96,7 +102,20 @@ export function buildMarkupDecorations(
     // 编辑区直接卡死（用户报过"输入 `= 1 = 2` 后无法再输入"），装了 try/catch 兜底后则表现为
     // "所有标题都被展开成源码"（整套装饰被丢弃）。这里按"没有正文就不加样式"处理。
     if (item.content.to > item.content.from) {
-      decorations.push(Decoration.mark({ class: cls }).range(item.content.from, item.content.to));
+      // 标题**只压不撑**地收行高：样式必须和标题类落在**同一个 mark** 上——行盒高度由这个
+      // span 的内联盒决定，挂行元素或另起并列 mark 都压不住它（实测两版都无效）。
+      const shrinkPx =
+        item.kind === "heading"
+          ? (headingLineHeightPx?.(item.content.from, item.level ?? 1) ?? null)
+          : null;
+      decorations.push(
+        Decoration.mark({
+          class: cls,
+          ...(shrinkPx != null
+            ? { attributes: { style: `line-height:${shrinkPx.toFixed(2)}px` } }
+            : {}),
+        }).range(item.content.from, item.content.to),
+      );
     }
     for (const marker of item.markers) {
       if (marker.from >= marker.to) continue;

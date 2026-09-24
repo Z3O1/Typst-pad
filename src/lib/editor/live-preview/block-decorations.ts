@@ -128,11 +128,10 @@ export function buildBlockCovers(
 export function buildHeadingShrinkDecorations(
   state: EditorState,
   covers: readonly BlockCover[],
-  contentWidthPx: number,
   textPt: number,
 ): Range<Decoration>[] {
   const out: Range<Decoration>[] = [];
-  if (!(contentWidthPx > 0) || !(textPt > 0)) return out;
+  if (!(textPt > 0)) return out;
   const textPx = (textPt * 4) / 3;
   for (const cover of covers) {
     const block = cover.block;
@@ -140,12 +139,17 @@ export function buildHeadingShrinkDecorations(
     if (!block.found || !(block.heightPt > 0.5) || !(block.widthPt > 0)) continue;
     if (block.from < 0 || block.from > state.doc.length) continue;
     const line = state.doc.lineAt(block.from);
-    if (state.doc.lineAt(Math.min(block.to, state.doc.length)).number !== line.number) continue;
+    // 只处理**单源码行**标题：判据是"块源码里没有换行"。不能比起止行号——块区间可能带上行尾
+    // 换行，那样起止会落到相邻空行上，一个标题都命中不了（实测 emitted=0 就是这个原因）。
+    const blockText = state.doc.sliceString(block.from, Math.min(block.to, state.doc.length));
+    if (blockText.includes("\n")) continue;
     const match = /^(=+)\s/.exec(line.text);
     if (!match) continue;
     const scale = match[1].length === 1 ? 1.4 : match[1].length === 2 ? 1.2 : 1.0;
     const naturalPx = scale * textPx * 1.65;
-    const bandPx = (block.heightPt * contentWidthPx) / block.widthPt;
+    // 只用 pt→px 的固定换算（CSS 1pt = 4/3 px）：**不能**在这里取 DOM 列宽——
+    // 装饰在布局前算，`view.contentDOM.clientWidth` 这时候还是 0，整条规则会静默失效。
+    const bandPx = block.heightPt * (4 / 3);
     // 只压不撑；差得太小就不动（避免噪声驱动的抖动）
     if (!(bandPx > 8) || bandPx > naturalPx - 0.5) continue;
     // **必须作用到标题自己的 span（`.cm-markup-heading-N`）上**，不能挂在 `.cm-line`、也不能

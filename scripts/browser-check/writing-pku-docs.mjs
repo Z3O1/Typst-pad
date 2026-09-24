@@ -534,6 +534,7 @@ for (const fx of fixtures) {
   await boot(c, BLOCKS_URL, {
     blockFixtures: [injected],
     mathFixtures: fx.math ?? [],
+    runtime: process.env.PKU_CONSOLE === "1",
     settleMs: 900,
   });
 
@@ -573,6 +574,18 @@ for (const fx of fixtures) {
     .filter((b) => b.found && !directlyEditable(fx.doc, b))
     .map((b) => ({ at: byteToPos(fx.doc, b.start), end: byteToPos(fx.doc, b.end) }));
   let expectedCrops = complexCrops.map((c) => c.at);
+
+  // 实验（`PKU_NO_EMPH=1`）：把强调/粗体的字形变化关掉（`font-style: normal`），
+  // 用来验证"浏览器多折一行"是不是斜体/粗体让 CJK 落到别的字体、前进宽度变大。
+  if (process.env.PKU_NO_EMPH === "1") {
+    await c.evaluate(`(() => {
+      let s = document.getElementById('pku-no-emph');
+      if (!s) { s = document.createElement('style'); s.id = 'pku-no-emph'; document.head.appendChild(s); }
+      s.textContent = '.editor-host.write .cm-markup-emph { font-style: normal !important; }' +
+        '.editor-host.write .cm-markup-strong { font-weight: normal !important; }';
+      return true;
+    })()`);
+  }
 
   // 实验（`PKU_NO_LETTER_SPACING=1`）：关掉 CJK 前进宽度补偿（保留 geometricPrecision），
   // 用来判断"补偿是不是过量"（若 geometricPrecision 已经让 advance 回到 1em，再减 0.333px 就偏窄）。
@@ -1178,12 +1191,44 @@ for (const fx of fixtures) {
           }
           out.push(
             el
-              ? { top: +docTopOf(el).toFixed(2), h: +el.getBoundingClientRect().height.toFixed(2), lh: el.style.lineHeight || '' }
+              ? {
+                  top: +docTopOf(el).toFixed(2),
+                  h: +el.getBoundingClientRect().height.toFixed(2),
+                  lh: el.style.lineHeight || "",
+                  cls: el.className,
+                  headLh: el.querySelector('[class*="cm-markup-heading"]')
+                    ? getComputedStyle(el.querySelector('[class*="cm-markup-heading"]')).lineHeight
+                    : "",
+                  fitVar: el.style.getPropertyValue("--heading-fit") || "",
+                }
               : null,
           );
         }
         return out;
       })()`);
+    console.log(
+      `  · heading-fit 诊断：${JSON.stringify(await c.evaluate("window.__headingFitDiag ?? null"))}`,
+    );
+    console.log(
+      `  · heading-fit DOM：${JSON.stringify(
+        await c.evaluate(`(() => {
+          const els = Array.from(document.querySelectorAll('.cm-heading-fit'));
+          return {
+            count: els.length,
+            sample: els.slice(0, 4).map((el) => ({
+              text: el.textContent.slice(0, 12),
+              cls: el.className,
+              varValue: el.style.getPropertyValue('--heading-fit'),
+              headLh: (() => {
+                const sp = el.querySelector('[class*="cm-markup-heading"]');
+                return sp ? getComputedStyle(sp).lineHeight : null;
+              })(),
+              h: +el.getBoundingClientRect().height.toFixed(2),
+            })),
+          };
+        })()`),
+      )}`,
+    );
     const gapInfo = await c.evaluate(`(() => {
       const rows = Array.from(document.querySelectorAll('.cm-write-parbreak'));
       const vals = {};
@@ -1313,6 +1358,33 @@ for (const fx of fixtures) {
       })()`);
       await sleep(120);
       topA.push((await measureAt([posList[i]]))[0]);
+      if (picks[i].kind === "Heading" && process.env.PKU_PLACEMENT === "1") {
+        const fitProbe = await c.evaluate(`(() => {
+          const content = document.querySelector('.cm-content');
+          const view = content.cmTile.root.view;
+          const fits = Array.from(document.querySelectorAll('.cm-heading-fit'));
+          const lines = Array.from(document.querySelectorAll('.cm-line'));
+          const find = (pos) => {
+            for (const el of lines) {
+              let p = -1;
+              try { p = view.posAtDOM(el, 0); } catch (e) { continue; }
+              if (p === pos) return el;
+            }
+            return null;
+          };
+          const target = find(${posList[i]});
+          const first = fits[0];
+          return {
+            fits: fits.length,
+            targetCls: target ? target.className : null,
+            firstFitPos: first ? view.posAtDOM(first, 0) : null,
+            firstFitText: first ? first.textContent.slice(0, 10) : null,
+          };
+        })()`);
+        console.log(
+          `      · fit 探针 L${picks[i] ? "" : ""}pos=${posList[i]} targetCls=${fitProbe.targetCls} fits=${fitProbe.fits} firstFitPos=${fitProbe.firstFitPos} firstFitText=${fitProbe.firstFitText}`,
+        );
+      }
     }
     await c.evaluate(`(() => {
       const v = document.querySelector('.cm-content').cmTile.root.view;
@@ -1333,9 +1405,56 @@ for (const fx of fixtures) {
       const b2 = topB[i];
       const bandOwn = b.heightPt * factor;
       console.log(
-        `  L${line}(${b.kind}) 逐块量=${a ? a.top : null} 一次量=${b2 ? b2.top : null} 两者差=${a && b2 ? (b2.top - a.top).toFixed(2) : "?"}px DOM高=${a ? a.h : "?"} 自带高=${bandOwn.toFixed(1)} 差=${a ? (a.h - bandOwn).toFixed(1) : "?"}px 带高和=${bandPx.toFixed(1)}px 落位-带高和=${a && topA[0] ? (a.top - topA[0].top - bandPx).toFixed(1) : "?"}px lh=${a ? a.lh || "-" : "-"}`,
+        `  L${line}(${b.kind}) 逐块量=${a ? a.top : null} DOM高=${a ? a.h : "?"} 自带高=${bandOwn.toFixed(1)} 差=${a ? (a.h - bandOwn).toFixed(1) : "?"}px 带高和=${bandPx.toFixed(1)}px 落位-带高和=${a && topA[0] ? (a.top - topA[0].top - bandPx).toFixed(1) : "?"}px cls=${a ? a.cls : "-"} headLh=${a ? a.headLh : "-"} fitVar=${a ? a.fitVar : "-"}`,
       );
     });
+  }
+
+  // 诊断（`PKU_WIDTH2=1`）：行数不一致的块里，行内公式 widget 的渲染宽 vs 夹具里的 Typst 宽度，
+  // 用来判断"多折一行"是不是公式 widget 比引擎行内 advance 宽。
+  if (process.env.PKU_WIDTH2 === "1") {
+    for (const r of rowFails.slice(0, 6)) {
+      const from = byteToPos(fx.doc, r.start);
+      const to = byteToPos(fx.doc, r.end);
+      const src = fx.doc.slice(from, to);
+      const bodies = [...src.matchAll(/\$([^$]+)\$/g)].map((m) => m[1].trim());
+      const byBody = new Map((fx.math ?? []).map((m) => [m.body, m]));
+      const jsWidths = await c.evaluate(`(() => {
+        const content = document.querySelector('.cm-content');
+        const view = content.cmTile.root.view;
+        let el = null;
+        for (const line of document.querySelectorAll('.cm-line')) {
+          let p = -1;
+          try { p = view.posAtDOM(line, 0); } catch (e) { continue; }
+          if (p === ${from}) { el = line; break; }
+        }
+        if (!el) return null;
+        // 该块可能折成多行：把紧随其后的行也算进来（直到位置超过块尾）
+        const els = [];
+        let cur = el;
+        while (cur) {
+          let p = -1;
+          try { p = view.posAtDOM(cur, 0); } catch (e) { p = -1; }
+          if (p >= 0 && p < ${to}) els.push(cur);
+          if (p < 0 || p >= ${to}) break;
+          cur = cur.nextElementSibling;
+        }
+        const w = [];
+        for (const e of els) {
+          for (const m of e.querySelectorAll('.cm-math-widget, .cm-math-block-inline')) {
+            w.push(+m.getBoundingClientRect().width.toFixed(2));
+          }
+        }
+        return w;
+      })()`);
+      const typstPx = bodies
+        .map((b) => byBody.get(b))
+        .filter(Boolean)
+        .map((m) => +(m.widthPt * (4 / 3)).toFixed(2));
+      console.log(
+        `  · WIDTH2 L${r.line} 行数 typst=${r.typstLines}/browser=${r.browserRows} widget 宽=${JSON.stringify(jsWidths)} 夹具宽px=${JSON.stringify(typstPx)}`,
+      );
+    }
   }
 
   // 记录首处失败（报告里直接指到行）

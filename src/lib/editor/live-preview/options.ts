@@ -68,6 +68,16 @@ export interface LivePreviewOptions {
    * 见 docs/development/writing-rendering.md。
    */
   blocks?: () => Block[] | null;
+  /**
+   * 标题**应收的行高**（px，`null` = 不压/不是标题）。由页面按"带高 vs 自然行盒"算好
+   * （它知道当前正文字号），`markup-decorations` 只负责把它挂到标题 mark 上。
+   */
+  headingLineHeightPx?: (from: number, level: number) => number | null;
+  /**
+   * 某条**空白分隔行**应收的高度（px，`null` = 用默认压缩高度）。
+   * 页面按"上一块是切片（盒高精确）+ 下一块的首行基线"反算，把锚点重新钉回 Typst 的位置。
+   */
+  gapRowHeightPx?: (rowFrom: number) => number | null;
   /** 编辑区正文列当前像素宽（块几何是 pt，标题按带高收行高要换算成 px） */
   contentWidthPx?: () => number;
   /**

@@ -28,7 +28,6 @@ import {
 import { createBlockMoves } from "./live-preview/block-moves";
 import { insideCovered } from "./live-preview/covered";
 import { buildMarkupDecorations } from "./live-preview/markup-decorations";
-import { buildHeadingShrinkDecorations } from "./live-preview/block-decorations";
 import { blockRangeFor, buildMathDecorations } from "./live-preview/math-decorations";
 import { refreshLivePreview } from "./live-preview/options";
 import type { LivePreviewOptions } from "./live-preview/options";
@@ -84,16 +83,16 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
       const all = [
         ...buildBlockCropDecorations(state, doc, covers, opts),
-        ...buildHeadingShrinkDecorations(
-          state,
-          covers,
-          opts.contentWidthPx?.() ?? 0,
-          opts.mathSizePt?.() ?? 0,
-        ),
         ...buildHiddenBlockDecorations(state, covers),
         ...buildFenceHidingDecorations(state, covers),
         ...buildMathDecorations(state, opts, math, context, covered),
-        ...buildMarkupDecorations(state, scan, covered),
+        ...buildMarkupDecorations(
+          state,
+          scan,
+          covered,
+          opts.headingLineHeightPx,
+          opts.gapRowHeightPx,
+        ),
       ];
       return {
         // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）
