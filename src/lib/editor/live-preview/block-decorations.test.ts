@@ -49,11 +49,11 @@ describe("isDirectlyEditableTextBlock", () => {
 
   it("没有几何或有意跳过的块不可直接编辑", () => {
     const doc = "正文。";
-    expect(
-      isDirectlyEditableTextBlock({ ...block(0, doc.length), found: false }, [], doc),
-    ).toBe(false);
-    expect(
-      isDirectlyEditableTextBlock({ ...block(0, doc.length), skipped: true }, [], doc),
-    ).toBe(false);
+    expect(isDirectlyEditableTextBlock({ ...block(0, doc.length), found: false }, [], doc)).toBe(
+      false,
+    );
+    expect(isDirectlyEditableTextBlock({ ...block(0, doc.length), skipped: true }, [], doc)).toBe(
+      false,
+    );
   });
 });

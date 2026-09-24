@@ -68,6 +68,8 @@ export interface LivePreviewOptions {
    * 见 docs/development/writing-rendering.md。
    */
   blocks?: () => Block[] | null;
+  /** 编辑区正文列当前像素宽（块几何是 pt，标题按带高收行高要换算成 px） */
+  contentWidthPx?: () => number;
   /**
    * 视口内出现了"**能渲染但还没有切片**"的块（窗口化渲染的正常中间态）：
    * 父组件去抖后按新的视口窗口重编译一次。不传则永远等着下一次按键 —— 长文档里

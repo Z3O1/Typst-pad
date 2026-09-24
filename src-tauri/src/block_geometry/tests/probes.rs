@@ -774,7 +774,7 @@ fn dump_pku_writing_fixtures() {
                         let mut sorted: Vec<&&PlacedItem> = on_page.clone();
                         sorted.sort_by(|a, b| a.baseline_pt.total_cmp(&b.baseline_pt));
                         let mut cur: Vec<&&PlacedItem> = Vec::new();
-                        let mut flush = |cur: &mut Vec<&&PlacedItem>,
+                        let flush = |cur: &mut Vec<&&PlacedItem>,
                                          spans: &mut Vec<serde_json::Value>| {
                             if cur.is_empty() {
                                 return;
@@ -1137,6 +1137,63 @@ fn dump_pku_writing_fixtures() {
                             println!("PKUREPLAY:{}", serde_json::json!({ "key": key, "fixture": json }));
                         }
                         println!("PKUREPLAYANCHOR:{}", pos);
+
+                        // ---- 含单 LF 的段落（报告里的"第 76–77 行"那一类：编辑器走切片）----
+                        // 聚焦要把它揭示成源码、Enter 分段、Shift+Enter 写 `\` + 换行，三种状态各要夹具。
+                        let multiline_anchor = source_blocks(&src)
+                            .into_iter()
+                            .find(|b| {
+                                let text = &src[b.range.clone()];
+                                // **要纯正文**：`#set page(` 这类多行代码块也是 Paragraph、也含单个 LF，
+                                // 但往代码里插 `\` 会直接编译失败（实测 "the character `\` is not valid in code"）。
+                                // 要"行尾在正文里"的段落：以 `#` 开头的（`#set page(`、`#table(`）整块是代码，
+                                // 往里插 `\` 会编译失败；公式里的 `#{…}` 插值不影响行尾是正文。
+                                b.kind == "Paragraph"
+                                    && text.contains('\n')
+                                    && !text.contains("\n\n")
+                                    && !text.trim_start().starts_with('#')
+                                    && !text.trim_start().starts_with('=')
+                                    && !text.contains('`')
+                                    && !text.contains("//")
+                                    && !text.contains("/*")
+                                    && b.range.end.saturating_sub(b.range.start) > 20
+                            })
+                            .map(|b| b.range.end);
+                        match multiline_anchor {
+                            Some(ml_pos) => {
+                                if src.as_bytes().get(ml_pos) != Some(&b'\n') {
+                                    failures.push("编辑回放：单 LF 段落锚点不在换行符上".to_string());
+                                } else {
+                                    // Enter：复用行尾换行再插一个 → 净增 1 个字符（与单行锚点同一套规则）
+                                    let ml_enter = format!("{}{}{}", &src[..ml_pos], "\n", &src[ml_pos..]);
+                                    // Enter 的**两种**合法结果都要有夹具：光标正好压在换行字符上时复用那个换行
+                                    // （净增 1），否则在光标处插入两个换行（净增 2）。CodeMirror 的行边界语义在这
+                                    // 两种情况间切换，前端两种都可能走到，夹具两套都备着。
+                                    let ml_enter_insert =
+                                        format!("{}{}{}", &src[..ml_pos], "\n\n", &src[ml_pos..]);
+                                    // Shift+Enter：复用行尾换行 → `\` + 换行（净增 1）；否则插入 `\` + 换行（净增 2）
+                                    let ml_soft =
+                                        format!("{}\\{}", &src[..ml_pos], &src[ml_pos..]);
+                                    let ml_soft_insert =
+                                        format!("{}\\{}{}", &src[..ml_pos], "\n", &src[ml_pos..]);
+                                    for (key, name, doc) in [
+                                        ("M", "单LF段落 原始", &src),
+                                        ("N", "单LF段落 Enter 复用换行", &ml_enter),
+                                        ("P", "单LF段落 Enter 插入分段", &ml_enter_insert),
+                                        ("S", "单LF段落 Shift+Enter 复用换行", &ml_soft),
+                                        ("T", "单LF段落 Shift+Enter 插入", &ml_soft_insert),
+                                    ] {
+                                        let json = state_json(name, doc);
+                                        println!(
+                                            "PKUREPLAY:{}",
+                                            serde_json::json!({ "key": key, "fixture": json })
+                                        );
+                                    }
+                                    println!("PKUREPLAYANCHOR2:{}", ml_pos);
+                                }
+                            }
+                            None => failures.push("编辑回放：找不到含单 LF 的段落".to_string()),
+                        }
                     }
                 } else {
                     failures.push("编辑回放：找不到合适的单行段落锚点".to_string());

@@ -144,7 +144,9 @@ describe("scanParagraphGapRows", () => {
   });
 
   it("整行以 `#` 开头的代码行两侧空行也压缩（如 `#table(` 这类多行调用）", () => {
-    const doc = ["正文一", "", "#table(", "  columns: 2,", "  [a], [b],", ")", "", "正文二"].join("\n");
+    const doc = ["正文一", "", "#table(", "  columns: 2,", "  [a], [b],", ")", "", "正文二"].join(
+      "\n",
+    );
     expect(gaps(doc)).toEqual([
       { from: doc.indexOf("\n\n#table(") + 1, count: 1 },
       { from: doc.indexOf("\n\n正文二") + 1, count: 1 },

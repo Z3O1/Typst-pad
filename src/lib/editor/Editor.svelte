@@ -164,6 +164,8 @@
     viewportHeight: () => view?.scrollDOM.clientHeight ?? 0,
     // 块级切片：只在写作模式交给渲染层，源码模式一律 null（要看到真正的源码）
     blocks: () => (mode === "write" ? (blocks ?? null) : null),
+    // 标题"只压不撑"地收行高要用列宽把 pt 换成 px（见 buildHeadingShrinkDecorations）
+    contentWidthPx: () => view?.contentDOM.clientWidth ?? 0,
     onBlocksNeeded: () => onBlocksNeeded?.(),
     // 点击定位（阶段 2）：父组件换算成字节偏移后问 Rust，编辑器只负责落光标
     onCropClick: (req: { page: number; xPt: number; yPt: number; from: number; to: number }) =>
@@ -777,6 +779,17 @@
     font-size: 1em;
     line-height: 1.65;
     font-weight: 600;
+  }
+
+  /* 标题"只压不撑"地收行高：值由块几何算出来后挂在行的 `--heading-fit` 上
+     （必须作用到标题自己的 span，行盒高度由它的内联盒决定，见 buildHeadingShrinkDecorations） */
+  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-1),
+  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-2),
+  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-3),
+  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-4),
+  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-5),
+  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-6) {
+    line-height: var(--heading-fit, inherit);
   }
 
   /* 列表符号/序号：替换出来的字符与正文同色、不与正文基线错位 */

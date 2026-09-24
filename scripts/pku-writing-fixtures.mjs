@@ -70,11 +70,16 @@ for (const line of lines) {
   }
 }
 const countLine = lines.find((l) => l.startsWith("PKUCOUNT:"));
-if (fixtures.length !== EXPECTED_SAMPLES || Number(countLine?.slice("PKUCOUNT:".length)) !== EXPECTED_SAMPLES) {
+if (
+  fixtures.length !== EXPECTED_SAMPLES ||
+  Number(countLine?.slice("PKUCOUNT:".length)) !== EXPECTED_SAMPLES
+) {
   console.error(
     `✗ 样本数不对：解析到 ${fixtures.length} 份，Rust 报告 ${countLine ?? "（缺 PKUCOUNT 行）"}，期望 ${EXPECTED_SAMPLES} 份`,
   );
-  console.error("  过滤用例名被改 / 用例被 #[cfg] 掉 / cargo 报错被吞 都会长这样，不要用这份产物跑验收。");
+  console.error(
+    "  过滤用例名被改 / 用例被 #[cfg] 掉 / cargo 报错被吞 都会长这样，不要用这份产物跑验收。",
+  );
   process.exit(1);
 }
 
@@ -89,8 +94,14 @@ for (const line of lines) {
     process.exit(1);
   }
 }
-const replayAnchor = Number(lines.find((l) => l.startsWith("PKUREPLAYANCHOR:"))?.slice("PKUREPLAYANCHOR:".length));
-const REPLAY_KEYS = ["A", "B", "C", "D"];
+const replayAnchor = Number(
+  lines.find((l) => l.startsWith("PKUREPLAYANCHOR:"))?.slice("PKUREPLAYANCHOR:".length),
+);
+// 第二个锚点：含单 LF 的段落（编辑器走切片，聚焦后要揭示成源码）
+const replayAnchor2 = Number(
+  lines.find((l) => l.startsWith("PKUREPLAYANCHOR2:"))?.slice("PKUREPLAYANCHOR2:".length),
+);
+const REPLAY_KEYS = ["A", "B", "C", "D", "M", "N", "P", "S", "T"];
 const replayByKey = new Map(replay.map((r) => [r.key, r.fixture]));
 if (REPLAY_KEYS.some((k) => !replayByKey.has(k)) || !(replayAnchor > 0)) {
   console.error(
@@ -107,7 +118,8 @@ for (const [key, fx] of replayByKey) {
 }
 
 const manifest = [];
-for (const fx of fixtures) {  const problems = [];
+for (const fx of fixtures) {
+  const problems = [];
   if (fx.ok !== true) problems.push(`ok=${fx.ok}`);
   if (!Array.isArray(fx.blocks) || fx.blocks.length === 0) problems.push("块数为 0");
   const anchored = (fx.blocks ?? []).filter((b) => b.found && typeof b.anchorYpt === "number");
@@ -140,10 +152,22 @@ const fixturesPath = join(OUT_DIR, "fixtures.json");
 const manifestPath = join(OUT_DIR, "manifest.json");
 const replayPath = join(OUT_DIR, "replay.json");
 writeFileSync(fixturesPath, JSON.stringify(fixtures));
-writeFileSync(replayPath, JSON.stringify({ anchor: replayAnchor, states: REPLAY_KEYS.map((k) => replayByKey.get(k)) }));
-writeFileSync(manifestPath, JSON.stringify({ pkuRoot, columnPt: Number(columnPt), samples: manifest }, null, 1));
+writeFileSync(
+  replayPath,
+  JSON.stringify({
+    anchor: replayAnchor,
+    anchor2: replayAnchor2,
+    states: REPLAY_KEYS.map((k) => replayByKey.get(k)),
+  }),
+);
+writeFileSync(
+  manifestPath,
+  JSON.stringify({ pkuRoot, columnPt: Number(columnPt), samples: manifest }, null, 1),
+);
 
-console.log(`\n✓ 导出 ${fixtures.length} 份真实作业夹具 + ${REPLAY_KEYS.length} 个编辑回放状态（锚点 ${replayAnchor}）`);
+console.log(
+  `\n✓ 导出 ${fixtures.length} 份真实作业夹具 + ${REPLAY_KEYS.length} 个编辑回放状态（锚点 ${replayAnchor}）`,
+);
 for (const m of manifest) {
   console.log(
     `  [${m.priority}] ${m.name}\n      ${m.absPath}\n      sha256=${m.sha256}\n      页数=${m.pages ?? "?"} 块=${m.blockCount}（有锚点 ${m.anchoredBlocks}）诊断=${m.diagnosticCount} 正文字号=${m.textPt}pt`,

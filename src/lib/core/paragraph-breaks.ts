@@ -55,7 +55,10 @@ function activeParRules(source: string, regions: readonly Region[]): ParRule[] {
       }
     }
     if (hidden) continue;
-    rules.push({ kind: match[0].includes("show") ? "show" : "set", args: balancedArgs(source, to) });
+    rules.push({
+      kind: match[0].includes("show") ? "show" : "set",
+      args: balancedArgs(source, to),
+    });
   }
   return rules;
 }

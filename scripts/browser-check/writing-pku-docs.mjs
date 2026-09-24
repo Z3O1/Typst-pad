@@ -69,7 +69,6 @@ for (const f of fixtures) {
   );
 }
 
-
 // ---------------------------------------------------------------------------
 // 全局断言
 // ---------------------------------------------------------------------------
@@ -87,7 +86,8 @@ if (!filter.length) {
     } catch {
       hash = null;
     }
-    if (hash !== f.sha256) stale.push(`${f.name}（夹具 ${f.sha256?.slice(0, 8)} ≠ 现在 ${hash?.slice(0, 8)}）`);
+    if (hash !== f.sha256)
+      stale.push(`${f.name}（夹具 ${f.sha256?.slice(0, 8)} ≠ 现在 ${hash?.slice(0, 8)}）`);
   }
   check(`原文哈希与夹具一致（改过原文要重导夹具）`, stale.length === 0, stale.join("；"));
 }
@@ -141,6 +141,375 @@ function slimFixture(fx) {
 const c = await connect();
 const reports = [];
 
+// ---------------------------------------------------------------------------
+// 编辑回放（P0）：Enter / 输入 / Backspace / Undo 的确定状态
+//
+// 桩只在"全文与夹具逐字相同"时给真实块几何，所以每个状态都有一份真实编译夹具
+// （`replay.json`，Rust 的 `PKUREPLAY:` 导出）。回放用**真实按键**驱动，逐步断言：
+//   * 文档文本与对应状态的夹具逐字相同；
+//   * 该状态命中了真实夹具（`__browserDevBlocksMatched`，绝不静默退回假切片）；
+//   * Undo / 连按 Backspace 回到原始文本后，后续行的基线回到编辑前的值（≤1px）。
+// ---------------------------------------------------------------------------
+const replayPath = `${OUT_DIR}replay.json`;
+if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
+  const replay = JSON.parse(readFileSync(replayPath, "utf8"));
+  const p0 = allFixtures[0];
+  const docColumnPt = p0.contentWidthPt;
+  const docColumnPx = Math.round((docColumnPt * 4) / 3);
+  const states = replay.states; // [A 原始, B Enter, C 输入, D Backspace]
+  let before = 0;
+  const slimP0 = slimFixture(p0).fixture;
+  const injected = [slimP0, ...states.map((s) => slimFixture({ ...p0, ...s }).fixture)];
+  console.log(`\n=== 编辑回放（${p0.name}，锚点 ${replay.anchor}）`);
+
+  await boot(c, BLOCKS_URL, {
+    blockFixtures: injected,
+    mathFixtures: p0.math ?? [],
+    settleMs: 800,
+  });
+  // 列宽钉到文档真实列宽（与逐块验收同口径）
+  const applyReplayWidth = (px) =>
+    c.evaluate(`(() => {
+      let s = document.getElementById('pku-writing-column');
+      if (!s) { s = document.createElement('style'); s.id = 'pku-writing-column'; document.head.appendChild(s); }
+      s.textContent = [
+        '.editor-host.write .cm-scroller { scrollbar-gutter: auto !important; }',
+        '.editor-host .cm-scroller::-webkit-scrollbar { width: 0 !important; height: 0 !important; }',
+        '.editor-host.write .cm-content { width: ${px}px !important; min-width: ${px}px !important; max-width: ${px}px !important; }',
+      ].join('\\n');
+      return document.querySelector('.cm-content')?.clientWidth ?? 0;
+    })()`);
+  await applyReplayWidth(docColumnPx);
+  await sleep(350);
+
+  const setDoc = (doc) =>
+    c.evaluate(`(() => {
+      const view = document.querySelector('.cm-content').cmTile.root.view;
+      view.focus();
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: ${JSON.stringify(doc)} } });
+      return view.state.doc.length;
+    })()`);
+  const setCursor = (pos) =>
+    c.evaluate(`(() => {
+      const view = document.querySelector('.cm-content').cmTile.root.view;
+      view.focus();
+      view.dispatch({ selection: { anchor: ${pos} } });
+      return view.state.selection.main.head;
+    })()`);
+  // 预热：先滚到底再滚回锚点，强制 CodeMirror 把沿途的块 widget 都实测一遍。
+  // 不做这一步时，刚加载完测到的绝对坐标可能还建立在"未实测 widget 的估算高度"上
+  // （回放实测到过整段恒定 121px 的偏移，行间差值却完全一致）。
+  const warmUp = async (pos) => {
+    await c.evaluate(`(() => {
+      const v = document.querySelector('.cm-content').cmTile.root.view;
+      v.scrollDOM.scrollTop = v.scrollDOM.scrollHeight;
+      return true;
+    })()`);
+    await sleep(350);
+    await c.evaluate(`(() => {
+      const v = document.querySelector('.cm-content').cmTile.root.view;
+      const L = v.state.doc.lineAt(${pos});
+      v.scrollDOM.scrollTop = Math.max(0, v.lineBlockAt(L.from).top - 120);
+      return true;
+    })()`);
+    await sleep(350);
+    await c.evaluate(`(() => {
+      const v = document.querySelector('.cm-content').cmTile.root.view;
+      v.scrollDOM.scrollTop = v.scrollDOM.scrollHeight;
+      return true;
+    })()`);
+    await sleep(350);
+    await c.evaluate(`(() => {
+      const v = document.querySelector('.cm-content').cmTile.root.view;
+      const L = v.state.doc.lineAt(${pos});
+      v.scrollDOM.scrollTop = Math.max(0, v.lineBlockAt(L.from).top - 120);
+      return true;
+    })()`);
+    await sleep(350);
+  };
+
+  const docText = () =>
+    c.evaluate(`document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()`);
+  const compileCount = () => c.evaluate(`window.__browserDevCallCounts?.compile_blocks ?? 0`);
+  const waitMatched = async (before) => {
+    await c.waitFor(
+      `(window.__browserDevCallCounts?.compile_blocks ?? 0) > ${before} && window.__browserDevBlocksMatched === true`,
+      { timeout: 20000 },
+    );
+  };
+  const matched = () => c.evaluate(`window.__browserDevBlocksMatched === true`);
+  /** 只等"重新编译过"（编辑态没有逐字夹具时要等这个，不能等 matched） */
+  const waitRecompiled = async (beforeCount) => {
+    await c.waitFor(`(window.__browserDevCallCounts?.compile_blocks ?? 0) > ${beforeCount}`, {
+      timeout: 20000,
+    });
+  };
+  // 按源码行号量基线（同一行号在"回到原始文本"后应对应同一内容）
+  const measureLines = (nums) =>
+    c.evaluate(`(() => {
+      const content = document.querySelector('.cm-content');
+      const view = content.cmTile.root.view;
+      const padTop = parseFloat(getComputedStyle(content).paddingTop) || 0;
+      const docTopOf = (el) => el.getBoundingClientRect().top - content.getBoundingClientRect().top - padTop;
+      const findLine = (from) => {
+        for (const el of document.querySelectorAll('.cm-line')) {
+          let p = -1;
+          try { p = view.posAtDOM(el, 0); } catch (e) { continue; }
+          if (p === from) return el;
+        }
+        return null;
+      };
+      const out = {};
+      for (const n of ${JSON.stringify(nums)}) {
+        if (n < 1 || n > view.state.doc.lines) continue;
+        const L = view.state.doc.line(n);
+        const el = findLine(L.from);
+        if (!el) continue;
+        const cs = getComputedStyle(el);
+        const ctx = document.createElement('canvas').getContext('2d');
+        ctx.font = cs.fontSize + ' ' + cs.fontFamily;
+        const tm = ctx.measureText('字Hg');
+        const asc = tm.fontBoundingBoxAscent || 0;
+        const desc = tm.fontBoundingBoxDescent || 0;
+        const lh = parseFloat(cs.lineHeight) || view.defaultLineHeight;
+        out[n] = docTopOf(el) + (lh - (asc + desc)) / 2 + asc;
+      }
+      return out;
+    })()`);
+
+  // replay.anchor 是 Rust 侧的**字节**偏移；编辑器位置是 UTF-16，中文文档直接当位置用会偏
+  const anchorPos = byteToPos(states[0].doc, replay.anchor);
+
+  /** 文本不一致时给出首个不同点，便于区分"插入位置不同"和"内容不同" */
+  const diffHint = (a, b) => {
+    if (a === b) return "";
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    return `首个不同 @${i}（锚点 ${anchorPos}）：实际 ${JSON.stringify(a.slice(i, i + 12))} / 夹具 ${JSON.stringify(b.slice(i, i + 12))}`;
+  };
+
+  // 加载 A（原始）——必须在按锚点定位之前（新页面初始是空文档）
+  before = await compileCount();
+  await setDoc(states[0].doc);
+  await waitMatched(before);
+  check(`编辑回放：原始状态命中真实夹具（不退回假切片）`, (await matched()) === true);
+  // 光标统一放在锚点：光标所在的复杂/多源码行块会展开成源码（比切片高），不统一就会把
+  // "展开的那一块"的高度差算成几何变化（回放实测到过恒定 121px 的偏移）。
+  await setCursor(anchorPos);
+
+  // 滚到锚点附近，让待测的行在视口里
+  await c.evaluate(`(() => {
+    const view = document.querySelector('.cm-content').cmTile.root.view;
+    const L = view.state.doc.lineAt(${anchorPos});
+    view.scrollDOM.scrollTop = Math.max(0, view.lineBlockAt(L.from).top - 120);
+    return true;
+  })()`);
+  const anchorLine = await c.evaluate(
+    `document.querySelector('.cm-content').cmTile.root.view.state.doc.lineAt(${anchorPos}).number`,
+  );
+  const refLines = [anchorLine + 1, anchorLine + 2, anchorLine + 3, anchorLine + 4, anchorLine + 5];
+  await warmUp(anchorPos);
+  const refBaselines = await measureLines(refLines);
+  check(
+    `编辑回放：参考行可测（${Object.keys(refBaselines).length}/${refLines.length} 行）`,
+    Object.keys(refBaselines).length >= 3,
+  );
+
+  // ① Enter
+  await setCursor(anchorPos);
+  before = await compileCount();
+  await c.key("Enter", { code: "Enter", keyCode: 13 });
+  await sleep(400);
+  const afterEnter = await docText();
+  check(
+    `编辑回放：Enter 在段末产生一个源码换行（${states[0].doc.length} → ${afterEnter.length} 字符）`,
+    afterEnter === states[1].doc,
+    diffHint(afterEnter, states[1].doc),
+  );
+  await waitMatched(before);
+  check(`编辑回放：Enter 后命中真实夹具`, (await matched()) === true);
+
+  // ② Ctrl+Z 撤销 → 文本与几何回到原始
+  before = await compileCount();
+  await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+  await sleep(400);
+  check(`编辑回放：Ctrl+Z 撤销 Enter 后文本恢复原样`, (await docText()) === states[0].doc);
+  await waitMatched(before);
+  await setCursor(anchorPos);
+  await warmUp(anchorPos);
+  const afterUndo = await measureLines(refLines);
+  let worstRestore = 0;
+  for (const n of Object.keys(refBaselines)) {
+    if (afterUndo[n] == null) continue;
+    worstRestore = Math.max(worstRestore, Math.abs(afterUndo[n] - refBaselines[n]));
+  }
+  check(
+    `编辑回放：撤销后后续行基线回到编辑前（最大偏差 ${worstRestore.toFixed(2)}px）`,
+    worstRestore <= 1,
+  );
+  if (worstRestore > 1) {
+    console.log(
+      "  · 基线对比 ref=",
+      JSON.stringify(refBaselines),
+      " afterUndo=",
+      JSON.stringify(afterUndo),
+    );
+  }
+
+  // ③ 输入两个汉字
+  await setCursor(anchorPos);
+  before = await compileCount();
+  await c.type("测试");
+  await sleep(400);
+  check(`编辑回放：输入两字后文本与夹具一致`, (await docText()) === states[2].doc);
+  await waitMatched(before);
+  check(`编辑回放：输入后命中真实夹具`, (await matched()) === true);
+
+  // ④ 连按两次 Backspace → 回到原始
+  before = await compileCount();
+  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+  await sleep(400);
+  check(`编辑回放：两次 Backspace 后文本恢复原样`, (await docText()) === states[0].doc);
+  await waitMatched(before);
+
+  // ⑤ 再按一次 Backspace（删掉原段末字符）
+  before = await compileCount();
+  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+  await sleep(400);
+  check(`编辑回放：Backspace 删字符后文本与夹具一致`, (await docText()) === states[3].doc);
+  await waitMatched(before);
+  check(`编辑回放：Backspace 后命中真实夹具`, (await matched()) === true);
+
+  // ⑥ 撤销回原始
+  before = await compileCount();
+  for (let i = 0; i < 3 && (await docText()) !== states[0].doc; i++) {
+    await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+    await sleep(300);
+  }
+  check(`编辑回放：撤销后回到原始文本`, (await docText()) === states[0].doc);
+  await waitMatched(before);
+  await setCursor(anchorPos);
+  await warmUp(anchorPos);
+  const finalBaselines = await measureLines(refLines);
+  let worstFinal = 0;
+  for (const n of Object.keys(refBaselines)) {
+    if (finalBaselines[n] == null) continue;
+    worstFinal = Math.max(worstFinal, Math.abs(finalBaselines[n] - refBaselines[n]));
+  }
+  check(
+    `编辑回放：回放一圈后后续行基线不变（最大偏差 ${worstFinal.toFixed(2)}px）`,
+    worstFinal <= 1,
+  );
+
+  // ⑦ 含单 LF 的段落（编辑器里走切片）：聚焦要**揭示成源码**、行数正确、不误改文本；
+  //    再回放 Enter 分段与 Shift+Enter（`\` + 换行）两种输入。
+  const ml = states[4];
+  // Enter / Shift+Enter 各有"复用行尾换行"与"插入"两种合法结果，夹具两套都有，
+  // 断言"实际等于其中之一"（几何仍由该状态的夹具保证，不会退回假切片）。
+  const mlEnterVariants = [states[5], states[6]];
+  const mlSoftVariants = [states[7], states[8]];
+  if (replay.anchor2 > 0 && ml && mlEnterVariants.every(Boolean) && mlSoftVariants.every(Boolean)) {
+    const mlPos = byteToPos(ml.doc, replay.anchor2);
+    // 段落边界直接从 M 态夹具的块表取（比按换行回溯稳）：段末 == anchor2 的那个可编辑段
+    // 注意：这一块含 `#{…}` 公式插值，是**复杂块**（走切片），不能用 directlyEditable 过滤；
+    // 回放要验证的正是"聚焦把切片揭示成源码"，与它是不是纯文本无关。
+    const mlBlock = ml.blocks.find((b) => b.end === replay.anchor2 && b.kind === "Paragraph");
+    const mlFrom = mlBlock ? byteToPos(ml.doc, mlBlock.start) : 0;
+    const srcLines = ml.doc.slice(mlFrom, mlPos).split("\n");
+    const focusPos = mlFrom + 2;
+    before = await compileCount();
+    await setDoc(ml.doc);
+    await waitMatched(before);
+    // 聚焦到段落内部：只改选区，不应触发重编译，也不应改文本
+    const docBeforeFocus = await docText();
+    const countAfterLoad = await compileCount();
+    await setCursor(focusPos);
+    await sleep(300);
+    const afterFocus = await c.evaluate(`(() => {
+      const view = document.querySelector('.cm-content').cmTile.root.view;
+      const doc = view.state.doc;
+      const from = ${focusPos};
+      const line = doc.lineAt(from);
+      let lines = 0;
+      for (let n = line.number; n <= doc.lines; n++) {
+        const t = doc.line(n).text;
+        if (t.trim() === '') break;
+        lines++;
+      }
+      return { docLen: view.state.doc.length, sel: view.state.selection.main.head, lines };
+    })()`);
+    check(
+      `编辑回放：聚焦单 LF 段落只改选区、不改文本（长度 ${afterFocus.docLen}，光标 ${afterFocus.sel}）`,
+      (await docText()) === docBeforeFocus && afterFocus.sel === focusPos,
+    );
+    check(
+      `编辑回放：聚焦后源码行数 = 段落源码行数（${afterFocus.lines} / ${srcLines.length}）`,
+      afterFocus.lines === srcLines.length,
+    );
+    check(
+      `编辑回放：聚焦不触发重编译（选区事务；${countAfterLoad} → ${await compileCount()}）`,
+      (await compileCount()) === countAfterLoad,
+    );
+
+    // Enter：段末分段
+    before = await compileCount();
+    const caretBefore = await setCursor(mlPos);
+    console.log(
+      `  · 单 LF 段落：mlFrom=${mlFrom} mlPos=${mlPos} 段落源码行数=${srcLines.length} 落点=${caretBefore}`,
+    );
+    await c.key("Enter", { code: "Enter", keyCode: 13 });
+    await sleep(400);
+    const mlAfterEnter = await docText();
+    const enterHit = mlEnterVariants.find((v) => v.doc === mlAfterEnter);
+    // 夹具覆盖两种规范结果（复用行尾换行 / 插入分段）；编辑器在这个位置还可能多带一个缩进，
+    // 那种变体没有逐字夹具，所以这里退一步断言**语义**：只在锚点之后动了换行、文本没被改，
+    // 并且确实重新编译过（不会静默显示假切片）。
+    const enterSamePrefix = mlAfterEnter.startsWith(ml.doc.slice(0, mlPos));
+    const enterNewlines =
+      (mlAfterEnter.match(/\n/g) ?? []).length - (ml.doc.match(/\n/g) ?? []).length;
+    check(
+      `编辑回放：单 LF 段落段末 Enter 产生分段（${ml.doc.length} → ${mlAfterEnter.length} 字符，换行 +${enterNewlines}${enterHit ? `，命中「${enterHit.name}」` : "，非规范变体"}）`,
+      enterHit ? true : enterSamePrefix && (enterNewlines === 1 || enterNewlines === 2),
+    );
+    await waitRecompiled(before);
+    check(
+      `编辑回放：单 LF 段落 Enter 后重新编译（不静默用假切片）`,
+      (await compileCount()) > before,
+    );
+    // 撤销回原始
+    before = await compileCount();
+    for (let i = 0; i < 3 && (await docText()) !== ml.doc; i++) {
+      await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+      await sleep(250);
+    }
+    await waitMatched(before);
+    check(`编辑回放：撤销回单 LF 段落原文`, (await docText()) === ml.doc);
+
+    // Shift+Enter：写 `\` + 换行
+    before = await compileCount();
+    await setCursor(mlPos);
+    await c.key("Enter", { code: "Enter", keyCode: 13, modifiers: 8 });
+    await sleep(400);
+    const mlAfterSoft = await docText();
+    const softHit = mlSoftVariants.find((v) => v.doc === mlAfterSoft);
+    const softSamePrefix = mlAfterSoft.startsWith(ml.doc.slice(0, mlPos));
+    const softBackslashes =
+      (mlAfterSoft.match(/\\/g) ?? []).length - (ml.doc.match(/\\/g) ?? []).length;
+    check(
+      `编辑回放：单 LF 段落 Shift+Enter 写显式换行（${ml.doc.length} → ${mlAfterSoft.length} 字符，反斜线 +${softBackslashes}${softHit ? `，命中「${softHit.name}」` : "，非规范变体"}）`,
+      softHit ? true : softSamePrefix && softBackslashes === 1,
+    );
+    await waitRecompiled(before);
+    check(
+      `编辑回放：单 LF 段落 Shift+Enter 后重新编译（不静默用假切片）`,
+      (await compileCount()) > before,
+    );
+  }
+
+  await c.screenshot(SHOT("pku-writing-replay"));
+}
+
 for (const fx of fixtures) {
   // 只跑编辑回放（调试用）：跳过逐块测量阶段
   if (process.env.PKU_REPLAY_ONLY === "1") break;
@@ -159,7 +528,9 @@ for (const fx of fixtures) {
   }
   const { fixture: injected, replaced } = slimFixture(fx);
   const injectedBytes = JSON.stringify([injected]).length + JSON.stringify(fx.math ?? []).length;
-  console.log(`  夹具注入：${(injectedBytes / 1024 / 1024).toFixed(2)}MB（大切片占位 ${replaced} 张）`);
+  console.log(
+    `  夹具注入：${(injectedBytes / 1024 / 1024).toFixed(2)}MB（大切片占位 ${replaced} 张）`,
+  );
 
   await boot(c, BLOCKS_URL, {
     blockFixtures: [injected],
@@ -271,9 +642,7 @@ for (const fx of fixtures) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     cropsNow = await cropsOf();
     if (cropsNow >= expectedCrops.length) break;
-    console.log(
-      `  · 切片 ${cropsNow}/${expectedCrops.length}，第 ${attempt} 次改列宽强制重编译`,
-    );
+    console.log(`  · 切片 ${cropsNow}/${expectedCrops.length}，第 ${attempt} 次改列宽强制重编译`);
     await applyWidth(widthPx + 3);
     await sleep(900);
     await applyWidth(widthPx);
@@ -581,7 +950,9 @@ for (const fx of fixtures) {
     b: r.browserBaselinePx ?? r.browserAnchorPx,
   });
   const anchored = rows.filter((r) => r.found && anchorOf(r).t != null && anchorOf(r).b != null);
-  const missingMeasured = rows.filter((r) => r.found && anchorOf(r).t != null && anchorOf(r).b == null);
+  const missingMeasured = rows.filter(
+    (r) => r.found && anchorOf(r).t != null && anchorOf(r).b == null,
+  );
   check(
     `${fx.name}：每个有几何的块都量到了锚点（缺 ${missingMeasured.length}）`,
     missingMeasured.length === 0,
@@ -718,7 +1089,10 @@ for (const fx of fixtures) {
       const browserEnds = visual.map((vl) => vl.to);
       let first = -1;
       for (let i = 0; i < Math.max(typstEnds.length, browserEnds.length); i++) {
-        if (typstEnds[i] !== browserEnds[i]) { first = i; break; }
+        if (typstEnds[i] !== browserEnds[i]) {
+          first = i;
+          break;
+        }
       }
       const around = (pos) => JSON.stringify(fx.doc.slice(Math.max(0, pos - 6), pos + 8));
       console.log(
@@ -864,8 +1238,11 @@ for (const fx of fixtures) {
       await sleep(20);
     }
     const blanks = [...seen.values()].sort((a, b) => a.line - b.line);
-    for (const b of blanks) console.log(`      · 未压缩空行 L${b.line} 高${b.h}px：上一行[${b.prev}] 下一行[${b.next}]`);
-    console.log(`      · 全篇未压缩空行共 ${blanks.length} 行，合计 ${blanks.reduce((a, b) => a + b.h, 0).toFixed(0)}px`);
+    for (const b of blanks)
+      console.log(`      · 未压缩空行 L${b.line} 高${b.h}px：上一行[${b.prev}] 下一行[${b.next}]`);
+    console.log(
+      `      · 全篇未压缩空行共 ${blanks.length} 行，合计 ${blanks.reduce((a, b) => a + b.h, 0).toFixed(0)}px`,
+    );
     const oldBlanks = await c.evaluate(`(() => {
       const view = document.querySelector('.cm-content').cmTile.root.view;
       const doc = view.state.doc;
@@ -885,6 +1262,49 @@ for (const fx of fixtures) {
       return out;
     })()`);
     void oldBlanks;
+    await c.evaluate(`(() => {
+      const v = document.querySelector('.cm-content').cmTile.root.view;
+      v.scrollDOM.scrollTop = Math.max(0, v.lineBlockAt(${posList[0]}).top - 120);
+      return true;
+    })()`);
+    await sleep(200);
+    const firstPickProbe = await c.evaluate(`(() => {
+      const content = document.querySelector('.cm-content');
+      const view = content.cmTile.root.view;
+      let el = null;
+      for (const line of document.querySelectorAll('.cm-line')) {
+        let p = -1;
+        try { p = view.posAtDOM(line, 0); } catch (e) { continue; }
+        if (p === ${posList[0]}) { el = line; break; }
+      }
+      if (!el) return { missing: true };
+      const spans = Array.from(el.querySelectorAll('span')).map((sp) => ({
+        cls: sp.className,
+        inline: sp.style.lineHeight || '',
+        computed: getComputedStyle(sp).lineHeight,
+      }));
+      return { h: +el.getBoundingClientRect().height.toFixed(2), html: el.innerHTML.slice(0, 160), spans };
+    })()`);
+    console.log(`  · 首块（L33）标题探针：${JSON.stringify(firstPickProbe)}`);
+    const headingProbe = await c.evaluate(`(() => {
+      const out = [];
+      for (const el of document.querySelectorAll('.cm-line')) {
+        const span = el.querySelector('[class*="cm-markup-heading"]');
+        if (!span) continue;
+        out.push({
+          text: el.textContent.slice(0, 10),
+          spanClass: span.className,
+          spanInline: span.style.lineHeight || '',
+          spanComputed: getComputedStyle(span).lineHeight,
+          lineInline: el.style.lineHeight || '',
+          lineComputed: getComputedStyle(el).lineHeight,
+          lineH: +el.getBoundingClientRect().height.toFixed(2),
+        });
+        if (out.length >= 3) break;
+      }
+      return out;
+    })()`);
+    console.log(`  · 标题行高探针：${JSON.stringify(headingProbe)}`);
     const topA = [];
     for (let i = 0; i < posList.length; i++) {
       await c.evaluate(`(() => {
@@ -923,7 +1343,10 @@ for (const fx of fixtures) {
   const firstFailure = [...adjFails, ...cumFails, ...missingMeasured].sort(
     (a, b) => (anchorOf(a).t ?? 0) - (anchorOf(b).t ?? 0),
   )[0];
-  if (firstFailure) console.log(`  ✗ 首处失败：L${firstFailure.line} ${firstFailure.kind} :: ${firstFailure.excerpt}`);
+  if (firstFailure)
+    console.log(
+      `  ✗ 首处失败：L${firstFailure.line} ${firstFailure.kind} :: ${firstFailure.excerpt}`,
+    );
 
   const report = {
     name: fx.name,
@@ -955,259 +1378,6 @@ for (const fx of fixtures) {
   console.log(`  报告：${OUT_DIR}report-${slug}.json（截图 pku-writing-${slug}.png）`);
 }
 
-// ---------------------------------------------------------------------------
-// 编辑回放（P0）：Enter / 输入 / Backspace / Undo 的确定状态
-//
-// 桩只在"全文与夹具逐字相同"时给真实块几何，所以每个状态都有一份真实编译夹具
-// （`replay.json`，Rust 的 `PKUREPLAY:` 导出）。回放用**真实按键**驱动，逐步断言：
-//   * 文档文本与对应状态的夹具逐字相同；
-//   * 该状态命中了真实夹具（`__browserDevBlocksMatched`，绝不静默退回假切片）；
-//   * Undo / 连按 Backspace 回到原始文本后，后续行的基线回到编辑前的值（≤1px）。
-// ---------------------------------------------------------------------------
-const replayPath = `${OUT_DIR}replay.json`;
-if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
-  const replay = JSON.parse(readFileSync(replayPath, "utf8"));
-  const p0 = allFixtures[0];
-  const docColumnPt = p0.contentWidthPt;
-  const docColumnPx = Math.round((docColumnPt * 4) / 3);
-  const states = replay.states; // [A 原始, B Enter, C 输入, D Backspace]
-  let before = 0;
-  const slimP0 = slimFixture(p0).fixture;
-  const injected = [slimP0, ...states.map((s) => slimFixture({ ...p0, ...s }).fixture)];
-  console.log(`\n=== 编辑回放（${p0.name}，锚点 ${replay.anchor}）`);
-
-  await boot(c, BLOCKS_URL, {
-    blockFixtures: injected,
-    mathFixtures: p0.math ?? [],
-    settleMs: 800,
-  });
-  // 列宽钉到文档真实列宽（与逐块验收同口径）
-  const applyReplayWidth = (px) =>
-    c.evaluate(`(() => {
-      let s = document.getElementById('pku-writing-column');
-      if (!s) { s = document.createElement('style'); s.id = 'pku-writing-column'; document.head.appendChild(s); }
-      s.textContent = [
-        '.editor-host.write .cm-scroller { scrollbar-gutter: auto !important; }',
-        '.editor-host .cm-scroller::-webkit-scrollbar { width: 0 !important; height: 0 !important; }',
-        '.editor-host.write .cm-content { width: ${px}px !important; min-width: ${px}px !important; max-width: ${px}px !important; }',
-      ].join('\\n');
-      return document.querySelector('.cm-content')?.clientWidth ?? 0;
-    })()`);
-  await applyReplayWidth(docColumnPx);
-  await sleep(350);
-
-  const setDoc = (doc) =>
-    c.evaluate(`(() => {
-      const view = document.querySelector('.cm-content').cmTile.root.view;
-      view.focus();
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: ${JSON.stringify(doc)} } });
-      return view.state.doc.length;
-    })()`);
-  const setCursor = (pos) =>
-    c.evaluate(`(() => {
-      const view = document.querySelector('.cm-content').cmTile.root.view;
-      view.focus();
-      view.dispatch({ selection: { anchor: ${pos} } });
-      return view.state.selection.main.head;
-    })()`);
-  // 预热：先滚到底再滚回锚点，强制 CodeMirror 把沿途的块 widget 都实测一遍。
-  // 不做这一步时，刚加载完测到的绝对坐标可能还建立在"未实测 widget 的估算高度"上
-  // （回放实测到过整段恒定 121px 的偏移，行间差值却完全一致）。
-  const warmUp = async (pos) => {
-    await c.evaluate(`(() => {
-      const v = document.querySelector('.cm-content').cmTile.root.view;
-      v.scrollDOM.scrollTop = v.scrollDOM.scrollHeight;
-      return true;
-    })()`);
-    await sleep(350);
-    await c.evaluate(`(() => {
-      const v = document.querySelector('.cm-content').cmTile.root.view;
-      const L = v.state.doc.lineAt(${pos});
-      v.scrollDOM.scrollTop = Math.max(0, v.lineBlockAt(L.from).top - 120);
-      return true;
-    })()`);
-    await sleep(350);
-    await c.evaluate(`(() => {
-      const v = document.querySelector('.cm-content').cmTile.root.view;
-      v.scrollDOM.scrollTop = v.scrollDOM.scrollHeight;
-      return true;
-    })()`);
-    await sleep(350);
-    await c.evaluate(`(() => {
-      const v = document.querySelector('.cm-content').cmTile.root.view;
-      const L = v.state.doc.lineAt(${pos});
-      v.scrollDOM.scrollTop = Math.max(0, v.lineBlockAt(L.from).top - 120);
-      return true;
-    })()`);
-    await sleep(350);
-  };
-
-  const docText = () =>
-    c.evaluate(`document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()`);
-  const compileCount = () =>
-    c.evaluate(`window.__browserDevCallCounts?.compile_blocks ?? 0`);
-  const waitMatched = async (before) => {
-    await c.waitFor(
-      `(window.__browserDevCallCounts?.compile_blocks ?? 0) > ${before} && window.__browserDevBlocksMatched === true`,
-      { timeout: 20000 },
-    );
-  };
-  const matched = () => c.evaluate(`window.__browserDevBlocksMatched === true`);
-  // 按源码行号量基线（同一行号在"回到原始文本"后应对应同一内容）
-  const measureLines = (nums) =>
-    c.evaluate(`(() => {
-      const content = document.querySelector('.cm-content');
-      const view = content.cmTile.root.view;
-      const padTop = parseFloat(getComputedStyle(content).paddingTop) || 0;
-      const docTopOf = (el) => el.getBoundingClientRect().top - content.getBoundingClientRect().top - padTop;
-      const findLine = (from) => {
-        for (const el of document.querySelectorAll('.cm-line')) {
-          let p = -1;
-          try { p = view.posAtDOM(el, 0); } catch (e) { continue; }
-          if (p === from) return el;
-        }
-        return null;
-      };
-      const out = {};
-      for (const n of ${JSON.stringify(nums)}) {
-        if (n < 1 || n > view.state.doc.lines) continue;
-        const L = view.state.doc.line(n);
-        const el = findLine(L.from);
-        if (!el) continue;
-        const cs = getComputedStyle(el);
-        const ctx = document.createElement('canvas').getContext('2d');
-        ctx.font = cs.fontSize + ' ' + cs.fontFamily;
-        const tm = ctx.measureText('字Hg');
-        const asc = tm.fontBoundingBoxAscent || 0;
-        const desc = tm.fontBoundingBoxDescent || 0;
-        const lh = parseFloat(cs.lineHeight) || view.defaultLineHeight;
-        out[n] = docTopOf(el) + (lh - (asc + desc)) / 2 + asc;
-      }
-      return out;
-    })()`);
-
-  // replay.anchor 是 Rust 侧的**字节**偏移；编辑器位置是 UTF-16，中文文档直接当位置用会偏
-  const anchorPos = byteToPos(states[0].doc, replay.anchor);
-
-  /** 文本不一致时给出首个不同点，便于区分"插入位置不同"和"内容不同" */
-  const diffHint = (a, b) => {
-    if (a === b) return "";
-    let i = 0;
-    while (i < a.length && i < b.length && a[i] === b[i]) i++;
-    return `首个不同 @${i}（锚点 ${anchorPos}）：实际 ${JSON.stringify(a.slice(i, i + 12))} / 夹具 ${JSON.stringify(b.slice(i, i + 12))}`;
-  };
-
-  // 加载 A（原始）——必须在按锚点定位之前（新页面初始是空文档）
-  before = await compileCount();
-  await setDoc(states[0].doc);
-  await waitMatched(before);
-  check(`编辑回放：原始状态命中真实夹具（不退回假切片）`, (await matched()) === true);
-  // 光标统一放在锚点：光标所在的复杂/多源码行块会展开成源码（比切片高），不统一就会把
-  // "展开的那一块"的高度差算成几何变化（回放实测到过恒定 121px 的偏移）。
-  await setCursor(anchorPos);
-
-  // 滚到锚点附近，让待测的行在视口里
-  await c.evaluate(`(() => {
-    const view = document.querySelector('.cm-content').cmTile.root.view;
-    const L = view.state.doc.lineAt(${anchorPos});
-    view.scrollDOM.scrollTop = Math.max(0, view.lineBlockAt(L.from).top - 120);
-    return true;
-  })()`);
-  const anchorLine = await c.evaluate(
-    `document.querySelector('.cm-content').cmTile.root.view.state.doc.lineAt(${anchorPos}).number`,
-  );
-  const refLines = [anchorLine + 1, anchorLine + 2, anchorLine + 3, anchorLine + 4, anchorLine + 5];
-  await warmUp(anchorPos);
-  const refBaselines = await measureLines(refLines);
-  check(
-    `编辑回放：参考行可测（${Object.keys(refBaselines).length}/${refLines.length} 行）`,
-    Object.keys(refBaselines).length >= 3,
-  );
-
-  // ① Enter
-  await setCursor(anchorPos);
-  before = await compileCount();
-  await c.key("Enter", { code: "Enter", keyCode: 13 });
-  await sleep(400);
-  const afterEnter = await docText();
-  check(
-    `编辑回放：Enter 在段末产生一个源码换行（${states[0].doc.length} → ${afterEnter.length} 字符）`,
-    afterEnter === states[1].doc,
-    diffHint(afterEnter, states[1].doc),
-  );
-  await waitMatched(before);
-  check(`编辑回放：Enter 后命中真实夹具`, (await matched()) === true);
-
-  // ② Ctrl+Z 撤销 → 文本与几何回到原始
-  before = await compileCount();
-  await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
-  await sleep(400);
-  check(`编辑回放：Ctrl+Z 撤销 Enter 后文本恢复原样`, (await docText()) === states[0].doc);
-  await waitMatched(before);
-  await setCursor(anchorPos);
-  await warmUp(anchorPos);
-  const afterUndo = await measureLines(refLines);
-  let worstRestore = 0;
-  for (const n of Object.keys(refBaselines)) {
-    if (afterUndo[n] == null) continue;
-    worstRestore = Math.max(worstRestore, Math.abs(afterUndo[n] - refBaselines[n]));
-  }
-  check(
-    `编辑回放：撤销后后续行基线回到编辑前（最大偏差 ${worstRestore.toFixed(2)}px）`,
-    worstRestore <= 1,
-  );
-  if (worstRestore > 1) {
-    console.log("  · 基线对比 ref=", JSON.stringify(refBaselines), " afterUndo=", JSON.stringify(afterUndo));
-  }
-
-  // ③ 输入两个汉字
-  await setCursor(anchorPos);
-  before = await compileCount();
-  await c.type("测试");
-  await sleep(400);
-  check(`编辑回放：输入两字后文本与夹具一致`, (await docText()) === states[2].doc);
-  await waitMatched(before);
-  check(`编辑回放：输入后命中真实夹具`, (await matched()) === true);
-
-  // ④ 连按两次 Backspace → 回到原始
-  before = await compileCount();
-  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
-  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
-  await sleep(400);
-  check(`编辑回放：两次 Backspace 后文本恢复原样`, (await docText()) === states[0].doc);
-  await waitMatched(before);
-
-  // ⑤ 再按一次 Backspace（删掉原段末字符）
-  before = await compileCount();
-  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
-  await sleep(400);
-  check(`编辑回放：Backspace 删字符后文本与夹具一致`, (await docText()) === states[3].doc);
-  await waitMatched(before);
-  check(`编辑回放：Backspace 后命中真实夹具`, (await matched()) === true);
-
-  // ⑥ 撤销回原始
-  before = await compileCount();
-  for (let i = 0; i < 3 && (await docText()) !== states[0].doc; i++) {
-    await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
-    await sleep(300);
-  }
-  check(`编辑回放：撤销后回到原始文本`, (await docText()) === states[0].doc);
-  await waitMatched(before);
-  await setCursor(anchorPos);
-  await warmUp(anchorPos);
-  const finalBaselines = await measureLines(refLines);
-  let worstFinal = 0;
-  for (const n of Object.keys(refBaselines)) {
-    if (finalBaselines[n] == null) continue;
-    worstFinal = Math.max(worstFinal, Math.abs(finalBaselines[n] - refBaselines[n]));
-  }
-  check(
-    `编辑回放：回放一圈后后续行基线不变（最大偏差 ${worstFinal.toFixed(2)}px）`,
-    worstFinal <= 1,
-  );
-  await c.screenshot(SHOT("pku-writing-replay"));
-}
-
 writeFileSync(
   `${OUT_DIR}summary.json`,
   JSON.stringify(
@@ -1222,7 +1392,11 @@ writeFileSync(
         pages: r.pages,
         comparable: r.comparable,
         firstFailure: r.firstFailure
-          ? { line: r.firstFailure.line, kind: r.firstFailure.kind, excerpt: r.firstFailure.excerpt }
+          ? {
+              line: r.firstFailure.line,
+              kind: r.firstFailure.kind,
+              excerpt: r.firstFailure.excerpt,
+            }
           : null,
       })),
     },

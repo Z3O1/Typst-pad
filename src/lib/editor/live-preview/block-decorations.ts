@@ -115,6 +115,54 @@ export function buildBlockCovers(
 }
 
 /**
+ * **只压不撑**地把标题行高对齐到它的带高。
+ *
+ * 背景：空行重复计高修完后，紧随标题的块相邻偏差 +12~20px，来源是标题行盒（h1 33.9px）比它
+ * 在 Typst 里的带宽（此处 23.2px）高出一截。但"标题一律占满带高"会把本来带宽 **大于** 行盒的
+ * 标题（h1 常见 36~41px）撑高，整体反而更差（round 15/20 两次实测 max 156 → 172~217）。
+ *
+ * 所以这里只做**单向压缩**：`line-height = min(自然行盒, 带高)`，只会变矮、不会变高；
+ * 不需要压的标题不产生装饰，布局与改动前完全一致。只处理单源码行标题（多行标题行盒 =
+ * 行数 × 行高，压成一份带高会截断）。
+ */
+export function buildHeadingShrinkDecorations(
+  state: EditorState,
+  covers: readonly BlockCover[],
+  contentWidthPx: number,
+  textPt: number,
+): Range<Decoration>[] {
+  const out: Range<Decoration>[] = [];
+  if (!(contentWidthPx > 0) || !(textPt > 0)) return out;
+  const textPx = (textPt * 4) / 3;
+  for (const cover of covers) {
+    const block = cover.block;
+    if (!cover.revealed || cover.noOutput || block.kind !== "Heading") continue;
+    if (!block.found || !(block.heightPt > 0.5) || !(block.widthPt > 0)) continue;
+    if (block.from < 0 || block.from > state.doc.length) continue;
+    const line = state.doc.lineAt(block.from);
+    if (state.doc.lineAt(Math.min(block.to, state.doc.length)).number !== line.number) continue;
+    const match = /^(=+)\s/.exec(line.text);
+    if (!match) continue;
+    const scale = match[1].length === 1 ? 1.4 : match[1].length === 2 ? 1.2 : 1.0;
+    const naturalPx = scale * textPx * 1.65;
+    const bandPx = (block.heightPt * contentWidthPx) / block.widthPt;
+    // 只压不撑；差得太小就不动（避免噪声驱动的抖动）
+    if (!(bandPx > 8) || bandPx > naturalPx - 0.5) continue;
+    // **必须作用到标题自己的 span（`.cm-markup-heading-N`）上**，不能挂在 `.cm-line`、也不能
+    // 另起一个并列 mark：行盒高度由标题 span 的 1.4em × 1.65 内联盒决定，外层或并列的样式都
+    // 压不住它（前两版分别挂行、挂并列 mark，实测都没效果）。做法是给行加一个类 + 一个 CSS
+    // 变量，再用 CSS 规则让标题 span 去读这个变量（自定义属性会继承到后代）。
+    out.push(
+      Decoration.line({
+        class: "cm-heading-fit",
+        attributes: { style: `--heading-fit:${bandPx.toFixed(2)}px` },
+      }).range(line.from),
+    );
+  }
+  return out;
+}
+
+/**
  * 视口附近有没有"能渲染却没有切片"的块 —— 有的话通知父组件按新窗口重编译。
  *
  * 窗口化渲染（见 block-plan.carryOverCrops 的说明）下这是常态：滚动到没渲过的区域时，
