@@ -155,7 +155,9 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
   const replay = JSON.parse(readFileSync(replayPath, "utf8"));
   const p0 = allFixtures[0];
   const docColumnPt = p0.contentWidthPt;
-  const docColumnPx = Math.round((docColumnPt * 4) / 3);
+  // 列宽用**精确**的 pt→px 换算（4/3），不要取整：整 px 会让"列宽/版心"这个比例与
+  // 正文的字号比例（docTextPt × 4/3）不一致，纵向比较时每 1000px 就偏 ~0.6px。
+  const docColumnPx = (docColumnPt * 4) / 3;
   const states = replay.states; // [A 原始, B Enter, C 输入, D Backspace]
   let before = 0;
   const slimP0 = slimFixture(p0).fixture;
@@ -267,7 +269,9 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
         if (!el) continue;
         const cs = getComputedStyle(el);
         const ctx = document.createElement('canvas').getContext('2d');
-        ctx.font = cs.fontSize + ' ' + cs.fontFamily;
+        // 基线要用**真正画这些字的字体**的 ascent/descent 算：正文栈以 Libertinus 打头（没有汉字），
+        // 用整个栈量出来的是回退族的度量，基线估算会差几个像素（我们追的正是这个量级）。
+        ctx.font = cs.fontSize + ' "Noto Serif CJK SC"';
         const tm = ctx.measureText('字Hg');
         const asc = tm.fontBoundingBoxAscent || 0;
         const desc = tm.fontBoundingBoxDescent || 0;
@@ -516,7 +520,9 @@ for (const fx of fixtures) {
   // 浏览器要按**文档真实列宽**排版：文档自带 `#set page(...)` 时注入的列宽不是它实际用的宽度，
   // 按注入列宽排版会让断行位置与夹具里的锚点完全对不上（见 Rust 侧 pku_true_content_pt）。
   const docColumnPt = fx.contentWidthPt;
-  const docColumnPx = Math.round((docColumnPt * 4) / 3);
+  // 列宽用**精确**的 pt→px 换算（4/3），不要取整：整 px 会让"列宽/版心"这个比例与
+  // 正文的字号比例（docTextPt × 4/3）不一致，纵向比较时每 1000px 就偏 ~0.6px。
+  const docColumnPx = (docColumnPt * 4) / 3;
   const comparable = true;
   if (fx.ownPage) {
     console.log(
@@ -760,7 +766,8 @@ for (const fx of fixtures) {
     for (const fam of families) {
       const c2 = document.createElement('canvas').getContext('2d');
       c2.font = cs.fontSize + ' ' + JSON.stringify(fam);
-      perFamily[fam] = +(c2.measureText('字').width.toFixed(3));
+      // 回读 ctx.font：赋值解析失败时会保持上一个字体，量出来的宽度就不是这一族的
+      perFamily[fam] = { w: +(c2.measureText('字').width.toFixed(3)), readback: c2.font, asc: +(c2.measureText('字Hg').fontBoundingBoxAscent ?? -1).toFixed(2) };
     }
     return {
       advance: w / 40,
@@ -881,7 +888,8 @@ for (const fx of fixtures) {
       const cs = getComputedStyle(el);
       const lh = parseFloat(cs.lineHeight) || baseLine;
       const ctx = document.createElement('canvas').getContext('2d');
-      ctx.font = cs.fontSize + ' ' + cs.fontFamily;
+      // 同 measureOne：用画汉字的那个族量基线度量
+      ctx.font = cs.fontSize + ' "Noto Serif CJK SC"';
       const tm = ctx.measureText('字Hg');
       const asc = tm.fontBoundingBoxAscent || tm.actualBoundingBoxAscent || 0;
       const desc = tm.fontBoundingBoxDescent || tm.actualBoundingBoxDescent || 0;
@@ -921,7 +929,9 @@ for (const fx of fixtures) {
   }
   const domCrops = measuredResults.filter((r) => r.mode === "crop").map((r) => r.from);
 
-  const measured = { columnPx, factor: columnPx / docColumnPt, results: measuredResults };
+  // 纵向 pt→px 一律用 CSS 的 4/3：字号的 px 值就是 docTextPt × 4/3 算出来的，
+  // 再用"实测列宽/版心"当比例会引入 0.06% 的系统偏差（长页面累计到几个像素）。
+  const measured = { columnPx, factor: 4 / 3, results: measuredResults };
   const byFrom = new Map(measured.results.map((r) => [r.from, r]));
   const rows = [];
   for (const b of fx.blocks) {
