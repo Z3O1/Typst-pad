@@ -48,7 +48,7 @@ const SUITES = [
   ["computed-style.mjs", 17],
   // **PKU 真实作业逐块几何**（P0 主样本 + 三份 P1）。这一套要 `PKU_ROOT` 指到本地作业目录，
   // 原文不进仓库 ⇒ 没有 `PKU_ROOT` 时**跳过并明说**（不是悄悄报绿），见下面的 pkuRequested。
-  ["writing-pku-docs.mjs", 68],
+  ["writing-pku-docs.mjs", 69],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
 /**

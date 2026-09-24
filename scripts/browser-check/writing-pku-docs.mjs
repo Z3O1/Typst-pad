@@ -424,6 +424,12 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
     before = await compileCount();
     await setDoc(ml.doc);
     await waitMatched(before);
+    // 段落**之后**几行的基线：聚焦（切片揭示成源码）前后应回到同一位置
+    const mlLineNo = ml.doc.slice(0, mlPos).split("\n").length;
+    const mlRefLines = [2, 3, 4, 5, 6].map((d) => mlLineNo + d);
+    await setCursor(0);
+    await sleep(250);
+    const mlRefBefore = await measureLines(mlRefLines);
     // 聚焦到段落内部：只改选区，不应触发重编译，也不应改文本
     const docBeforeFocus = await docText();
     const countAfterLoad = await compileCount();
@@ -453,6 +459,19 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
     check(
       `编辑回放：聚焦不触发重编译（选区事务；${countAfterLoad} → ${await compileCount()}）`,
       (await compileCount()) === countAfterLoad,
+    );
+    // 光标移出该段落（切片重新盖住）后，后续几行的基线应回到聚焦前的位置
+    await setCursor(0);
+    await sleep(350);
+    const mlRefAfter = await measureLines(mlRefLines);
+    let mlWorst = 0;
+    for (const n of Object.keys(mlRefBefore)) {
+      if (mlRefAfter[n] == null) continue;
+      mlWorst = Math.max(mlWorst, Math.abs(mlRefAfter[n] - mlRefBefore[n]));
+    }
+    check(
+      `编辑回放：暂离单 LF 段落后后续行基线不变（最大偏差 ${mlWorst.toFixed(2)}px，${Object.keys(mlRefBefore).length} 行）`,
+      Object.keys(mlRefBefore).length >= 3 && mlWorst <= 1,
     );
 
     // Enter：段末分段
