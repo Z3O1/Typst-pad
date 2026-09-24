@@ -20,10 +20,12 @@ import { dbg } from "../core/debug";
 import { MATH_TEXT_PT } from "../core/typst-engine";
 import { createBlockDrag } from "./live-preview/block-drag";
 import {
+  buildBlockBandFitDecorations,
   buildBlockCovers,
   buildBlockCropDecorations,
   buildFenceHidingDecorations,
   buildHiddenBlockDecorations,
+  blockBandFit,
 } from "./live-preview/block-decorations";
 import { createBlockMoves } from "./live-preview/block-moves";
 import { insideCovered } from "./live-preview/covered";
@@ -81,12 +83,23 @@ export function livePreview(opts: LivePreviewOptions): Extension {
       const covered = covers
         .filter((c) => !c.revealed)
         .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
+      // **块级带高盒**（见 block-decorations 的 buildBlockBandFitDecorations）：整篇可编辑正文都能
+      // 拿到带高与首行主基线时才启用。要求"每一个可编辑正文块都有几何"是刻意的 —— 半套规则
+      // （一部分块撑到带高、一部分按自然行盒）比不启用更差：后者只是漂移，前者会错位。
+      // 量不出字体度量（jsdom / 老后端 / 源码模式）或块表过期时一律不启用，行为与从前一致。
+      const bandMetrics = opts.writeFontMetrics?.() ?? null;
+      const revealedText = covers.filter((c) => c.revealed && !c.noOutput);
+      const bandBoxes =
+        bandMetrics != null &&
+        revealedText.length > 0 &&
+        revealedText.every((c) => blockBandFit(c.block, bandMetrics) != null);
       const all = [
         ...buildBlockCropDecorations(state, doc, covers, opts),
         ...buildHiddenBlockDecorations(state, covers),
         ...buildFenceHidingDecorations(state, covers),
+        ...(bandBoxes ? buildBlockBandFitDecorations(state, covers, bandMetrics) : []),
         ...buildMathDecorations(state, opts, math, context, covered),
-        ...buildMarkupDecorations(state, scan, covered, opts.headingLineHeightPx),
+        ...buildMarkupDecorations(state, scan, covered, bandBoxes),
       ];
       return {
         // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）

@@ -101,6 +101,45 @@ export function measureWriteLetterSpacing(stack: string, fontSizePx: number): nu
   return Math.abs(delta) > 0.1 ? delta : 0;
 }
 
+/**
+ * 写作模式里**真正画汉字**的那一族（打包思源宋体，见 EDITOR_FONT_FACES）。
+ *
+ * 量基线度量必须用它、而不是整个字体栈：栈首的 Libertinus Serif 没有汉字，行盒的 strut
+ * 虽然按它算，但实际撑住行盒的是汉字字形的上升部（实测 asc 17 vs 13）。
+ */
+export const WRITE_CJK_FAMILY = "Noto Serif CJK SC";
+
+/** 一族的上升部 / 下降部（px，正文字号下） */
+export interface WriteFontMetrics {
+  ascent: number;
+  descent: number;
+}
+
+/**
+ * 量写作模式正文字形的上升部 / 下降部（px）。
+ *
+ * 用途：块级带高盒（`blockBandFit`）要按"行盒顶 + 半 leading + 上升部 = 主基线"这条
+ * 行盒模型反算行高，从而把可编辑正文的首行主基线钉在引擎给的位置上。
+ *
+ * 与浏览器验收**同一套量法**（`PKU` 套件的 `measureOne`）：`fontBoundingBoxAscent` 优先，
+ * 拿不到再退 `actualBoundingBoxAscent`。量不出来返回 null —— 调用方据此**整条规则不启用**，
+ * 布局与加这条规则之前逐字节一致。
+ */
+export function measureWriteFontMetrics(
+  fontSizePx: number,
+  family: string = WRITE_CJK_FAMILY,
+): WriteFontMetrics | null {
+  if (typeof document === "undefined" || !(fontSizePx > 0)) return null;
+  const ctx = document.createElement("canvas").getContext("2d");
+  if (!ctx) return null;
+  ctx.font = `${fontSizePx}px "${family}"`;
+  const tm = ctx.measureText("字Hg");
+  const ascent = tm.fontBoundingBoxAscent || tm.actualBoundingBoxAscent || 0;
+  const descent = tm.fontBoundingBoxDescent || tm.actualBoundingBoxDescent || 0;
+  if (!(ascent > 0)) return null;
+  return { ascent, descent };
+}
+
 /** 从 Rust 侧取打包字体的字节（真机路径；浏览器开发模式由 stub 顶上） */
 export async function loadBundledFont(file: string): Promise<ArrayBuffer> {
   const bytes = await invoke<ArrayBuffer | number[] | Uint8Array>("bundled_font", { name: file });

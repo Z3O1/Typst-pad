@@ -94,6 +94,9 @@ export class MathWidget extends WidgetType {
           part.style.height = `${seg.heightPt}pt`;
           const segDepth = Math.max(0, seg.heightPt - seg.baselinePt);
           part.style.verticalAlign = `${-segDepth}pt`;
+          // 基线与盒顶的距离（px）：浏览器验收要按"视觉行的基线"数行（见 writing-pku-docs.mjs），
+          // 而公式框的高度各不相同，只有这个偏移能让它落回与文字同一条基线。
+          part.dataset.mathAscent = `${((seg.baselinePt * 4) / 3).toFixed(3)}px`;
           part.innerHTML = seg.svg;
           const segSvg = part.querySelector("svg");
           if (segSvg) {
@@ -110,6 +113,8 @@ export class MathWidget extends WidgetType {
         // 基线对齐：盒底到基线的距离 = height - baseline，整体下移这么多
         const depth = Math.max(0, this.render.heightPt - this.render.baselinePt);
         wrap.style.verticalAlign = `${-depth}pt`;
+        // 同 .cm-math-seg：给验收留"盒顶 → 基线"的距离
+        wrap.dataset.mathAscent = `${((this.render.baselinePt * 4) / 3).toFixed(3)}px`;
         wrap.innerHTML = this.render.svg;
         const svg = wrap.querySelector("svg");
         if (svg) {

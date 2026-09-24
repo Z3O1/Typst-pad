@@ -40,7 +40,13 @@ export function buildMarkupDecorations(
     paragraphGapRows: ParagraphGapRow[];
   },
   covered: readonly { from: number; to: number }[] = [],
-  headingLineHeightPx?: (from: number, level: number) => number | null,
+  /**
+   * 这一轮装饰里"可编辑正文"整篇走**块级带高盒**（见 block-decorations 的
+   * `buildBlockBandFitDecorations`）：带高里已经含了前后各半个段距，空白源码行必须归零，否则
+   * 每一条空行都会把后面所有块往下推一份重复的间距（实测四份作业 19~112 条空行 × 3.05px）。
+   * 关掉时行为与加带高盒之前**逐字节一致**（源码模式、块表过期、jsdom 都走这条）。
+   */
+  bandBoxes = false,
 ): Range<Decoration>[] {
   const doc = scan.docString;
   const marks = scan.markup;
@@ -58,7 +64,9 @@ export function buildMarkupDecorations(
     // 而 coverTo == 上一块的源码终点 == 这串空行的起点（格子首尾相接，见 planBlockCovers）。
     // 空行起点比上一块的终点晚一个换行（块终点在第一个 `\n` 上，空行从第二个 `\n` 起算）
     const afterBand = coverEnds.has(row.from - 1) || coverEnds.has(row.from);
-    const em = (TYPOGRAPHIC_PARBREAK_ROW_EM / row.count) * (afterBand ? 0.5 : 1);
+    const em = bandBoxes
+      ? 0 // 带高盒生效：段距已经在相邻块的带高里，空行只留 0 高（见函数头注释）
+      : (TYPOGRAPHIC_PARBREAK_ROW_EM / row.count) * (afterBand ? 0.5 : 1);
     const style = `--write-parbreak-height: ${em.toFixed(6)}em`;
     decorations.push(
       Decoration.line({
@@ -96,20 +104,7 @@ export function buildMarkupDecorations(
     // 编辑区直接卡死（用户报过"输入 `= 1 = 2` 后无法再输入"），装了 try/catch 兜底后则表现为
     // "所有标题都被展开成源码"（整套装饰被丢弃）。这里按"没有正文就不加样式"处理。
     if (item.content.to > item.content.from) {
-      // 标题**只压不撑**地收行高：样式必须和标题类落在**同一个 mark** 上——行盒高度由这个
-      // span 的内联盒决定，挂行元素或另起并列 mark 都压不住它（实测两版都无效）。
-      const shrinkPx =
-        item.kind === "heading"
-          ? (headingLineHeightPx?.(item.content.from, item.level ?? 1) ?? null)
-          : null;
-      decorations.push(
-        Decoration.mark({
-          class: cls,
-          ...(shrinkPx != null
-            ? { attributes: { style: `line-height:${shrinkPx.toFixed(2)}px` } }
-            : {}),
-        }).range(item.content.from, item.content.to),
-      );
+      decorations.push(Decoration.mark({ class: cls }).range(item.content.from, item.content.to));
     }
     for (const marker of item.markers) {
       if (marker.from >= marker.to) continue;

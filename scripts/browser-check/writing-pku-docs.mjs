@@ -686,6 +686,16 @@ for (const fx of fixtures) {
     .map((b) => ({ at: byteToPos(fx.doc, b.start), end: byteToPos(fx.doc, b.end) }));
   let expectedCrops = complexCrops.map((c) => c.at);
 
+  // 实验（`PKU_MATH_SQUEEZE=<px>`）：调行内公式 widget 的负右外边距
+  if (process.env.PKU_MATH_SQUEEZE) {
+    await c.evaluate(`(() => {
+      let s = document.getElementById('pku-math-squeeze');
+      if (!s) { s = document.createElement('style'); s.id = 'pku-math-squeeze'; document.head.appendChild(s); }
+      s.textContent = ':root { --write-math-squeeze: ${process.env.PKU_MATH_SQUEEZE}px; }';
+      return true;
+    })()`);
+  }
+
   // 实验（`PKU_NO_EMPH=1`）：把强调/粗体的字形变化关掉（`font-style: normal`），
   // 用来验证"浏览器多折一行"是不是斜体/粗体让 CJK 落到别的字体、前进宽度变大。
   if (process.env.PKU_NO_EMPH === "1") {
@@ -828,23 +838,6 @@ for (const fx of fixtures) {
   check(
     `${fx.name}：作业原文已完整输入编辑器（${lenNow}/${wantedLen} 字符）`,
     lenNow === wantedLen,
-  );
-  // 公式渲染是异步队列：先等第一条公式落地再统计，否则会读到"真 0 / 假 0"的假象
-  await c
-    .waitFor(
-      `((window.__browserDevMathHits?.real ?? 0) + (window.__browserDevMathHits?.fake ?? 0)) > 0`,
-      { timeout: 15000 },
-    )
-    .catch(() => {});
-  const mathHits = await c.evaluate(`window.__browserDevMathHits ?? { real: 0, fake: 0 }`);
-  const mathFake = await c.evaluate(`window.__browserDevMathFake ?? []`);
-  check(
-    `${fx.name}：行内/行间公式全部命中真实产物（真 ${mathHits.real} / 假 ${mathHits.fake}）`,
-    mathHits.fake === 0 && mathHits.real > 0,
-    mathFake
-      .slice(0, 6)
-      .map((r) => `${r.display ? "D" : "I"}@${r.sizePt} ${JSON.stringify(r.body).slice(0, 48)}`)
-      .join(" | ") + `（夹具里 ${(fx.math ?? []).length} 个公式产物）`,
   );
 
   const fontSize = await c.evaluate(
@@ -1006,24 +999,59 @@ for (const fx of fixtures) {
       const asc = tm.fontBoundingBoxAscent || tm.actualBoundingBoxAscent || 0;
       const desc = tm.fontBoundingBoxDescent || tm.actualBoundingBoxDescent || 0;
       const baseline = top + (lh - (asc + desc)) / 2 + asc;
+      // **视觉行数**：逐字符问 coordsAtPos，top 变大就是折了一行。
+      // 不能再拿"盒高 ÷ 行高"当行数了：带高盒生效后每行的 line-height 是**按块反解出来的**
+      // （可能 8px 也可能 45px），盒高又等于引擎的带高（含半个段距），两者相除不是行数。
+      // 逐字符法是 DOM/CM 一致的直接证据，块内只有一两百字符，成本可忽略。
       let rows = 0, height = 0, rendered = 0;
       for (let n = line.number; n <= lastLineNo; n++) {
         const L = view.state.doc.line(n);
         const e2 = findLineEl(L.from);
         if (e2) {
-          const h = e2.getBoundingClientRect().height;
-          const l2 = parseFloat(getComputedStyle(e2).lineHeight) || baseLine;
-          height += h;
-          rows += Math.max(1, Math.round(h / l2));
+          height += e2.getBoundingClientRect().height;
           rendered++;
         } else {
-          const b = view.lineBlockAt(L.from);
-          height += b.height;
-          rows += Math.max(1, Math.round(b.height / baseLine));
+          height += view.lineBlockAt(L.from).height;
+        }
+        if (e2 || n === line.number) {
+          // **视觉行数 = 不同"基线"的条数**（容差 = Typst 行距的一半）：
+          //   * 文字节点的矩形顶 + 字体上升部 = 该行基线（同一行的文字片段基线相同）；
+          //   * 行内公式 widget 的高度各不相同、顶边自然不齐，只有 data-math-ascent
+          //     （盒顶 → 基线的距离，见 widgets.ts）能让它落回同一条基线；
+          //   * 逐字符 coordsAtPos 会被原子替换区间挡住（一行只有公式时量出 1 行），
+          //     所以这里按"线盒"数而不是按字符数。
+          const tol = ${(Number(fx.lineSpacingPt) || 18) * (4 / 3) * 0.5};
+          const bl = [];
+          const pushBl = (b) => {
+            if (Number.isFinite(b) && !bl.some((x) => Math.abs(x - b) < tol)) bl.push(b);
+          };
+          const walker = document.createTreeWalker(e2 || el, NodeFilter.SHOW_TEXT);
+          while (walker.nextNode()) {
+            const rg = document.createRange();
+            rg.selectNodeContents(walker.currentNode);
+            for (const rc of rg.getClientRects()) {
+              if (rc.height > 0) pushBl(rc.top + asc);
+            }
+          }
+          for (const w of (e2 || el).querySelectorAll('[data-math-ascent]')) {
+            const wa = parseFloat(w.dataset.mathAscent);
+            for (const rc of w.getClientRects()) {
+              if (rc.height > 0) pushBl(Number.isFinite(wa) ? rc.top + wa : rc.bottom);
+            }
+          }
+          if (bl.length === 0) {
+            rows += Math.max(1, Math.round((e2 || el).getBoundingClientRect().height / baseLine));
+          } else {
+            rows += bl.length;
+          }
+        } else {
+          rows += Math.max(1, Math.round(view.lineBlockAt(L.from).height / baseLine));
         }
       }
+      if (rows === 0) rows = 1;
       return {
         from: ${s.from}, mode: 'text', top, height, anchor: top, baseline, rows,
+        band: el.classList.contains('cm-block-band'),
         dom: { cls: String(el.className), h: Math.round(el.getBoundingClientRect().height), rendered },
       };
     })()`);
@@ -1039,6 +1067,23 @@ for (const fx of fixtures) {
     await sleep(35);
     measuredResults.push(await measureOne(s));
   }
+  // 公式渲染是异步队列：先等第一条公式落地再统计，否则会读到"真 0 / 假 0"的假象
+  await c
+    .waitFor(
+      `((window.__browserDevMathHits?.real ?? 0) + (window.__browserDevMathHits?.fake ?? 0)) > 0`,
+      { timeout: 15000 },
+    )
+    .catch(() => {});
+  const mathHits = await c.evaluate(`window.__browserDevMathHits ?? { real: 0, fake: 0 }`);
+  const mathFake = await c.evaluate(`window.__browserDevMathFake ?? []`);
+  check(
+    `${fx.name}：行内/行间公式全部命中真实产物（真 ${mathHits.real} / 假 ${mathHits.fake}）`,
+    mathHits.fake === 0 && mathHits.real > 0,
+    mathFake
+      .slice(0, 6)
+      .map((r) => `${r.display ? "D" : "I"}@${r.sizePt} ${JSON.stringify(r.body).slice(0, 48)}`)
+      .join(" | ") + `（夹具里 ${(fx.math ?? []).length} 个公式产物）`,
+  );
   const domCrops = measuredResults.filter((r) => r.mode === "crop").map((r) => r.from);
 
   // 纵向 pt→px 一律用 CSS 的 4/3：字号的 px 值就是 docTextPt × 4/3 算出来的，
@@ -1069,6 +1114,7 @@ for (const fx of fixtures) {
       browserHeightPx: m?.height ?? null,
       typstLines,
       browserRows: m?.rows ?? null,
+      band: m?.band ?? null,
       dom: m?.dom ?? null,
       excerpt: fx.doc.slice(byteToPos(fx.doc, b.start), byteToPos(fx.doc, b.end)).slice(0, 40),
     };
@@ -1184,6 +1230,21 @@ for (const fx of fixtures) {
     (r) => r.mode === "text" && r.found && r.typstLines > 0 && r.browserRows != null,
   );
   const rowFails = textRows.filter((r) => r.browserRows !== r.typstLines);
+  // **带高盒必须整篇生效**（硬判据）：可编辑正文的行盒要正好等于引擎给的带高。
+  // 这条曾经整片失效过 —— CodeMirror 认为"上一块是覆盖到本行行首的块 widget"时会丢掉本行的
+  // line decoration（`blockPosCovered()`），87 条里只有 16 条落到 DOM，缺的全是"紧跟切片/
+  // 隐藏块后面"的行（见 block-decorations 里 `inclusiveEnd: false` 的说明）。
+  const bandMissing = rows.filter(
+    (r) => r.mode === "text" && r.found && r.typstHeightPt > 0.5 && r.band !== true,
+  );
+  check(
+    `${fx.name}：可编辑正文全部走带高盒（盒高=带高，缺 ${bandMissing.length} 块）`,
+    bandMissing.length === 0,
+    bandMissing
+      .slice(0, 6)
+      .map((r) => `L${r.line}(${r.kind}) h=${r.typstHeightPt.toFixed(1)}pt :: ${r.excerpt}`)
+      .join(" | "),
+  );
   // 诊断（`PKU_BREAK=1`）：对行数不一致的块，逐视觉行比"断点"——Typst 侧用夹具的
   // `lineSpans[].end`（该行最后一个字形的源字节），浏览器侧用 `visualLineAt().to`。
   // 第一个不同的断点就是"从哪个字开始折行不同"。
@@ -1318,10 +1379,11 @@ for (const fx of fixtures) {
                   h: +el.getBoundingClientRect().height.toFixed(2),
                   lh: el.style.lineHeight || "",
                   cls: el.className,
-                  headLh: el.querySelector('[class*="cm-markup-heading"]')
-                    ? getComputedStyle(el.querySelector('[class*="cm-markup-heading"]')).lineHeight
-                    : "",
-                  fitVar: el.style.getPropertyValue("--heading-fit") || "",
+                  bandVar: el.style.getPropertyValue("--write-band-h") || "",
+                  bandLh: el.style.getPropertyValue("--write-band-lh") || "",
+                  ch: getComputedStyle(el).height,
+                  hasBand: el.classList.contains("cm-block-band"),
+                  styleAttr: (el.getAttribute("style") || "").slice(0, 90),
                 }
               : null,
           );
@@ -1527,7 +1589,7 @@ for (const fx of fixtures) {
       const b2 = topB[i];
       const bandOwn = b.heightPt * factor;
       console.log(
-        `  L${line}(${b.kind}) 逐块量=${a ? a.top : null} DOM高=${a ? a.h : "?"} 自带高=${bandOwn.toFixed(1)} 差=${a ? (a.h - bandOwn).toFixed(1) : "?"}px 带高和=${bandPx.toFixed(1)}px 落位-带高和=${a && topA[0] ? (a.top - topA[0].top - bandPx).toFixed(1) : "?"}px cls=${a ? a.cls : "-"} headLh=${a ? a.headLh : "-"} fitVar=${a ? a.fitVar : "-"}`,
+        `  L${line}(${b.kind}) 逐块量=${a ? a.top : null} DOM高=${a ? a.h : "?"} 自带高=${bandOwn.toFixed(1)} 差=${a ? (a.h - bandOwn).toFixed(1) : "?"}px 带高和=${bandPx.toFixed(1)}px 落位-带高和=${a && topA[0] ? (a.top - topA[0].top - bandPx).toFixed(1) : "?"}px cls=${a ? a.cls : "-"} hasBand=${a ? a.hasBand : "-"} bandVar=${a ? a.bandVar : "-"} bandLh=${a ? a.bandLh : "-"} ch=${a ? a.ch : "-"} styleAttr=${a ? a.styleAttr : "-"}`,
       );
     });
   }

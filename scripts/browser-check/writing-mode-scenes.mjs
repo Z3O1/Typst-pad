@@ -130,7 +130,9 @@ check("找到真实 Typst 的最小段落间距夹具", !!paragraphScene);
 if (paragraphScene) {
   await loadScene(paragraphScene.doc);
   const paragraphGeometry = await c.evaluate(
-    '(() => { const content = document.querySelector(".cm-content"); const view = content.cmTile.root.view; const lines = Array.from(content.querySelectorAll(":scope > .cm-line")); const gap = lines.find((line) => line.classList.contains("cm-write-parbreak")); const first = lines[0]?.getBoundingClientRect(); const last = lines.at(-1)?.getBoundingClientRect(); return { source: view.state.doc.toString(), lineCount: lines.length, gapCount: lines.filter((line) => line.classList.contains("cm-write-parbreak")).length, gapHeight: gap?.getBoundingClientRect().height ?? null, glyphTopDelta: first && last ? last.top - first.top : null }; })()',
+    // **量字形盒顶，不量行盒顶**：带高盒生效后行的盒高 = 引擎给的带高（含半个段距），
+    // 行盒顶之间的距离不等于字形的距离。文字 range 的矩形顶才是"这一行字画在哪"。
+    '(() => { const content = document.querySelector(".cm-content"); const view = content.cmTile.root.view; const lines = Array.from(content.querySelectorAll(":scope > .cm-line")); const gap = lines.find((line) => line.classList.contains("cm-write-parbreak")); const textTop = (el) => { if (!el) return null; const rg = document.createRange(); rg.selectNodeContents(el); const r = rg.getBoundingClientRect(); return r.width > 0 || r.height > 0 ? r.top : el.getBoundingClientRect().top; }; const first = textTop(lines[0]); const last = textTop(lines.at(-1)); return { source: view.state.doc.toString(), lineCount: lines.length, gapCount: lines.filter((line) => line.classList.contains("cm-write-parbreak")).length, gapHeight: gap?.getBoundingClientRect().height ?? null, glyphTopDelta: first !== null && last !== null ? last - first : null }; })()',
   );
   check(
     "原文与三条可编辑源码行都保留",
@@ -140,22 +142,22 @@ if (paragraphScene) {
     JSON.stringify(paragraphGeometry),
   );
   const typstGapPx = (20.438 * 4) / 3;
+  // 量的是**两个段落的字形距离**（不是空行的高度）：带高盒生效时（真实夹具的块都有几何）
+  // 空行高度归零、段距由相邻块的带高承载，空行高度不再是判据 —— 字形距离才是。
   check(
-    "段距行高与真实 Typst 字形位置一致（目标 " + typstGapPx.toFixed(2) + "px）",
-    paragraphGeometry.gapHeight !== null &&
-      Math.abs(paragraphGeometry.gapHeight - 3.05) <= 0.25 &&
+    "段距与真实 Typst 字形位置一致（目标 " + typstGapPx.toFixed(2) + "px）",
+    paragraphGeometry.glyphTopDelta !== null &&
       Math.abs(paragraphGeometry.glyphTopDelta - typstGapPx) <= 1,
     JSON.stringify(paragraphGeometry),
   );
 
   await replaceDocument(c, "1\n\n\n 1", 100);
   const repeatedGap = await c.evaluate(
-    '(() => { const lines = Array.from(document.querySelectorAll(".cm-content > .cm-line")); const gaps = lines.filter((line) => line.classList.contains("cm-write-parbreak")); return { count: gaps.length, totalHeight: gaps.reduce((sum, line) => sum + line.getBoundingClientRect().height, 0), glyphTopDelta: lines.at(-1).getBoundingClientRect().top - lines[0].getBoundingClientRect().top, editableRows: gaps.every((line) => line.matches(".cm-line") && line.querySelector(".cm-widget") === null) }; })()',
+    '(() => { const lines = Array.from(document.querySelectorAll(".cm-content > .cm-line")); const gaps = lines.filter((line) => line.classList.contains("cm-write-parbreak")); const textTop = (el) => { const rg = document.createRange(); rg.selectNodeContents(el); const r = rg.getBoundingClientRect(); return r.width > 0 || r.height > 0 ? r.top : el.getBoundingClientRect().top; }; return { count: gaps.length, totalHeight: gaps.reduce((sum, line) => sum + line.getBoundingClientRect().height, 0), glyphTopDelta: textTop(lines.at(-1)) - textTop(lines[0]), editableRows: gaps.every((line) => line.matches(".cm-line") && line.querySelector(".cm-widget") === null) }; })()',
   );
   check(
     "连续空行共享同一份段距，且各自仍是源码行",
     repeatedGap.count === 2 &&
-      Math.abs(repeatedGap.totalHeight - 3.05) <= 0.25 &&
       Math.abs(repeatedGap.glyphTopDelta - typstGapPx) <= 1 &&
       repeatedGap.editableRows,
     JSON.stringify(repeatedGap),

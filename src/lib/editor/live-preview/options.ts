@@ -7,6 +7,12 @@ import type { Text } from "@codemirror/state";
 import type { MathRender } from "../../core/typst-engine";
 import type { Block } from "../../core/block-plan";
 
+/** 一族的上升部 / 下降部（px）；形状与 editor-font.ts 的 `WriteFontMetrics` 一致 */
+export interface WriteFontMetrics {
+  ascent: number;
+  descent: number;
+}
+
 /** 待渲染的公式（父组件据此调用 Rust 侧 compile_math） */
 export interface MathRequest {
   /** 缓存键（body + 风格 + 编译上下文） */
@@ -69,10 +75,13 @@ export interface LivePreviewOptions {
    */
   blocks?: () => Block[] | null;
   /**
-   * 标题**应收的行高**（px，`null` = 不压/不是标题）。由页面按"带高 vs 自然行盒"算好
-   * （它知道当前正文字号），`markup-decorations` 只负责把它挂到标题 mark 上。
+   * 写作模式正文字形的**上升部 / 下降部**（px，量不出来返回 null）。
+   *
+   * 给"块级带高盒"用（见 block-decorations 的 `buildBlockBandFitDecorations`）：由行盒模型
+   * `基线 = 盒顶 + (行高 − (上升部 + 下降部)) / 2 + 上升部` 反解行高，把可编辑正文的首行主基线
+   * 钉在引擎给的位置。返回 null 时**整条规则不启用**（那正是源码模式 / jsdom / 老后端的情形）。
    */
-  headingLineHeightPx?: (from: number, level: number) => number | null;
+  writeFontMetrics?: () => WriteFontMetrics | null;
   /**
    * 视口内出现了"**能渲染但还没有切片**"的块（窗口化渲染的正常中间态）：
    * 父组件去抖后按新的视口窗口重编译一次。不传则永远等着下一次按键 —— 长文档里

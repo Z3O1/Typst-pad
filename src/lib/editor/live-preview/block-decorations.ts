@@ -12,7 +12,7 @@ import type { Block, BlockCover } from "../../core/block-plan";
 import { scanNonMarkupRegions } from "../../core/typst-lex";
 import type { Region } from "../../core/typst-lex";
 import { PREFETCH_MARGIN } from "./options";
-import type { LivePreviewOptions } from "./options";
+import type { LivePreviewOptions, WriteFontMetrics } from "./options";
 import { BlockCropWidget } from "./widgets";
 import { applyBlockSelection } from "../../core/block-plan";
 
@@ -115,51 +115,75 @@ export function buildBlockCovers(
 }
 
 /**
- * **只压不撑**地把标题行高对齐到它的带高。
+ * **块级带高盒**：把可编辑正文的行盒**精确**摆到引擎给的带上。
  *
- * 背景：空行重复计高修完后，紧随标题的块相邻偏差 +12~20px，来源是标题行盒（h1 33.9px）比它
- * 在 Typst 里的带宽（此处 23.2px）高出一截。但"标题一律占满带高"会把本来带宽 **大于** 行盒的
- * 标题（h1 常见 36~41px）撑高，整体反而更差（round 15/20 两次实测 max 156 → 172~217）。
+ * 背景（见 REPORT「混合高度模型」）：引擎返回的带是"首尾相接、铺满全页"的 —— 相邻两块在两者墨迹的
+ * 中点处切，所以每块带高 = 自身内容 + 前后各半个间距。切片走这条路时高度天然精确（SVG 的固有比例
+ * 就是带高），但可编辑正文原来按浏览器自然行盒（字号 × 1.65）排：正文块盒高与带高差 3~10px，
+ * 且首行基线在带内的偏移也不同（Typst 侧取决于带顶切在哪，浏览器侧永远是"半 leading + 上升部"）。
+ * 四份真实作业实测：相邻锚点越界 47/18/11/59 处、页内累计最大 34~63px，全部长在这条缝里。
  *
- * 所以这里只做**单向压缩**：`line-height = min(自然行盒, 带高)`，只会变矮、不会变高；
- * 不需要压的标题不产生装饰，布局与改动前完全一致。只处理单源码行标题（多行标题行盒 =
- * 行数 × 行高，压成一份带高会截断）。
+ * 两条 CSS 就能把这块对齐（都是**行盒模型**的直接后果，不是拟合）：
+ *   - `height = 带高`：块的**盒顶/盒底**与带顶/带底重合 ⇒ 块间距不再靠空行反算；
+ *   - `line-height = 2 × (首行主基线 − 带顶) − 上升部 + 下降部`：由
+ *     `行盒基线 = 盒顶 + (line-height − (上升部 + 下降部)) / 2 + 上升部` 反解，
+ *     让首行主基线**正好**落回 `anchorBaselinePt`。
+ *
+ * 因此带高盒生效的同一轮里，段落之间的空白源码行高度归零（间距已经含在带里，再给一份就是
+ * 重复计高 —— 历史上"把正文撑到带高"失败三次都是因为这个）。这条由 `markup-decorations` 的
+ * `bandBoxes` 开关执行，`writing-blocks` 那套光标用例里 bandBoxes 不生效（假块没有 `anchorBaselinePt`），
+ * 所以空行照旧占整行。
  */
-export function buildHeadingShrinkDecorations(
+export interface BlockBandFit {
+  /** 行盒应占的高度（px）= 引擎给这块的带高 */
+  heightPx: number;
+  /** 行高（px）：见上，由首行主基线偏移反解 */
+  lineHeightPx: number;
+}
+
+/** 一块能不能走带高盒；不能则返回 null（调用方保持自然行盒，绝不半套规则混用） */
+export function blockBandFit(block: Block, metrics: WriteFontMetrics): BlockBandFit | null {
+  if (!block.found || block.noOutput) return null;
+  if (!(block.heightPt > 0.5) || !(block.widthPt > 0)) return null;
+  const baseline = block.anchorBaselinePt;
+  if (baseline == null || !Number.isFinite(baseline)) return null;
+  // 一律用 CSS 的 4/3（pt → px）：列宽换算会引入 0.06% 的系统偏差，长页面累计成几个像素
+  const factor = 4 / 3;
+  const heightPx = block.heightPt * factor;
+  const offsetPx = (baseline - block.yPt) * factor;
+  const lineHeightPx = 2 * offsetPx - metrics.ascent + metrics.descent;
+  if (!Number.isFinite(lineHeightPx) || lineHeightPx < 0) return null;
+  return { heightPx, lineHeightPx };
+}
+
+/**
+ * 带高盒装饰：给可编辑正文所在的那**一条源码行**挂上盒高与行高。
+ *
+ * 只处理单源码行块（多源码行的块由 `isDirectlyEditableTextBlock` 判定为切片，见那里的说明）；
+ * 块区间可能带行尾换行，所以按"块尾不超过行尾"判定。挂两个自定义属性而不是直接写
+ * `height`/`line-height`：样式规则留在 `Editor.svelte` 的 CSS 里，标题 span 也能一起被规整。
+ */
+export function buildBlockBandFitDecorations(
   state: EditorState,
   covers: readonly BlockCover[],
-  textPt: number,
+  metrics: WriteFontMetrics | null,
 ): Range<Decoration>[] {
   const out: Range<Decoration>[] = [];
-  if (!(textPt > 0)) return out;
-  const textPx = (textPt * 4) / 3;
+  if (!metrics) return out;
   for (const cover of covers) {
+    if (!cover.revealed || cover.noOutput) continue;
     const block = cover.block;
-    if (!cover.revealed || cover.noOutput || block.kind !== "Heading") continue;
-    if (!block.found || !(block.heightPt > 0.5) || !(block.widthPt > 0)) continue;
-    if (block.from < 0 || block.from > state.doc.length) continue;
+    if (block.from < 0 || block.from >= state.doc.length) continue;
+    const fit = blockBandFit(block, metrics);
+    if (!fit) continue;
     const line = state.doc.lineAt(block.from);
-    // 只处理**单源码行**标题：判据是"块源码里没有换行"。不能比起止行号——块区间可能带上行尾
-    // 换行，那样起止会落到相邻空行上，一个标题都命中不了（实测 emitted=0 就是这个原因）。
-    const blockText = state.doc.sliceString(block.from, Math.min(block.to, state.doc.length));
-    if (blockText.includes("\n")) continue;
-    const match = /^(=+)\s/.exec(line.text);
-    if (!match) continue;
-    const scale = match[1].length === 1 ? 1.4 : match[1].length === 2 ? 1.2 : 1.0;
-    const naturalPx = scale * textPx * 1.65;
-    // 只用 pt→px 的固定换算（CSS 1pt = 4/3 px）：**不能**在这里取 DOM 列宽——
-    // 装饰在布局前算，`view.contentDOM.clientWidth` 这时候还是 0，整条规则会静默失效。
-    const bandPx = block.heightPt * (4 / 3);
-    // 只压不撑；差得太小就不动（避免噪声驱动的抖动）
-    if (!(bandPx > 8) || bandPx > naturalPx - 0.5) continue;
-    // **必须作用到标题自己的 span（`.cm-markup-heading-N`）上**，不能挂在 `.cm-line`、也不能
-    // 另起一个并列 mark：行盒高度由标题 span 的 1.4em × 1.65 内联盒决定，外层或并列的样式都
-    // 压不住它（前两版分别挂行、挂并列 mark，实测都没效果）。做法是给行加一个类 + 一个 CSS
-    // 变量，再用 CSS 规则让标题 span 去读这个变量（自定义属性会继承到后代）。
+    if (block.to > line.to) continue;
     out.push(
       Decoration.line({
-        class: "cm-heading-fit",
-        attributes: { style: `--heading-fit:${bandPx.toFixed(2)}px` },
+        class: "cm-block-band",
+        attributes: {
+          style: `--write-band-h:${fit.heightPx.toFixed(3)}px; --write-band-lh:${fit.lineHeightPx.toFixed(3)}px`,
+        },
       }).range(line.from),
     );
   }
@@ -224,6 +248,13 @@ export function buildBlockCropDecorations(
       Decoration.replace({
         widget: new BlockCropWidget(cover, doc.slice(from, to), opts.dark(), opts.onOpenLink),
         block: true,
+        // **`inclusiveEnd: false` 是必须的**：块替换默认在两端"包含边界"，而这一格的终点就是
+        // **下一块那一行的行首** —— CodeMirror 见到"上一块是块 widget 且覆盖了这个位置"就会
+        // 丢掉这一行自己的 line decoration（`blockPosCovered()`，见 docview 的
+        // addLineStartIfNotCovered）。带高盒（`.cm-block-band`）正是挂在这一行上的：
+        // 实测 87 条带高盒装饰只有 16 条落到 DOM，缺的 71 条全部是"紧跟在切片/隐藏块后面"的行。
+        // 置 false 只改边界归属，替换区间与外观都不变。
+        inclusiveEnd: false,
       }).range(from, to),
     );
   }
@@ -255,7 +286,9 @@ export function buildHiddenBlockDecorations(
     const from = Math.max(0, Math.min(cover.coverFrom, state.doc.length));
     const to = Math.max(from, Math.min(cover.coverTo, state.doc.length));
     if (to <= from) continue;
-    out.push(Decoration.replace({ block: true }).range(from, to));
+    // `inclusiveEnd: false` 的理由同 buildBlockCropDecorations：这一格的终点是下一块的行首，
+    // 默认的"包含边界"会让下一行的 line decoration（带高盒）被丢掉。
+    out.push(Decoration.replace({ block: true, inclusiveEnd: false }).range(from, to));
   }
   return out;
 }

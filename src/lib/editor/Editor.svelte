@@ -27,7 +27,8 @@
   import { planForCommand } from "../core/write-commands";
   import type { WriteCommand } from "../core/write-commands";
   import { mark } from "../core/startup-timing";
-  import { WRITE_FONT_STACK } from "./editor-font";
+  import { WRITE_FONT_STACK, measureWriteFontMetrics } from "./editor-font";
+  import type { WriteFontMetrics } from "./editor-font";
   import { dbg } from "../core/debug";
   import { anchorEffectAt, measureAnchorYMargin } from "./scroll-anchor";
   // 浏览器验收用的测试钩子（只在 `?browserdev=1` 下真的挂到 window 上，桌面版是空操作）
@@ -141,6 +142,8 @@
   // 避免 wrap 的 $effect 首跑再做一次等价重配。不在此处读 prop：顶层读 prop 会被
   // svelte-check 判为"只捕获初值"的误用告警（state_referenced_locally）。
   let appliedWrap = false;
+  /** 写作模式正文字形度量的记忆（字号变了才重量，见 livePreviewOptions.writeFontMetrics） */
+  let writeMetricsCache: { size: number; value: WriteFontMetrics | null } | null = null;
   let applyingExternal = false; // 外部 doc 同步时抑制 onDocChange，避免误标脏
   // 当前生效的编译错误与前缀代码（由 diagnostics/prefixCode prop 驱动；供波浪线与 hover 提示读取）
   let diagState: { list: CompileErrorLocation[]; prefix: string } = { list: [], prefix: "" };
@@ -164,18 +167,15 @@
     viewportHeight: () => view?.scrollDOM.clientHeight ?? 0,
     // 块级切片：只在写作模式交给渲染层，源码模式一律 null（要看到真正的源码）
     blocks: () => (mode === "write" ? (blocks ?? null) : null),
-    // 标题"只压不撑"：自然行盒 = 级差 × 字号(px) × 1.65，带高 = heightPt × 4/3；
-    // 只有带高更小才压（一律占满带高会把带宽大于行盒的标题撑高，反而更差）
-    // 空白分隔行"反算高度"：上一块是**切片**（盒高精确）、下一块首行基线已知时，
-    // 把这条空行的高度定成"目标基线差 − 上一块盒高 − 下一块盒内基线偏移"，让下一块的首行基线
-    // 精确落回 Typst 的位置（相邻/累计偏差都从这里长出来，见 REPORT 的落位自检）。
-    headingLineHeightPx: (from: number, level: number) => {
-      const b = (blocks ?? []).find((x) => x.kind === "Heading" && from >= x.from && from <= x.to);
-      if (!b || !(b.heightPt > 0.5)) return null;
-      const scale = level === 1 ? 1.4 : level === 2 ? 1.2 : 1.0;
-      const naturalPx = scale * ((docTextPt * 4) / 3) * 1.65;
-      const bandPx = b.heightPt * (4 / 3);
-      return bandPx > 8 && bandPx < naturalPx - 0.5 ? bandPx : null;
+    // **块级带高盒**需要的字体度量（见 editor-font.measureWriteFontMetrics）：按字号记忆，
+    // 让可编辑正文的行盒高/首行主基线直接由引擎的带几何反解（见 block-decorations）。
+    // 量不出来（jsdom / 老后端）返回 null，那一轮就不启用带高盒。
+    writeFontMetrics: () => {
+      const size = (docTextPt * 4) / 3;
+      if (writeMetricsCache?.size !== size) {
+        writeMetricsCache = { size, value: measureWriteFontMetrics(size) };
+      }
+      return writeMetricsCache.value;
     },
     onBlocksNeeded: () => onBlocksNeeded?.(),
     // 点击定位（阶段 2）：父组件换算成字节偏移后问 Rust，编辑器只负责落光标
@@ -792,15 +792,29 @@
     font-weight: 600;
   }
 
-  /* 标题"只压不撑"地收行高：值由块几何算出来后挂在行的 `--heading-fit` 上
-     （必须作用到标题自己的 span，行盒高度由它的内联盒决定，见 buildHeadingShrinkDecorations） */
-  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-1),
-  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-2),
-  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-3),
-  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-4),
-  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-5),
-  .editor-host.write :global(.cm-heading-fit .cm-markup-heading-6) {
-    line-height: var(--heading-fit, inherit);
+  /* **块级带高盒**（见 block-decorations 的 buildBlockBandFitDecorations）：
+     可编辑正文所在的那一条源码行直接占**引擎给的带高**，行高由"首行主基线在带内的偏移"反解，
+     于是块的盒顶/盒底与带顶/带底重合、首行基线也钉在 `anchorBaselinePt` 上。
+     没有这一条时正文块按自然行盒（字号 × 1.65）排，与带高差 3~10px、首行基线偏移也不一致 ——
+     相邻锚点越界与页内累计偏差全部长在这条缝里（四份真实作业实测）。
+     注：这一轮的空白源码行高度由装饰压到 0（段距已经含在带高里，见 markup-decorations）。 */
+  .editor-host.write :global(.cm-line.cm-block-band) {
+    box-sizing: border-box;
+    height: var(--write-band-h, auto);
+    line-height: var(--write-band-lh, inherit);
+  }
+
+  /* 带高盒里标题的 span **必须**跟着行的行高走：标题 span 自带 1.4em/1.2em 的字号，
+     它自己的 `line-height: 1.65`（相对更大字号）会把行盒的上升部顶得比 strut 还高，
+     基线于是被压低 5~7px —— 带高盒刚对上的位置又丢了。改成 inherit 后标题的相对偏移只剩
+     字号差带来的 `(上升部 − 下降部) / 2`（h1 约 2.6px、h2 约 1.3px），有界且不随块变。 */
+  .editor-host.write :global(.cm-block-band .cm-markup-heading-1),
+  .editor-host.write :global(.cm-block-band .cm-markup-heading-2),
+  .editor-host.write :global(.cm-block-band .cm-markup-heading-3),
+  .editor-host.write :global(.cm-block-band .cm-markup-heading-4),
+  .editor-host.write :global(.cm-block-band .cm-markup-heading-5),
+  .editor-host.write :global(.cm-block-band .cm-markup-heading-6) {
+    line-height: inherit;
   }
 
   /* 列表符号/序号：替换出来的字符与正文同色、不与正文基线错位 */
@@ -812,6 +826,14 @@
   .editor-host.write :global(.cm-math-widget),
   .editor-host.write :global(.cm-math-block) {
     font-size: 1em;
+  }
+
+  /* 行内公式 widget 的**前进宽度微调**：widget 宽 = 独立紧致盒宽（含侧边距/斜体修正），引擎在段落里
+     给它的行内 advance 略小（实测"公式前后字形间距 66.31pt vs 紧致盒宽 66.30pt"里含了两侧的间距）。
+     负 margin-right 只收紧后面的文本、不拉伸公式本身。PKU 实测：−0.5px 无变化、−1~−1.5px 让数分周二
+     行数不一致 6→5、最大累计 63→42px，而 ≤−2px 开始伤害上周高代；默认取 −1px，可用变量调。 */
+  .editor-host.write :global(.cm-math-widget) {
+    margin-right: var(--write-math-squeeze, -1px);
   }
 
   /* 长行内公式的**可断行片段**：每个片段是独立的 inline-block，片段之间的 <wbr> 给浏览器
