@@ -871,17 +871,20 @@ fn dump_pku_writing_fixtures() {
                 "lineTopsPt": line_tops,
                 "lineCount": line_count,
                 // **每一行的源码终点**（块内相对字节偏移，不含块尾）：前端据此强制换行，
-                // 与产品 `BlockCrop::line_breaks` 同源同口径。
+                // 与产品 `BlockCrop::line_breaks` 同源同口径（同一函数、同一行距阈值）。
                 "lineBreaks": match page {
-                    Some(page) => crate::block_geometry::line_break_offsets(
-                        &items,
-                        range.clone(),
-                        page,
-                        out.text_pt,
-                    )
-                    .into_iter()
-                    .filter_map(|abs| abs.checked_sub(doc_start + b.start))
-                    .collect::<Vec<usize>>(),
+                    Some(page) => {
+                        crate::block_geometry::block_lines(
+                            &items,
+                            range.clone(),
+                            page,
+                            line_spacing_pt,
+                        )
+                        .breaks
+                        .into_iter()
+                        .filter_map(|abs| abs.checked_sub(doc_start + b.start))
+                        .collect::<Vec<usize>>()
+                    }
                     None => Vec::new(),
                 },
                 // **等比例占位切片**（不是真渲染像素）：真 SVG 在图片/公式密集的作业里单份 5MB+，

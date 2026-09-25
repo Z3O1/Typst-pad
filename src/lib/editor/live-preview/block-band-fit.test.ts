@@ -20,6 +20,8 @@ function block(from: number, to: number, geo: Partial<Block> = {}): Block {
     anchorBaselinePt: null,
     widthPt: 100,
     heightPt: 10,
+    lineBreaks: [],
+    lineCount: 0,
     links: [],
     ...geo,
   };

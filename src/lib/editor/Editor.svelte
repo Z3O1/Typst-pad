@@ -730,6 +730,10 @@
   .editor-host.write :global(.cm-scroller) {
     padding-left: 48px;
     padding-right: 48px;
+    /* 行尾溢出（见 .cm-write-engine-break-line）不许变成横向滚动条：写作模式永远不需要横向滚动，
+       而"溢出 → 出滚动条 → 版心变 → 重编译"正是这里要避免的反馈环。溢出量是几个像素，
+       落在上面那 48px 纸张留白里，不会被裁掉。 */
+    overflow-x: hidden;
     /* 滚动条槽位常驻：写作模式的**版心宽是编译期输入**（Rust 侧按列宽注入 #set page），
        如果滚动条出现/消失会让列宽来回变，就形成"重编译 → 内容高度变 → 滚动条变 → 再重编译"
        的反馈环（预览区当年就是这么闪的，见 docs/development/frontend.md 的布局反馈环说明）。 */
@@ -815,6 +819,35 @@
   .editor-host.write :global(.cm-block-band .cm-markup-heading-5),
   .editor-host.write :global(.cm-block-band .cm-markup-heading-6) {
     line-height: inherit;
+  }
+
+  /* **引擎给的折行断点**（见 block-decorations 的 buildEngineBreakDecorations）：
+     给断点前那个字符套一层行内 span，由 `::after` 吐一个换行符强制断行 —— 段落折几行由 Typst
+     的断点决定，不再是浏览器的贪心折行（两者的差异见 docs/development/writing-rendering.md）。
+     必须是行内 mark（不是 widget）：widget 会让 CodeMirror 拆逻辑行，带高盒会跟着丢。
+     `white-space: pre` 让 `\A` 真的当换行而不是空白折叠掉。 */
+  .editor-host.write :global(.cm-write-engine-break)::after {
+    content: "\A";
+    white-space: pre;
+    /* 行尾压缩（见下）不许把下一行的行首往左带 */
+    letter-spacing: 0;
+  }
+
+  /* **行尾压缩**：Typst 每一行能装下的字比 Chromium 多一个左右（Typst 会在行尾压缩 CJK 标点、
+     还会把行尾空白挂出去），所以只禁折还不够 —— 实测高代周二 L268 那一行自然宽 499.8px 装不进
+     495px 的列、高代周一 L63 的引擎行 603.1px 只余 1.6px，"差一点点"时浏览器仍会在断点前面
+     自己折一次（那一块就多一行）。给**断点前那个字**一份负字距 = 把这一行的可用宽度放宽 1em：
+     它后面已经没有别的字了，视觉上零影响（实测各行左缘完全不变），也不需要精确复刻 Typst 的
+     压缩规则。 */
+  .editor-host.write :global(.cm-write-engine-break) {
+    letter-spacing: -1em;
+  }
+
+  /* **这一行只在我们给的断点处折**（见 buildEngineBreakDecorations 的说明）：Typst 每行能装下的
+     字比 Chromium 多一个左右，不禁折的话浏览器会在断点前面先折，每满一行就多折一行。
+     代价是满行的行尾溢出正文列几个像素 —— 那是 Typst"标点悬挂"的观感，右侧 48px 纸张留白接住。 */
+  .editor-host.write :global(.cm-line.cm-write-engine-break-line) {
+    white-space: pre;
   }
 
   /* 列表符号/序号：替换出来的字符与正文同色、不与正文基线错位 */

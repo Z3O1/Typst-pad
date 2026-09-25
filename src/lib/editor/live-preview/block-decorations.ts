@@ -191,6 +191,113 @@ export function buildBlockBandFitDecorations(
 }
 
 /**
+ * **按引擎给的断点强制换行**（`cm-write-engine-break`）。
+ *
+ * 背景：段落折成几行是浏览器说了算 —— Typst 用全局最优断行、还会压缩 CJK 标点，Chromium 是贪心。
+ * 四份真实作业 210 个可编辑块里 6 个因此差一行（两个方向都有），而纵向几何（带高/首行基线）已经
+ * 精确对齐。这里用引擎聚类出的每行源码终点，在断点处放一枚**行内 mark**，由 CSS 的
+ * `::after { content: "\A"; white-space: pre }` 断行 —— 浏览器只负责画，折在哪由 Typst 决定。
+ *
+ * 为什么是 mark 而不是 widget（round 12 的反面教材）：`display: block; height: 0` 的行内 widget
+ * 会让 CodeMirror 把逻辑行拆成多个行盒，带高盒（挂在行元素上的 line decoration）只落到第一段，
+ * 四份作业当场 59/26/43/4 个块失去带高盒（套件 71 → 49 通过）。mark 只是给**已有文本节点**套一层
+ * 行内 span，CodeMirror 的行结构与块级装饰完全不受影响。
+ *
+ * 三条校验（任一不满足就跳过这一枚断点 / 这一块）：
+ *  - **自洽**：`lineBreaks.length + 1 === lineCount`（引擎给的行数），否则整块不用 —— 聚类被
+ *    行内矩阵/多重分式搅乱时，断点条数与真实行数对不上，硬折只会折错；
+ *  - **严格递增且落在块内**：反序/越界的项直接作废；
+ *  - **不落在原子区间里**：断点前那个字符若在 `$…$`（公式 widget）或 code/raw/注释里，它已经被
+ *    replace 换掉了，挂 mark 也断不了行，跳过（那一行退回浏览器折行）。
+ */
+export function buildEngineBreakDecorations(
+  state: EditorState,
+  covers: readonly BlockCover[],
+  opaque: readonly Region[] = [],
+  math: readonly { from: number; to: number }[] = [],
+): Range<Decoration>[] {
+  const out: Range<Decoration>[] = [];
+  const docLength = state.doc.length;
+  for (const cover of covers) {
+    if (!cover.revealed || cover.noOutput) continue;
+    const block = cover.block;
+    const breaks = block.lineBreaks;
+    if (!breaks || breaks.length === 0) continue;
+    if (block.lineCount !== breaks.length + 1) continue;
+    const marks: Range<Decoration>[] = [];
+    let prev = block.from;
+    let skipped = 0;
+    for (const pos of breaks) {
+      // 断点插在 `pos-1` 与 `pos` 之间：给 `pos-1` 那个字符套 mark
+      if (pos <= prev || pos > block.to || pos > docLength) {
+        skipped++;
+        break;
+      }
+      prev = pos;
+      const at = pos - 1;
+      if (at < 0) {
+        skipped++;
+        break;
+      }
+      const region = rangeAt(at, opaque);
+      // 引号是 markup（见 isDirectlyEditableTextBlock 的说明）：`"` 后面照样可以断行
+      if (region && region.kind !== "string") {
+        skipped++;
+        continue;
+      }
+      if (rangeAt(at, math) != null) {
+        skipped++;
+        continue;
+      }
+      marks.push(Decoration.mark({ class: "cm-write-engine-break" }).range(at, pos));
+    }
+    /**
+     * **有断点落不上就整块不折**（不是"折一半"）。
+     *
+     * 断点落不上只有一种情形：它落在 `$…$` 这类原子区间里 —— 说明 Typst 是在一个**行内公式内部**
+     * 折的行，而浏览器把整条公式当一块（`<wbr>` 只在运算符处给断点）。这时只折剩下几个断点，
+     * 等于凭空多插几刀却不管这一行的实际容量：实测高代周二 L207 因此从 4 行涨到 6 行、
+     * 数分周二 L48 从 5 行变 4 行。整块退回浏览器的贪心折行，最坏也就是回到加这个功能之前。
+     */
+    if (skipped > 0) continue;
+    out.push(...marks);
+    /**
+     * **这一行不许浏览器再折**（`.cm-write-engine-break-line` → `white-space: pre`）。
+     *
+     * 为什么必须禁：Typst 的行比 Chromium 同宽下能装的**多一个字左右**（Typst 会在行尾压缩
+     * CJK 标点、还会把行尾空白挂出去，Chromium 两样都不做）。只插断点不禁折时，浏览器会在
+     * 断点**前面**先折一次 —— 每一满行都多出一行，实测高代周二从 1 块不一致涨到 19 块
+     * （L128 的 5 行折成 9 行）。禁掉之后浏览器只在我们给的位置断，行数与 Typst 逐行相等
+     * （实测 L128 5=5、L146 6=6），代价是满行的行尾会**溢出正文列几个像素** —— 那正是 Typst
+     * 自己"标点悬挂"的观感，列宽外还有 48px 的纸张留白接住。
+     *
+     * 另一个前提：**整块只有一条源码行** —— 多源码行的块无法用一条 `.cm-line` 的样式覆盖。
+     */
+    const line = state.doc.lineAt(block.from);
+    if (block.to <= line.to) {
+      out.push(Decoration.line({ class: "cm-write-engine-break-line" }).range(line.from));
+    }
+  }
+  return out;
+}
+
+/** 命中位置的那个（按位置有序、互不重叠的）区间；没有返回 undefined */
+function rangeAt<T extends { from: number; to: number }>(
+  pos: number,
+  ranges: readonly T[],
+): T | undefined {
+  let lo = 0;
+  let hi = ranges.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ranges[mid].to <= pos) lo = mid + 1;
+    else hi = mid;
+  }
+  const hit = ranges[lo];
+  return hit && hit.from <= pos && pos < hit.to ? hit : undefined;
+}
+
+/**
  * 视口附近有没有"能渲染却没有切片"的块 —— 有的话通知父组件按新窗口重编译。
  *
  * 窗口化渲染（见 block-plan.carryOverCrops 的说明）下这是常态：滚动到没渲过的区域时，

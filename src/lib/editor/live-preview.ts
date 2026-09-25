@@ -23,6 +23,7 @@ import {
   buildBlockBandFitDecorations,
   buildBlockCovers,
   buildBlockCropDecorations,
+  buildEngineBreakDecorations,
   buildFenceHidingDecorations,
   buildHiddenBlockDecorations,
   blockBandFit,
@@ -98,6 +99,9 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         ...buildHiddenBlockDecorations(state, covers),
         ...buildFenceHidingDecorations(state, covers),
         ...(bandBoxes ? buildBlockBandFitDecorations(state, covers, bandMetrics) : []),
+        // 引擎给的折行断点（见 buildEngineBreakDecorations）：段落折几行由 Typst 决定，不再是
+        // 浏览器的贪心折行。块表过期（沿用旧坐标）时 lineBreaks 已在 remap 里清空，不会折错。
+        ...buildEngineBreakDecorations(state, covers, opaque, math),
         ...buildMathDecorations(state, opts, math, context, covered),
         ...buildMarkupDecorations(state, scan, covered, bandBoxes),
       ];

@@ -619,6 +619,8 @@ describe("livePreview 块级切片", () => {
     anchorBaselinePt: null,
     widthPt: 371,
     heightPt: 20,
+    lineBreaks: [],
+    lineCount: 0,
     svg: blockSvg("b"),
     links: [],
     ...opts,

@@ -20,6 +20,8 @@ function block(from: number, to: number, kind: Block["kind"] = "Paragraph"): Blo
     anchorBaselinePt: null,
     widthPt: 100,
     heightPt: 10,
+    lineBreaks: [],
+    lineCount: 0,
     links: [],
   };
 }

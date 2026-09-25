@@ -86,12 +86,17 @@ pub struct BlockCrop {
     pub anchor_baseline_pt: Option<f64>,
     /// **每一行的源码终点**（相对块起点的字节偏移，升序，不含块尾）。
     ///
-    /// 给浏览器"按 Typst 的断点折行"用：前端在这些位置插 `display: block; height: 0` 的
-    /// 行内 widget 就能强制换行，段落折行数不再取决于浏览器的贪心断行
-    /// （见 docs/development/writing-rendering.md 的"折行"一节）。空 = 拿不到（没有文本 /
-    /// 单行 / 老后端），前端按没有它处理。
+    /// 给浏览器"按 Typst 的断点折行"用：前端在这些位置放强制换行装饰，段落折行数不再取决于
+    /// 浏览器的贪心断行（见 docs/development/writing-rendering.md 的"折行"一节）。空 = 拿不到
+    /// （没有文本 / 单行 / 老后端），前端按没有它处理。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub line_breaks: Vec<usize>,
+    /// **这一块的视觉行数**（与验收夹具的 `lineCount` 同一套基线聚类口径）。
+    ///
+    /// 前端拿它与 `line_breaks.len() + 1` 对账：**自洽才用**那些断点（见 `block_lines` 的说明）。
+    /// `None` = 拿不到（无文本 / 老后端），此时前端一律不用断点。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<usize>,
     /// 该块 SVG **内部**的链接热区（相对裁剪带左上角，pt）：前端据此贴一层可点的透明方块。
     /// 只有窗口内的块才有（与 svg 同步取舍），没有链接时为空数组。
     pub links: Vec<CropLink>,
@@ -295,9 +300,12 @@ pub fn compile_blocks(
         }
     }
 
-    // 文档正文实际字号：**必须在 `store_hit_geometry` 之前算**（stats 与 items 一起被消费掉），
-    // 行断点聚类也要拿它当阈值，所以提到切片循环之前。
+    // 文档正文实际字号：行断点聚类要拿它兜底，`store_hit_geometry` 之后 stats 就没了，
+    // 所以提到切片循环之前算一次。
     let text_pt = document_text_pt(&stats);
+    // 文档行距（基线直方图自相关峰）：行断点聚类的阈值 = 行距 × 0.75，与验收夹具同口径
+    // （见 collect.rs 的 `line_spacing_pt` 与 `block_lines`）。全篇只估一次。
+    let line_spacing = line_spacing_pt(&items);
 
     let mut crops: Vec<Option<BlockCrop>> = Vec::with_capacity(blocks.len());
     crops.resize_with(blocks.len(), || None);
@@ -394,6 +402,14 @@ pub fn compile_blocks(
         } else {
             Vec::new()
         };
+        // 行断点：绝对源偏移 → 块内相对偏移（前端再按块起点换算成 CodeMirror 位置）。
+        // `line_count` 与断点同源：前端要按"断点条数 + 1 == 行数"做自洽校验，不自洽就整块不用。
+        let lines = block_lines(
+            &items,
+            (blocks[*idx].range.start + doc_start)..(blocks[*idx].range.end + doc_start),
+            g.page,
+            line_spacing,
+        );
         crops[*idx] = Some(BlockCrop {
             start: blocks[*idx].range.start,
             end: blocks[*idx].range.end,
@@ -413,15 +429,12 @@ pub fn compile_blocks(
                 g.page,
             ),
             // 行断点：绝对源偏移 → 块内相对偏移（前端再按块起点换算成 CodeMirror 位置）
-            line_breaks: line_break_offsets(
-                &items,
-                (blocks[*idx].range.start + doc_start)..(blocks[*idx].range.end + doc_start),
-                g.page,
-                text_pt,
-            )
-            .into_iter()
-            .filter_map(|abs| abs.checked_sub(doc_start + blocks[*idx].range.start))
-            .collect(),
+            line_breaks: lines
+                .breaks
+                .iter()
+                .filter_map(|abs| abs.checked_sub(doc_start + blocks[*idx].range.start))
+                .collect(),
+            line_count: (lines.count > 0).then_some(lines.count),
             links,
             svg,
         });
@@ -437,6 +450,7 @@ pub fn compile_blocks(
             found: false, // 没有几何 = 引擎这块没画（前端整格隐藏，见 noOutput）
             skipped: false,
             line_breaks: Vec::new(),
+            line_count: None,
             pages: 0,
             page: 0,
             x_pt: 0.0,
@@ -449,9 +463,6 @@ pub fn compile_blocks(
             svg: String::new(),
         }));
     }
-
-    // 文档正文实际字号：**必须在 `store_hit_geometry` 之前算**（stats 与 items 一起被消费掉）
-    let text_pt = document_text_pt(&stats);
 
     // 字形几何进缓存，供"点击 → 精确字符"的命中测试用（见 HIT_CACHE）。
     // 放在最后：前面的几何计算都借用了 items，这里把所有权交出去，不再多一份拷贝。

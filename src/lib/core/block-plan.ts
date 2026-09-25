@@ -70,6 +70,19 @@ export interface Block {
    * 带高占位（让可编辑块占满 Typst 的块带）需要它把首行基线也放到带内正确位置。
    */
   anchorBaselinePt: number | null;
+  /**
+   * **引擎给的折行断点**（CodeMirror 位置，升序、绝对、不含块尾；空 = 不用）。
+   *
+   * 用途：段落折成几行**不再由浏览器决定** —— 引擎按真实排版聚类出每行的源码终点，前端在这些
+   * 位置强制换行，于是贪心折行与 Typst 全局最优折行（含 CJK 标点压缩）的差异不再体现为行数
+   * 不一致（见 docs/development/writing-rendering.md 的"折行"一节）。
+   *
+   * **必须与 `lineCount` 自洽才用**：`lineBreaks.length + 1 === lineCount`。断点条数与视觉行数
+   * 对不上时整块退回浏览器折行（宁可与从前一样，也不按错位的断点折）。
+   */
+  lineBreaks: number[];
+  /** 引擎给的**视觉行数**（0 = 拿不到）；与 `lineBreaks` 一起做自洽校验 */
+  lineCount: number;
   /** 切片内部的可点链接热区（相对裁剪带左上角，pt）；空数组 = 这一块没有链接 */
   links: CropLink[];
 }
@@ -115,14 +128,23 @@ export function toBlockTable(
     | "xPt"
     | "yPt"
     | "anchorBaselinePt"
+    | "lineBreaks"
+    | "lineCount"
     | "links"
   >[],
 ): BlockTable {
   const offsets: number[] = [];
+  /** 折行断点的**绝对字节偏移**（按块拼平），以及每块在其中的起点（末位是总数当哨兵） */
+  const breakBytes: number[] = [];
+  const breakStart: number[] = [];
   for (const b of raw) {
     offsets.push(b.start, b.end);
+    breakStart.push(breakBytes.length);
+    for (const rel of b.lineBreaks ?? []) breakBytes.push(b.start + rel);
   }
+  breakStart.push(breakBytes.length);
   const positions = byteOffsetsToPositions(doc, offsets);
+  const breakPositions = byteOffsetsToPositions(doc, breakBytes);
   const blocks: Block[] = [];
   for (let i = 0; i < raw.length; i++) {
     const b = raw[i];
@@ -148,6 +170,9 @@ export function toBlockTable(
         typeof b.anchorBaselinePt === "number" && Number.isFinite(b.anchorBaselinePt)
           ? b.anchorBaselinePt
           : null,
+      // 折行断点：字节 → UTF-16 位置；越界/反序的项在装饰层按"自洽校验"整块丢弃
+      lineBreaks: breakPositions.slice(breakStart[i], breakStart[i + 1]),
+      lineCount: typeof b.lineCount === "number" && b.lineCount > 0 ? b.lineCount : 0,
       // 链接热区的 href：Rust 侧已经按白名单过滤过（见 block_geometry 的链接收集），
       // 这里**再挡一层**（PR #60 审查第 6 条的附带项）：前端是"点一下就交给系统打开"的那一端，
       // 不该只依赖上游的判断 —— `javascript:` / `data:` 这类伪协议落到 `<a href>` 上很危险。
@@ -520,6 +545,9 @@ export function remapBlocksThroughEdit(
     noOutput: false,
     svg: "",
     heightPt: 0,
+    // 退回源码的块不再用引擎断点：它的坐标是旧编译的，按它折行只会折错（见 Block.lineBreaks）
+    lineBreaks: [],
+    lineCount: 0,
   });
   for (const b of blocks) {
     if (revealedBy(b)) {
@@ -540,7 +568,13 @@ export function remapBlocksThroughEdit(
     }
     // 改动段之后：整体平移
     if (b.from >= span.to) {
-      const shifted = { ...b, from: b.from + span.delta, to: b.to + span.delta };
+      const shifted = {
+        ...b,
+        from: b.from + span.delta,
+        to: b.to + span.delta,
+        // 断点是**绝对位置**，块整体平移时必须一起平移（否则会折在别人家的字上）
+        lineBreaks: b.lineBreaks.map((p) => p + span.delta),
+      };
       out.push(shifted);
       if (shifted.svg !== "" && shifted.found) kept++;
       continue;

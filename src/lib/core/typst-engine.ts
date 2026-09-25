@@ -255,6 +255,16 @@ export interface BlockCrop {
    * 写作模式要让可编辑块按"带高"占位时，首行基线的带内偏移也要对上（见 `Block.anchorBaselinePt`）。
    */
   anchorBaselinePt?: number | null;
+  /**
+   * **每一行的源码终点**（相对块起点的 **UTF-8 字节**偏移，升序，不含块尾；缺省/空 = 拿不到）。
+   * 前端按引擎给的断点强制换行，段落折几行就不再看浏览器的贪心断行（见 `Block.lineBreaks`）。
+   */
+  lineBreaks?: number[];
+  /**
+   * **这一块的视觉行数**（与验收夹具同口径的基线聚类）。前端用它给断点做自洽校验：
+   * `lineBreaks.length + 1 === lineCount` 才用（不自洽说明聚类/过滤动过手脚，整块退回浏览器折行）。
+   */
+  lineCount?: number;
   /** 切片 SVG；空串 = 没有渲染结果 */
   svg: string;
   /**

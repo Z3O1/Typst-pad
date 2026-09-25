@@ -296,51 +296,134 @@ pub fn first_line_baseline(items: &[PlacedItem], range: Range<usize>, page: usiz
         .map(|(k, _)| *k as f64 / 2.0)
 }
 
+/// 文档的**行距**（pt）：基线直方图的**自相关峰**（0.5pt 分箱，步长 8~30pt 里取重叠最多的那个）。
+///
+/// 为什么用全局估计而不是逐块算：多数字形落在每行的主基线上，把整份基线集合平移一个真实行距后
+/// 重叠最多，分式/上下标是少数、不会赢；而逐块估计依赖行数，行数又由主峰数得出，误差会被放大
+/// （实测数分周二被带成 11.5 / 21pt 两个假峰）。
+///
+/// 这也是浏览器验收的夹具探针用的同一个估计量 —— **两边必须同口径**，否则"引擎给的行断点"与
+/// "验收认为的 Typst 行数"会对不上（`writing-pku-docs.mjs` / `.browser-check/pku-writing/`）。
+pub fn line_spacing_pt(items: &[PlacedItem]) -> Option<f64> {
+    let mut bins: std::collections::BTreeMap<i64, usize> = std::collections::BTreeMap::new();
+    for i in items {
+        *bins
+            .entry((i.baseline_pt * 2.0).round() as i64)
+            .or_insert(0) += 1;
+    }
+    if bins.len() < 3 {
+        return None;
+    }
+    let mut best = (0i64, 0usize);
+    for step in 16i64..=60 {
+        let mut overlap = 0usize;
+        for (b, c) in &bins {
+            if bins.contains_key(&(b + step)) {
+                overlap += c;
+            }
+        }
+        if overlap > best.1 {
+            best = (step, overlap);
+        }
+    }
+    (best.1 > 0).then(|| best.0 as f64 / 2.0)
+}
+
+/// 一个块按基线聚类出来的**行结构**：`count` = 视觉行数，`breaks` = 每行（除最后一行）的源码终点。
+#[derive(Debug, Clone, Default)]
+pub struct BlockLines {
+    /// 视觉行数（与浏览器验收的 `lineCount` 同一套聚类口径）
+    pub count: usize,
+    /// 每行的源码终点（升序、绝对源字节偏移，不含块尾）
+    pub breaks: Vec<usize>,
+}
+
 /// 块内**每一行的源码终点**（升序，**不含最后一行的块尾**；绝对源字节偏移）。
 ///
-/// 用途：让浏览器按 Typst 的断点折行 —— 前端在这些位置插一个 `display: block; height: 0`
-/// 的行内 widget 就能强制换行，断点落在 `$…$` 之类原子区间里的项由前端丢弃
-/// （见 docs/development/writing-rendering.md 的"折行"一节）。
+/// 用途：让浏览器按 Typst 的断点折行 —— 前端在这些位置放一个"强制换行"的装饰，段落折成几行
+/// 就不再取决于浏览器的贪心断行（见 docs/development/writing-rendering.md 的"折行"一节）。
 ///
-/// 判据是**基线聚类**：同一行的上下标/分式会把基线拉开约 0.35em，而 Typst 的行距通常 ≥1em，
-/// 取 0.75em 当阈值能把"行内偏移"与"行"分开（与 `lineCount` 同一套口径）。一行里取最大的
-/// `range.end` 当终点。
+/// 判据是**基线聚类**：同一行的上下标/分式会把基线拉开好几 pt，而 Typst 的行距通常 ≥15pt，
+/// 取行距的 0.75 倍当阈值能把"行内偏移"与"行"分开；断点取"上一行最右终点"与"下一行最左起点"
+/// 里较小的那个（理由见下面的行内注释）。
 ///
-/// **这是"提示"而不是"真值"**（实测四份作业 327 个块里 27 个与 `lineCount - 1` 不一致）：
-/// 行内矩阵/多重分式的子基线能超过 0.75em（把一行拆开），同一个 `$…$` 里多个字形也可能共用一个
-/// 源区间（取 max + dedup 之后条数变少）。所以前端消费时必须自己校验：严格递增、不落在
-/// `$…$`/raw 之类的原子区间里、且与这一块的视觉行数自洽 —— 不自洽就整块不用断点。
-pub fn line_break_offsets(
+/// **聚类必须是"与上一个行边界比"而不是"与前一个字形比"**（2026-09-25 修正，这是"提示不准"
+/// 的真正原因）：数学密集的段落里，同一行内的上下标基线铺得很开（相邻字形差 5~10pt），
+/// 按"相邻差 > 阈值"聚类会把整块并成一行 —— 实测数分周二 L154 的 6 行被并成 1 行、L48 的 5 行
+/// 被并成 2 行，于是"引擎说 2 行、验收说 5 行"，前端就算照做也强制不出正确的断点。
+/// 与验收的 `lineCount` 同口径之后，`count` 与 `breaks.len() + 1` 对所有块一致。
+///
+/// 仍然是**提示而非真值**：行内矩阵/多重分式的子基线可能超过阈值（把一行切多），同一个 `$…$`
+/// 里多个字形也可能共用一个源区间（把一行切少）。正常情形下 `count == breaks.len() + 1`；
+/// 前端消费时必须自己校验：`count` 与断点条数自洽、断点严格递增、不落在 `$…$`/raw 之类的
+/// 原子区间里 —— 不自洽就整块不用。
+pub fn block_lines(
     items: &[PlacedItem],
     range: Range<usize>,
     page: usize,
-    text_pt: f64,
-) -> Vec<usize> {
+    line_spacing: Option<f64>,
+) -> BlockLines {
     let mut hit: Vec<&PlacedItem> = items
         .iter()
         .filter(|i| i.page == page && i.range.start < range.end && i.range.end >= range.start)
         .collect();
-    if hit.len() < 2 {
-        return Vec::new();
+    if hit.is_empty() {
+        return BlockLines::default();
     }
     hit.sort_by(|a, b| a.baseline_pt.total_cmp(&b.baseline_pt));
-    let threshold = (text_pt * 0.75).max(0.5);
-    let mut offsets: Vec<usize> = Vec::new();
+    // 阈值与验收的 `lineCount` 完全相同：行距的 0.75 倍；量不到行距时不聚类（任何基线差都算新行）
+    let threshold = line_spacing.map(|sp| sp * 0.75).unwrap_or(0.0);
+    // 先按基线聚类切行，再**逐行取源码区间**：`(min_start, max_end)`。
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut lines = 1usize;
     let mut line_start = 0usize;
+    let mut last_boundary = hit[0].baseline_pt;
     for i in 1..=hit.len() {
-        let boundary = i == hit.len() || hit[i].baseline_pt - hit[i - 1].baseline_pt > threshold;
+        let boundary = i == hit.len() || hit[i].baseline_pt - last_boundary > threshold;
         if boundary {
-            if let Some(end) = hit[line_start..i].iter().map(|it| it.range.end).max() {
-                offsets.push(end);
+            let cluster = &hit[line_start..i];
+            let start = cluster.iter().map(|it| it.range.start).min().unwrap();
+            let end = cluster.iter().map(|it| it.range.end).max().unwrap();
+            ranges.push((start, end));
+            if i < hit.len() {
+                lines += 1;
+                last_boundary = hit[i].baseline_pt;
             }
             line_start = i;
         }
     }
-    // 最后一项是块尾（不需要断点）；再去掉越界、重复与不递增的项
-    offsets.pop();
-    offsets.retain(|o| *o > range.start && *o < range.end);
-    offsets.dedup();
-    offsets
+    // 每个断点取"上一行最右源码终点"，只有在它越出块尾时才退回"下一行最左源码起点"里较小的那个。
+    //
+    // **主口径必须是 `range.end` 的最大值**（2026-09-25 实测反面教材）：行内公式 `$…$` 的每一个
+    // 字形都映射到**整条公式**的源区间，于是一条跨两行的公式会让**下一行**的"最左起点"退回到
+    // 上一行里 —— 拿它当断点就等于把这条公式及其后的内容整段往下推，一行变两行、再连锁
+    // （实测高代周二因此从 1 块不一致涨到 19 块，L128 的 5 行折成 9 行）。
+    //
+    // 越界才回退的理由：公式的源区间也可能**一直伸到块尾**（公式是块里最后一样东西），此时
+    // `range.end` 会给上一行也塞一个块尾 —— 那个断点会被"必须落在块内"的过滤丢掉，整块退回
+    // 浏览器折行。退回"下一行最左起点"至少能把这一行切开，且位置必在块内。
+    let mut offsets: Vec<usize> = Vec::new();
+    for i in 0..ranges.len().saturating_sub(1) {
+        let end_of_line = ranges[i].1;
+        let start_of_next = ranges[i + 1].0;
+        let mut candidate = if end_of_line > range.start && end_of_line < range.end {
+            end_of_line
+        } else {
+            start_of_next
+        };
+        if let Some(last) = offsets.last() {
+            if *last >= candidate {
+                candidate = *last + 1;
+            }
+        }
+        if candidate > range.start && candidate < range.end {
+            offsets.push(candidate);
+        }
+    }
+    BlockLines {
+        count: lines,
+        breaks: offsets,
+    }
 }
 
 /// 给定源字节区间，算出它在版面上的**外接矩形**（None = 该区间没有任何渲染结果）
