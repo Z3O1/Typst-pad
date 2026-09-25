@@ -118,24 +118,40 @@ function typstLineCount(block, textPt, parLeading) {
   for (let i = 1; i < ys.length; i++) if (ys[i] - ys[i - 1] > threshold) lines++;
   return lines;
 }
-/** 把体积大的切片换成等比例占位（几何不变、注入体积可控）；高代周一的整页图片有 5MB+ */
+/**
+ * 把体积大的切片换成等比例占位（几何不变、注入体积可控）；高代周一的整页图片有 5MB+。
+ *
+ * **同时剥掉页面根本读不到的字段**（2026-09-25 验收整改）：块夹具是整份 JSON 注入到页面里的
+ * （`Page.addScriptToEvaluateOnNewDocument`），而 `math`（1.4MB）另有 `__DEV_MATH_FIXTURES`
+ * 通道、`lineSpans`/`lineTopsPt`/`baselineHist` 只是**诊断产物**（套件在 Node 侧读，页面不读）。
+ * 以前原样注入 3.1MB，导航要被这份脚本拖慢；剥掉之后只剩 ~200KB（实测导航 1.5s）。
+ * **`lineBreaks`/`lineCount` 必须留着** —— 那是产品要用的折行断点。
+ */
 const SLIM_SVG_LIMIT = 300_000;
 function slimFixture(fx) {
   let replaced = 0;
   const blocks = fx.blocks.map((b) => {
-    if (directlyEditable(fx.doc, b)) return { ...b, svg: "" };
-    if (b.svg && b.svg.length > SLIM_SVG_LIMIT) {
+    // 页面不读的字段：诊断数组
+    const { lineSpans, lineTopsPt, baselineHist, ...keep } = b;
+    void lineSpans;
+    void lineTopsPt;
+    void baselineHist;
+    if (directlyEditable(fx.doc, keep)) return { ...keep, svg: "" };
+    if (keep.svg && keep.svg.length > SLIM_SVG_LIMIT) {
       replaced++;
       return {
-        ...b,
+        ...keep,
         // 宽度用**文档真实列宽**：`#set page` 覆盖过的文档，块自带的 widthPt 是注入页的列宽，
         // 拿它当 viewBox 会让切片高度按错误比例缩放，逐块几何全错。
-        svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${fx.contentWidthPt} ${b.heightPt}"></svg>`,
+        svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${fx.contentWidthPt} ${keep.heightPt}"></svg>`,
       };
     }
-    return b;
+    return keep;
   });
-  return { fixture: { ...fx, blocks }, replaced };
+  // `math` 走 `__DEV_MATH_FIXTURES`，块夹具里这份是重复的 1.4MB
+  const { math, ...rest } = fx;
+  void math;
+  return { fixture: { ...rest, blocks }, replaced };
 }
 
 const c = await connect();
@@ -158,10 +174,21 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
   // 列宽用**精确**的 pt→px 换算（4/3），不要取整：整 px 会让"列宽/版心"这个比例与
   // 正文的字号比例（docTextPt × 4/3）不一致，纵向比较时每 1000px 就偏 ~0.6px。
   const docColumnPx = (docColumnPt * 4) / 3;
-  const states = replay.states; // [A 原始, B Enter, C 输入, D Backspace]
+  const states = replay.states; // [A 原始, B Enter, C 输入, D Backspace, N/S 单 LF 的推算变体]
+  /**
+   * **"实际输入结果"的夹具**（`replay.extras`，键 N2/S2）：由 `writing-pku-capture.mjs` 用真实按键
+   * 抓下编辑器真正产生的文本、再由 Rust 编译出来。单 LF 段落的 Enter / Shift+Enter 必须命中它们 ——
+   * 编辑器会给新行带上**自动缩进**，推算的变体对不上（实测），而桩对不上就静默退回假块。
+   */
+  const extras = replay.extras ?? [];
+  const extraByKey = new Map(extras.map((e) => [e.key, e]));
   let before = 0;
   const slimP0 = slimFixture(p0).fixture;
-  const injected = [slimP0, ...states.map((s) => slimFixture({ ...p0, ...s }).fixture)];
+  const injected = [
+    slimP0,
+    ...states.map((s) => slimFixture({ ...p0, ...s }).fixture),
+    ...extras.map((s) => slimFixture({ ...p0, ...s }).fixture),
+  ];
   console.log(`\n=== 编辑回放（${p0.name}，锚点 ${replay.anchor}）`);
 
   await boot(c, BLOCKS_URL, {
@@ -291,6 +318,21 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
     while (i < a.length && i < b.length && a[i] === b[i]) i++;
     return `首个不同 @${i}（锚点 ${anchorPos}）：实际 ${JSON.stringify(a.slice(i, i + 12))} / 夹具 ${JSON.stringify(b.slice(i, i + 12))}`;
   };
+  /**
+   * 编辑态的逐字比对失败时，把与**每一个候选夹具**的首个不同点都打出来。
+   * 少了它，"没命中"只能看到一句"非规范变体"，看不出差在哪（实测差的就是一个自动缩进空格）。
+   */
+  const diffHintAgainstVariants = (actual, variants, at) => {
+    const lines = [`锚点 ${at}：没有任何夹具与编辑结果逐字相同（候选 ${variants.length} 份）`];
+    for (const v of variants) {
+      let i = 0;
+      while (i < Math.min(actual.length, v.doc.length) && actual[i] === v.doc[i]) i++;
+      lines.push(
+        `  vs ${v.name}：首处不同 @${i} 夹具=${JSON.stringify(v.doc.slice(i, i + 16))} 实际=${JSON.stringify(actual.slice(i, i + 16))}`,
+      );
+    }
+    return lines.join("\n      ");
+  };
 
   // 加载 A（原始）——必须在按锚点定位之前（新页面初始是空文档）
   before = await compileCount();
@@ -408,11 +450,17 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
 
   // ⑦ 含单 LF 的段落（编辑器里走切片）：聚焦要**揭示成源码**、行数正确、不误改文本；
   //    再回放 Enter 分段与 Shift+Enter（`\` + 换行）两种输入。
-  // M 就是 A（同一篇原文），直接用第一个状态；Enter/Shift+Enter 各备一份规范夹具
+  // M 就是 A（同一篇原文），直接用第一个状态；Enter/Shift+Enter 用**抓取到的实际结果**夹具
+  // （`extras` 的 N2/S2），推算变体只作为补充候选。
   const ml = states[0];
-  const mlEnterVariants = [states[4]];
-  const mlSoftVariants = [states[5]];
-  if (replay.anchor2 > 0 && ml && mlEnterVariants.every(Boolean) && mlSoftVariants.every(Boolean)) {
+  const mlEnterVariants = [extraByKey.get("N2"), states[4]].filter(Boolean);
+  const mlSoftVariants = [extraByKey.get("S2"), states[5]].filter(Boolean);
+  check(
+    "编辑回放：单 LF 段落的实际输入结果有逐字夹具（N2/S2；没有就先跑抓取一步）",
+    extraByKey.has("N2") && extraByKey.has("S2"),
+    `拿到 ${[...extraByKey.keys()].join(",") || "（空）"}；跑 PKU_ROOT=… npm run verify:pku-writing（它会先抓取再验收）`,
+  );
+  if (replay.anchor2 > 0 && ml && mlEnterVariants.length > 0 && mlSoftVariants.length > 0) {
     const mlPos = byteToPos(ml.doc, replay.anchor2);
     // 段落边界直接从 M 态夹具的块表取（比按换行回溯稳）：段末 == anchor2 的那个可编辑段
     // 注意：这一块含 `#{…}` 公式插值，是**复杂块**（走切片），不能用 directlyEditable 过滤；
@@ -484,17 +532,21 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
     await sleep(400);
     const mlAfterEnter = await docText();
     const enterHit = mlEnterVariants.find((v) => v.doc === mlAfterEnter);
-    // 夹具覆盖两种规范结果（复用行尾换行 / 插入分段）；编辑器在这个位置还可能多带一个缩进，
-    // 那种变体没有逐字夹具，所以这里退一步断言**语义**：只在锚点之后动了换行、文本没被改，
-    // 并且确实重新编译过（不会静默显示假切片）。
-    const enterSamePrefix = mlAfterEnter.startsWith(ml.doc.slice(0, mlPos));
-    const enterNewlines =
-      (mlAfterEnter.match(/\n/g) ?? []).length - (ml.doc.match(/\n/g) ?? []).length;
+    /**
+     * **必须逐字命中真实夹具**（2026-09-25 验收整改）：以前这里"没命中就退一步断言语义"
+     * （只在锚点后动了换行 + 重新编译过就算过），而桩在没命中时会退回**假块** —— 那条断言
+     * 于是可以在"几何全是假的"情况下报绿。现在没命中直接失败，并把首个不同点打出来。
+     */
     check(
-      `编辑回放：单 LF 段落段末 Enter 产生分段（${ml.doc.length} → ${mlAfterEnter.length} 字符，换行 +${enterNewlines}${enterHit ? `，命中「${enterHit.name}」` : "，非规范变体"}）`,
-      enterHit ? true : enterSamePrefix && (enterNewlines === 1 || enterNewlines === 2),
+      `编辑回放：单 LF 段落段末 Enter 逐字命中真实夹具（${ml.doc.length} → ${mlAfterEnter.length} 字符${enterHit ? `，命中「${enterHit.name}」` : ""}）`,
+      Boolean(enterHit),
+      enterHit ? "" : diffHintAgainstVariants(mlAfterEnter, mlEnterVariants, mlPos),
     );
-    await waitRecompiled(before);
+    // 命中之后还必须**真的重新编译并命中**（`__browserDevBlocksMatched`），不能只等"编译次数变多"。
+    // **等不到就记失败、不往外抛**：一个夹具缺失不该把后面所有判据都吞掉（半路抛出去就只看得到
+    // 第一个问题，正是这份验收报告早期最容易被误读的地方）。
+    await waitMatched(before).catch(() => {});
+    check(`编辑回放：单 LF 段落 Enter 后该状态命中真实夹具（不退回假块）`, await matched());
     check(
       `编辑回放：单 LF 段落 Enter 后重新编译（不静默用假切片）`,
       (await compileCount()) > before,
@@ -515,14 +567,13 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
     await sleep(400);
     const mlAfterSoft = await docText();
     const softHit = mlSoftVariants.find((v) => v.doc === mlAfterSoft);
-    const softSamePrefix = mlAfterSoft.startsWith(ml.doc.slice(0, mlPos));
-    const softBackslashes =
-      (mlAfterSoft.match(/\\/g) ?? []).length - (ml.doc.match(/\\/g) ?? []).length;
     check(
-      `编辑回放：单 LF 段落 Shift+Enter 写显式换行（${ml.doc.length} → ${mlAfterSoft.length} 字符，反斜线 +${softBackslashes}${softHit ? `，命中「${softHit.name}」` : "，非规范变体"}）`,
-      softHit ? true : softSamePrefix && softBackslashes === 1,
+      `编辑回放：单 LF 段落 Shift+Enter 逐字命中真实夹具（${ml.doc.length} → ${mlAfterSoft.length} 字符${softHit ? `，命中「${softHit.name}」` : ""}）`,
+      Boolean(softHit),
+      softHit ? "" : diffHintAgainstVariants(mlAfterSoft, mlSoftVariants, mlPos),
     );
-    await waitRecompiled(before);
+    await waitMatched(before).catch(() => {});
+    check(`编辑回放：单 LF 段落 Shift+Enter 后该状态命中真实夹具（不退回假块）`, await matched());
     check(
       `编辑回放：单 LF 段落 Shift+Enter 后重新编译（不静默用假切片）`,
       (await compileCount()) > before,
@@ -1754,6 +1805,12 @@ writeFileSync(
   JSON.stringify(
     {
       generatedAt: new Date().toISOString(),
+      /**
+       * **本轮运行的令牌**（`PKU_RUN_ID`）：`verify:pku-writing` 在跑套件前会删掉旧汇总，再拿这个
+       * 令牌核对"这份汇总是不是本轮写的"。以前只看"文件在不在"，套件半路失败（例如导航超时）
+       * 时上一轮的绿汇总会被原样打印出来 —— 那份"通过"根本不代表本轮（2026-09-25 验收抓到）。
+       */
+      runId: process.env.PKU_RUN_ID ?? null,
       pkuRoot: process.env.PKU_ROOT ?? null,
       columnPt: allFixtures[0].contentWidthPt,
       docs: reports.map((r) => ({

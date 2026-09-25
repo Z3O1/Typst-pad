@@ -62,13 +62,26 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 
 ```bash
 PKU_ROOT="$HOME/PKU" npm run fixtures:pku-writing   # 真实后端按源文件路径编译四份作业 + 公式产物
-PKU_ROOT="$HOME/PKU" npm run verify:pku-writing     # 上面两条 + 只跑 writing-pku-docs.mjs
-PKU_ROOT="$HOME/PKU" ONLY=writing-pku-docs.mjs npm run verify:browser
+PKU_ROOT="$HOME/PKU" npm run verify:pku-writing     # 一条命令跑完：夹具 → 抓取实际输入结果 → 编译它们 → 逐块几何
+PKU_ROOT="$HOME/PKU" ONLY=writing-pku-docs.mjs npm run verify:browser   # 只跑几何套件（夹具要已经导好）
 ```
+
+**`verify:pku-writing` 只认"本轮令牌"**（2026-09-25 验收整改）：跑之前先删掉上一轮的 `summary.json` 与
+`report-doc*.json`，并把 `PKU_RUN_ID` 传给套件；套件把它写进本轮汇总，入口再拿它核对。以前只看
+"文件在不在"，套件半路失败（导航超时、样本没匹配上）时**上一轮的绿汇总会被原样打印出来** ——
+那份"通过"根本不代表本轮。现在缺文件或令牌对不上就打印"本轮没有有效的逐块汇总"并非零退出。
 
 原文不复制进仓库；夹具、测量 JSON 与截图写在已忽略的 `.browser-check/pku-writing/`。命令日志会列出实际加载的路径、SHA-256 与样本数。`verify:browser` 没有 `PKU_ROOT` 也没在 `ONLY` 里点名时，这一套**跳过并明说**（不是悄悄报绿）。几何判据用文档**真实列宽**（文档自带 `#set page(...)` 会覆盖注入页设置），浏览器列宽被钉到同一宽度。
 
-编辑回放（P0）：Rust 为同一段落的四个状态（原始 / Enter / 输入两字 / Backspace）各导一份真实编译夹具（`replay.json`），浏览器用**真实按键**驱动并逐步断言"文本与夹具逐字相同 + 命中真实夹具（`__browserDevBlocksMatched`，绝不静默退回假切片）+ 光标统一放在锚点后再量、撤销后后续行基线回到编辑前"。加新状态时 Rust 与夹具包装层要一起加，否则该状态会命中不到几何而失败（设计如此）。`PKU_REPLAY_ONLY=1` 只跑回放段（调试用）；CDP 调用有 `CDP_TIMEOUT_MS`（默认 30s）超时，避免浏览器崩了以后整段死等。
+编辑回放（P0）：Rust 为同一段落的四个状态（原始 / Enter / 输入两字 / Backspace）各导一份真实编译夹具（`replay.json`），浏览器用**真实按键**驱动并逐步断言"文本与夹具逐字相同 + 命中真实夹具（`__browserDevBlocksMatched`，绝不静默退回假切片）+ 光标统一放在锚点后再量、撤销后后续行基线回到编辑前"。加新状态时 Rust 与夹具包装层要一起加，否则该状态会命中不到几何而失败（设计如此）。
+
+**单 LF 段落的 Enter / Shift+Enter 走"抓取 → 编译 → 验收"三段**（2026-09-25 验收整改）：这两个按键的实际结果里带**编辑器的自动缩进**（实测 P0 的那一段，光标行以空格开头，回车后新行也被缩进一个空格），Rust 推算的"复用换行 / 插两个换行"两种变体**一种都对不上** —— 而桩对不上就静默退回假块，旧断言只看"文本变长 + 重新编译过"于是可以在几何全是假的情况下报绿。现在：
+
+1. `writing-pku-capture.mjs` 用真实按键把**实际产生的文本**抓进 `capture.json`（不做几何断言，抓不到就非零退出）；
+2. `npm run fixtures:pku-replay` 让 Rust 用**真实后端**把这些文本编译成 `replay.json` 的 `extras`（键 `N2`/`S2`，`PKU_REQUIRE_CAPTURE=1` 时缺了就失败）；
+3. 主套件要求这两个状态**逐字命中**夹具、且编译后 `__browserDevBlocksMatched === true`，没命中就把与每个候选的首个不同点打出来并判失败（`PKU_ROOT=… npm run verify:pku-writing` 会自动按 1→2→3 跑完）。
+
+`writing-pku-docs.mjs` 的期望检查数是 **76**（改动它就要同步 `run-all.mjs` 的 SUITES）。`PKU_REPLAY_ONLY=1` 只跑回放段（调试用）；CDP 调用有 `CDP_TIMEOUT_MS` 超时，避免浏览器崩了以后整段死等。
 
 对账锚点两边都用**首行主基线**：Rust 侧从帧里取（`anchorBaselinePt`），浏览器侧用"行盒顶端 + 半 leading + 字体 ascent"算。浏览器坐标必须走 **DOM**（扫描已渲染的 `.cm-line`、用 `posAtDOM` 精确匹配目标行、`getBoundingClientRect` 取位置，文档坐标 = 元素视口顶端 − content 顶端 − padding-top），**不要用 `lineBlockAt`/`coordsAtPos` 或 `scrollTop` 换算**：高度图在长文档里会给出偏差 200px 级的位置，滚动锚定也会让 `scrollTop` 与 DOM 不同步。夹具还导出每块的 `lineSpans`（逐行源区间 + 右缘），`PKU_BREAK=1` 用它逐断点对比"Typst 折在哪 vs 浏览器折在哪"（浏览器侧用逐字符 `coordsAtPos` 看 y 何时增大——这个 CodeMirror 版本没有 `visualLineAt`）；`PKU_MATH_WIDTH=1` 打印行内公式 widget 的渲染宽与 SVG 宽（用来区分"宽度不对"与"不可断"）。`PKU_PLACEMENT=1` 做**逐块落位自检**：同一批块「逐个滚进视口量」与「滚到首块后一次性量」各量一遍（两者应完全一致，否则说明落位受滚动状态影响），并与「前面所有块带高之和」对账、打印 DOM 行高直方图与未被压缩的空行（本轮据此定位到「贴着规则行/行间公式的空行按整行渲染」）。`PKU_DIAG=1` 会打印最大偏差块附近的逐行 DOM 坐标，`PKU_LINE_SPACING=1` 是对照实验开关（把编辑器行高换成夹具量出的 `lineSpacingPt`，尚未并入产品）。
 

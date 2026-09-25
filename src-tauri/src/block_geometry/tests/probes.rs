@@ -1,6 +1,60 @@
 // **按需跑的探针**（全部 `#[ignore]`）：导出几何/夹具/dump 给浏览器验收用，不进日常 `cargo test`。
 use super::*;
 
+/// 读 `PKU_CAPTURE`（浏览器抓取脚本写下的"实际输入结果"）→ `[(key, 中文名, 文档文本)]`。
+///
+/// 为什么要从文件读、而不是在 Rust 里推算：Enter / Shift+Enter 的结果里带**编辑器的自动缩进**
+/// （实测 P0 的单 LF 段落，光标那一行以空格开头，回车后新行也被缩进一个空格），Rust 猜不到编辑器
+/// 的缩进规则；猜错时浏览器桩会静默退回假块、验收变成假绿（2026-09-25 验收抓到）。
+/// 抓取脚本用真实按键把实际文本写进 `capture.json`，这里只负责"把它编译成夹具"。
+///
+/// 相对路径按**仓库根**解析：`cargo test` 的工作目录是包根（`src-tauri/`），而调用方（npm 脚本）
+/// 写的是仓库根的相对路径 —— 直接 `read_to_string` 会 "No such file or directory"（实测）。
+fn read_capture_states() -> Result<Vec<(&'static str, String, String)>, String> {
+    let Ok(raw) = std::env::var("PKU_CAPTURE") else {
+        return if std::env::var("PKU_REQUIRE_CAPTURE").as_deref() == Ok("1") {
+            Err("编辑回放：本轮要求「实际输入结果」夹具，但没有给 PKU_CAPTURE".to_string())
+        } else {
+            Ok(Vec::new())
+        };
+    };
+    let path = if std::path::Path::new(&raw).is_absolute() {
+        std::path::PathBuf::from(&raw)
+    } else {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(&raw)
+    };
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("编辑回放：读不到抓取文件（{}）：{e}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("编辑回放：抓取文件不是合法 JSON（{}）：{e}", path.display()))?;
+    let mut out: Vec<(&'static str, String, String)> = Vec::new();
+    for (key, field) in [("N2", "enter"), ("S2", "soft")] {
+        let Some(doc) = value
+            .get(field)
+            .and_then(|x| x.get("doc"))
+            .and_then(|d| d.as_str())
+        else {
+            continue;
+        };
+        let name = value
+            .get(field)
+            .and_then(|x| x.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("实际输入结果")
+            .to_string();
+        out.push((key, name, doc.to_string()));
+    }
+    if out.len() != 2 {
+        return Err(format!(
+            "编辑回放：抓取文件里缺少输入结果（{}）",
+            path.display()
+        ));
+    }
+    Ok(out)
+}
+
 /// **场景集**：写作模式要覆盖的文档形态（只用于按需导出的真实产物夹具；常驻测试不跑这些）。
 /// 见 `scripts/browser-check/writing-mode-scenes.mjs`。同上有意写成单行字面量。
 const SCENE_DOCS: &[(&str, &str)] = &[
@@ -1380,6 +1434,27 @@ fn dump_pku_writing_fixtures() {
                                 }
                             }
                             None => failures.push("编辑回放：找不到含单 LF 的段落".to_string()),
+                        }
+
+                        // ---- **"实际输入结果"的夹具**（浏览器抓取 → 这里用真实后端编译）----
+                        //
+                        // 为什么不在这里推算变体：Enter / Shift+Enter 的结果里带**编辑器的自动缩进**
+                        // （实测 P0 的单 LF 段落，光标那一行以空格开头，回车后新行也缩进一个空格），
+                        // Rust 猜不到编辑器的缩进规则；猜错时浏览器桩会静默退回假块，
+                        // 而旧断言只看"文本变长 + 重新编译过"就报绿（2026-09-25 验收抓到）。
+                        // 抓取脚本（writing-pku-capture.mjs）把**实际产生的文本**写进 capture.json，
+                        // 这里编译它 —— 夹具因此是"实际会走到的状态"，不是"以为会走到的状态"。
+                        match read_capture_states() {
+                            Ok(captured) => {
+                                for (key, name, doc) in &captured {
+                                    let json = state_json(name, doc);
+                                    println!(
+                                        "PKUREPLAY:{}",
+                                        serde_json::json!({ "key": key, "fixture": json })
+                                    );
+                                }
+                            }
+                            Err(e) => failures.push(e),
                         }
                     }
                 } else {

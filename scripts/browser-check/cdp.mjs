@@ -108,30 +108,44 @@ export async function connect() {
     close: () => ws.close(),
 
     /**
-     * 导航到目标地址并**等应用挂载出来**（`.cm-content` 出现为止）。两处讲究：
+     * 导航到目标地址并**等应用挂载出来**（`.cm-content` 出现为止）。三处讲究：
      *
      * 1. 先跳 about:blank 再跳目标：同 URL 的 Page.navigate 不会重新加载，若上一次加载停在了
      *    错误页（如 dev server 正在改写文件时的 500），会一直复现旧页面；
      * 2. **最多重试 3 次**：验收脚本会反复换 URL / 反复重载（每次换 `&blockslow=1` 这类参数都算
      *    一次导航），实测偶发被上一次导航打断、页面停在 about:blank —— 那一轮就白跑了。
-     *    只等"URL 对了"不够，必须等到页面真的挂载出来。
+     * 3. **`Page.navigate` 自己报超时不算失败**（2026-09-25 实测的假故障）：冷启动时 Vite 要转译
+     *    整棵模块图，页面 `responseEnd` 实测 7.9s，机器更慢时整条导航的**回应**会超过 CDP 调用
+     *    超时 —— 但页面其实已经跳过去了、应用也起来了。以前这里把那个报错直接抛出去，整轮验收就
+     *    停在"Page.navigate 超时"上，而真正该看的判据是"应用挂载出来了没有"（下面两道 waitFor）。
+     *    所以导航调用一律 try/catch 吞掉，成败只看 waitFor。
      */
     async goto(url) {
       await send("Page.enable");
-      for (let attempt = 1; ; attempt++) {
-        await send("Page.navigate", { url: "about:blank" });
+      let lastError = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await send("Page.navigate", { url: "about:blank" });
+        } catch (e) {
+          lastError = e;
+        }
         await new Promise((r) => setTimeout(r, 200));
-        await send("Page.navigate", { url });
+        try {
+          await send("Page.navigate", { url });
+        } catch (e) {
+          lastError = e;
+        }
         try {
           await this.waitFor(`location.href.startsWith(${JSON.stringify(url.split("?")[0])})`, {
-            timeout: 15000,
+            timeout: 30000,
           });
-          await this.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 15000 });
+          await this.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
           return;
         } catch (e) {
-          if (attempt >= 3) throw e;
+          lastError = e;
         }
       }
+      throw lastError ?? new Error("goto 失败：应用没有挂载出来");
     },
 
     /** 轮询直到表达式为真；超时抛错（失败信息里带表达式，便于定位） */

@@ -48,7 +48,7 @@ const SUITES = [
   ["computed-style.mjs", 17],
   // **PKU 真实作业逐块几何**（P0 主样本 + 三份 P1）。这一套要 `PKU_ROOT` 指到本地作业目录，
   // 原文不进仓库 ⇒ 没有 `PKU_ROOT` 时**跳过并明说**（不是悄悄报绿），见下面的 pkuRequested。
-  ["writing-pku-docs.mjs", 73],
+  ["writing-pku-docs.mjs", 76],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
 /**
@@ -93,6 +93,26 @@ async function httpOk(url) {
   } catch {
     return false;
   }
+}
+
+/** 端口能不能由我们绑定（用来区分"服务还没起来"与"端口被别的进程占着"） */
+async function portFree(port) {
+  const net = await import("node:net");
+  return new Promise((resolve) => {
+    const s = net.createServer();
+    s.once("error", () => resolve(false));
+    s.once("listening", () => s.close(() => resolve(true)));
+    s.listen(Number(port), "127.0.0.1");
+  });
+}
+
+/** 从 start 起找一个能绑的端口（连续 20 个都被占就放弃） */
+async function pickFreePort(start, tries = 20) {
+  for (let i = 0; i < tries; i++) {
+    const p = String(Number(start) + i);
+    if (await portFree(p)) return p;
+  }
+  return null;
 }
 
 async function waitFor(label, url, tries = 60) {
@@ -149,20 +169,55 @@ process.on("SIGINT", onSignal(130));
 process.on("SIGTERM", onSignal(143));
 
 if (!SKIP_DEV) {
-  launch("dev", "npm", ["run", "dev", "--", "--port", PORT, "--host", "0.0.0.0"]);
-  if (!(await waitFor("dev server", `http://127.0.0.1:${PORT}/`))) process.exit(1);
-  console.log(`✓ dev server 就绪（:${PORT}）`);
+  /**
+   * **端口已经有人服务就复用，不再"再起一个然后等 60 秒报没起来"**（2026-09-25 验收教训）：
+   * 上一次验收被中断时，`run-all` 起的 dev server 是 detached 的独立会话，可能活下来继续占着
+   * 1425 —— 那时新起的 Vite 会立刻以 "Port 1425 is already in use" 退出，而这里只报
+   * "dev server 在 60s 内没起来"，看起来像环境玄学。现在：能 HTTP 响应就复用（并明说不是本轮
+   * 起的、收尾不回收它）；端口被占但 HTTP 不响应就直接说清楚并给出换端口的命令。
+   */
+  if (await httpOk(`http://127.0.0.1:${PORT}/`)) {
+    console.log(`✓ 复用已在跑的 dev server（:${PORT}；不是本轮起的，收尾不回收）`);
+  } else if (!(await portFree(PORT))) {
+    console.error(
+      `✗ 端口 :${PORT} 被占用，但 HTTP 不响应 —— 多半是上一次验收残留的 dev server（detached，杀掉 run-all 不会连带回收）。\n` +
+        `  换端口重跑：PORT=${Number(PORT) + 10} npm run verify:browser；或先释放 :${PORT}`,
+    );
+    process.exit(1);
+  } else {
+    launch("dev", "npm", ["run", "dev", "--", "--port", PORT, "--host", "0.0.0.0"]);
+    // 冷启动的 Vite 要转译整棵模块图，60s 不够（实测本机 8s 起步、忙时更久）
+    if (!(await waitFor("dev server", `http://127.0.0.1:${PORT}/`, 120))) process.exit(1);
+    console.log(`✓ dev server 就绪（:${PORT}）`);
+  }
 }
 
+/**
+ * 浏览器：默认**自己起一个**（`REUSE_CDP=1` 才复用已在跑的那个）。
+ *
+ * 以前是"`:9335` 上有 CDP 就复用"—— 但**卡住的页面目标同样能通过 `/json/version`**，
+ * 复用它会把上一轮的卡死状态带进这一轮（实测 `Page.navigate` 60s 不返回）。
+ * 端口被占（残留浏览器）时自动往后找一个能绑的端口，并把实际端口传给各套件。
+ */
 let chrome = null;
-if (await httpOk(`http://127.0.0.1:${CDP_PORT}/json/version`)) {
-  console.log(`✓ 复用已在跑的 CDP（:${CDP_PORT}）`);
+let cdpPort = CDP_PORT;
+const reuseCdp = process.env.REUSE_CDP === "1";
+if (reuseCdp && (await httpOk(`http://127.0.0.1:${CDP_PORT}/json/version`))) {
+  console.log(`✓ 复用已在跑的 CDP（:${CDP_PORT}，REUSE_CDP=1）`);
 } else {
+  if (await httpOk(`http://127.0.0.1:${CDP_PORT}/json/version`)) {
+    console.log(`⚠ :${CDP_PORT} 上已有浏览器（可能是上一次跑残留的）→ 本轮另起一个端口`);
+  }
+  const free = await pickFreePort(CDP_PORT);
+  if (!free) {
+    console.error(`✗ 从 :${CDP_PORT} 起连续 20 个端口都被占用，起不了浏览器`);
+    process.exit(1);
+  }
+  cdpPort = free;
   chrome = findChrome();
   if (!chrome) {
     console.error(
-      `✗ CDP :${CDP_PORT} 上没有浏览器，也没找到本机 Chromium。\n` +
-        `  要么先起一个（headless + --remote-debugging-port=${CDP_PORT}），要么用 CHROME_PATH=<可执行文件> 指给它。`,
+      `✗ 没找到本机 Chromium。用 CHROME_PATH=<可执行文件> 指给它，或先自己起一个 headless 浏览器。`,
     );
     process.exit(1);
   }
@@ -170,18 +225,47 @@ if (await httpOk(`http://127.0.0.1:${CDP_PORT}/json/version`)) {
     "--no-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",
-    `--user-data-dir=${join(OUT, `cdp-profile-run-all-${CDP_PORT}`)}`,
-    `--remote-debugging-port=${CDP_PORT}`,
+    `--user-data-dir=${join(OUT, `cdp-profile-run-all-${cdpPort}`)}`,
+    `--remote-debugging-port=${cdpPort}`,
     "--window-size=1400,900",
     APP_URL,
   ]);
-  if (!(await waitFor("headless Chromium", `http://127.0.0.1:${CDP_PORT}/json/version`, 30))) {
+  if (!(await waitFor("headless Chromium", `http://127.0.0.1:${cdpPort}/json/version`, 30))) {
     process.exit(1);
   }
-  console.log(`✓ headless Chromium 就绪（:${CDP_PORT}，${chrome}）`);
+  console.log(`✓ headless Chromium 就绪（:${cdpPort}，${chrome}）`);
 }
 
-const env = { ...process.env, CDP_PORT, BROWSER_CHECK_PORT: PORT, BROWSER_CHECK_URL: APP_URL };
+const env = {
+  ...process.env,
+  CDP_PORT: cdpPort,
+  BROWSER_CHECK_PORT: PORT,
+  BROWSER_CHECK_URL: APP_URL,
+};
+
+/**
+ * **预热点应用**：冷启动的 Vite 要转译整棵模块图（实测首屏 `responseEnd` 7.9s，机器忙时更久），
+ * 那笔开销以前是**第一个套件的第一次 boot** 付的 —— 于是 `Page.navigate` 的 CDP 调用超时、
+ * 或者 `waitFor(.cm-content)` 在 15s 上超时重试。这里先自己加载两遍（第二遍走缓存），
+ * 各套件的 boot 就都是热的；应用根本起不来时也在这里**早失败**、报错清楚。
+ */
+if (!SKIP_DEV || process.env.SKIP_WARMUP !== "1") {
+  const warm = spawnSync(process.execPath, [join(HERE, "warmup.mjs")], {
+    cwd: ROOT,
+    env,
+    encoding: "utf8",
+    timeout: 300000,
+  });
+  writeFileSync(join(OUT, "run-all-warmup.log"), `${warm.stdout ?? ""}${warm.stderr ?? ""}`);
+  if (warm.status !== 0) {
+    console.error(
+      `✗ 应用预热点失败（退出码 ${warm.status}）：dev server / 浏览器可能有问题；` +
+        `详情见 ${join(OUT, "run-all-warmup.log")}`,
+    );
+    process.exit(1);
+  }
+  console.log("✓ 应用已预热点（后续套件的 boot 都是热的）");
+}
 
 if (!SKIP_FIXTURES) {
   runStep("fixtures-blocks", "npm", ["run", "fixtures:blocks"]);
@@ -189,6 +273,29 @@ if (!SKIP_FIXTURES) {
   // PKU 真实作业夹具要作业原文（`PKU_ROOT`，默认 `$HOME/PKU`）；只有显式要求那一套时才导，
   // 否则默认 `verify:browser` 会在没有作业的机器上红掉 —— 但那不是产品回归。
   if (pkuRequested) runStep("fixtures-pku-writing", "npm", ["run", "fixtures:pku-writing"]);
+}
+
+/**
+ * **按退出码判定的"步骤"**（不是套件：没有"通过 N 项"摘要），只在 `ONLY` 点名时跑。
+ *
+ * 目前只有 PKU 的编辑回放抓取（`writing-pku-capture.mjs`）：它要用真实按键把"实际会产生的输入
+ * 结果"抓下来（编辑器会给新行带自动缩进，Rust 推算不出来），必须有自己的 dev server + 浏览器，
+ * 所以放在这里、复用同一套生命周期。
+ */
+const STEPS = [["writing-pku-capture.mjs", "抓取编辑回放的实际结果"]];
+for (const [file, label] of STEPS) {
+  if (!only || !only.has(file)) continue;
+  ran += 1;
+  const full = join(HERE, file);
+  const logFile = join(OUT, `run-all-${file.replace(/\.mjs$/, "")}.log`);
+  if (!existsSync(full)) {
+    record(label, false, "脚本不存在");
+    continue;
+  }
+  const res = spawnSync(process.execPath, [full], { cwd: ROOT, env, encoding: "utf8" });
+  writeFileSync(logFile, `${res.stdout ?? ""}${res.stderr ?? ""}`);
+  const tail = `${res.stdout ?? ""}${res.stderr ?? ""}`.trimEnd().split("\n").slice(-1)[0] ?? "";
+  record(label, res.status === 0, res.status === 0 ? "" : `${tail}；详情见 ${logFile}`);
 }
 
 for (const [file, expectCount] of SUITES) {

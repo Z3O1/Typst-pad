@@ -102,6 +102,13 @@ const replayAnchor2 = Number(
   lines.find((l) => l.startsWith("PKUREPLAYANCHOR2:"))?.slice("PKUREPLAYANCHOR2:".length),
 );
 const REPLAY_KEYS = ["A", "B", "C", "D", "N", "S"];
+/**
+ * **"实际输入结果"的夹具**（`N2` Enter / `S2` Shift+Enter）：由浏览器抓取脚本
+ * （`writing-pku-capture.mjs`）把编辑器真正产生的文本写进 `capture.json`，再由 Rust 用真实后端
+ * 编译。它们不是"推算的变体"，而是"实际会走到的那个状态" —— 桩只在逐字相同时给真实几何，
+ * 所以主套件现在**必须**命中其中一个，命中不了直接红（见 writing-pku-docs.mjs 第 ⑦ 组）。
+ */
+const EXTRA_KEYS = ["N2", "S2"];
 const replayByKey = new Map(replay.map((r) => [r.key, r.fixture]));
 if (REPLAY_KEYS.some((k) => !replayByKey.has(k)) || !(replayAnchor > 0)) {
   console.error(
@@ -109,6 +116,24 @@ if (REPLAY_KEYS.some((k) => !replayByKey.has(k)) || !(replayAnchor > 0)) {
       `期望 ${REPLAY_KEYS.join(",")} 且锚点 > 0`,
   );
   process.exit(1);
+}
+const extraByKey = new Map();
+for (const key of EXTRA_KEYS) {
+  const fx = replayByKey.get(key);
+  if (fx) extraByKey.set(key, fx);
+}
+if (process.env.PKU_REQUIRE_CAPTURE === "1" && extraByKey.size !== EXTRA_KEYS.length) {
+  console.error(
+    `✗ 缺少"实际输入结果"夹具：拿到 ${[...extraByKey.keys()].join(",") || "（空）"}，期望 ${EXTRA_KEYS.join(",")}；` +
+      `先跑 npm run verify:pku-writing 的抓取一步（或 PKU_CAPTURE=<capture.json> 重跑夹具）`,
+  );
+  process.exit(1);
+}
+for (const [key, fx] of extraByKey) {
+  if (fx.ok !== true || !Array.isArray(fx.blocks) || fx.blocks.length === 0) {
+    console.error(`✗ "实际输入结果"夹具 ${key}（${fx.name}）没有可用几何`);
+    process.exit(1);
+  }
 }
 for (const [key, fx] of replayByKey) {
   if (fx.ok !== true || !Array.isArray(fx.blocks) || fx.blocks.length === 0) {
@@ -158,6 +183,11 @@ writeFileSync(
     anchor: replayAnchor,
     anchor2: replayAnchor2,
     states: REPLAY_KEYS.map((k) => replayByKey.get(k)),
+    // 带上 key（`N2`/`S2`）：主套件按 key 取"实际输入结果"的夹具，光有 fixture 认不出是哪一个
+    extras: EXTRA_KEYS.filter((k) => extraByKey.has(k)).map((k) => ({
+      key: k,
+      ...extraByKey.get(k),
+    })),
   }),
 );
 writeFileSync(
