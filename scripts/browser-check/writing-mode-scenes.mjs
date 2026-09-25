@@ -235,6 +235,30 @@ check(
   JSON.stringify(shiftEnterLinebreak),
 );
 
+// 空白行上的 Shift+Enter 不能插入没有正文的 Typst 显式换行；撤销要恢复原始空白。
+await replaceDocument(c, "前段\n  \n后段", 100);
+await c.evaluate(
+  '(() => { const view = window.__typstPadView; view.dispatch({ selection: { anchor: "前段\\n  ".length } }); })()',
+);
+await c.key("Enter", { code: "Enter", keyCode: 13, modifiers: 8 });
+const blankLineBreak = await c.evaluate(
+  '(() => { const view = window.__typstPadView; return { doc: view.state.doc.toString(), head: view.state.selection.main.head, gaps: document.querySelectorAll(".cm-write-parbreak").length }; })()',
+);
+check(
+  "带缩进的空行 Shift+Enter 只清理空白并新增源码行，不插入显式换行符",
+  blankLineBreak.doc === "前段\n\n\n后段" && blankLineBreak.head === 4 && blankLineBreak.gaps === 2,
+  JSON.stringify(blankLineBreak),
+);
+await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+const blankLineUndo = await c.evaluate(
+  "(() => { const view = window.__typstPadView; return { doc: view.state.doc.toString(), head: view.state.selection.main.head }; })()",
+);
+check(
+  "空白行换行可一次撤销，缩进和光标回到编辑前",
+  blankLineUndo.doc === "前段\n  \n后段" && blankLineUndo.head === "前段\n  ".length,
+  JSON.stringify(blankLineUndo),
+);
+
 // 11 篇场景里有 6 篇是纯正文/标题（0 张复杂切片），逐篇的几何断言在空数组上是恒真的。
 // 这条**无条件**的聚合断言把"该有切片却一张都没有"钉住（否则整套几何验收可以静默空转）。
 const totalCrops = summary.reduce((n, s) => n + s.切片, 0);

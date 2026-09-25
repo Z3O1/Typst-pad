@@ -39,7 +39,7 @@ const SUITES = [
   ["writing-blocks.mjs", 133],
   ["writing-blocks-visual.mjs", 81],
   ["writing-blocks-hit.mjs", 34],
-  ["writing-mode-scenes.mjs", 83],
+  ["writing-mode-scenes.mjs", 85],
   ["wysiwyg-visual.mjs", 20],
   // 写作模式的**动态稳定性**（报告 T0）：逐帧量"光标进出公式/复杂块"的几何（点击 / 左右键 /
   // Ctrl+E 三档等效几何、高块 widget 不钉的例外），补上另外七套都不管的那段动态手感
@@ -225,6 +225,9 @@ if (reuseCdp && (await httpOk(`http://127.0.0.1:${CDP_PORT}/json/version`))) {
     "--no-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",
+    // 验收浏览器使用独立临时 profile，不保存用户密码；避免 Linux 的
+    // GNOME Keyring 在每次启动新 profile 时弹出“创建 Default Keyring”窗口。
+    "--password-store=basic",
     `--user-data-dir=${join(OUT, `cdp-profile-run-all-${cdpPort}`)}`,
     `--remote-debugging-port=${cdpPort}`,
     "--window-size=1400,900",

@@ -294,6 +294,54 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     }
   });
 
+  it("写作模式：文首、文末与已有空行按键只产生预期的源码行", () => {
+    const cases = [
+      { doc: "", pos: 0, shiftKey: false, expected: "\n", head: 1 },
+      { doc: "", pos: 0, shiftKey: true, expected: "\n", head: 1 },
+      { doc: "  ", pos: 2, shiftKey: false, expected: "\n", head: 1 },
+      { doc: "正文\n  ", pos: 5, shiftKey: true, expected: "正文\n\n", head: 4 },
+      { doc: "前段\n\n后段", pos: 3, shiftKey: false, expected: "前段\n\n\n后段", head: 4 },
+      { doc: "前段\n\n", pos: 4, shiftKey: false, expected: "前段\n\n\n", head: 5 },
+    ];
+    for (const { doc, pos, shiftKey, expected, head } of cases) {
+      const view = makeWriteView(doc);
+      view.dispatch({ selection: { anchor: pos } });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey });
+      expect(view.state.doc.toString(), JSON.stringify({ doc, pos, shiftKey })).toBe(expected);
+      expect(view.state.selection.main.head).toBe(head);
+      view.destroy();
+    }
+  });
+
+  it("写作模式：跨公式或 raw 的选区只做安全换行，不在残余源码里插入段落符", () => {
+    for (const { doc, from, to, expected } of [
+      { doc: "a $x$ b", from: 2, to: 5, expected: "a \n b" },
+      { doc: "a `raw` b", from: 2, to: 7, expected: "a \n b" },
+    ]) {
+      for (const shiftKey of [false, true]) {
+        const view = makeWriteView(doc);
+        view.dispatch({ selection: { anchor: from, head: to } });
+        press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey });
+        expect(view.state.doc.toString(), JSON.stringify({ doc, shiftKey })).toBe(expected);
+        expect(view.state.selection.main.head).toBe(from + 1);
+        view.destroy();
+      }
+    }
+  });
+
+  it("写作模式：Enter 和 Shift+Enter 各作为一次编辑撤销，完整恢复源码和光标", () => {
+    for (const shiftKey of [false, true]) {
+      const view = makeWriteView("前段\n后段");
+      view.dispatch({ selection: { anchor: 2 } });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey });
+      expect(view.state.doc.toString()).toBe(shiftKey ? "前段\\\n后段" : "前段\n\n后段");
+      press(view, { key: "z", code: "KeyZ", keyCode: 90, ctrlKey: true });
+      expect(view.state.doc.toString()).toBe("前段\n后段");
+      expect(view.state.selection.main.head).toBe(2);
+      view.destroy();
+    }
+  });
+
   it("Ctrl+D 无选区删除整行（覆盖 searchKeymap 的选中下一处）", () => {
     const view = makeView("aaa\nbbb\nccc\n");
     view.dispatch({ selection: { anchor: 0 } }); // 光标在首行行首，无选区

@@ -93,6 +93,28 @@ fn block_partition_matches_typst_semantics() {
     );
 }
 
+/// 单个源码换行仍是同一段，空白行才分段；多留空行不应产生空的可见段落。
+/// 这是写作模式里 `1\n\n1` 多出空行问题的后端边界。
+#[test]
+fn paragraph_partition_distinguishes_soft_source_newline_from_blank_line() {
+    for (src, expected_paragraphs) in [
+        ("1\n1", 1),
+        ("1\n\n1", 2),
+        ("1\n \n1", 2),
+        ("1\n\n\n1", 2),
+        ("\n\n1\n\n", 1),
+    ] {
+        let paragraphs = source_blocks(src)
+            .into_iter()
+            .filter(|block| block.kind == "Paragraph")
+            .count();
+        assert_eq!(
+            paragraphs, expected_paragraphs,
+            "段落划分与 Typst 换行语义不符: {src:?}"
+        );
+    }
+}
+
 /// 前缀代码（设置里的编译前缀）不进块区间：返回的偏移应是**用户文档坐标**
 #[test]
 fn writing_mode_blocks_ignore_prefix_offset() {

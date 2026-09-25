@@ -35,6 +35,19 @@ describe("scanParagraphGapRows", () => {
     ]);
   });
 
+  it("全空文档与文首空白没有可压缩的段距；UTF-16 偏移仍指向正确空行", () => {
+    expect(gaps("\n\n  \n")).toEqual([]);
+    expect(gaps("  \n\n正文")).toEqual([]);
+    expect(gaps("😀段\n\n尾段")).toEqual([{ from: 4, count: 1 }]);
+  });
+
+  it("围栏代码内外的空行都由复杂块承载，不误作普通正文段距", () => {
+    const doc = ["前段", "", "```typ", "a", "", "b", "```", "", "后段"].join("\n");
+    expect(gaps(doc)).toEqual([]);
+    // 对照：删去围栏后，同一位置的普通段落空行才进入段距压缩。
+    expect(gaps("前段\n\n后段")).toEqual([{ from: 3, count: 1 }]);
+  });
+
   it("标题两侧的空白行也压缩（标题是可编辑文本，上下间距没有切片承载）", () => {
     const doc = "普通段落\n\n= 标题\n\n正文";
     expect(gaps(doc)).toEqual([
