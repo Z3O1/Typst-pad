@@ -89,6 +89,8 @@ PKU_ROOT="$HOME/PKU" ONLY=writing-pku-docs.mjs npm run verify:browser   # 只跑
 
 浏览器套件用 dev 桩跑的是"同一套产物 + 同一套前端"，**不能**替代真机：真机的字体来自 `bundled_font` IPC、编译在 Rust 侧同一进程、PDF 资源从作业原目录读。所以每次改写作链路（装饰、公式、块几何、分页）都要在一台有桌面环境的机器上按下面清单抽查一次，并把结论（通过/差异/截图）记进验收报告。
 
+**本机结论（2026-09-25，无桌面会话的环境）**：`npm run tauri dev` 编译与启动都成功，随后 GTK 事件循环初始化失败并 panic —— `Failed to initialize gtk backend!: "Failed to initialize GTK"`（`tao-0.35.3/src/platform_impl/linux/event_loop.rs`，exit 101），**没有窗口**。属环境受限（没有可用的显示会话/GTK），不是代码问题；下面的清单必须在有桌面 WebView 的机器上执行。
+
 准备：`npm run tauri dev`；作业原文放在 `~/PKU/26fall/...`（只读，不复制进仓库）。
 
 1. **加载与分页**：打开 `高等代数/week2-2026.9.24/1.typ`。逐页核对页面尺寸、页边距与 PDF 预览一致；`#set page(margin: 2.5cm)` 生效（不是注入页设置）。
