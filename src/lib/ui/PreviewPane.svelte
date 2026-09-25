@@ -103,11 +103,16 @@
   }
 
   /* 每页 SVG 顶层文档（compileToSvg 按页序拼接入预览容器）：铺满预览容器宽度
-     （容器宽度由缩放逻辑控制）、高度按比例——等宽缩放，文本不拉伸变形 */
+     （容器宽度由缩放逻辑控制）、高度按比例——等宽缩放，文本不拉伸变形。
+     夜间滤镜：typst 产物永远是白纸黑字，深色主题下整页反色成"深色纸 + 浅色字"。
+     值走页面变量 --night-svg-filter（`:root` 深色 / `.app.light` = none），与写作模式的
+     切片、公式**共用同一条**，所以切换主题**不需要重新编译** —— 已编译好的 SVG 立即换色。
+     （彩色图形与嵌入图片也会被反色，这是"不重新编译"的代价，取舍见 docs/development/frontend.md。） */
   .preview-paper > :global(svg) {
     display: block;
     width: 100%;
     height: auto;
+    filter: var(--night-svg-filter, none);
   }
 
   /* 页间分隔线（typst-engine composePages 注入的 <div class="page-separator">），随主题自适应 */

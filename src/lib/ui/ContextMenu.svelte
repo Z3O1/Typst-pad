@@ -2,8 +2,8 @@
   // 受控右键菜单弹层：props 传入条目与弹出位置，position 为 null 时不渲染。
   // - 弹出位置超出视口时自动收边（computeMenuPosition 纯函数）；
   // - 点击外部 / Escape / 窗口滚动（捕获阶段，覆盖内部滚动）/ 窗口失焦时回调 onClose。
-  // 样式与 MenuBar 下拉一致（共用 +page.svelte `:root` 里那组「弹出来的面板」固定浅色
-  // --panel-*，圆角阴影同款；深色主题下也是白底黑字）。
+  // 样式与 MenuBar 下拉一致（共用 +page.svelte `:root` / `.app.light` 里那组「弹出来的面板」
+  // --panel-*，圆角阴影同款；**跟随主题**：深色主题深面板 + 浅字，浅色主题白面板 + 深字）。
   import { computeMenuPosition } from "./context-menu-utils";
 
   export type ContextMenuItem =
@@ -108,8 +108,8 @@
 
 <style>
   .context-menu {
-    /* 与菜单下拉/弹窗/诊断浮层共用「弹出来的面板」固定浅色（--panel-*，定义在 +page.svelte 的 :root）。
-       做法同 MenuBar 下拉：就地重绑主题变量 + 面板自己的 color（不写 color 会继承深色主题的浅灰字）。 */
+    /* 与菜单下拉/弹窗/诊断浮层共用「弹出来的面板」配色（--panel-*，定义在 +page.svelte 的
+       `:root` 与 `.app.light`）。做法同 MenuBar 下拉：就地重绑主题变量 + 面板自己的 color。 */
     --border: var(--panel-border);
     --fg: var(--panel-fg);
     --fg-dim: var(--panel-fg-dim);

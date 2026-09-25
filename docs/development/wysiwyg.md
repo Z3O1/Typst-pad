@@ -16,7 +16,7 @@ CodeMirror 的 StateField 维护装饰。一般标记样式始终应用；每枚
 
 `MathOutput` 提供成功标志、SVG、宽高、基线和错误信息；**长行内公式还带 `segments`**（按顶层运算符切开、各自编译的片段，`+ - = < > <= >= != == -> <-`，括号内的运算符不算顶层，短公式不分段、任一片段编译失败就整体退回整块）。这是为了对齐折行：Typst 会在行内公式的运算符处折行，而浏览器把整块 SVG 当不可断的原子 —— PKU 实测同一段浏览器折 4 行、Typst 3 行，位置与行数两条门槛同时红。前端 `MathWidget` 把片段渲染成多个 `inline-block`、片段之间插 `<wbr>`（被完整选中时仍整块渲染）。**分段的门槛是"当前片段 ≥ 10 个源码字符"**（2026-09-25 由 20 降到 10）：片段就是交给浏览器的折行机会，门槛太高时 `左边=右边` 这类"Typst 会在中间折"的公式根本不给机会（实测数分周二 L122 的两处断点都落在第 12 个字符的 `=` 上）。代价是每多切一刀少一次运算符左侧间距，实测 4.7pt/刀（见 `compile_math_inline_segments_match_total_width`）。注意 `typst-engine` 的 `compileMath` 是逐字段重建结果对象的，新增字段必须显式带出去，否则整条链路白做。SVG 为贴边透明底，尺寸以 pt 表示。公式布局要把 Typst 绘制的墨迹纳入页面范围：文字使用 glyph ink edges，图形使用 shape bbox，并递归处理 group 仿射变换。若墨迹越界，再以显式页面尺寸和 padding 重排；正常情况不应无条件多编译一次。基线测量用双页探针：第二页放相同公式和低于基线的零宽参照，`page.frame.baseline()` 不能视为字形基线。详见 Rust `typst_world/math.rs`。
 
-源码模式默认 10.5pt（14 CSS px）；写作模式跟随文档正文点数，公式 SVG 的 pt 尺寸与编辑器 CSS 点数按同一尺度使用。Rust 与前端默认值须同步。暗色下公式黑字可反色显示；CodeMirror `EditorView.theme` 不支持 `&dark` 选择器，应通过主题 class 处理。
+源码模式默认 10.5pt（14 CSS px）；写作模式跟随文档正文点数，公式 SVG 的 pt 尺寸与编辑器 CSS 点数按同一尺度使用。Rust 与前端默认值须同步。暗色下公式黑字可反色显示，滤镜走页面变量 `--night-svg-filter`（`invert(1) contrast(.71)`，与块切片、整页预览共用，见[前端](frontend.md)）；CodeMirror `EditorView.theme` 不支持 `&dark` 选择器，应通过主题 class 处理。
 
 独占单行的行间公式仍使用行内 widget，并通过独立行装饰居中；跨行行间公式才使用块级 widget。围栏代码可渲染为纯文本代码块。块级装饰必须来自 StateField。空公式应安全回退或显示空结果，不得让排版错误破坏编辑。
 

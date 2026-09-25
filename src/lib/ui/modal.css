@@ -25,7 +25,8 @@
   background: rgba(255, 255, 255, 0.55);
 }
 
-/* 弹窗（关于 / 设置 / 更新 / 未保存确认）：**固定浅色面板**，做法见 `:root` 的 --panel-*。
+/* 弹窗（关于 / 设置 / 更新 / 未保存确认）：与菜单/右键菜单/诊断浮层共用「弹出来的面板」
+   配色（--panel-*，定义见 +page.svelte 的 `:root` 与 `.app.light`）。**跟随主题**。
    就地重绑主题变量 ⇒ 弹窗里的标题（--accent）、正文（--fg）、按钮与输入框（--bg-pane/--border）、
    更新说明（--fg-dim）全都自动跟着变，不用逐个改。 */
 .modal {
@@ -39,7 +40,7 @@
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   box-shadow: var(--panel-shadow);
-  color: var(--panel-fg); /* 见 :root 那段：不写这条就等于白底 + 深色主题的浅灰字 */
+  color: var(--panel-fg); /* 见 :root 那段：不写这条会继承 `.app` 的字色，与面板底色可能不是一对 */
   padding: 20px 24px;
 }
 
@@ -109,10 +110,12 @@
   color: var(--accent);
 }
 
+/* 实心主按钮：底色是 --panel-accent，字色必须单独给 —— 深色主题的 accent 是亮蓝，
+   配 #ffffff 对比度只有 1.6:1 左右（浅色主题的深蓝才配白字），所以走 --panel-btn-fg。 */
 .modal-btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #ffffff;
+  color: var(--panel-btn-fg);
 }
 
 .modal-btn.primary:hover {

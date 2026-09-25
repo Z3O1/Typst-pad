@@ -287,9 +287,10 @@
      `left: 0` 而不是 `right: 0` —— 徽标现在在状态栏最左（2026-09-14），右对齐会把 520px 宽的
      浮层整体推到窗口左侧外面（靠 clampPopoverRect 也能救回来，但那样每次都是"被夹住"的状态）。 */
   .error-popover {
-    /* 与弹窗/菜单同一套固定浅色面板（做法见 `:root` 的 --panel-*）：
-       浮层本体白底，里面的**每一条诊断（.error-item）用浅灰块**——条目灰、面板白，
-       这是用户 2026-09-18 指定的（此前是浅色主题下的反过来的组合：灰面板 + 白条目）。 */
+    /* 与弹窗/菜单同一套「弹出来的面板」配色（--panel-*，定义在 +page.svelte 的
+       `:root` 与 `.app.light`）：面板本体一个底色，里面的**每一条诊断（.error-item）
+       用次级底色**——深色主题是「深面板 + 略亮条目」，浅色是「白面板 + 浅灰条目」，
+       两边都是条目比面板"凸"一点。 */
     --bg-pane: var(--panel-soft-bg);
     --border: var(--panel-border);
     --fg: var(--panel-fg);
@@ -307,7 +308,7 @@
     border: 1px solid var(--panel-border);
     border-radius: 6px;
     box-shadow: var(--panel-shadow);
-    color: var(--panel-fg); /* 不写这条 = 白底 + 深色主题的浅灰字（见 :root 那段） */
+    color: var(--panel-fg); /* 面板自己的字色；不写这条会继承 `.app` 的字色 */
     padding: 8px;
     z-index: 50;
     /* 状态栏整条是 user-select: none，这里必须显式放开：浮层里的诊断文字要能拖选复制
@@ -374,8 +375,8 @@
   }
 
   /* 可点击的错误条目：左对齐、等宽定位、悬停高亮。
-     底色走 `--bg-pane`（浮层里已重绑成 --panel-soft-bg 的浅灰）——
-     「白面板 + 灰条目」是用户 2026-09-18 指定的组合。 */
+     底色走 `--bg-pane`（浮层里已重绑成 --panel-soft-bg 的**次级底色**）——
+     条目比面板底色亮一档（深色主题 #303033 / #252526，浅色主题 #f0f0f0 / #ffffff）。 */
   .error-item {
     display: flex;
     align-items: baseline;

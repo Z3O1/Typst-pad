@@ -48,10 +48,14 @@ export const mathWidgetTheme = EditorView.theme({
     width: "100%",
     height: "auto",
   },
-  // 暗色：typst 产物是白底黑字（页面自带白底），整体反色后即"深色纸 + 浅色字"，
-  // 与既有公式 widget 的反色策略一致（文档自带颜色会被反掉，见调研文档第三节）
+  // 暗色：typst 产物是白底黑字（页面自带白底），反色后即"深色纸 + 浅色字"。
+  // 滤镜值由页面统一定义在 --night-svg-filter（+page.svelte 的 `:root` / `.app.light`），
+  // 与整页预览共用同一条：`invert(1) contrast(.71)` —— 纯白纸 → #252525（≈ --bg-paper）、
+  // 纯黑字 → #dadada（≈ --fg），所以切片、公式与可编辑正文是同一张"纸"。
+  // 只写 invert(1) 会让白纸翻成纯黑、比编辑区底色还黑一截（2026-09-26 截图确认过）。
+  // 这里留 fallback，编辑器若不在 `.app` 子树里（测试桩 / 独立挂载）也不会丢掉反色。
   ".cm-block-crop-dark svg": {
-    filter: "invert(1)",
+    filter: "var(--night-svg-filter, invert(1) contrast(0.71))",
   },
 
   ".cm-math-widget": {
@@ -75,11 +79,13 @@ export const mathWidgetTheme = EditorView.theme({
     width: "100%",
     height: "100%",
   },
-  // 暗色主题：typst 产物是黑字透明底，深色背景上会看不见 → 整体反色
+  // 暗色主题：typst 产物是黑字透明底，深色背景上会看不见 → 反色
   // （只影响黑色笔画，透明底保持不变）。暗色标记由 Editor.svelte 按主题注入
   // （不用 `&dark` 选择器：EditorView.theme 不支持该前缀，实测抛 "Unsupported selector: &dark"）。
+  // 滤镜与块切片、整页预览同一条（见上面 .cm-block-crop-dark 的说明）：黑字 → #dadada，
+  // 与正文同色；透明底反色后仍是透明。
   ".cm-math-dark svg": {
-    filter: "invert(1)",
+    filter: "var(--night-svg-filter, invert(1) contrast(0.71))",
   },
   // 独占整行的行间公式：居中显示（与 typst 的独立式子一致）
   ".cm-math-block": {

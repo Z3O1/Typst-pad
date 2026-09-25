@@ -2179,6 +2179,8 @@
 
 <style>
   :root {
+    /* 原生控件（复选框 / 下拉框 / 滚动条）跟随主题；`.app.light` 里改回 light */
+    color-scheme: dark;
     --bg: #1e1e1e;
     --bg-pane: #252526;
     --bg-backdrop: #1a1a1a;
@@ -2189,29 +2191,37 @@
     --fg-dim: #9d9d9d;
     --accent: #4fc1ff;
 
-    /* 「弹出来的面板」的固定浅色（2026-09-18 用户要求：先「把上方菜单栏的展开菜单改成白色」，
-       再「所有弹出来的窗口、错误/警告浮层改成白色（每一个条目改成灰色）」）——
-       菜单下拉、右键菜单、弹窗（关于/设置/更新/未保存确认）、错误/警告浮层**共用这一组**，
-       **深色主题下也是白底黑字**，所以这几条**不跟上面那组主题变量走**。
-       用法（三处都一样，别逐个改子元素的颜色）：在面板根元素上把主题变量就地重绑一遍 ——
+    /* 「弹出来的面板」配色（菜单下拉、右键菜单、弹窗（关于/设置/更新/未保存确认）、
+       错误/警告浮层**共用这一组**）：**跟随主题**——这里给的是深色默认值，
+       浅色值在下面的 `.app.light` 里恢复（2026-09-26 改：此前把这组钉成固定白色，
+       深色主题下也是一块白板 + 整页预览一张白纸）。
+       用法（四处都一样，别逐个改子元素的颜色）：在面板根元素上把主题变量就地重绑一遍 ——
        `.modal` / `.error-popover` / `.context-menu` 里的子元素本来就只用
-       --fg / --fg-dim / --bg-pane / --border / --accent，重绑一次就整体变浅色、
-       而且不用去数有几个标题几个按钮。**必须同时给定面板自己的 `color`**：
-       继承下来的是 `.app` 上算好的 #d4d4d4（深色主题的浅灰），白底上等于看不见。
-       要调色只改这几行；**别把某一条改回主题变量**（白底 + 浅灰字 = 看不见）。 */
-    --panel-bg: #ffffff;
-    --panel-soft-bg: #f0f0f0; /* 影子面板上的「凹下去」的东西：诊断条目 / 输入框 / 进度槽 */
-    --panel-border: #d9d9d9;
-    --panel-fg: #1f1f1f;
-    --panel-fg-dim: #6b6b6b;
-    --panel-accent: #0b6bb5; /* 白底上的蓝用浅色主题那一支（深色的 #4fc1ff 在白底上太浅） */
-    --panel-hover-bg: #e8f2f9; /* 悬停：浅蓝底 + 蓝字（白底上用「亮蓝底 + 白字」看不清） */
-    --panel-hover-fg: #0b6bb5;
-    /* 白底面板的阴影要比深色面板时代浅（原来 0.45~0.5 会让白块边缘发黑） */
-    --panel-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+       --fg / --fg-dim / --bg-pane / --border / --accent，重绑一次就整体换色、
+       而且不用去数有几个标题几个按钮。面板都挂在 `.app` 子树里，所以 `.app.light`
+       覆盖这几条即可整体切回浅色。**必须同时给定面板自己的 `color`**：
+       继承下来的是 `.app` 上算好的字色，与面板底色不是一对时等于看不见。
+       要调色只改 `:root` 与 `.app.light` 这两处；**两条必须成对**。 */
+    --panel-bg: #252526;
+    --panel-soft-bg: #303033; /* 面板上「凹下去」的东西：诊断条目 / 输入框 / 进度槽 */
+    --panel-border: #3c3c3c;
+    --panel-fg: #e6e6e6;
+    --panel-fg-dim: #aeb0b5;
+    --panel-accent: #4fc1ff;
+    --panel-hover-bg: #2b3d4d; /* 悬停：深蓝底 + 亮蓝字 */
+    --panel-hover-fg: #4fc1ff;
+    --panel-hover-dim: #8fb6d0; /* 悬停时的快捷键/次要字，比 --panel-fg-dim 偏蓝 */
+    /* 实心主按钮（底色 = --panel-accent）上的字：亮蓝底配白字对比度不够 */
+    --panel-btn-fg: #10242f;
+    /* 夜间显示滤镜：typst 产物是白纸黑字，整页预览与写作切片/公式共用这一条反色
+       （白 #fff → #252525，黑 #000 → #dadada，与 --bg-paper / --fg 对得上）。
+       深色默认值在这里，浅色在 `.app.light` 里置 none。见 live-preview/theme.ts 与 PreviewPane。 */
+    --night-svg-filter: invert(1) contrast(0.71);
+    --panel-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   }
 
   .app.light {
+    color-scheme: light;
     --typora-caret: #1a1a1a;
     --bg: #f5f5f5;
     --bg-pane: #ffffff;
@@ -2222,6 +2232,21 @@
     --fg: #1f1f1f;
     --fg-dim: #6b6b6b;
     --accent: #0b6bb5;
+
+    /* 「弹出来的面板」的浅色（深色默认值见上面的 `:root`）：白底 + 深色字 + 浅蓝悬停 */
+    --panel-bg: #ffffff;
+    --panel-soft-bg: #f0f0f0;
+    --panel-border: #d9d9d9;
+    --panel-fg: #1f1f1f;
+    --panel-fg-dim: #6b6b6b;
+    --panel-accent: #0b6bb5; /* 白底上的蓝用浅色主题那一支（深色的 #4fc1ff 在白底上太浅） */
+    --panel-hover-bg: #e8f2f9; /* 悬停：浅蓝底 + 蓝字（白底上用「亮蓝底 + 白字」看不清） */
+    --panel-hover-fg: #0b6bb5;
+    --panel-hover-dim: #5a7f9c;
+    --panel-btn-fg: #ffffff;
+    --night-svg-filter: none;
+    /* 白底面板的阴影要比深色面板浅（0.45~0.5 会让白块边缘发黑） */
+    --panel-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
   }
 
   * {

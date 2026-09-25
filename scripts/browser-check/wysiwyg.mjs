@@ -18,6 +18,34 @@ const { check, state } = createChecker();
 const c = await connect();
 await boot(c, DEV_URL);
 
+// 「弹出来的面板」配色的期望计算值（+page.svelte 的 `:root` 给深色、`.app.light` 给浅色）。
+// 菜单下拉、右键菜单、四个弹窗、错误/警告浮层**共用同一组变量**，所以期望值也集中放在这里，
+// 第 16 组（菜单）与第 45 组（四类弹层 + 右键菜单）复用同一份，改色只需改这里。
+const PANEL_DARK = {
+  bg: "rgb(37, 37, 38)", // --panel-bg #252526
+  soft: "rgb(48, 48, 51)", // --panel-soft-bg #303033（浮层条目 / 输入框）
+  fg: "rgb(230, 230, 230)", // --panel-fg #e6e6e6
+  dim: "rgb(174, 176, 181)", // --panel-fg-dim #aeb0b5
+  accent: "rgb(79, 193, 255)", // --panel-accent #4fc1ff
+  hoverBg: "rgb(43, 61, 77)", // --panel-hover-bg #2b3d4d
+  hoverFg: "rgb(79, 193, 255)", // --panel-hover-fg #4fc1ff
+  hoverDim: "rgb(143, 182, 208)", // --panel-hover-dim #8fb6d0
+};
+const PANEL_LIGHT = {
+  bg: "rgb(255, 255, 255)", // --panel-bg #ffffff
+  soft: "rgb(240, 240, 240)", // --panel-soft-bg #f0f0f0
+  fg: "rgb(31, 31, 31)", // --panel-fg #1f1f1f
+  dim: "rgb(107, 107, 107)", // --panel-fg-dim #6b6b6b
+  accent: "rgb(11, 107, 181)", // --panel-accent #0b6bb5
+  hoverBg: "rgb(232, 242, 249)", // --panel-hover-bg #e8f2f9
+  hoverFg: "rgb(11, 107, 181)", // --panel-hover-fg #0b6bb5
+  hoverDim: "rgb(90, 127, 156)", // --panel-hover-dim #5a7f9c
+};
+/** 夜间显示滤镜：整页预览 + 写作模式切片/公式共用（+page.svelte 的 --night-svg-filter）。
+ *  `invert(1)` 只把白纸翻成纯黑（比编辑区底色还黑一截，截图里就是"纯黑块"），
+ *  后面这截 contrast(.71) 才是让它落到 #252525 / #dadada、与正文同一张纸的那一步。 */
+const NIGHT_SVG_FILTER = "invert(1) contrast(0.71)";
+
 /** 编辑器内的可见文本（widget 已替换的部分不出现，除非有 title/aria） */
 const editorText = `document.querySelector(".cm-content").innerText`;
 /** 行内公式 widget 数量 */
@@ -495,8 +523,10 @@ const viewMenu = await c.evaluate(`(() => {
 })()`);
 await c.click(viewMenu.x, viewMenu.y);
 await c.waitFor(`document.body.innerText.includes("显示预览栏")`, { timeout: 5000 });
-// 展开菜单固定浅色面板（用户 2026-09-18 要求「把上方菜单栏的展开菜单改成白色」）：
-// 断言实测计算样式，而不是"面板出现了"——把颜色改回主题变量（--bg-toolbar/--fg）这条就会红
+// 展开菜单与弹窗 / 右键菜单 / 诊断浮层共用「弹出来的面板」配色，**跟随主题**
+//（2026-09-26 改：此前这组固定白色，深色主题下也是一块白板）。这里是「主题：自动」，
+// 而无头 Chrome 报浅色偏好 ⇒ 期望白底黑字。显式切「主题：暗」的那半在后面同一组里。
+// 断言实测计算样式，而不是"面板出现了"——把面板底色接回 --bg-toolbar 这类工具栏变量这条就会红。
 const menuPalette = await c.evaluate(`(() => {
   const panel = document.querySelector(".menu-dropdown");
   const item = panel ? panel.querySelector(".menu-item") : null;
@@ -506,13 +536,13 @@ const menuPalette = await c.evaluate(`(() => {
   };
 })()`);
 check(
-  "展开菜单是白色面板（不跟深色主题走）",
-  menuPalette.panelBg === "rgb(255, 255, 255)",
+  "浅色主题下展开菜单是白色面板（面板跟随主题）",
+  menuPalette.panelBg === PANEL_LIGHT.bg,
   JSON.stringify(menuPalette),
 );
 check(
-  "菜单项文字是深色（白底可读）",
-  menuPalette.itemColor === "rgb(31, 31, 31)",
+  "浅色主题下菜单项文字是深色（白底可读）",
+  menuPalette.itemColor === PANEL_LIGHT.fg,
   JSON.stringify(menuPalette),
 );
 await c.screenshot(SHOT("wysiwyg-16-menu-white"));
@@ -538,8 +568,9 @@ check(
 );
 await c.screenshot(SHOT("wysiwyg-16-split-again"));
 
-// 展开菜单在**深色主题**下也必须是白底黑字（用户提这条需求时用的就是深色主题）。
-// 组内前面那次是「主题：自动」，而无头 Chrome 报浅色偏好 ⇒ 上面截的是浅色主题的菜单；
+// 展开菜单在**深色主题**下必须跟着变深（2026-09-26 改：此前这组要求"深色下仍是白底"，
+// 用户看到深色编辑器旁边戳着一块白板 + 一张白纸预览，明确要求夜间模式整页深色）。
+// 组内前面那次是「主题：自动」，而无头 Chrome 报浅色偏好 ⇒ 上面量到的是浅色主题的菜单；
 // 这里显式切到「主题：暗」再验一遍，最后切回「自动」复原（后面的组不该受这次切换影响）。
 const pickMenu16 = async (label) => {
   const rect = await c.evaluate(`(() => {
@@ -567,25 +598,75 @@ await openView16();
 const darkMenu = await c.evaluate(`(() => {
   const panel = document.querySelector(".menu-dropdown");
   const item = panel.querySelector(".menu-item");
+  const shortcut = panel.querySelector(".menu-item-shortcut");
   return {
     panelBg: getComputedStyle(panel).backgroundColor,
     itemColor: getComputedStyle(item).color,
     toolbarBg: getComputedStyle(document.querySelector(".toolbar")).backgroundColor,
+    shortcutColor: shortcut ? getComputedStyle(shortcut).color : null,
+    // 深色主题下应用声明的是 color-scheme: dark（复选框/下拉/滚动条跟随），浅色反过来
+    colorScheme: getComputedStyle(document.querySelector(".app")).colorScheme,
   };
 })()`);
 check(
-  "深色主题下展开菜单仍是白底（面板不跟主题走）",
-  darkMenu.panelBg === "rgb(255, 255, 255)" && darkMenu.toolbarBg !== "rgb(255, 255, 255)",
+  "深色主题下展开菜单是深色面板（面板跟随主题）",
+  darkMenu.panelBg === PANEL_DARK.bg && darkMenu.toolbarBg !== "rgb(255, 255, 255)",
   JSON.stringify(darkMenu),
 );
 check(
-  "深色主题下菜单项文字仍是深色（白底可读）",
-  darkMenu.itemColor === "rgb(31, 31, 31)",
+  "深色主题下菜单项文字是浅色（深底可读）",
+  darkMenu.itemColor === PANEL_DARK.fg,
   JSON.stringify(darkMenu),
 );
-await c.screenshot(SHOT("wysiwyg-16-menu-white-dark"));
+check(
+  "深色主题下快捷键灰字是深色面板那一支（不是给白底调的深蓝灰）",
+  darkMenu.shortcutColor === PANEL_DARK.dim,
+  JSON.stringify(darkMenu),
+);
+check(
+  "深色主题下应用声明 color-scheme: dark（原生控件跟随）",
+  darkMenu.colorScheme === "dark",
+  JSON.stringify(darkMenu),
+);
+// 悬停态：**真发一次 mouseMoved**（不合成 hover 类），否则量不到 :hover 那几条规则。
+// 这里正是原来写死给白底的 #5a7f9c 会露馅的地方 —— 深色面板上它几乎糊进悬停底色里。
+const hoverItem16 = await c.evaluate(`(() => {
+  const e = document.querySelector(".menu-dropdown .menu-item");
+  const r = e.getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+})()`);
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseMoved",
+  x: hoverItem16.x,
+  y: hoverItem16.y,
+  button: "none",
+  buttons: 0,
+});
+await new Promise((r) => setTimeout(r, 150));
+const darkMenuHover = await c.evaluate(`(() => {
+  const item = document.querySelector(".menu-dropdown .menu-item:hover");
+  if (!item) return { missing: true };
+  const shortcut = item.querySelector(".menu-item-shortcut");
+  return {
+    itemBg: getComputedStyle(item).backgroundColor,
+    itemColor: getComputedStyle(item).color,
+    shortcutColor: shortcut ? getComputedStyle(shortcut).color : null,
+  };
+})()`);
+check(
+  "深色主题下悬停条目走深蓝底 + 亮蓝字、快捷键用悬停灰（不是写死的白底配色）",
+  darkMenuHover.itemBg === PANEL_DARK.hoverBg &&
+    darkMenuHover.itemColor === PANEL_DARK.hoverFg &&
+    darkMenuHover.shortcutColor === PANEL_DARK.hoverDim,
+  JSON.stringify(darkMenuHover),
+);
+await c.screenshot(SHOT("wysiwyg-16-menu-dark"));
 await pickMenu16("主题：自动"); // 复原
 await c.waitFor(`document.querySelector(".app").classList.contains("light")`, { timeout: 5000 });
+const lightScheme = await c.evaluate(
+  `getComputedStyle(document.querySelector(".app")).colorScheme`,
+);
+check("切回浅色后 color-scheme 变回 light", lightScheme === "light", lightScheme);
 
 console.log("17) 切到源代码模式 → 自动回到双栏（源码 + 预览）");
 const viewMenu2 = await c.evaluate(`(() => {
@@ -3922,18 +4003,19 @@ check(
 );
 
 // ---------------------------------------------------------------------------
-// 第 45 组：「弹出来的东西」一律白底
-// 背景（用户 2026-09-18 原话：「把所有弹出来的窗口，和 错误 警告 的浮窗（把每一个条目改成
-// 灰色），改成白色」）：上一版只把**菜单下拉**改成固定浅色（第 16 组），这一版把同一套
-// --panel-* 用到右键菜单、四个弹窗、错误/警告两个浮层上；浮层里的**条目**改浅灰
-// （原来是「浅色主题下灰面板 + 白条目」，现在反过来：白面板 + 灰条目）。
+// 第 45 组：「弹出来的东西」跟随主题 —— 深色主题下一律深色，浅色主题下一律浅色
+// 历史：2026-09-18 用户要求「把所有弹出来的窗口，和 错误 警告 的浮窗改成白色」，
+// 这组于是把菜单下拉、右键菜单、四个弹窗、错误/警告两个浮层统统钉在固定白底上（第 16 组同款）。
+// **2026-09-26 翻面**：夜间模式下那块白板与整页预览的白纸连成一片（截图见第 16 组），
+// 用户要求整个界面深色，于是同一套 --panel-* 改成"跟随主题"（深色值在 +page.svelte 的 `:root`，
+// 浅色值在 `.app.light`）。
 //
-// 断言分两段：① 先在**深色主题**下量（这几处原来跟 --bg-toolbar(#2d2d30)/--fg(#d4d4d4) 走，
-// 改回主题变量这条立刻红 —— 浅色主题下改回去只是 #ececec 的白，肉眼不容易发现，恰恰是
-// 用户报的那种"灰面板"）；② 再量浮层条目与文字（白底 + 浅灰字 = 看不见，所以单独钉住
-// 文字颜色）。更新弹窗与这里量到的四个弹窗共用 `.modal` 一条规则，不另测。
+// 断言分两段：① 深色主题下面板深、字浅、条目比面板亮一档（把 --panel-* 钉回浅色立刻红）；
+// ② 浅色主题下面板白、字深（**这段不能省**：只测深色的话，把 `.app.light` 里那组浅色值
+// 整段删掉也照样全绿，浅色主题却会变成"深色编辑器 + 白板"的镜像故障）。
+// 更新弹窗与这里量到的四个弹窗共用 `.modal` 一条规则，不另测。
 // ---------------------------------------------------------------------------
-console.log("45) 弹出来的面板一律白底（弹窗 / 错误·警告浮层 / 右键菜单），浮层条目是浅灰");
+console.log("45) 弹出来的面板跟随主题（深色下深、浅色下浅）：弹窗 / 浮层 / 右键菜单");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
@@ -3942,20 +4024,32 @@ await new Promise((r) => setTimeout(r, 700));
 /** 某个选择器上的一条计算样式（取不到元素时返回 null，不抛） */
 const style45 = (sel, prop) =>
   `(() => { const e = document.querySelector(${JSON.stringify(sel)}); return e ? getComputedStyle(e).${prop} : null; })()`;
-const PANEL45_BG = "rgb(255, 255, 255)"; // --panel-bg
-const PANEL45_SOFT = "rgb(240, 240, 240)"; // --panel-soft-bg（浮层里的条目）
-const PANEL45_FG = "rgb(31, 31, 31)"; // --panel-fg
+// 深色主题的期望值（与第 16 组共用顶部那份常量；浅色那份在第 45b 段用 PANEL_LIGHT）
+const PANEL45_BG = PANEL_DARK.bg; // --panel-bg
+const PANEL45_SOFT = PANEL_DARK.soft; // --panel-soft-bg（浮层里的条目 / 输入框）
+const PANEL45_FG = PANEL_DARK.fg; // --panel-fg
+const PANEL45_DIM = PANEL_DARK.dim; // --panel-fg-dim（说明文字 / 禁用项 / 复制按钮）
+const PANEL45_ACCENT = PANEL_DARK.accent; // --panel-accent（弹窗标题）
 
 // 切到深色主题再量（入口同第 16 组；本组结束时切回「自动」复原）
 await openMenu("视图");
 await c.waitFor(`!!document.querySelector(".menu-dropdown")`, { timeout: 5000 });
 await clickMenuItem("主题：暗");
 await c.waitFor(`!document.querySelector(".app").classList.contains("light")`, { timeout: 5000 });
-const panel45Toolbar = await c.evaluate(style45(".toolbar", "backgroundColor"));
+// 前置：确实在深色主题（`.app` 没有 light 类，且工具栏不是**浅色**面板底）。
+// 别写"工具栏 ≠ --panel-bg"：工具栏走的正是 --bg-pane，深色主题下两者同值（#252526），
+// 那个写法在面板翻成深色之后必然红 —— 是断言本身失效，不是主题没切过去（2026-09-26 踩过）。
+const panel45Pre = await c.evaluate(`(() => {
+  const app = document.querySelector(".app");
+  return {
+    hasLight: app.classList.contains("light"),
+    toolbarBg: getComputedStyle(document.querySelector(".toolbar")).backgroundColor,
+  };
+})()`);
 check(
-  "（前置）确实是深色主题：工具栏仍是深色",
-  panel45Toolbar !== PANEL45_BG,
-  String(panel45Toolbar),
+  "（前置）确实是深色主题：.app 无 light 类、工具栏不是浅色面板底",
+  !panel45Pre.hasLight && panel45Pre.toolbarBg !== PANEL_LIGHT.bg,
+  JSON.stringify(panel45Pre),
 );
 
 // —— 设置弹窗（弹窗里元素最多的一种：标题 / 正文 / 说明文字 / 下拉 / 多行输入框 / 按钮）——
@@ -3970,19 +4064,28 @@ const set45 = {
   dim: await c.evaluate(style45(".settings-modal .settings-hint", "color")),
   areaBg: await c.evaluate(style45(".settings-modal .settings-textarea", "backgroundColor")),
   areaColor: await c.evaluate(style45(".settings-modal .settings-textarea", "color")),
+  // 实心主按钮（「保存」）的底色/字色：深色主题的 accent 是亮蓝，配白字只有 ~1.6:1，
+  // 必须走 --panel-btn-fg（深色主题给深字、浅色主题才给白字）。
+  btnBg: await c.evaluate(style45(".settings-modal .modal-btn.primary", "backgroundColor")),
+  btnColor: await c.evaluate(style45(".settings-modal .modal-btn.primary", "color")),
 };
-check("深色主题下设置弹窗是白底", set45.bg === PANEL45_BG, JSON.stringify(set45));
+check("深色主题下设置弹窗是深色面板", set45.bg === PANEL45_BG, JSON.stringify(set45));
 check(
-  "弹窗里的正文是深色、说明是灰字（白底上都读得出来）",
-  set45.color === PANEL45_FG && set45.dim === "rgb(107, 107, 107)",
+  "弹窗里的正文是浅色、说明是次级灰（深底上都读得出来）",
+  set45.color === PANEL45_FG && set45.dim === PANEL45_DIM,
   JSON.stringify(set45),
 );
 check(
-  "多行输入框是浅灰底 + 深色字（不是深色主题的深灰底浅灰字）",
+  "多行输入框是次级深灰底 + 浅色字（比面板亮一档，不是白底深字）",
   set45.areaBg === PANEL45_SOFT && set45.areaColor === PANEL45_FG,
   JSON.stringify(set45),
 );
-await c.screenshot(SHOT("wysiwyg-45-settings-white-dark"));
+check(
+  "主按钮是亮蓝底 + **深色**字（亮蓝配白字看不清——--panel-btn-fg）",
+  set45.btnBg === PANEL45_ACCENT && set45.btnColor === "rgb(16, 36, 47)",
+  JSON.stringify(set45),
+);
+await c.screenshot(SHOT("wysiwyg-45-settings-dark"));
 await c.key("Escape", { code: "Escape", keyCode: 27 });
 await new Promise((r) => setTimeout(r, 400));
 
@@ -3998,17 +4101,15 @@ const about45 = {
   note: await c.evaluate(style45(".about-modal .about-note", "color")),
 };
 check(
-  "深色主题下关于弹窗也是白底（共用 .modal 那条规则）",
-  about45.bg === PANEL45_BG &&
-    about45.title === "rgb(11, 107, 181)" &&
-    about45.note === "rgb(107, 107, 107)",
+  "深色主题下关于弹窗也是深色面板（共用 .modal 那条规则）",
+  about45.bg === PANEL45_BG && about45.title === PANEL45_ACCENT && about45.note === PANEL45_DIM,
   JSON.stringify(about45),
 );
-await c.screenshot(SHOT("wysiwyg-45-about-white-dark"));
+await c.screenshot(SHOT("wysiwyg-45-about-dark"));
 await c.evaluate(`document.querySelector(".about-modal .modal-actions .modal-close").click()`);
 await new Promise((r) => setTimeout(r, 300));
 
-// —— 警告浮层：白底 + 灰条目 ——
+// —— 警告浮层：深色面板 + 比面板亮一档的条目 ——
 await c.evaluate(`document.querySelector(".cm-content").focus()`);
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
@@ -4025,16 +4126,16 @@ const warn45 = {
   itemColor: await c.evaluate(style45(".warning-popover .error-item-msg", "color")),
 };
 check(
-  "深色主题下警告浮层是白底、条目标题是灰字",
-  warn45.bg === PANEL45_BG && warn45.titleColor === "rgb(107, 107, 107)",
+  "深色主题下警告浮层是深色面板、条目标题是次级灰",
+  warn45.bg === PANEL45_BG && warn45.titleColor === PANEL45_DIM,
   JSON.stringify(warn45),
 );
 check(
-  "警告浮层里的每一个条目是浅灰底 + 深色字（用户指定的组合）",
+  "警告浮层里的每一个条目是次级深灰底 + 浅色字（比面板亮一档）",
   warn45.itemBg === PANEL45_SOFT && warn45.itemColor === PANEL45_FG,
   JSON.stringify(warn45),
 );
-await c.screenshot(SHOT("wysiwyg-45-warning-white-dark"));
+await c.screenshot(SHOT("wysiwyg-45-warning-dark"));
 await c.key("Escape", { code: "Escape", keyCode: 27 });
 await new Promise((r) => setTimeout(r, 300));
 
@@ -4055,41 +4156,42 @@ const err45 = {
   copyColor: await c.evaluate(style45(".error-popover .error-item-copy", "color")),
 };
 check(
-  "深色主题下错误浮层是白底 + 浅灰条目（与警告侧同款）",
+  "深色主题下错误浮层是深色面板 + 次级深灰条目（与警告侧同款）",
   err45.bg === PANEL45_BG && err45.itemBg === PANEL45_SOFT,
   JSON.stringify(err45),
 );
 check(
-  "错误浮层里的行列与「复制」按钮是灰字（白底上仍读得出来）",
-  err45.itemLoc === "rgb(107, 107, 107)" && err45.copyColor === "rgb(107, 107, 107)",
+  "错误浮层里的行列与「复制」按钮是次级灰（深底上仍读得出来）",
+  err45.itemLoc === PANEL45_DIM && err45.copyColor === PANEL45_DIM,
   JSON.stringify(err45),
 );
-await c.screenshot(SHOT("wysiwyg-45-error-white-dark"));
+await c.screenshot(SHOT("wysiwyg-45-error-dark"));
 await c.key("Escape", { code: "Escape", keyCode: 27 });
 await new Promise((r) => setTimeout(r, 300));
 
 // —— 右键菜单：同一套 --panel-*（**真实右键**：不是合成事件）——
-const ctx45Point = await c.evaluate(`(() => {
-  const r = document.querySelector(".cm-content").getBoundingClientRect();
-  return { x: Math.round(r.left + 60), y: Math.round(r.top + 20) };
-})()`);
-await c.send("Input.dispatchMouseEvent", {
-  type: "mousePressed",
-  x: ctx45Point.x,
-  y: ctx45Point.y,
-  button: "right",
-  buttons: 2,
-  clickCount: 1,
-});
-await c.send("Input.dispatchMouseEvent", {
-  type: "mouseReleased",
-  x: ctx45Point.x,
-  y: ctx45Point.y,
-  button: "right",
-  buttons: 0,
-  clickCount: 1,
-});
-await c.waitFor(`!!document.querySelector(".context-menu")`, { timeout: 5000 });
+/** 在编辑器左上角发一次真实右键并等菜单出来（深色 / 浅色两段共用） */
+const openContext45 = async () => {
+  const p = await c.evaluate(`(() => {
+    const r = document.querySelector(".cm-content").getBoundingClientRect();
+    return { x: Math.round(r.left + 60), y: Math.round(r.top + 20) };
+  })()`);
+  for (const [type, buttons] of [
+    ["mousePressed", 2],
+    ["mouseReleased", 0],
+  ]) {
+    await c.send("Input.dispatchMouseEvent", {
+      type,
+      x: p.x,
+      y: p.y,
+      button: "right",
+      buttons,
+      clickCount: 1,
+    });
+  }
+  await c.waitFor(`!!document.querySelector(".context-menu")`, { timeout: 5000 });
+};
+await openContext45();
 const ctx45 = {
   bg: await c.evaluate(style45(".context-menu", "backgroundColor")),
   // 逐个条目读：空文档上「剪切 / 复制」是 disabled（灰字），别拿第一条当代表
@@ -4101,22 +4203,218 @@ const ctx45 = {
   }))`),
 };
 check(
-  "深色主题下右键菜单是白底 + 可用条目是深色字（禁用的那几条照旧灰字）",
+  "深色主题下右键菜单是深色面板 + 可用条目是浅色字（禁用的那几条是次级灰）",
   ctx45.bg === PANEL45_BG &&
     ctx45.items.some((i) => !i.disabled && i.color === PANEL45_FG) &&
-    ctx45.items.every((i) => i.color === PANEL45_FG || i.color === "rgb(107, 107, 107)"),
+    ctx45.items.every((i) => i.color === PANEL45_FG || i.color === PANEL45_DIM),
   JSON.stringify(ctx45),
 );
-await c.screenshot(SHOT("wysiwyg-45-context-white-dark"));
+await c.screenshot(SHOT("wysiwyg-45-context-dark"));
 await c.key("Escape", { code: "Escape", keyCode: 27 });
 await new Promise((r) => setTimeout(r, 250));
 check("Esc 收起右键菜单", !(await c.evaluate(`!!document.querySelector(".context-menu")`)));
+
+// ---------------------------------------------------------------------------
+// 第 45b 段：切到**浅色**主题，同一批面板必须回到白底深字
+// 这段是防"翻面只翻了深色"：`.app.light` 里那组浅色 --panel-* 一旦漏掉，
+// 浅色主题就会变成"浅色界面 + 深色菜单/弹窗"，而只测深色的第 45 组照样全绿。
+// 挑三处代表量：菜单下拉、设置弹窗、右键菜单（浮层两处与弹窗共用变量，不重复占运行时间）。
+// ---------------------------------------------------------------------------
+console.log("45b) 切到浅色主题：同一批面板回到白底深字");
+await openMenu("视图");
+await c.waitFor(`!!document.querySelector(".menu-dropdown")`, { timeout: 5000 });
+await clickMenuItem("主题：明");
+await c.waitFor(`document.querySelector(".app").classList.contains("light")`, { timeout: 5000 });
+
+await openMenu("视图");
+await c.waitFor(`!!document.querySelector(".menu-dropdown")`, { timeout: 5000 });
+const lightMenu45 = await c.evaluate(`(() => {
+  const panel = document.querySelector(".menu-dropdown");
+  const item = panel.querySelector(".menu-item");
+  return { panelBg: getComputedStyle(panel).backgroundColor, itemColor: getComputedStyle(item).color };
+})()`);
+check(
+  "浅色主题下展开菜单回到白底 + 深色字",
+  lightMenu45.panelBg === PANEL_LIGHT.bg && lightMenu45.itemColor === PANEL_LIGHT.fg,
+  JSON.stringify(lightMenu45),
+);
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 200));
+
+await openMenu("文件");
+await c.waitFor(`document.body.innerText.includes("设置")`, { timeout: 5000 });
+await clickMenuItem("设置");
+await c.waitFor(`!!document.querySelector(".settings-modal")`, { timeout: 5000 });
+await new Promise((r) => setTimeout(r, 300));
+const lightSet45 = {
+  bg: await c.evaluate(style45(".settings-modal", "backgroundColor")),
+  color: await c.evaluate(style45(".settings-modal .modal-text", "color")),
+  dim: await c.evaluate(style45(".settings-modal .settings-hint", "color")),
+  areaBg: await c.evaluate(style45(".settings-modal .settings-textarea", "backgroundColor")),
+  areaColor: await c.evaluate(style45(".settings-modal .settings-textarea", "color")),
+  btnBg: await c.evaluate(style45(".settings-modal .modal-btn.primary", "backgroundColor")),
+  btnColor: await c.evaluate(style45(".settings-modal .modal-btn.primary", "color")),
+};
+check(
+  "浅色主题下设置弹窗回到白底 + 深色正文/次级灰说明",
+  lightSet45.bg === PANEL_LIGHT.bg &&
+    lightSet45.color === PANEL_LIGHT.fg &&
+    lightSet45.dim === PANEL_LIGHT.dim,
+  JSON.stringify(lightSet45),
+);
+check(
+  "浅色主题下输入框回到浅灰底深字，主按钮回到深蓝底**白字**",
+  lightSet45.areaBg === PANEL_LIGHT.soft &&
+    lightSet45.areaColor === PANEL_LIGHT.fg &&
+    lightSet45.btnBg === PANEL_LIGHT.accent &&
+    lightSet45.btnColor === "rgb(255, 255, 255)",
+  JSON.stringify(lightSet45),
+);
+await c.screenshot(SHOT("wysiwyg-45-settings-light"));
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 400));
+
+await openContext45();
+const lightCtx45 = {
+  bg: await c.evaluate(style45(".context-menu", "backgroundColor")),
+  items:
+    await c.evaluate(`Array.from(document.querySelectorAll(".context-menu .menu-item")).map((e) => ({
+    text: e.textContent.trim(),
+    color: getComputedStyle(e).color,
+    disabled: e.disabled,
+  }))`),
+};
+check(
+  "浅色主题下右键菜单回到白底 + 可用条目深色字",
+  lightCtx45.bg === PANEL_LIGHT.bg &&
+    lightCtx45.items.some((i) => !i.disabled && i.color === PANEL_LIGHT.fg) &&
+    lightCtx45.items.every((i) => i.color === PANEL_LIGHT.fg || i.color === PANEL_LIGHT.dim),
+  JSON.stringify(lightCtx45),
+);
+await c.screenshot(SHOT("wysiwyg-45-context-light"));
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await new Promise((r) => setTimeout(r, 250));
 
 // 收尾：切回「自动」主题（后面的收尾/下一次运行不该受本组影响）
 await openMenu("视图");
 await c.waitFor(`!!document.querySelector(".menu-dropdown")`, { timeout: 5000 });
 await clickMenuItem("主题：自动");
 await c.waitFor(`document.querySelector(".app").classList.contains("light")`, { timeout: 5000 });
+
+// ---------------------------------------------------------------------------
+// 第 46 组：夜间滤镜统一（整页预览 / 公式），且切主题**不重新编译**
+// 背景：typst 产物永远是白纸黑字。深色主题下要整页反色成"深色纸 + 浅色字"，做法是给
+// 预览页 SVG 与写作模式的公式/切片 SVG 挂**同一条**滤镜（--night-svg-filter，
+// 写作切片那半在 writing-blocks.mjs 第 6 组）。两处讲究：
+//   ① 只写 invert(1) 会把白纸翻成纯黑 —— 比编辑区底色还黑一截，用户截图里就是"纯黑块"；
+//      后面那截 contrast(.71) 才把纸落到 #252525、字落到 #dadada。这里钉完整滤镜值。
+//   ② 切主题**只改计算样式**：整页预览是已编译好的 SVG，重新编译会让白纸闪一下。
+//      用"切换前打的探针属性还在不在"证明节点没被换掉（innerHTML 没被重写）。
+// ---------------------------------------------------------------------------
+console.log("46) 夜间滤镜：整页预览与公式共用同一条，切主题不重新编译");
+
+/** 切主题（走真实菜单；主题偏好本身在第 16 / 45 组测） */
+const setTheme46 = async (label) => {
+  await openMenu("视图");
+  await c.waitFor(`!!document.querySelector(".menu-dropdown")`, { timeout: 5000 });
+  await clickMenuItem(label);
+  await new Promise((r) => setTimeout(r, 350));
+};
+/** 是否写作模式：看 .editor-host 的 write 类（预览栏显隐还可能被手工开关，不作判据） */
+const inWriteMode46 = `document.querySelector(".editor-host").className.includes("write")`;
+/** 切到目标模式（Ctrl+E 双向切换） */
+const ensureMode46 = async (wantWrite) => {
+  if ((await c.evaluate(inWriteMode46)) === wantWrite) return;
+  await c.evaluate(`document.querySelector(".cm-content").focus()`);
+  await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+  await new Promise((r) => setTimeout(r, 700));
+};
+
+// —— 第一段：整页预览（写作模式下预览栏收起，先切到源代码模式）——
+await setTheme46("主题：明");
+await ensureMode46(false);
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+await c.type("= 夜间预览\n\n正文与公式 $x^2 + y^2 = z^2$。\n");
+await c.waitFor(`!!document.querySelector("#preview-host > svg")`, { timeout: 20000 });
+await new Promise((r) => setTimeout(r, 400));
+// 探针：主题切换若触发重新编译，innerHTML 会整段重写，这个属性就没了
+await c.evaluate(
+  `document.querySelector("#preview-host > svg").setAttribute("data-theme-probe", "46")`,
+);
+const lightPrev46 = await c.evaluate(`(() => {
+  const svg = document.querySelector("#preview-host > svg");
+  return {
+    filter: getComputedStyle(svg).filter,
+    pages: document.querySelectorAll("#preview-host > svg").length,
+  };
+})()`);
+check(
+  "浅色主题下整页预览不加滤镜（白纸原样输出）",
+  lightPrev46.filter === "none",
+  JSON.stringify(lightPrev46),
+);
+await c.screenshot(SHOT("wysiwyg-46-preview-light"));
+
+await setTheme46("主题：暗");
+await new Promise((r) => setTimeout(r, 400));
+const darkPrev46 = await c.evaluate(`(() => {
+  const svg = document.querySelector("#preview-host > svg");
+  return {
+    filter: svg ? getComputedStyle(svg).filter : null,
+    probeKept: !!document.querySelector('#preview-host > svg[data-theme-probe="46"]'),
+    pages: document.querySelectorAll("#preview-host > svg").length,
+  };
+})()`);
+check(
+  "深色主题下整页预览套上 invert(1) contrast(.71)（只 invert 会得到纯黑纸）",
+  darkPrev46.filter === NIGHT_SVG_FILTER,
+  JSON.stringify(darkPrev46),
+);
+check(
+  "切主题没有重新编译：同一张预览 SVG 节点还在（探针属性保留、页数不变）",
+  darkPrev46.probeKept && darkPrev46.pages === lightPrev46.pages,
+  JSON.stringify(darkPrev46),
+);
+await c.screenshot(SHOT("wysiwyg-46-preview-dark"));
+
+// —— 第二段：公式 widget（只在写作模式渲染，所以这里切回写作模式）——
+await ensureMode46(true);
+await c.evaluate(`document.querySelector(".cm-content").focus()`);
+await c.selectAll();
+await c.type("公式 $x^2 + y^2 = z^2$ 在这里。\n");
+await c.waitFor(`!!document.querySelector(".cm-math-widget svg")`, { timeout: 25000 });
+await new Promise((r) => setTimeout(r, 300));
+const darkMath46 = await c.evaluate(`(() => {
+  const w = document.querySelector(".cm-math-widget");
+  return {
+    hasDarkClass: w.className.includes("cm-math-dark"),
+    filter: getComputedStyle(w.querySelector("svg")).filter,
+  };
+})()`);
+check(
+  "深色主题下公式 widget 用同一条夜间滤镜（与整页预览一致）",
+  darkMath46.hasDarkClass && darkMath46.filter === NIGHT_SVG_FILTER,
+  JSON.stringify(darkMath46),
+);
+await c.screenshot(SHOT("wysiwyg-46-math-dark"));
+
+await setTheme46("主题：明");
+await new Promise((r) => setTimeout(r, 500));
+const lightMath46 = await c.evaluate(`(() => {
+  const w = document.querySelector(".cm-math-widget");
+  return {
+    hasDarkClass: w.className.includes("cm-math-dark"),
+    filter: getComputedStyle(w.querySelector("svg")).filter,
+  };
+})()`);
+check(
+  "浅色主题下公式 widget 摘掉夜间滤镜与暗色类（黑字白底原样）",
+  !lightMath46.hasDarkClass && lightMath46.filter === "none",
+  JSON.stringify(lightMath46),
+);
+await c.screenshot(SHOT("wysiwyg-46-math-light"));
+await setTheme46("主题：自动"); // 复原
 
 // 收尾：清回空文档并回写作模式
 await c.evaluate(`document.querySelector(".cm-content").focus()`);

@@ -257,8 +257,8 @@ const dark = await c.evaluate(`(() => {
 })()`);
 check("暗色主题下 widget 带反色类", dark.hasDarkClass, JSON.stringify(dark));
 check(
-  "SVG 应用了 invert 滤镜（黑字在深底上可见）",
-  dark.filter.includes("invert"),
+  "SVG 应用 invert(1) contrast(.71)（黑字在深底上可见，且白纸不会翻成纯黑）",
+  dark.filter === "invert(1) contrast(0.71)",
   JSON.stringify(dark),
 );
 check(

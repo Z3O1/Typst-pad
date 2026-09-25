@@ -157,6 +157,18 @@ check(
   (await c.evaluate(DARK_CROPS)) >= 1,
   `切片 ${await c.evaluate(CROPS)} / 暗色切片 ${await c.evaluate(DARK_CROPS)}`,
 );
+// 滤镜值要**完整**对：只写 invert(1) 的话白纸一翻就是纯黑 —— 比编辑区底色（--bg-paper
+// #252526）还黑一截，截图里就是一块"纯黑块"（2026-09-26 用户截图确认）。contrast(.71)
+// 把白纸落回 #252525、黑字抬到 #dadada，切片才和可编辑正文是同一张纸。
+const darkSliceFilter = await c.evaluate(`(() => {
+  const svg = document.querySelector(".cm-block-crop-dark svg");
+  return svg ? getComputedStyle(svg).filter : null;
+})()`);
+check(
+  "暗色下切片滤镜是 invert(1) contrast(.71)（与整页预览、公式同一条）",
+  darkSliceFilter === "invert(1) contrast(0.71)",
+  String(darkSliceFilter),
+);
 await c.screenshot(SHOT("writing-blocks-dark"));
 
 console.log("7) 长文档 + 窗口化：滚动到没渲过的区域 → 去抖后补渲出切片");
@@ -176,6 +188,16 @@ await c.selectAll();
 await c.type(longDoc);
 await new Promise((r) => setTimeout(r, 900));
 const longCropsBefore = await c.evaluate(CROPS);
+// 浅色主题必须**没有**夜间滤镜（--night-svg-filter 在 `.app.light` 里是 none，且暗色类不该挂）
+const lightSliceFilter = await c.evaluate(`(() => {
+  const svg = document.querySelector(".cm-block-crop svg");
+  return svg ? getComputedStyle(svg).filter : null;
+})()`);
+check(
+  "浅色主题下切片不带暗色类、也不加滤镜",
+  lightSliceFilter === "none" && (await c.evaluate(DARK_CROPS)) === 0,
+  `filter=${lightSliceFilter} dark=${await c.evaluate(DARK_CROPS)}`,
+);
 // 滚到底部（滚轮走真实事件路径）
 await c.wheel(700, 400, 4000);
 await new Promise((r) => setTimeout(r, 400));
