@@ -2,6 +2,35 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.2] - 2026-09-26
+
+主题是**「折行交给 Typst，验收交给真实作业」**：写作模式下段落折成几行不再由浏览器的贪心断行决定 —— 引擎按基线聚类算出每一行的源码终点，前端在断点处强制换行、浏览器只负责画，四份真实作业的 210 个可编辑块折行数与 Typst **逐块相等**。同时把「拿真实作业做验收」（PKU）做成一条命令、能真正判失败的门禁，并重建了文档结构。
+
+### Added
+
+- **写作模式按引擎断点折行**：`compile_blocks` 回传每块每行的源码终点（`line_breaks` / `line_count`），前端在断点前那个字挂一层行内 mark（`cm-write-engine-break`，`::after` 吐一个 `\A`）、给该行加 `cm-write-engine-break-line`（`white-space: pre`）禁折、再给断点前那个字一份 `letter-spacing: -1em` 的行尾压缩（它后面已经没有别的字，实测各行左缘不变、视觉零影响）。`.cm-scroller` 因此设 `overflow-x: hidden` —— Typst 式标点悬挂多出的几像素落在纸张留白里，不许它变成横向滚动条（"出滚动条 → 版心变 → 重编译"正是这里要避免的反馈环）。**必须是 mark 而不是 widget**：行内块级 widget 会让 CodeMirror 把逻辑行拆成多个行盒、带高盒只落到第一段（实测四份作业 59/26/4/43 个块当场失去带高盒，改动已回滚）。两条判据防止"行数反而更多"的假绿：断点条数必须与 `line_count` 自洽，且**有一枚落不上就整块不折**（半套规则实测让高代周二 L207 从 4 行涨到 6 行）。另外行内公式内部也留折行机会（`split_inline_math` 的分段门槛由 20 字符降到 10，刚好覆盖 `左边=右边` 这种最短的可断公式，代价是每切一刀少 4.7pt 运算符左侧间距）。结果：四份作业 210 个可编辑块折行数 0/87、0/39、0/17、0/67 **全部与 Typst 一致**，见 `docs/development/writing-rendering.md`。
+- **真实作业验收（PKU）**：`PKU_ROOT="$HOME/PKU" npm run verify:pku-writing` 一条命令跑完「Rust 导出真夹具 → 浏览器抓取实际输入结果 → 真实后端编译它们 → 逐块几何对账」，**76 项**检查覆盖同页相邻锚点 / 页内累计偏差、逐块折行数、可编辑正文视觉行数、真实按键编辑回放与切片集合。作业原文**只读、不复制进仓库**，夹具与测量写在已忽略的 `.browser-check/pku-writing/`；没给 `PKU_ROOT` 时显式跳过并说明，而不是悄悄报绿。见 `docs/development/testing.md`。
+
+### Fixed
+
+- **写作模式纵向锚点偏差归零**：可编辑正文原先按浏览器自然行盒（字号 × 1.65）排，盒高与引擎给的带高差 3~10px、首行基线在带内的偏移也各算各的 —— 四份真实作业的相邻锚点越界 73/22/17/69 处、页内累计最大 547/83/12/208px 全长在这条缝里。现在由引擎的 `yPt` / `anchorBaselinePt` 反解行盒（`height = heightPt × 4/3`、`line-height = 2 × (anchorBaselinePt − yPt) × 4/3 − ascent + descent`），带高盒生效的同一轮里把段间空行高度归零（段距已含在相邻带里，再给空行一份就是每行多推 3px），块切片的 replace 装饰改 `inclusiveEnd: false`（否则 CodeMirror 认为这一行被上一块的块 widget 覆盖而丢掉 line decoration，实测 87 条只落到 DOM 16 条）。可编辑正文 100% 走带高盒。
+- **写作模式 ↑/↓ 不再吃掉空行、跨空行保留目标列**：块与块之间那条空源码行在写作模式里只有几个像素高，而 CodeMirror 的 `moveVertically` 按半个文本高的步长扫 —— 一步就跨过去了（实测 8 行文档走出 8→7→6→5→3→1）。接管判据因此从一条变两条：除"跨过未展开的切片"外，再加"默认落点跳过了源码行"（`|Δ行号| > 1`，所以行内折行仍是 CodeMirror 的逐可见行行为）。空行上没有文本、光标 x 恒为 0，于是本模块自己记住上一步落的列（`carryGoal`），只在落点就是当前位置时沿用，点击/打字/Home/End 之后自然作废。该套件原先 4 条常红（129/133），现在 **133 项全绿**。
+- **标题"只压不撑"真正生效**（样式挂到标题 mark 上而不是行元素）；随后带高盒已经覆盖它，`buildHeadingShrinkDecorations` / `--heading-fit` 那套一并删除。
+- **带缩进的空行按 Shift+Enter 只清理空白并新增源码行**，不再插入没有正文的 Typst 显式换行；一次撤销即可回到原缩进与光标。
+- **段距压缩的边界补齐**：全空文档与文首空白没有可压缩的段距（UTF-16 偏移仍指向正确空行）；围栏代码内外的空行都由复杂块承载，不误作普通正文段距。
+- **验收夹具不再跟启动耗时较劲**：`wysiwyg.mjs` 第 34 组"存档里「上次检查时间」就是刚刚"原本写成 `now - at < 60s`，一次耗时 67s 的导航就把它判红 —— 而 67s 仍远小于历史上的 6 小时节流窗口，被复现的前提完全成立，红的是夹具。现在改成对账"这串时间戳就是本次种进去的"且"离现在远小于 6 小时"，并把这套纪律写进 `docs/development/testing.md`。
+- **验收本身可信了**（回应上一轮"未通过"结论的两个阻断项，两处都做了反向验证 —— 临时撤掉修复确认它真的会红）：`verify:pku-writing` 不再"跑不完也报绿" —— `Page.navigate` 的 CDP 调用超时不再当成失败（冷启动实测 7.9s，成败只看应用挂载出来没有），残留 dev server 占着端口时能 HTTP 响应就复用、不响应就说清原因并给出换端口命令，入口跑之前先删旧汇总并用 `PKU_RUN_ID` 令牌核对本轮；单 LF 段落的 Enter / Shift+Enter 改走「抓取 → 编译 → 验收」三段，要求**逐字命中**夹具且 `__browserDevBlocksMatched === true`，不再允许对不上就静默退回假切片（抓到的实际结果带编辑器自动缩进的一个空格，Rust 推算的两种变体一种都对不上）。
+
+### Changed
+
+- **文档结构重建**：新增 `docs/` 分层文档树（development / maintainers / design），README 与 CONTRIBUTING 收敛为入口；`AGENTS.md` 重写为"边界 + 常用命令 + 按任务导航"三维指南，旧路径引用一并改指新位置。
+- **段落划分边界钉住**（Rust 与前端各一组）：单个源码换行仍是同一段、空白行才分段、多留空行不产生空的可见段落；Enter / Shift+Enter 各作一次编辑撤销并恢复光标。
+
+### Test / CI
+
+- 浏览器验收：wysiwyg 291、writing-blocks 133、writing-blocks-visual 81、writing-blocks-hit 34、writing-mode-scenes 85、wysiwyg-visual 20、writing-stability 107、computed-style 17、PKU 真实作业 76。
+- 本地门禁：`npm test` 61 文件 1067 项、`cargo test` 66 项、`cargo clippy --all-targets -- -D warnings`、`cargo fmt --check`、`npm run check` 0 错、`npm run format:check` 干净。
+
 ## [0.10.1] - 2026-09-23
 
 ### Fixed
