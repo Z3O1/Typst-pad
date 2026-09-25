@@ -174,7 +174,19 @@ export function createBlockMoves({
   }
 
   /**
-   * ↑/↓（含 Shift 扩选）：**默认没跨切片就交回默认**，跨了才按源码行走一步（见 `blockVerticalMoves`）。
+   * 上一次**我们自己**落下的竖直目标列（px，相对内容左缘）。
+   *
+   * 只为跨空行服务：块与块之间那条空源码行在写作模式里只有几个像素高（要贴 Typst 的段距，
+   * 见 `markup-decorations` 的 `cm-write-parbreak`），空行上也没有文本 —— 光标的 x 恒等于 0，
+   * 几何上量不出"用户其实想停在第 4 列"。实测高代/数分那种"从段落行尾 ↓ 到空行再 ↓ 到下一段"
+   * 的走法会因此把列掉到 0（`writing-blocks` 的"列保留"用例就是这么红的）。
+   * 只在"上一步也是我们落的、而且落点就是现在这个位置"时沿用 —— 别的一动（点击、打字、Home/End）
+   * 位置就变了，那个列自然作废。
+   */
+  let carryGoal: { head: number; x: number } | null = null;
+
+  /**
+   * ↑/↓（含 Shift 扩选）：**默认走法正常就交回默认**，否则按源码行走一步（见 `blockVerticalMoves`）。
    * 返回 false = 交给 CodeMirror 的默认绑定（永远安全：默认至少不会"什么都不做"）。
    */
   function verticalMove(view: EditorView, forward: boolean, extend: boolean): boolean {
@@ -189,17 +201,34 @@ export function createBlockMoves({
       if (!range.empty && !extend) return false;
       const doc = view.state.doc;
       const head = range.head;
-      const fallback = view.moveVertically(range, forward);
-      // 默认走法没跨过任何未展开的切片 → 它本身就是代码模式的行为，一个字节都别改
-      if (!crossesCollapsedCover(covers, head, fallback.head)) return false;
-      // 跨过了切片：按源码行走**一行**（空行也停、列保留、落点所在块会因此展开）
       const line = doc.lineAt(head);
+      const fallback = view.moveVertically(range, forward);
+      /**
+       * 两种情况下默认走法不能用，改按**源码行**走一步：
+       *
+       * 1. **跨过了未展开的切片**（`crossesCollapsedCover`）：默认会把 widget 当空气，
+       *    可能跳一整块、也可能一路扫回文档开头（用户报过「在 `== 6` 前面按上跳回开头」）。
+       * 2. **跳过了源码行**（`skipped`）：默认是"逐可见行"扫的，而写作模式里块间那条空源码行
+       *    只有几个像素高（贴 Typst 段距的代价），`moveVertically` 的半行步长会**一步跨过它** ——
+       *    表现为 ↑/↓ 把空行吃掉（实测 8 行文档走出 8→7→6→5→3→1，跳过第 4、2 行）。
+       *    判据只看"默认落点与当前行隔了不止一行"，所以行内折行（同一源码行内换视觉行）
+       *    仍然是 CodeMirror 的逐可见行行为，不会被这条接管。
+       */
+      const crossed = crossesCollapsedCover(covers, head, fallback.head);
+      const skipped = Math.abs(doc.lineAt(fallback.head).number - line.number) > 1;
+      if (!crossed && !skipped) return false;
+      // 跨过了切片 / 跳过了源码行：按源码行走**一行**（空行也停、列保留、落点所在块会因此展开）
       const pos = sourceVerticalTarget(doc, head, forward ? 1 : -1, 1, head - line.from);
       if (pos === null || pos === head) return false;
-      const goalX = goalColumnX(view, head, range.goalColumn);
+      const goalX =
+        range.goalColumn ??
+        (line.length === 0 && carryGoal?.head === head ? carryGoal.x : null) ??
+        goalColumnX(view, head, range.goalColumn);
       // 落在行尾（非空行）时 assoc 取 -1，否则光标会被画到下一行行首
       const row = doc.lineAt(pos);
       const assoc = row.length > 0 && pos === row.to ? -1 : 1;
+      // 记住这一步的目标列：下一步若落在空行上，光标的 x 量不出它（见 carryGoal 的说明）
+      carryGoal = goalX === null ? null : { head: pos, x: goalX };
       view.dispatch({
         selection: extend
           ? EditorSelection.range(range.anchor, pos, goalX ?? undefined)
@@ -216,6 +245,7 @@ export function createBlockMoves({
         if (hit !== null && hit !== pos) {
           const target = doc.lineAt(hit);
           const hitAssoc = target.length > 0 && hit === target.to ? -1 : 1;
+          carryGoal = { head: hit, x: goalX };
           view.dispatch({
             selection: extend
               ? EditorSelection.range(range.anchor, hit, goalX)
