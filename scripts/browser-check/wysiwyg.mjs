@@ -2351,18 +2351,23 @@ const seedState = async (state) => {
   );
 };
 
-await seedState({ autoCheckUpdates: true, lastUpdateCheckAt: Date.now() });
+// 种进去的时间戳要留下来对账：判据不能只看"读回来时还没过多久"（那是拿夹具的墙钟赌启动耗时）。
+const seededAt = Date.now();
+await seedState({ autoCheckUpdates: true, lastUpdateCheckAt: seededAt });
 await c.goto(`${DEV_URL}&fakeupdate=1`);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-// 种进去的"刚刚检查过"必须真的生效，否则这一组就退化成"旧存档所以当然会查"
+// 种进去的"刚刚检查过"必须真的生效，否则这一组就退化成"旧存档所以当然会查"。
+// 判据 = "存档里那串时间戳是**本次种进去的**（不是空、不是上一轮残留），且离读回来的时刻
+// 远小于历史上的 6 小时节流窗口"。**不要改回 `now - at < 60s`**：2026-09-26 本机一次导航
+// 耗时 67s 就把它判红，而 67s 仍然属于"被 6 小时节流拦掉"的状态 —— 前提完全成立，红的是夹具。
 const seeded = await c.evaluate(`(() => {
   const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
   return { at: typeof raw.lastUpdateCheckAt === "number" ? raw.lastUpdateCheckAt : null, now: Date.now() };
 })()`);
 check(
   "起手：存档里「上次检查时间」就是刚刚（复现被节流拦掉的那个状态）",
-  seeded.at !== null && seeded.now - seeded.at < 60_000,
-  JSON.stringify(seeded),
+  seeded.at !== null && seeded.at >= seededAt - 1000 && seeded.now - seeded.at < 6 * 60 * 60 * 1000,
+  JSON.stringify({ ...seeded, seededAt }),
 );
 
 // 先在编辑区落一个焦点：更新窗是"自己弹出来的"，绝不能把焦点从写作位置上抢走。
