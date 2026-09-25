@@ -743,6 +743,7 @@ fn dump_pku_writing_fixtures() {
             let mut line_spans: Vec<serde_json::Value> = Vec::new();
             let mut line_tops: Vec<f64> = Vec::new();
             let mut line_count = 0usize;
+            let mut baseline_hist: Vec<serde_json::Value> = Vec::new();
             if let Some(page) = page {
                 let on_page: Vec<&&PlacedItem> = hit.iter().filter(|i| i.page == page).collect();
                 if !on_page.is_empty() {
@@ -783,26 +784,79 @@ fn dump_pku_writing_fixtures() {
                     ys.sort_by(|a, b| a.total_cmp(b));
                     ys.dedup();
                     line_tops = ys;
-                    // **行数 = 主基线聚类**：阈值为实测行距的 0.75 倍（上下标/分式把基线拉开
-                    // 约 ±5~8pt，行距 15~18pt，0.75 倍能分开"行"与"行内偏移"）。量不到行距时
-                    // 退回"基线上有个字形就算一行"。
+                    // **行数 = 主基线聚类 + 合并"主基线挨得太近"的相邻簇**（与产品
+                    // `block_lines` 同一套定义，但这里**独立实现**，免得两边一起错还能报绿）：
+                    //   1) 累计聚类：阈值为实测行距的 0.75 倍（上下标/分式把基线拉开约 ±5~8pt，
+                    //      行距 15~18pt，0.75 倍能分开"行"与"行内偏移"）；
+                    //   2) 合并：相邻两簇的**主基线**（承载字形最多的那条）相距 < 半个行距时并成一簇
+                    //      —— 分式的分子/分母、上下标不是新的一行。少了这一步，数分周二 L54/L72
+                    //      的 1 行会被数成 2 行、L154 的 5 行数成 6 行、L48 的 4 行数成 5 行
+                    //      （实测：改之前浏览器量与这条量只有 205/210 一致，改之后 209/210）。
                     let mut bs: Vec<f64> = on_page.iter().map(|i| i.baseline_pt).collect();
                     bs.sort_by(|a, b| a.total_cmp(b));
                     let threshold = line_spacing_pt.map(|sp| sp * 0.75).unwrap_or(0.0);
                     if !bs.is_empty() {
-                        line_count = 1;
+                        // 累计聚类 → 每簇的 (主基线, 主基线字形数)
+                        let mut groups: Vec<Vec<f64>> = vec![vec![bs[0]]];
                         let mut last = bs[0];
                         for v in bs.iter().skip(1) {
                             if *v - last > threshold {
-                                line_count += 1;
+                                groups.push(Vec::new());
                                 last = *v;
                             }
+                            groups.last_mut().unwrap().push(*v);
                         }
+                        let mode_of = |g: &Vec<f64>| -> (f64, usize) {
+                            let mut bins: std::collections::BTreeMap<i64, (f64, usize)> =
+                                std::collections::BTreeMap::new();
+                            for v in g {
+                                let e = bins.entry((v * 2.0).round() as i64).or_insert((*v, 0));
+                                e.1 += 1;
+                            }
+                            *bins
+                                .iter()
+                                .max_by(|a, b| a.1 .1.cmp(&b.1 .1).then(b.0.cmp(a.0)))
+                                .unwrap()
+                                .1
+                        };
+                        let mut kept: Vec<(f64, usize)> = Vec::new();
+                        for g in &groups {
+                            let m = mode_of(g);
+                            match kept.last() {
+                                Some((pm, pg))
+                                    if line_spacing_pt
+                                        .map(|sp| (m.0 - pm).abs() < sp * 0.5)
+                                        .unwrap_or(false) =>
+                                {
+                                    if m.1 > *pg {
+                                        let last = kept.last_mut().unwrap();
+                                        *last = m;
+                                    }
+                                }
+                                _ => kept.push(m),
+                            }
+                        }
+                        line_count = kept.len();
                     }
                     // 逐行拆：按同一阈值把字形分到各行，记录源区间与右缘
                     {
                         let mut sorted: Vec<&&PlacedItem> = on_page.clone();
                         sorted.sort_by(|a, b| a.baseline_pt.total_cmp(&b.baseline_pt));
+                        // **基线直方图**（0.5pt 分箱 → 该基线上的字形数）：行数与断点的判据都要用它。
+                        // 为什么要它：分式的分子/分母、上下标各有自己的基线，光看"基线集合"分不清
+                        // "新的一行"与"同一行的偏移"——一行真正的主基线（承载正文的那些字）在直方图
+                        // 上是峰，行内偏移是矮丘。诊断产物，不进产品路径。
+                        let mut hist: std::collections::BTreeMap<i64, usize> =
+                            std::collections::BTreeMap::new();
+                        for i in on_page.iter() {
+                            *hist
+                                .entry((i.baseline_pt * 2.0).round() as i64)
+                                .or_insert(0) += 1;
+                        }
+                        baseline_hist = hist
+                            .into_iter()
+                            .map(|(k, c)| serde_json::json!([k as f64 / 2.0, c]))
+                            .collect();
                         let mut cur: Vec<&&PlacedItem> = Vec::new();
                         let flush =
                             |cur: &mut Vec<&&PlacedItem>, spans: &mut Vec<serde_json::Value>| {
@@ -870,6 +924,7 @@ fn dump_pku_writing_fixtures() {
                 "lineSpans": line_spans,
                 "lineTopsPt": line_tops,
                 "lineCount": line_count,
+                "baselineHist": baseline_hist,
                 // **每一行的源码终点**（块内相对字节偏移，不含块尾）：前端据此强制换行，
                 // 与产品 `BlockCrop::line_breaks` 同源同口径（同一函数、同一行距阈值）。
                 "lineBreaks": match page {

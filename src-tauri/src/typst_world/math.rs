@@ -182,8 +182,14 @@ const BREAK_OPERATORS: &[&str] = &["<=", ">=", "!=", "==", "->", "<-", "<", ">",
 /// 只在够长的公式上切（`MIN_SEGMENT_CHARS`），否则会为短公式白跑好几次编译。
 /// 括号 / 方括号 / 花括号里的运算符不算顶层（`sum_(i=1)^n` 的 `=` 不会被切）。
 pub fn split_inline_math(body: &str) -> Vec<String> {
-    /// 单个片段的最少源码字符数：太短的片段攒在一起再切
-    const MIN_SEGMENT_CHARS: usize = 20;
+    /// 单个片段的最少源码字符数：太短的片段攒在一起再切。
+    ///
+    /// 取 10（原先 20）：Typst 的断行**允许落在行内公式内部**（实测数分周二 L122 的两处断点分别
+    /// 落在 `tilde F(t)=F(t)^(-1)` 与 `tilde F(t)=(c^(-1))^t` 里，都在第 12 个字符的 `=` 处）。
+    /// 片段就是"浏览器可以用来折行的机会"（片段之间留 `<wbr>`）：门槛太高时这类公式根本不给机会，
+    /// 浏览器只能把整条公式当原子块搬走，行数就与 Typst 对不上。10 个字符刚好覆盖"`左边=右边`"
+    /// 这种最短的可断公式，又不会把 `a + b` 这类短式切碎。
+    const MIN_SEGMENT_CHARS: usize = 10;
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut depth = 0i32;

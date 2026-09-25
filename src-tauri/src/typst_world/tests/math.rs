@@ -398,9 +398,15 @@ fn compile_math_inline_segments_match_total_width() {
         out.segments.len()
     );
     let sum: f64 = out.segments.iter().map(|s| s.width_pt).sum();
+    // 判据按**断点个数**算，不写死一个绝对值：每多切一刀就少掉一次"运算符左侧间距"
+    //（片段各自独立编译，而 Typst 会抑制表达式**开头**的运算符前置间距），损失与断点数成正比。
+    // `MIN_SEGMENT_CHARS` 从 20 降到 10 之后这个公式被切得更碎（5 段 4 刀），原先那个
+    // "整块 ±12pt" 的绝对值口径必然过不去；真正要守的不变量是"每一刀只损失一点点"，
+    // 实测 4.7pt/刀（10 项求和式），取 5pt 当上界。
+    let cuts = out.segments.len().saturating_sub(1).max(1) as f64;
     assert!(
-        (sum - out.width_pt).abs() < 12.0,
-        "片段宽度之和 {sum} 应接近整块宽度 {}（差 {}）",
+        (sum - out.width_pt).abs() < 5.0 * cuts,
+        "片段宽度之和 {sum} 与整块宽度 {} 的差 {} 应小于每刀 5pt × {cuts} 刀",
         out.width_pt,
         (sum - out.width_pt).abs()
     );

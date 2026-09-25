@@ -344,8 +344,9 @@ pub struct BlockLines {
 /// 就不再取决于浏览器的贪心断行（见 docs/development/writing-rendering.md 的"折行"一节）。
 ///
 /// 判据是**基线聚类**：同一行的上下标/分式会把基线拉开好几 pt，而 Typst 的行距通常 ≥15pt，
-/// 取行距的 0.75 倍当阈值能把"行内偏移"与"行"分开；断点取"上一行最右终点"与"下一行最左起点"
-/// 里较小的那个（理由见下面的行内注释）。
+/// 取行距的 0.75 倍当阈值能把"行内偏移"与"行"分开；聚类之后再**合并主基线相距 < 半个行距的
+/// 相邻簇**（分子/分母那种矮丘不是新的一行，见下面 `merged` 一段的实测说明）。断点取"上一行
+/// 最右终点"与"下一行最左起点"里**后者更小才用后者**（理由见下面的行内注释）。
 ///
 /// **聚类必须是"与上一个行边界比"而不是"与前一个字形比"**（2026-09-25 修正，这是"提示不准"
 /// 的真正原因）：数学密集的段落里，同一行内的上下标基线铺得很开（相邻字形差 5~10pt），
@@ -373,25 +374,89 @@ pub fn block_lines(
     hit.sort_by(|a, b| a.baseline_pt.total_cmp(&b.baseline_pt));
     // 阈值与验收的 `lineCount` 完全相同：行距的 0.75 倍；量不到行距时不聚类（任何基线差都算新行）
     let threshold = line_spacing.map(|sp| sp * 0.75).unwrap_or(0.0);
-    // 先按基线聚类切行，再**逐行取源码区间**：`(min_start, max_end)`。
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let mut lines = 1usize;
+    // 聚类之后还要**合并"主基线挨得太近"的相邻簇**（见下面的说明），所以先算出每簇的
+    // 主基线（承载字形最多的那条基线）与簇内字形数。
+    struct Cluster {
+        start: usize,
+        end: usize,
+        mode: f64,
+        mode_glyphs: usize,
+    }
+    let cluster_of = |from: usize, to: usize| -> Cluster {
+        let mut bins: std::collections::BTreeMap<i64, (f64, usize)> =
+            std::collections::BTreeMap::new();
+        for it in &hit[from..to] {
+            let e = bins
+                .entry((it.baseline_pt * 2.0).round() as i64)
+                .or_insert((it.baseline_pt, 0));
+            e.1 += 1;
+        }
+        // 字形最多的那条基线；并列时取最小的那条（保证确定性）
+        let (_, (mode, mode_glyphs)) = bins
+            .iter()
+            .max_by(|a, b| a.1 .1.cmp(&b.1 .1).then(b.0.cmp(a.0)))
+            .unwrap();
+        Cluster {
+            start: from,
+            end: to,
+            mode: *mode,
+            mode_glyphs: *mode_glyphs,
+        }
+    };
+    let mut clusters: Vec<Cluster> = Vec::new();
     let mut line_start = 0usize;
     let mut last_boundary = hit[0].baseline_pt;
     for i in 1..=hit.len() {
         let boundary = i == hit.len() || hit[i].baseline_pt - last_boundary > threshold;
         if boundary {
-            let cluster = &hit[line_start..i];
-            let start = cluster.iter().map(|it| it.range.start).min().unwrap();
-            let end = cluster.iter().map(|it| it.range.end).max().unwrap();
-            ranges.push((start, end));
+            clusters.push(cluster_of(line_start, i));
             if i < hit.len() {
-                lines += 1;
                 last_boundary = hit[i].baseline_pt;
             }
             line_start = i;
         }
     }
+    // **合并"主基线挨得太近"的相邻簇**（2026-09-25 实测，这是"折行数与 Typst 不符"的最后一块拼图）。
+    //
+    // 为什么需要：分式的分子/分母、上下标各有自己的基线，**累计聚类**会把它们与前一行分开 ——
+    // 判据是"与前一个行边界差 > 0.75 行距"，而一条矮丘离上一行越远就越容易被判成新行。
+    // 实测数分周二 L54/L72 本来只有 **1 行**（主基线上 17 / 39 个字形，其余都是 1~2 个字形的
+    // 分子分母），却被数成 2 行；L154 的 5 行被数成 6 行、L48 的 4 行被数成 5 行 —— 于是
+    // 前端去"强制折出"一个并不存在的换行（或整块退回贪心），验收当然对不上。
+    //
+    // 判据：相邻两簇的**主基线**相距 < 半个行距时合并。真实的行距是整份行距（15~18pt），
+    // 行内偏移不可能超过半个行距 —— 实测 L122/L154 的真实行主基线正好相隔 15.5pt（不合并），
+    // 而 L54/L72 的假行主基线只相隔 4pt（合并）。四份作业 210 个可编辑块里，这条规则只改动
+    // 了那 4 个块，且改完之后浏览器量与引擎量 **209/210 一致**（剩下的 1 块是"Typst 在行内公式
+    // 内部折行"，浏览器折不了原子 widget，见文档的"折行"一节）。
+    if let Some(spacing) = line_spacing {
+        let mut merged: Vec<Cluster> = Vec::with_capacity(clusters.len());
+        for c in clusters {
+            match merged.last_mut() {
+                Some(prev) if (c.mode - prev.mode).abs() < spacing * 0.5 => {
+                    prev.end = c.end;
+                    if c.mode_glyphs > prev.mode_glyphs {
+                        prev.mode = c.mode;
+                        prev.mode_glyphs = c.mode_glyphs;
+                    }
+                }
+                _ => merged.push(c),
+            }
+        }
+        clusters = merged;
+    }
+    // 逐行取源码区间：`(min_start, max_end)`
+    let ranges: Vec<(usize, usize)> = clusters
+        .iter()
+        .map(|c| {
+            let cl = &hit[c.start..c.end];
+            (
+                cl.iter().map(|it| it.range.start).min().unwrap(),
+                cl.iter().map(|it| it.range.end).max().unwrap(),
+            )
+        })
+        .collect();
+    let lines = clusters.len();
     // 每个断点取"上一行最右源码终点"，只有在它越出块尾时才退回"下一行最左源码起点"里较小的那个。
     //
     // **主口径必须是 `range.end` 的最大值**（2026-09-25 实测反面教材）：行内公式 `$…$` 的每一个
