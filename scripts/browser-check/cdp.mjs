@@ -66,13 +66,15 @@ export async function connect() {
   // 2026-09-24 编辑回放段实测卡死过一次，所以这里兜住。
   // 默认 60s：编辑回放要注入 9 份状态夹具（每份 135 块的 JSON），导航 + 首帧解析会明显变慢
   const CALL_TIMEOUT_MS = Number(process.env.CDP_TIMEOUT_MS ?? 60000);
-  const send = (method, params = {}) =>
+  // 导航的 CDP 回应偶尔要等满 60s，但页面实际已经就绪；goto 随后会独立检查 URL / 挂载 / 恢复。
+  const NAV_TIMEOUT_MS = Math.min(CALL_TIMEOUT_MS, Number(process.env.CDP_NAV_TIMEOUT_MS ?? 15000));
+  const send = (method, params = {}, timeoutMs = CALL_TIMEOUT_MS) =>
     new Promise((res, rej) => {
       const mid = ++id;
       const timer = setTimeout(() => {
         pending.delete(mid);
-        rej(new Error(`CDP 调用超时（${CALL_TIMEOUT_MS}ms）：${method}`));
-      }, CALL_TIMEOUT_MS);
+        rej(new Error(`CDP 调用超时（${timeoutMs}ms）：${method}`));
+      }, timeoutMs);
       pending.set(mid, {
         res: (v) => {
           clearTimeout(timer);
@@ -126,23 +128,29 @@ export async function connect() {
       await send("Page.enable");
       let lastError = null;
       for (let attempt = 1; attempt <= 3; attempt++) {
+        // 导航回应超时后，旧页面可能还停在同一 URL。记录文档的启动时刻，
+        // 只有新文档加载出来才算成功，避免把旧页面的挂载标记误当作本轮结果。
+        const previous = await evaluate(
+          "({ href: location.href, origin: performance.timeOrigin })",
+        ).catch(() => null);
         try {
           if (attempt === 1) {
-            const current = await evaluate("location.href").catch(() => null);
-            if (current === url) await send("Page.reload", { ignoreCache: false });
-            else await send("Page.navigate", { url });
+            if (previous?.href === url)
+              await send("Page.reload", { ignoreCache: false }, NAV_TIMEOUT_MS);
+            else await send("Page.navigate", { url }, NAV_TIMEOUT_MS);
           } else {
-            await send("Page.navigate", { url: "about:blank" });
+            await send("Page.navigate", { url: "about:blank" }, NAV_TIMEOUT_MS);
             await new Promise((r) => setTimeout(r, 200));
-            await send("Page.navigate", { url });
+            await send("Page.navigate", { url }, NAV_TIMEOUT_MS);
           }
         } catch (e) {
           lastError = e;
         }
         try {
-          await this.waitFor(`location.href.startsWith(${JSON.stringify(url.split("?")[0])})`, {
-            timeout: 30000,
-          });
+          await this.waitFor(
+            `location.href === ${JSON.stringify(new URL(url).href)} && performance.timeOrigin !== ${JSON.stringify(previous?.origin ?? null)}`,
+            { timeout: 30000 },
+          );
           await this.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
           /**
            * **再等"存档已经落到页面上"**（`?browserdev=1` 才有的只读标记，见

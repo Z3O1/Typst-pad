@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 // 编辑快捷键 keymap 的绑定断言与行为测试
 // 行为测试通过 jsdom 在编辑器 DOM 上派发 keydown 事件，验证键位真正生效
 // （CodeMirror 的 keydown 处理挂在 contentDOM 上，事件按真实浏览器路径派发）

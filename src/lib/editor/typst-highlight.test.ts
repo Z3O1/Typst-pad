@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { describe, expect, it } from "vitest";
 import { tags } from "@lezer/highlight";
 import type { Tag } from "@lezer/highlight";

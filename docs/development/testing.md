@@ -14,7 +14,7 @@
 | Svelte 拆分、样式或布局 | 浏览器交互 + `computed-style.mjs`，关注作用域和窄窗口 |
 | 文件对话框、写盘、多窗口、设置接线、更新安装 | 相关单测/静态权限检查 + 桌面验证 |
 
-CI 门禁是类型检查、Vitest、Prettier、前端构建、rustfmt、clippy 与 Rust 测试，具体步骤以 [CI](../maintainers/ci.md) 和 workflow 为准。不要把“相关测试已通过”表述为“全部 CI 已通过”。
+CI 门禁是类型检查、Vitest、Prettier、前端构建、rustfmt、clippy 与 Rust 测试，具体步骤以 [CI](../maintainers/ci.md) 和 workflow 为准。不要把“相关测试已通过”表述为“全部 CI 已通过”。Vitest 默认用 Node 运行纯逻辑测试，需要 DOM 或 localStorage 的文件在文件首行声明 `@vitest-environment jsdom`；新测试只在确实调用浏览器 API 时才加这条声明。
 
 ```bash
 npm run check
@@ -44,7 +44,7 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 
 以上环境变量语法用于 POSIX shell。运行器 `scripts/browser-check/run-all.mjs` 启动服务、连接或启动 Chromium、**只导出本轮真会跑的套件声明过的夹具**（`SUITE_FIXTURES`）、运行套件并汇总，默认 Vite 1425 / CDP 9335，避开桌面开发端口 1420。产物在 `.browser-check/`；它只清理自己启动的进程。`SKIP_DEV=1` 可复用服务；`SKIP_FIXTURES=1` 只在确认夹具与当前代码一致时使用。
 
-`ONLY=…` 时**按依赖准备**：只有被点名套件声明过的夹具才会导出（例如 `ONLY=writing-blocks.mjs` 不再白导公式夹具）；没有 `ONLY` 时与旧的"两类夹具都导"完全一致。改动套件的夹具依赖时要同步改 `SUITE_FIXTURES`（漏写会让那套件在 `loadFixtures` 硬失败，不会静默少测）。每条命令的**墙钟耗时**都会打印在汇总里，并写进 `.browser-check/run-all-timing.json`，便于前后对比。
+`ONLY=…` 时**按依赖准备**：只有被点名套件声明过的夹具才会导出（例如 `ONLY=writing-blocks.mjs` 不再白导公式夹具）；没有 `ONLY` 时与旧的"两类夹具都导"完全一致。改动套件的夹具依赖时要同步改 `SUITE_FIXTURES`（漏写会让那套件在 `loadFixtures` 硬失败，不会静默少测）。夹具导出失败会立即停止本轮，避免后面的浏览器套件读取旧夹具并白跑数分钟。每条命令的**墙钟耗时**都会打印在汇总里，并写进 `.browser-check/run-all-timing.json`，便于前后对比。
 
 单独运行脚本时自行准备服务、CDP 和夹具，通过 `BROWSER_CHECK_PORT` 或完整 `BROWSER_CHECK_URL` 指定页面，通过 `CDP_PORT` 指定浏览器。`run-all` 的服务端口变量是 `PORT`，不要与单套件变量混淆。
 
@@ -75,7 +75,9 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 | 命中套件对"本来就不该有切片"的夹具不再等 8s | 以前无条件 `waitFor(crop > 0)`，11 篇里一半是纯正文夹具、每篇等满 8s；改成等 `__browserDevBlocksMatched`（更确定：断言不会跑在旧表上） |
 | `createChecker` 每条断言记耗时，收尾打印最慢 10 条 | "哪一条在等"以前只能靠猜；耗时 ≥400ms 的条目直接在行尾标 `[N.Ns]` |
 
-**提速纪律**（别用这些换速度）：不跳过真实编译、不复用未经校验的旧夹具、不共享页面并行跑、不放宽任何超时或阈值。上面每一条都只删"重复的准备工作"，判据与断言数量不变（清单里的期望项数只在**新增断言**时同步）。
+点击命中套件现在只加载实际有复杂切片可点的 5 篇夹具；另外 6 篇纯正文/标题的“零切片”由 `writing-blocks-visual` 和 `writing-mode-scenes` 使用同一份真实夹具验证。命中套件的预期检查数从 34 降到 16，点击到字符的探针覆盖不变。本机单跑套件由 14.6s 降到 8.8s（各轮仍有波动）。
+
+**提速纪律**（别用这些换速度）：不跳过真实编译、不复用未经校验的旧夹具、不共享页面并行跑、不放宽任何超时或阈值。删重复场景时要确认另一套件仍覆盖其判据，并同步修改 `run-all.mjs` 的期望项数；只删准备工作时断言数量不变。
 
 **同环境前后实测**（本机 2026-09-26，`npm run verify:browser`，无 `PKU_ROOT`）：`computed-style`
 `11.7s → 3.1s`、`writing-blocks-hit` `72.9s → 12.5s`（单跑）、`writing-mode-scenes` `55.5s → 21.6s`、

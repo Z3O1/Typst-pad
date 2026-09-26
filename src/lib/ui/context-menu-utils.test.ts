@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 // 自定义右键菜单纯逻辑模块的单测：
 // 区域判定（resolveContextZone，含 #48「菜单栏/状态栏右键无效果」的守卫）、
 // 预览选区判定、菜单项 enabled 计算。

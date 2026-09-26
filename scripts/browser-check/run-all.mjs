@@ -38,7 +38,7 @@ const SUITES = [
   ["wysiwyg.mjs", 305],
   ["writing-blocks.mjs", 137],
   ["writing-blocks-visual.mjs", 99],
-  ["writing-blocks-hit.mjs", 34],
+  ["writing-blocks-hit.mjs", 16],
   ["writing-mode-scenes.mjs", 85],
   ["wysiwyg-visual.mjs", 20],
   // 写作模式的**动态稳定性**（报告 T0）：逐帧量"光标进出公式/复杂块"的几何（点击 / 左右键 /
@@ -216,7 +216,7 @@ function record(name, ok, note, ms) {
   console.log(`${ok ? "✓" : "✗"} ${name}${note ? `（${note}）` : ""}${secs}`);
 }
 
-/** 只跑一条命令（夹具导出这类没有"项数"的步骤）：退出码即结果，输出留档；返回耗时 ms */
+/** 只跑一条命令（夹具导出这类没有"项数"的步骤）：退出码即结果，输出留档；返回成功与否 */
 function runStep(name, cmd, args) {
   const logFile = join(OUT, `run-all-${name}.log`);
   // cargo 常在 ~/.cargo/bin，而本机默认 PATH 里可能没有（`fixtures:*` 里是裸 `cargo`）
@@ -225,13 +225,9 @@ function runStep(name, cmd, args) {
   const res = spawnSync(cmd, args, { cwd: ROOT, env, encoding: "utf8" });
   const ms = Date.now() - t0;
   writeFileSync(logFile, `${res.stdout ?? ""}${res.stderr ?? ""}`);
-  record(
-    name,
-    res.status === 0,
-    res.status === 0 ? "" : `退出码 ${res.status}；详情见 ${logFile}`,
-    ms,
-  );
-  return ms;
+  const ok = res.status === 0;
+  record(name, ok, ok ? "" : `退出码 ${res.status}；详情见 ${logFile}`, ms);
+  return ok;
 }
 
 console.log(`浏览器验收：dev ${APP_URL} / CDP ${CDP_PORT}`);
@@ -365,7 +361,11 @@ if (!SKIP_FIXTURES) {
   for (const name of ["blocks", "math", "pku"]) {
     if (!neededFixtures.has(name)) continue;
     const [step, args] = FIXTURE_STEPS[name];
-    runStep(step, "npm", args);
+    if (!runStep(step, "npm", args)) {
+      // 真实夹具没有导出时继续跑浏览器只会浪费几分钟，并可能读到上一轮的旧夹具。
+      console.error(`✗ ${step} 失败，停止本轮浏览器验收`);
+      process.exit(1);
+    }
   }
 }
 

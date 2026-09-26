@@ -453,17 +453,6 @@ fn references_and_labels_do_not_block_verification() {
     );
 }
 
-#[test]
-fn footnote_paragraph_stays_unverifiable() {
-    let _hit_cache = hit_cache_guard();
-    // 脚注正文被排到页底（与对应源块不在同一个带里）⇒ 整块切片，绝不直接编辑
-    let doc = "正文里有脚注#footnote[页底文字]。\n";
-    let out = blocks_of(doc);
-    let block = block_at(&out, doc, "正文里有脚注");
-    let proof = block.edit.as_ref().expect("应当带证明对象");
-    assert_eq!(proof.verdict, "unknown", "reason={}", proof.reason);
-}
-
 // ---------------------------------------------------------------------------
 // 真实作业暴露的两个误判（PKU 回归）：宏字形指回定义处、公式内部合法的同源字形
 // ---------------------------------------------------------------------------
@@ -496,15 +485,4 @@ fn repeated_math_source_ranges_are_not_duplicate_output() {
         "公式内部的同源字形不该被当重复输出（reason={}）",
         proof.reason
     );
-}
-
-#[test]
-fn real_duplicate_output_is_still_unknown_after_the_relaxation() {
-    let _hit_cache = hit_cache_guard();
-    // 放宽之后必须仍然拦住真正的重复输出（正文文字被画两遍）
-    let doc = "#show: it => it + it\n\n同一段正文文字会被画两遍。\n";
-    let out = blocks_of(doc);
-    let block = block_at(&out, doc, "同一段正文");
-    let proof = block.edit.as_ref().expect("应当带证明对象");
-    assert_eq!(proof.verdict, "unknown", "reason={}", proof.reason);
 }

@@ -10,9 +10,9 @@ use super::*;
 fn oversized_block_is_skipped_not_rendered() {
     let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
     const COLUMN_PT: f64 = 371.25;
-    // 1000 行代码 ≈ 35KB，稳稳超过 8KB 的上限；前后各留一个正常段落当对照
+    // 280 行代码约 9.5KB，超过 8KB 上限并留有余量；前后各留一个正常段落当对照
     let mut code = String::new();
-    for i in 0..1000 {
+    for i in 0..280 {
         code.push_str(&format!("let value_{i} = compute({i}, {i});\n"));
     }
     let doc = format!("第一段正文。\n\n```rust\n{code}```\n\n最后一段正文。\n");

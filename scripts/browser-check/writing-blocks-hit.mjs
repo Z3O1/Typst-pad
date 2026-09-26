@@ -41,10 +41,7 @@ const PROBE_PICK = FULL ? null : [0, 6, 11, 14];
 
 const { check, state } = createChecker();
 
-/**
- * 这一篇夹具**期望**有几张复杂块切片（与套件末尾那三条期望判据同一口径）。
- * 纯正文/标题的夹具是 0 —— 那些夹具就不该等切片出现（见循环里的等待说明）。
- */
+/** 夹具里有多少张可点击的复杂切片；零切片场景由 visual/scenes 验证。 */
 function fixtureBlocksNeedingCrops(fx) {
   const last = fx.blocks.at(-1);
   return fx.blocks.filter(
@@ -59,7 +56,10 @@ const fixtures = loadFixtures("block-fixtures.json", {
   what: "点击探针夹具",
   hint: "先跑 npm run fixtures:blocks",
 });
-const withProbes = fixtures.filter((f) => Array.isArray(f.hitProbes) && f.hitProbes.length > 0);
+// 只跑实际有复杂切片可点的夹具；纯正文的“零切片”由 visual/scenes 套件用同一真实夹具验证。
+const withProbes = fixtures.filter(
+  (f) => Array.isArray(f.hitProbes) && f.hitProbes.length > 0 && fixtureBlocksNeedingCrops(f) > 0,
+);
 console.log(
   `夹具：${withProbes.length} 篇带点击探针的真实产物（共 ${withProbes.reduce((n, f) => n + f.hitProbes.length, 0)} 个探针点）`,
 );
@@ -125,21 +125,11 @@ for (const fx of withProbes) {
   await replaceDocument(c, fx.doc);
   // 光标挪到文档开头：第一块成为"活动块"（源码形态），其余块都是切片
   await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
-  /**
-   * 等这一篇的**产物真的到位**。判据是"桩命中了夹具"（`__browserDevBlocksMatched`）。
-   *
-   * 以前无条件等 `crop 数 > 0`：对**纯正文/标题**那几篇"本来就不该有切片"的夹具必然等满 8s
-   * 超时而白等（11 篇里有一半是这种，实测每篇 8s，合计半分钟以上）；而"没有切片"恰恰是本套件
-   * 对这些夹具的**期望**，不是失败信号。命中夹具才是"这一轮编译落地了、断言不跑在旧表上"的
-   * 确定信号。有切片的夹具再额外等一次切片出现。
-   */
-  const expectCrops = fixtureBlocksNeedingCrops(fx);
+  // 等本轮真实夹具命中并生成切片，避免把上一篇的 DOM 当成当前产物。
   await c.waitFor(`window.__browserDevBlocksMatched === true`, { timeout: 8000 }).catch(() => {});
-  if (expectCrops > 0) {
-    await c
-      .waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 })
-      .catch(() => {});
-  }
+  await c
+    .waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 })
+    .catch(() => {});
   await new Promise((r) => setTimeout(r, 200));
   const initialCrops = await c.evaluate(
     `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
@@ -232,10 +222,8 @@ for (const fx of withProbes) {
   }
 
   check(
-    clicked > 0
-      ? `${fx.name}：${clicked} 次复杂块点击全部落在真实几何给出的字符上`
-      : `${fx.name}：纯正文/标题没有生成可点击切片`,
-    clicked > 0 ? matched === clicked : initialCrops.length === 0,
+    `${fx.name}：${clicked} 次复杂块点击全部落在真实几何给出的字符上`,
+    clicked > 0 && matched === clicked,
     `命中 ${matched}/${clicked}`,
   );
   check(
@@ -250,8 +238,8 @@ for (const fx of withProbes) {
   );
   const activeFrom = byteToPos(fx.doc, fx.blocks[activeIndex].start);
   check(
-    clicked > 0 ? "被点的复杂块回到源码形态" : "纯正文场景始终保持真实文本",
-    clicked > 0 ? !cropsNow.includes(activeFrom) : cropsNow.length === 0,
+    "被点的复杂块回到源码形态",
+    clicked > 0 && !cropsNow.includes(activeFrom),
     JSON.stringify({ cropsNow, activeFrom }),
   );
 

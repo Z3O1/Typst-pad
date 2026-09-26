@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 // typst-engine 单元测试：纯函数（诊断转换 / 页序拼接）+ invoke/dialog 已 mock 的
 // compileToSvg / compileToPdf 契约映射。不接触真实 Tauri 环境。
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";

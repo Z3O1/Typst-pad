@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import type { Range } from "@codemirror/state";

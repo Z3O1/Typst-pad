@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 // localStorage 持久化模块单元测试（jsdom 提供 localStorage）
 import { describe, it, expect, beforeEach } from "vitest";
 import { loadState, saveState, clearState, mergeSessionFields } from "./persistence";

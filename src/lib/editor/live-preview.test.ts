@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 // 所见即所得扩展（live-preview）的 DOM 级测试：在 jsdom 里真挂一个 EditorView，
 // 断言公式 widget 与标记隐藏的实际装饰行为（与 scripts/browser-check/wysiwyg.mjs 的
 // 浏览器验证互补：这里是 CI 可跑的回归网，那边是真实浏览器 + 真实输入的验收）。

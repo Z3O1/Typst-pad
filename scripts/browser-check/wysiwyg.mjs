@@ -482,8 +482,6 @@ console.log("15) 写作模式形态：单栏、纸张居中、无行号槽");
 // 回到干净的默认态：清 localStorage 后重载（默认 livePreview=true → 单栏）
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 const single = await c.evaluate(`(() => {
   const panes = document.querySelector(".panes");
   const preview = document.querySelector(".preview-pane");
@@ -703,8 +701,6 @@ await c.screenshot(SHOT("wysiwyg-17-source-split"));
 console.log("18) 仿 Typora 写作界面：纸张观感 + 格式菜单/快捷键");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 const paper = await c.evaluate(`(() => {
   const host = document.querySelector(".editor-host");
   const cm = document.querySelector(".cm-editor");
@@ -790,8 +786,6 @@ console.log("20) 模式切换不丢内容：写作 ↔ 源码 双向切换（含
 // 这里用真实输入 + 真实快捷键把两条路径都走一遍。
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 await c.evaluate(`(() => { window.__cm = document.querySelector(".cm-content"); return 1; })()`);
 await c.evaluate(`document.querySelector(".cm-content").focus()`);
 await c.selectAll();
@@ -870,8 +864,6 @@ await new Promise((r) => setTimeout(r, 300));
 console.log("21) 启动恢复上次内容（会话安全网）：输入 → 重载 → 内容回来；开关关闭时不恢复");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 const emptyAtStart = await c.evaluate(`document.querySelector(".cm-content").innerText.trim()`);
 check("清空存档后启动是空文档", emptyAtStart === "", JSON.stringify(emptyAtStart));
 await c.evaluate(`document.querySelector(".cm-content").focus()`);
@@ -879,8 +871,6 @@ await c.type("RESTORE-ME 未保存内容\n");
 await new Promise((r) => setTimeout(r, 700)); // 等 300ms 防抖写 localStorage
 // 重载（不清 localStorage）：模拟"关掉再打开"
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 900));
 const restored = await c.evaluate(`document.querySelector(".cm-content").innerText`);
 check("重载后内容被恢复", restored.includes("RESTORE-ME"), JSON.stringify(restored));
 const restoredInfo = await c.evaluate(`(() => {
@@ -906,8 +896,6 @@ const seededRestore = await c.evaluate(`(() => {
 })()`);
 await flushStateSeedJson(c, seededRestore); // 等过应用的 300ms 防抖写盘，再把这份原样写回一次
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 900));
 const notRestored = await c.evaluate(`document.querySelector(".cm-content").innerText.trim()`);
 check("关掉「启动时恢复」后不恢复内容", notRestored === "", JSON.stringify(notRestored));
 
@@ -916,8 +904,6 @@ console.log(
 );
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 await c.evaluate(`document.querySelector(".cm-content").focus()`);
 await c.selectAll();
 const altDoc = Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 行`).join("\n") + "\n";
@@ -979,8 +965,6 @@ console.log("23) 自动更新入口（浏览器开发模式：桩固定返回「
 // 真实下载/安装/签名校验只能在桌面版验证（Windows NSIS），见 docs/development/testing.md。
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 /** 点开菜单栏某个分类（按标签前缀找） */
 const openMenu = async (prefix) => {
@@ -1062,8 +1046,6 @@ console.log("24) Ctrl+滚轮界面缩放（字太小 → 放大整个界面）")
 // 于是手势改成整界面缩放（Tauri setZoom，等价浏览器 Ctrl+滚轮）。
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 /** 缩放探针：桩记录的缩放系数 + 存档 + 状态栏文案 + 状态栏缩放徽标 */
 const zoomProbe = `(() => {
@@ -1123,10 +1105,12 @@ check(
 );
 await c.screenshot(SHOT("wysiwyg-24-zoom-in"));
 
-// 重载：恢复出来的缩放要重新交给 webview（否则重启后界面又变小了）
+// 重载：恢复出来的缩放要重新交给 webview（否则重启后界面又变小了）。
+// 存档恢复标记早于缩放 effect；等 setZoom 真正收到恢复档位，再读探针。
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 900));
+await c.waitFor(`Math.abs((window.__browserDevLastZoom ?? 0) - 1.5) < 0.001`, {
+  timeout: 5000,
+});
 const afterReload = await c.evaluate(zoomProbe);
 check(
   "重载后恢复 150% 并重新应用",
@@ -1218,8 +1202,6 @@ await c.screenshot(SHOT("wysiwyg-24-zoom-reset"));
 console.log("25) 正文字体设置");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 await openMenu("文件");
 await c.waitFor(`document.body.innerText.includes("设置")`, { timeout: 5000 });
@@ -1330,8 +1312,6 @@ check(
 // 字体族名写错（中文族名永远匹配不上）→ typst 只发 warning：必须可见，否则就是"改了字体没用"
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 600));
 await c.click(400, 300);
 await c.type('#set text(font: "微软雅黑")\n中文测试');
 // 注意：警告徽标自 2026-09-14 起**常驻显示**（无警告时是 0），所以这里要等"可点击"
@@ -1364,8 +1344,6 @@ await c.screenshot(SHOT("wysiwyg-25-font-warning"));
 console.log("26) 更新说明的 Markdown 渲染");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(`${DEV_URL}&fakeupdate=1`);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 await openMenu("帮助");
 await c.waitFor(`document.body.innerText.includes("检查更新")`, { timeout: 5000 });
@@ -1463,8 +1441,6 @@ const gotoSim = async (extra) => {
     await c.evaluate(`localStorage.clear()`); // CDP 域不可用时退回页面内清理（仍好过旧写法）
   }
   await c.goto(`${DEV_URL}${extra}`);
-  await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-  await new Promise((r) => setTimeout(r, 900));
 };
 /** 在编辑区中心连滚 N 格 */
 const wheelOverEditor = async (deltaY, times) => {
@@ -1644,8 +1620,6 @@ const seededViewA = await c.evaluate(`(() => {
 })()`);
 await flushStateSeedJson(c, seededViewA); // 等过应用的 300ms 防抖写盘
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 // 660px 宽的 CSS 视口 = 在 1258px 窗口里缩放到 ~190%
 await c.send("Emulation.setDeviceMetricsOverride", {
   width: 660,
@@ -1717,8 +1691,6 @@ const seededViewB = await c.evaluate(`(() => {
 })()`);
 await flushStateSeedJson(c, seededViewB); // 等过应用的 300ms 防抖写盘
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 await c.click(400, 300);
 await c.selectAll();
 // 一条远宽于编辑区的长行（中文按 2 字宽算，足够撑出横向滚动）
@@ -1777,8 +1749,6 @@ await c.screenshot(SHOT("wysiwyg-29-wrap-on"));
 
 // 刷新后仍然折行（持久化真的生效，而不只是内存里的一次重配）
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 const reloadedWrap = await c.evaluate(wrapProbe);
 check(
   "重新加载后仍然自动换行（存档恢复）",
@@ -2042,8 +2012,6 @@ await c.send("Emulation.clearDeviceMetricsOverride");
 console.log("31) 输入 $ 自动配对");
 await c.evaluate(`localStorage.clear()`); // 回到默认写作模式（live-preview 开着，能看见块级公式）
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 await c.click(400, 300);
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
@@ -2200,8 +2168,6 @@ await new Promise((r) => setTimeout(r, 200));
 console.log("32) 状态栏左侧的警告/错误计数");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 const barProbe = `(() => {
   const bar = document.querySelector(".statusbar");
@@ -2328,8 +2294,6 @@ await new Promise((r) => setTimeout(r, 400));
 console.log("33) 切换模式不改变光标位置");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 await c.click(400, 300);
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
@@ -2637,8 +2601,6 @@ check(
 console.log("35) Esc 退出设置界面 + Ctrl+Shift+N 新建窗口");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 await c.click(400, 300);
 await c.selectAll();
 await c.type("= 窗口测试");
@@ -2785,8 +2747,6 @@ check(
 console.log("36) 回车换行继承上一行缩进 + Tab 四格缩进（用户要求）");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 await c.click(400, 300);
 
 /** 清空重来：全选 + 退格，再输入新内容（每小条独立，避免互相污染） */
@@ -2913,8 +2873,6 @@ await c.screenshot(SHOT("wysiwyg-36-auto-indent"));
 console.log("37) 帮助 → 关于");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 const aboutProbe = `(() => {
   const modal = document.querySelector(".about-modal");
@@ -3028,7 +2986,15 @@ const archiveProbe = `(() => {
 })()`;
 const beforeBlankNew = await c.evaluate(archiveProbe);
 await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 });
-await new Promise((r) => setTimeout(r, 900));
+// 新建先 clearState，再由 300ms 防抖写回空会话；等最终存档，避免把中间的 null 误判成失败。
+await c
+  .waitFor(
+    `(() => { const s = ${archiveProbe}; return s.content === "" && s.dirty === false; })()`,
+    {
+      timeout: 5000,
+    },
+  )
+  .catch(() => {});
 const newOnBlank = await c.evaluate(archiveProbe);
 check(
   "空文档上 Ctrl+N：没有可丢的内容 → 不弹确认，直接新建（dirty 被新建翻成 false）",
@@ -3409,8 +3375,6 @@ check(
 console.log("42) 编译错误的红波浪线（主源诊断 path: null）");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 const diagProbe = `(() => {
   const bar = document.querySelector(".statusbar");
@@ -3465,8 +3429,6 @@ check(
 console.log("43) 状态栏两个徽标的 Popover 交互一致（Esc / 点外部 / 点条目 / 收边）");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 const POP43_WARN = "[aria-label='编译警告列表']";
 const POP43_ERR = "[aria-label='编译错误列表']";
@@ -3722,8 +3684,6 @@ await new Promise((r) => setTimeout(r, 300));
 console.log("44) 复制编译错误/警告信息（浮层里的「复制」按钮）");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 /** 复制记录 + 浮层状态 + 状态栏（含源码模式的行列）探针 */
 const copy44Probe = `(() => {
@@ -3873,8 +3833,6 @@ console.log(
 );
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 await c.click(400, 300);
 
 /** 文档 + 选区 + 公式 widget 现状（一次取齐） */
@@ -4034,8 +3992,6 @@ check(
 console.log("45) 弹出来的面板跟随主题（深色下深、浅色下浅）：弹窗 / 浮层 / 右键菜单");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
-await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-await new Promise((r) => setTimeout(r, 700));
 
 /** 某个选择器上的一条计算样式（取不到元素时返回 null，不抛） */
 const style45 = (sel, prop) =>

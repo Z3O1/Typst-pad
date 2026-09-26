@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 // 长行内公式的**可断行片段**渲染：片段依次渲染、片段之间留可断点。
 // 这是"浏览器折行位置与 Typst 一致"的关键（见 Rust `split_inline_math` 与 widgets.ts 的说明）。
 import { describe, expect, it } from "vitest";

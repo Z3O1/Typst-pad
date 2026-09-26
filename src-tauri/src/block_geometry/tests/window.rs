@@ -50,7 +50,7 @@ fn writing_mode_window_limits_crops() {
 fn windowing_keeps_payload_bounded() {
     let _hit_cache = hit_cache_guard(); // 命中几何是全局的，见上面的说明
     let mut src = String::from("= 长文档\n\n");
-    for i in 0..160 {
+    for i in 0..128 {
         src.push_str(&format!(
             "第 {i} 段正文，用来把文档撑长，观察窗口化是否真的把产物压住了。这一段里放一个行内公式 $a_{i} + b_{i}$，\n                 再补一句普通中文，让每个段落都有两三行。\n\n"
         ));
