@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { blockBandFit, buildBlockBandFitDecorations } from "./block-decorations";
+import { remapBlocksThroughEdit } from "../../core/block-plan";
 import type { Block, BlockCover } from "../../core/block-plan";
 
 /** 造一个块：[from,to)、带顶 yPt、带高 heightPt、首行主基线 anchorBaselinePt（都是 pt） */
@@ -168,6 +169,75 @@ describe("带高盒装到 DOM 上", () => {
       const banded = Array.from(host.querySelectorAll(".cm-line.cm-block-band"));
       const texts = banded.map((el) => el.textContent);
       expect(texts).toEqual(["aaa", "ccc", "ddd", "eee"]);
+    } finally {
+      view.destroy();
+      host.remove();
+    }
+  });
+
+  /**
+   * **输入抖动回归**（2026-09-26）：敲一个字之后、编译结果落地之前，**整篇**的带高盒与引擎断点
+   * 都必须还在。
+   *
+   * 旧行为：编辑触碰到的块被 `remapBlocksThroughEdit` 清掉几何（`heightPt = 0`）→
+   * `bandBoxes` 的"每一个展开的可编辑正文块都有几何"当场为假 → **整篇**的带高盒与"空行归零"
+   * 一起关掉，编译落地再打开。实测（`.browser-check/probe-jitter.mjs`，真实夹具）整篇高度
+   * 347.1 → 333.7px、被编辑那一段从 99.9px 掉到 72.6px，150~300ms 后再跳回来 —— 就是用户报的
+   * "输入时短暂抖动"。现在被触碰的块带着 `layoutHold` 的占位几何（`cm-block-band-hold`）。
+   */
+  it("编辑后编译落地前：整篇带高盒与引擎断点都还在（不能先跳后跳回）", () => {
+    const before = "第一段。\n\nabcdefg\n\n第三段。\n";
+    const after = "第一段。\n\nabcXdefg\n\n第三段。\n";
+    const blocks = [
+      block(0, 4, { ...geo, yPt: 0, heightPt: 18, anchorBaselinePt: 12 }),
+      block(6, 13, {
+        ...geo,
+        yPt: 20,
+        heightPt: 30,
+        anchorBaselinePt: 33,
+        lineBreaks: [9],
+        lineCount: 2,
+      }),
+      block(15, 19, { ...geo, yPt: 56, heightPt: 18, anchorBaselinePt: 68 }),
+    ];
+    let current: Block[] = blocks;
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc: before,
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => current,
+            writeFontMetrics: () => ({ ascent: 17, descent: 4 }),
+          }),
+        ],
+      }),
+    });
+    const count = (sel: string) => host.querySelectorAll(sel).length;
+    try {
+      // 基线：三条可编辑正文行都有精确带高盒，第二段有 1 枚引擎断点
+      expect(count(".cm-line.cm-block-band")).toBe(3);
+      expect(count(".cm-write-engine-break")).toBe(1);
+
+      // 敲一个字：先落文档事务（与真实编辑一致），块表再按 remap 平移（与 +page.svelte 同序）
+      view.dispatch({ changes: { from: 9, insert: "X" } });
+      current = remapBlocksThroughEdit(blocks, before, after).blocks;
+      view.dispatch({ selection: { anchor: 10 } });
+
+      // 编译还没落地：三条正文行仍然全部占着带高（被编辑的那一条是**占位**类），断点也还在
+      const bands = count(".cm-line.cm-block-band, .cm-line.cm-block-band-hold");
+      expect(bands, "整篇带高盒不能在编译落地前关掉").toBe(3);
+      expect(count(".cm-line.cm-block-band-hold"), "被编辑的块要走占位类").toBe(1);
+      expect(count(".cm-write-engine-break"), "引擎断点不能在编译落地前被清掉").toBe(1);
+      // 旧切片绝不能盖住新输入：被编辑的块必须仍然是可编辑源码
+      expect(count(".cm-block-crop")).toBe(0);
     } finally {
       view.destroy();
       host.remove();

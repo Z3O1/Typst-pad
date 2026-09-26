@@ -1,6 +1,6 @@
 // 常用标记（标题 / 粗体 / 斜体 / 行内代码 / 列表符号）扫描的单元测试。
 import { describe, it, expect } from "vitest";
-import { scanMarkupDecorations } from "./markup-ranges";
+import { scanAllowedInlineCode, scanMarkupDecorations } from "./markup-ranges";
 import { scanMathRanges } from "./math-ranges";
 
 /** 便捷断言：取某类装饰的标记文本与正文文本 */
@@ -202,5 +202,42 @@ describe("区域极多时的判定（二分相交检查的功能守护）", () =
     expect(scanMarkupDecorations(doc).map((m) => m.kind)).toEqual(["strong", "raw-inline", "emph"]);
     const strong = scanMarkupDecorations(doc)[0];
     expect(doc.slice(strong.content.from, strong.content.to)).toBe("真粗");
+  });
+});
+
+describe("简单函数白名单（任务 4）：`#strong[文字]` / `#emph[文字]`", () => {
+  it("隐藏 `#strong[` 与 `]`，正文加粗；`#emph` 同理", () => {
+    expect(parts("正文 #strong[加粗] 收尾。")).toEqual([
+      { kind: "strong", level: undefined, markers: ["#strong[", "]"], content: "加粗" },
+    ]);
+    expect(parts("#emph[斜体]")).toEqual([
+      { kind: "emph", level: undefined, markers: ["#emph[", "]"], content: "斜体" },
+    ]);
+  });
+
+  it("任意自定义函数 / 别的内建函数不认（保持复杂块）", () => {
+    for (const doc of ["#box[内容]", "#h(1em)", "#figure([图])", "#text(red)[红]"]) {
+      expect(
+        scanMarkupDecorations(doc).filter((d) => d.kind === "strong" || d.kind === "emph"),
+      ).toEqual([]);
+      expect(scanAllowedInlineCode(doc)).toEqual([]);
+    }
+  });
+
+  it("内容里夹带代码 / raw / 标签 / 换行时整条不认（lexer 未必进得了内容块）", () => {
+    for (const doc of [
+      "#strong[#h(1em)字]",
+      "#strong[`码`]",
+      "#strong[<标签>]",
+      "#strong[两\n行]",
+    ]) {
+      expect(scanAllowedInlineCode(doc)).toEqual([]);
+    }
+  });
+
+  it("未闭合 / 空内容不认；内容里的 `$公式$` 与 `*粗*` 放行", () => {
+    expect(scanAllowedInlineCode("#strong[没闭合")).toEqual([]);
+    expect(scanAllowedInlineCode("#strong[]")).toEqual([]);
+    expect(scanAllowedInlineCode("#strong[$x$ 与 *粗*]")).toHaveLength(1);
   });
 });

@@ -6,6 +6,13 @@ use super::*;
 pub struct SourceBlock {
     pub kind: &'static str,
     pub range: Range<usize>,
+    /// **块内的原子区间**（相对用户文档的字节偏移，升序）：公式、标签、引用、行内 raw。
+    ///
+    /// 这些源码段的呈现不由"逐字符排版"负责 —— 公式由前端按同一段源码单独编译成 widget、
+    /// 引用画成编号、标签根本不画、行内 raw 画成代码文本。文字对应证明因此**不要求**
+    /// 这些区间逐字符有字形（否则 `$dif$` 这类 typst 会合成字形的写法永远证不出来）。
+    /// 范围由**语法树**给出（不是另写一套词法），见 `exempt_ranges`。
+    pub atoms: Vec<Range<usize>>,
     /// **这块在 Typst 里不产生任何版面内容**（`#let` / `#set` / `#show` / `#import`）。
     ///
     /// 为什么需要它：这些语句里的**内容值**（如 `#let va = $v$` 里的公式）在使用处的字形，
@@ -14,6 +21,119 @@ pub struct SourceBlock {
     /// 拿到了跨 500pt 的假包围盒，前端把它当成一张大切片画出来，正文重复出现。
     /// 这类块必须按"无输出"处理（前端会整格隐藏、光标进去才展开源码），不做几何匹配。
     pub no_output: bool,
+}
+
+/// 原子节点：呈现不靠"逐字符排版"的语法节点（见 `SourceBlock::atoms`）
+fn is_atom_node(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::Equation | SyntaxKind::Label | SyntaxKind::Ref | SyntaxKind::Raw
+    )
+}
+
+/// 收集一个节点子树里的**豁免区间**（见 `SourceBlock::atoms` 的说明）。
+///
+/// 豁免 = 不要求"逐字符有字形"的源码段：
+///  * 原子节点**整体**（公式 / 标签 / 引用 / raw）；
+///  * markup 里**行内函数调用的语法部分**（`#strong[` 的 `#strong` 与定界符）：函数名与括号
+///    不画成文字；**内容块照常检查** —— `#show strong: it => [替换]` 换掉内容时必须证不出来
+///    （替换内容的 span 落在块外）。
+///
+/// 只豁免 `#` + `FuncCall`（任务 4 的简单函数白名单）；其它 `#…` 不豁免（更保守：块内那些
+/// 字母数字找不到字形 ⇒ 证不出来 ⇒ 切片）。
+fn exempt_ranges(node: &SyntaxNode, base: usize) -> Vec<Range<usize>> {
+    // 传进来的节点**自己**就可能是原子（段落里的 `$x$` 是顶层节点，不是谁的子节点）
+    if is_atom_node(node.kind()) {
+        let len = node.len();
+        let mut single = Vec::new();
+        if len > 0 {
+            single.push(base..base + len);
+        }
+        return single;
+    }
+    let mut out = Vec::new();
+    collect_exempt(node, base, &mut out);
+    out.sort_by_key(|r| (r.start, r.end));
+    out
+}
+
+/// 子节点连同它们的**绝对**字节区间（未 numberize 的树按长度累加，见 `source_blocks`）
+fn child_ranges(node: &SyntaxNode, base: usize) -> Vec<(Range<usize>, SyntaxNode)> {
+    let mut out = Vec::new();
+    let mut cursor = base;
+    for child in node.children() {
+        let start = cursor;
+        let end = start + child.len();
+        cursor = end;
+        out.push((start..end, child.clone()));
+    }
+    out
+}
+
+/// 递归收集豁免区间（见 `exempt_ranges`）
+fn collect_exempt(node: &SyntaxNode, base: usize, out: &mut Vec<Range<usize>>) {
+    let kids = child_ranges(node, base);
+    let mut i = 0usize;
+    while i < kids.len() {
+        let (range, child) = (kids[i].0.clone(), kids[i].1.clone());
+        // `#strong[文字]` 在语法树里是 `Hash` + `FuncCall` 两个**兄弟**节点
+        // （markup 里的行内代码没有 `Code` 外壳，见源码树实测）。
+        if child.kind() == SyntaxKind::Hash {
+            if let Some((expr_range, expr)) = kids.get(i + 1).cloned() {
+                if expr.kind() == SyntaxKind::FuncCall {
+                    let contents = content_blocks(&expr, expr_range.start);
+                    // 代码语法 = 整段减去内容块
+                    let mut cursor = range.start;
+                    for (cr, _) in &contents {
+                        if cr.start > cursor {
+                            out.push(cursor..cr.start);
+                        }
+                        cursor = cursor.max(cr.end);
+                    }
+                    if expr_range.end > cursor {
+                        out.push(cursor..expr_range.end);
+                    }
+                    // 内容块内部照常递归（公式等原子、嵌套调用仍然豁免）
+                    for (cr, cnode) in &contents {
+                        collect_exempt(cnode, cr.start, out);
+                    }
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        if is_atom_node(child.kind()) {
+            out.push(range);
+        } else {
+            collect_exempt(&child, range.start, out);
+        }
+        i += 1;
+    }
+}
+
+/// 一个节点子树里**最外层**的 `ContentBlock`（含绝对区间与节点本身）
+fn content_blocks(node: &SyntaxNode, base: usize) -> Vec<(Range<usize>, SyntaxNode)> {
+    let mut out = Vec::new();
+    collect_content_blocks(node, base, &mut out);
+    out
+}
+
+fn collect_content_blocks(
+    node: &SyntaxNode,
+    base: usize,
+    out: &mut Vec<(Range<usize>, SyntaxNode)>,
+) {
+    let mut cursor = base;
+    for child in node.children() {
+        let start = cursor;
+        let end = start + child.len();
+        cursor = end;
+        if child.kind() == SyntaxKind::ContentBlock {
+            out.push((start..end, child.clone()));
+            continue; // 嵌套内容块已被这一层覆盖
+        }
+        collect_content_blocks(child, start, out);
+    }
 }
 
 /// 这些语法树顶层节点在 Typst 里**不产生版面内容**（定义/规则/导入）。
@@ -81,6 +201,22 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
     // 子节点字节偏移的累加游标（见下面循环里的说明）
     let mut cursor = 0usize;
 
+    // **豁免区间一次性算在整棵树上**（见 `exempt_ranges`）。
+    //
+    // 为什么要整棵树一起算，而不是逐节点：`#strong[文字]` 在语法树里是 `Hash` + `FuncCall`
+    // 两个**兄弟**节点，只有能看到兄弟关系的那一层才能认出"这是行内调用"。逐顶层节点算时
+    // `FuncCall` 单拎出来，里面的 `strong` 就不会被豁免 —— 白名单函数的块会误判成
+    // "`strong` 没有字形"（实测）。
+    let all_atoms = exempt_ranges(&root, 0);
+    // 落在某一个块里的豁免区间（绝对文档坐标）
+    let atoms_in = |range: &Range<usize>| -> Vec<Range<usize>> {
+        all_atoms
+            .iter()
+            .filter(|a| a.start >= range.start && a.end <= range.end)
+            .cloned()
+            .collect()
+    };
+
     let close_para =
         |para: &mut Option<Range<usize>>, no_output: &mut bool, out: &mut Vec<SourceBlock>| {
             if let Some(r) = para.take() {
@@ -92,6 +228,7 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
                     let no_output = *no_output || text_is_no_output_statements(&src[r.clone()]);
                     out.push(SourceBlock {
                         kind: if no_output { "Code" } else { "Paragraph" },
+                        atoms: atoms_in(&r),
                         range: r,
                         no_output,
                     });
@@ -140,6 +277,7 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
             close_para(&mut para, &mut para_no_output, &mut out);
             out.push(SourceBlock {
                 kind: kind_name(kind),
+                atoms: atoms_in(&range),
                 range,
                 no_output: is_no_output_node(kind),
             });
@@ -147,17 +285,17 @@ pub fn source_blocks(src: &str) -> Vec<SourceBlock> {
         }
 
         let this_no_output = is_no_output_node(kind);
-        para = match para {
+        match para.as_mut() {
             Some(r) => {
                 // 混进任何会画东西的节点（Text / Strong / Equation …）就不再是"无输出块"
                 para_no_output = para_no_output && this_no_output;
-                Some(r.start..r.end.max(range.end))
+                r.end = r.end.max(range.end);
             }
             None => {
                 para_no_output = this_no_output;
-                Some(range.start..range.end)
+                para = Some(range.start..range.end);
             }
-        };
+        }
     }
     close_para(&mut para, &mut para_no_output, &mut out);
     out

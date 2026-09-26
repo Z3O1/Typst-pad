@@ -24,6 +24,7 @@
 | [前端](development/frontend.md) | 页面、窗口、输入、布局与缩放 |
 | [编译后端](development/compiler-backend.md) | IPC、诊断、项目根、字体与包实现 |
 | [写作渲染](development/writing-rendering.md) | 文本/切片、调度、坐标与交互 |
+| [可编辑子集](development/writable-subset.md) | 直接编辑资格、文字对应证明、行内原子与结构化编辑设计 |
 | [所见即所得](development/wysiwyg.md) | 标记识别、公式、装饰与揭示 |
 | [文件与安全](development/files-and-security.md) | 写盘、会话、原生路径与权限 |
 | [测试](development/testing.md) | 验证选择、命令、证据与覆盖边界 |
@@ -39,6 +40,7 @@
 
 - [渲染模型](design/rendering-model.md)：真实排版与可编辑文本的取舍。
 - [编辑设计与研究](design/wysiwyg-research.md)：源码映射边界和未实施方案。
+- [结构化编辑设计](design/structured-editing.md)：行内原子与表格/图片/图注/引用的可改子集与拆分。
 
 ## 维护文档
 

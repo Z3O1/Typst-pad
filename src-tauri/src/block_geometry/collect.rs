@@ -26,6 +26,21 @@ pub struct PlacedItem {
     pub baseline_pt: f64,
 }
 
+/// 一项目**typst 自己合成**的字形（`span` 为 `None`）：列表符号 `•` / `1.`、`dif` 的 "d" 这类。
+///
+/// 它们不是主文档的字形（没有可映射的源码区间），也不是别的文件的东西 —— 是 typst 排版时
+/// 现造的。文字对应证明把它们当成"块内合成件"（既不算外来墨迹，也不参与覆盖）；
+/// **列表符号**则要原样取出来交给前端：符号、缩进、编号必须与 typst 一致，前端那套
+/// "按缩进计数"的近似不能冒充自定义编号/起始值。
+#[derive(Debug, Clone)]
+pub struct DetachedInk {
+    pub page: usize,
+    pub rect: Rect,
+    pub baseline_pt: f64,
+    /// 这个字形画出来的字符（`text.text[glyph.range()]`；空串的合成件不收）
+    pub text: String,
+}
+
 /// 帧遍历的统计（用来判断"映射漏了多少"而不是只看最终覆盖率）
 #[derive(Debug, Default, Clone)]
 pub struct FrameStats {
@@ -41,6 +56,18 @@ pub struct FrameStats {
     /// 用来回答"这篇文档的正文实际多大"（`document_text_pt`）—— 源码透镜要按它渲染，
     /// 否则光标一进某一块，那一块的字就比切片大一圈（用户：「不要光标在哪里哪里就变大了」）。
     pub size_weights: std::collections::BTreeMap<u32, usize>,
+    /// **不属于主文档、或 span 解析不出来的墨迹**（页号 + 页面坐标矩形）。
+    ///
+    /// 为什么单列：`items` 只收"主文档里能解出字节区间的项"，而 `#include` 进来的文件
+    /// （span 落在别的 `FileId` 上）与解析不出区间的项**照样画在页面上**。文字对应证明要能
+    /// 判断"这一块的带里有没有外来的墨迹"（任务 1 的反例：来自其它源文件的可见内容），
+    /// 所以这些项不能丢，只是不能当成"这一块的源码"。
+    ///
+    /// 另：字形 span 落在**别的文件**上时，`world.range` 给出的是那个文件里的字节偏移，
+    /// 与主文档坐标毫无关系 —— 早先的遍历把它当主文档偏移收进 `items`，会污染块几何与命中。
+    pub foreign_ink: Vec<(usize, Rect)>,
+    /// **typst 合成的字形**（见 `DetachedInk`）：列表符号等
+    pub detached_ink: Vec<DetachedInk>,
 }
 /// 遍历所有页的帧，收集"有源位置的项"的几何。
 ///
@@ -61,9 +88,11 @@ pub fn collect_geometry_with_links(
     let mut items = Vec::new();
     let mut links = Vec::new();
     let mut stats = FrameStats::default();
+    let main_id = world.main();
     for (i, page) in document.pages().iter().enumerate() {
         walk_frame(
             world,
+            main_id,
             &page.frame,
             i + 1,
             Point::zero(),
@@ -78,9 +107,14 @@ pub fn collect_geometry_with_links(
 
 /// 递归遍历帧。坐标映射与 typst-ide 的 `find_in_frame` 同构：
 /// 子帧里的点 `p` 在本层的位置 = `pos + p.transform(group.transform)`。
+///
+/// `main_id` = 主文档的 `FileId`：**只有 span 属于主文档的项才进 `items`**（块几何、折行、
+/// 命中都建立在"主文档字节偏移"上）；属于别的文件（`#include`）或解析不出区间的项进
+/// `stats.foreign_ink`，供文字对应证明判断"带内有没有外来墨迹"。
 #[allow(clippy::too_many_arguments)]
 fn walk_frame(
     world: &dyn World,
+    main_id: typst::syntax::FileId,
     frame: &Frame,
     page: usize,
     offset: Point,
@@ -102,20 +136,45 @@ fn walk_frame(
                 let mut x = Abs::zero();
                 for glyph in &text.glyphs {
                     let advance = glyph.x_advance.at(text.size);
-                    let mapped = glyph_range(world, text, glyph);
-                    if let Some(range) = mapped {
-                        let (up, down) = glyph_ink(text, glyph.id);
-                        let rect = Rect::new(
-                            Point::new(origin.x + x, origin.y - up),
-                            Point::new(origin.x + x + advance, origin.y + down),
-                        );
-                        out.push(PlacedItem {
-                            page,
-                            range,
-                            rect,
-                            baseline_pt: origin.y.to_pt(),
-                        });
-                        stats.glyphs_mapped += 1;
+                    let (up, down) = glyph_ink(text, glyph.id);
+                    let rect = Rect::new(
+                        Point::new(origin.x + x, origin.y - up),
+                        Point::new(origin.x + x + advance, origin.y + down),
+                    );
+                    // 只有**主文档**的字形才算这一块的几何：别的文件（include）里写下的
+                    // 区间是那个文件的坐标，混进来就是错位。
+                    //
+                    // 三类要分开（实测）：① span 属于主文档且能解出区间 → 这一块的字形；
+                    // ② span 属于**别的文件** → 真外源（计入 `foreign_ink`，文字证明要拦它）；
+                    // ③ span 是 `None`（typst 自己合成的：列表符号 `•`/`1.`、`dif` 的 "d" 这类）
+                    //    → 既不是主文档也不是别的文件，是这一块内容的合成件，**不算外来**。
+                    match glyph.span.0.id() {
+                        // 主文档的 span 却解不出区间：不多见，也不算外源
+                        Some(id) if id == main_id => {
+                            if let Some(range) = glyph_range(world, text, glyph) {
+                                out.push(PlacedItem {
+                                    page,
+                                    range,
+                                    rect,
+                                    baseline_pt: origin.y.to_pt(),
+                                });
+                                stats.glyphs_mapped += 1;
+                            }
+                        }
+                        Some(_) => stats.foreign_ink.push((page, rect)),
+                        None => {
+                            // typst 合成的字形：列表符号要用它的可见文字，别的只是占位
+                            if let Some(visible) = text.text.get(glyph.range()) {
+                                if !visible.is_empty() {
+                                    stats.detached_ink.push(DetachedInk {
+                                        page,
+                                        rect,
+                                        baseline_pt: origin.y.to_pt(),
+                                        text: visible.to_string(),
+                                    });
+                                }
+                            }
+                        }
                     }
                     x += advance;
                 }
@@ -131,6 +190,7 @@ fn walk_frame(
                 }
                 walk_frame(
                     world,
+                    main_id,
                     &group.frame,
                     page,
                     origin,
@@ -142,30 +202,43 @@ fn walk_frame(
             }
             FrameItem::Shape(shape, span) => {
                 stats.shapes += 1;
-                if let Some(range) = world.range(*span) {
-                    let bb = shape.bbox(true);
-                    let rect = Rect::new(
-                        Point::new(origin.x + bb.min.x, origin.y + bb.min.y),
-                        Point::new(origin.x + bb.max.x, origin.y + bb.max.y),
-                    );
-                    out.push(PlacedItem {
-                        page,
-                        range,
-                        rect,
-                        baseline_pt: rect.min.y.to_pt(),
-                    });
+                let bb = shape.bbox(true);
+                let rect = Rect::new(
+                    Point::new(origin.x + bb.min.x, origin.y + bb.min.y),
+                    Point::new(origin.x + bb.max.x, origin.y + bb.max.y),
+                );
+                match span.id() {
+                    Some(id) if id == main_id => {
+                        if let Some(range) = world.range(*span) {
+                            out.push(PlacedItem {
+                                page,
+                                range,
+                                rect,
+                                baseline_pt: rect.min.y.to_pt(),
+                            });
+                        }
+                    }
+                    // 别的文件画的东西：算外来墨迹（`None` = typst 合成件，不算）
+                    Some(_) => stats.foreign_ink.push((page, rect)),
+                    None => {}
                 }
             }
             FrameItem::Image(_, size, span) => {
                 stats.images += 1;
-                if let Some(range) = world.range(*span) {
-                    let rect = Rect::new(origin, Point::new(origin.x + size.x, origin.y + size.y));
-                    out.push(PlacedItem {
-                        page,
-                        range,
-                        rect,
-                        baseline_pt: origin.y.to_pt(),
-                    });
+                let rect = Rect::new(origin, Point::new(origin.x + size.x, origin.y + size.y));
+                match span.id() {
+                    Some(id) if id == main_id => {
+                        if let Some(range) = world.range(*span) {
+                            out.push(PlacedItem {
+                                page,
+                                range,
+                                rect,
+                                baseline_pt: origin.y.to_pt(),
+                            });
+                        }
+                    }
+                    Some(_) => stats.foreign_ink.push((page, rect)),
+                    None => {}
                 }
             }
             FrameItem::Link(dest, size) => {

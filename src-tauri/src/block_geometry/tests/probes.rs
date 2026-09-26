@@ -960,6 +960,10 @@ fn dump_pku_writing_fixtures() {
                 "kind": b.kind,
                 "found": b.found,
                 "skipped": b.skipped,
+                // 文字对应证明 / 列表标记：浏览器侧的可编辑期望值要按它们算
+                // （`editableInFixture`），不能只按 kind 猜 —— 否则"能不能直接编辑"两套判据。
+                "edit": b.edit,
+                "listMarker": b.list_marker,
                 "pages": b.pages,
                 "page": b.page,
                 "xPt": b.x_pt,

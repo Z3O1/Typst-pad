@@ -9,6 +9,8 @@ import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import { planBlockCovers } from "../../core/block-plan";
 import type { Block, BlockCover } from "../../core/block-plan";
+import { decideTextBlockEditing } from "../../core/editable-subset";
+import { scanAllowedInlineCode } from "../../core/markup-ranges";
 import { scanNonMarkupRegions } from "../../core/typst-lex";
 import type { Region } from "../../core/typst-lex";
 import { PREFETCH_MARGIN } from "./options";
@@ -17,73 +19,16 @@ import { BlockCropWidget } from "./widgets";
 import { applyBlockSelection } from "../../core/block-plan";
 
 /**
- * 第一阶段的“可编辑正文”只接管能保守判定为纯 markup 的 Paragraph / Heading。
- *
- * `Paragraph` 只是 Typst 顶层分块的兜底类别，里面仍可能混有 `#image(...)`、自定义宏、raw、
- * 注释等内容；仅按 kind 放开会把这些复杂内容从可靠的引擎切片退回近似源码显示。这里复用
- * live-preview 已有的 lexer：块内只要出现**代码 / raw / 注释**区域，就继续沿用局部渲染。
- *
- * **`string` 区域不算复杂**（2026-09-22 审查发现）：lexer 把 `"` 无条件登记成 string（为了让
- * `"$5"` 不被当成公式，见 `typst-lex` 的说明），但 markup 里的 `"` 就是 typst 的弯引号、是
- * 纯 markup —— 一旦把它算作复杂内容，写了一对引号的正文（`他说"你好"，然后走了。`）就会整段
- * 退回切片，未闭合的引号更会让其后所有段落一起退化，正好违背这条规则本身。真在代码里的字符串
- * 一定被外层的 `code` 区域包住（`#let s = "x"`、`#image("x.png")`），所以放宽 string
- * 不会漏掉任何代码。
- *
- * 公式不属于 opaque 区域，因此“普通文字 + 行内公式”仍是可编辑正文，公式本身继续由
- * math decoration 局部替换。粗体 / 斜体也属于 markup，直接作用在真实文本上。
- *
- * **段内有单 LF 的段落也不再直接编辑**（`docString` 里含换行）：Typst 把段落内的单换行当空白、
- * 整段连排（实测数分作业一块源 6 行 → 引擎 5 个视觉行），而逐源码行的可编辑文本每行必占一个
- * 行盒（同一块浏览器 9 行），纵向位置从这一段起就再也对不上。这类块改用引擎切片呈现，
- * 光标进入时照旧展开成源码（与复杂块同一条路径）。编辑器自己的 Enter 写的是两个换行（新段落）、
- * Shift+Enter 写的是 `\` + 换行（Typst 显式换行），都不会产生"段内单 LF"，所以这条只影响
- * 粘贴/手写的硬折行文本。
- */
-export function isDirectlyEditableTextBlock(
-  block: Pick<Block, "from" | "to" | "kind" | "found" | "skipped">,
-  opaque: readonly Region[],
-  docString = "",
-): boolean {
-  if ((block.kind !== "Paragraph" && block.kind !== "Heading") || !block.found || block.skipped) {
-    return false;
-  }
-  if (docString.slice(block.from, block.to).includes("\n")) return false;
-  return !overlapsComplexRegion(block.from, block.to, opaque);
-}
-
-/**
- * 块区间与“复杂区域”（code / raw / comment）相交吗。
- *
- * `opaque` 按位置有序且互不重叠 ⇒ 二分找到第一个 `from >= from` 的区域，再往后扫到越过块尾
- * 为止。**别写成从头线性扫**：那是每个格子一次、每次按键重建装饰一次，即 O(块 × 区域)；
- * `markup-ranges` 里记过同样的教训（40k 字符实测 47ms/次）。
- */
-function overlapsComplexRegion(from: number, to: number, opaque: readonly Region[]): boolean {
-  let lo = 0;
-  let hi = opaque.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (opaque[mid].from < from) lo = mid + 1;
-    else hi = mid;
-  }
-  for (let i = Math.max(0, lo - 1); i < opaque.length; i++) {
-    const region = opaque[i];
-    if (region.from >= to) break;
-    // 引号是 markup：见 isDirectlyEditableTextBlock 的说明（只有 code/raw/comment 算复杂）
-    if (region.kind === "string") continue;
-    if (region.to > from && region.from < to) return true;
-  }
-  return false;
-}
-
-/**
  * 把块表算成"当前文档下要覆盖哪些区间"（块表已是 CodeMirror 位置，见 block-plan.toBlockTable）。
  * 越界 / 反序的格子直接丢掉（文档在编译期间被大改时可能出现）——宁可少渲染，不可乱渲染。
  *
  * 注意：这里**特意不做"文档变了就退回源码"**。块表在编译结果回来之前是旧的，而编辑只发生在
  * 已展开的那一格；其它格的边界都落在空白处（上一块的源码终点），偏一两个字符既不会露出来
  * 也不会吃掉正文。反过来"一变就退回"会让每敲一个字都闪一次源码（见 block-plan 的说明）。
+ *
+ * **可编辑资格的唯一判据在 `core/editable-subset`**：这里只消费它的结论，不另写语法条件
+ * （"是不是段落/标题、有没有 code/raw、是不是单源码行、文字有没有被证明对应"都在那边）。
+ * 这样前端只有一套判据，后端也只提供"帧里画了什么"的证明。
  */
 export function buildBlockCovers(
   state: EditorState,
@@ -107,9 +52,19 @@ export function buildBlockCovers(
     docLength,
   );
   // 普通正文与标题始终保留为真实文本：光标进出不会再触发整块图片/源码切换。
-  // 复杂 Paragraph / Heading（含代码、raw、注释等）不命中此规则，仍保留原来的可靠退路。
+  // 只有**通过核心决策**（白名单 + 文字对应 + 几何 + 新鲜度）的块才获准直接编辑；
+  // 复杂块、文字对不上的块、过期产物都不命中，仍保留原来的可靠退路（切片 / 源码）。
+  // 白名单行内调用（`#strong` / `#emph`）的 code 区域不算"复杂"（任务 4）；一次算好给所有块用
+  const allowedCode = scanAllowedInlineCode(doc, opaque);
   for (const cover of covers) {
-    if (isDirectlyEditableTextBlock(cover.block, opaque, doc)) cover.revealed = true;
+    if (cover.noOutput) continue;
+    const decision = decideTextBlockEditing({
+      block: cover.block,
+      source: doc.slice(cover.block.from, cover.block.to),
+      opaque,
+      allowedCode,
+    });
+    if (decision.editable) cover.revealed = true;
   }
   return covers;
 }
@@ -143,7 +98,11 @@ export interface BlockBandFit {
 
 /** 一块能不能走带高盒；不能则返回 null（调用方保持自然行盒，绝不半套规则混用） */
 export function blockBandFit(block: Block, metrics: WriteFontMetrics): BlockBandFit | null {
-  if (!block.found || block.noOutput) return null;
+  /**
+   * `found` = 这份几何是**本轮编译**的；`layoutHold` = 它是"编辑已发生、编译还没落地"那段窗口里
+   * 的上一次几何，只用来把版面钉住（见 `Block.layoutHold`）。两者之外一律不加带高盒。
+   */
+  if ((!block.found && block.layoutHold !== true) || block.noOutput) return null;
   if (!(block.heightPt > 0.5) || !(block.widthPt > 0)) return null;
   const baseline = block.anchorBaselinePt;
   if (baseline == null || !Number.isFinite(baseline)) return null;
@@ -159,7 +118,7 @@ export function blockBandFit(block: Block, metrics: WriteFontMetrics): BlockBand
 /**
  * 带高盒装饰：给可编辑正文所在的那**一条源码行**挂上盒高与行高。
  *
- * 只处理单源码行块（多源码行的块由 `isDirectlyEditableTextBlock` 判定为切片，见那里的说明）；
+ * 只处理单源码行块（多源码行的块由 `core/editable-subset` 判为切片，见那里的说明）；
  * 块区间可能带行尾换行，所以按"块尾不超过行尾"判定。挂两个自定义属性而不是直接写
  * `height`/`line-height`：样式规则留在 `Editor.svelte` 的 CSS 里，标题 span 也能一起被规整。
  */
@@ -178,9 +137,18 @@ export function buildBlockBandFitDecorations(
     if (!fit) continue;
     const line = state.doc.lineAt(block.from);
     if (block.to > line.to) continue;
+    /**
+     * **占位布局用另一个类**（`cm-block-band-hold` → `min-height` 而不是 `height`）。
+     *
+     * 精确块的盒高就是引擎给的带高（内容一定装得下）；占位块的内容可能已经比上一次多了一行
+     * （回车、粘贴），此时钉死高度会让新行**溢出盒子**、压到下一块上。`min-height` 的效果是
+     * "只能长、不能缩"：内容没变时与精确块逐像素一致（不动），内容变多时立刻长出来（一次符合
+     * 内容变化的位移），编译落地后再校正成精确的带高。
+     */
+    const cls = block.layoutHold === true ? "cm-block-band-hold" : "cm-block-band";
     out.push(
       Decoration.line({
-        class: "cm-block-band",
+        class: cls,
         attributes: {
           style: `--write-band-h:${fit.heightPx.toFixed(3)}px; --write-band-lh:${fit.lineHeightPx.toFixed(3)}px`,
         },
@@ -222,7 +190,26 @@ export function buildEngineBreakDecorations(
     if (!cover.revealed || cover.noOutput) continue;
     const block = cover.block;
     const breaks = block.lineBreaks;
-    if (!breaks || breaks.length === 0) continue;
+    if (!breaks || breaks.length === 0) {
+      /**
+       * **引擎说这一块只有一行**（`lineCount === 1`）→ 不许浏览器自己折。
+       *
+       * Typst 会在行尾压缩 CJK 标点、还会把标点挂出正文列，同一行在浏览器里可能就差几个像素
+       * 而多折一行（实测 PKU 高代周二两个、数分周二一个列表项：typst=1 / browser=2，正文是
+       * 纯中文，纯粹是列宽余量差）。用与多行情形**同一条** `.cm-write-engine-break-line`
+       * （`white-space: pre`）：浏览器只能在引擎给的位置断，溢出落在右侧纸张留白里。
+       *
+       * 只在 `lineCount` **明确为 1** 时下手：0 = 拿不到（老后端 / 桩 / 刚被编辑触碰过、
+       * 坐标已清空的块），那时照旧让浏览器自然折行。
+       */
+      if (block.lineCount === 1) {
+        const line = state.doc.lineAt(block.from);
+        if (block.to <= line.to) {
+          out.push(Decoration.line({ class: "cm-write-engine-break-line" }).range(line.from));
+        }
+      }
+      continue;
+    }
     if (block.lineCount !== breaks.length + 1) continue;
     const marks: Range<Decoration>[] = [];
     let prev = block.from;
@@ -240,7 +227,7 @@ export function buildEngineBreakDecorations(
         break;
       }
       const region = rangeAt(at, opaque);
-      // 引号是 markup（见 isDirectlyEditableTextBlock 的说明）：`"` 后面照样可以断行
+      // 引号是 markup（见 editable-subset 的 overlapsComplexRegion 说明）：`"` 后面照样可以断行
       if (region && region.kind !== "string") {
         skipped++;
         continue;

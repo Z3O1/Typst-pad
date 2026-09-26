@@ -6,8 +6,11 @@
 // 本模块只做决策，不碰 CodeMirror：把"块表 + 当前选区 + 文档长度"算成
 // "哪些区间要被 widget 覆盖"，落成装饰由 live-preview.ts 负责。
 import type { Text } from "@codemirror/state";
-import type { BlockCrop, CropLink } from "./typst-engine";
+import type { BlockCrop, BlockEditProof, CropLink, ListMarkerProof } from "./typst-engine";
 import { byteOffsetsToPositions } from "./block-offsets";
+
+/** 文字对应证明 / 列表标记的线格式定义在 `typst-engine`（IPC 契约同处），块层原样再导出 */
+export type { BlockEditProof, ListMarkerProof };
 
 /** 版本快照用：同一次编译产出的文档文本（用来判断块表是否已过期） */
 export interface BlockTable {
@@ -85,6 +88,34 @@ export interface Block {
   lineCount: number;
   /** 切片内部的可点链接热区（相对裁剪带左上角，pt）；空数组 = 这一块没有链接 */
   links: CropLink[];
+  /**
+   * **文字对应证明**（任务 1）：这一块画出来的可见内容能不能严格对应回它的源码区间。
+   *
+   * `undefined` = 产物里没有这个字段（旧后端 / 只提供几何的桩）→ 决策退回旧的语法判据；
+   * 有值但 `verdict === "unknown"` = **证不出来** → 不许直接编辑（切片）。
+   * 见 `core/editable-subset` 与 Rust `block_geometry::text_proof`。
+   */
+  edit?: BlockEditProof | null;
+  /**
+   * **列表项的渲染标记**（任务 2）：符号/缩进/编号全部取自引擎（见 `ListMarkerProof`）。
+   * `null` = 不是列表项 / 取不到引擎标记 → 列表项不开放直接编辑（切片）。
+   */
+  listMarker?: ListMarkerProof | null;
+  /**
+   * **占位布局**（输入抖动修复）：这一块的几何**不是本轮编译的产物**，而是"编辑已经发生、
+   * 编译还没落地"那段窗口里用来**保持版面不跳**的上一次成功编译结果。
+   *
+   * 为什么需要：编辑一次就会让被改块的几何失效（否则旧切片会盖住新字），而带高盒与"空行归零"
+   * 是**整篇同生共死**的（见 `live-preview.ts` 的 `bandBoxes`）：被改块一失效，整篇可编辑正文的
+   * 带高盒与段距压缩会同时关掉 —— 实测 4 行夹具输入一个字，整篇高度当场 −13.4px、被编辑那一段
+   * 的盒高从 99.9px 掉到 72.6px，150~300ms 后编译落地再跳回来。这就是用户报的"输入时短暂抖动"。
+   *
+   * 于是这里把最后一次几何**显式地当作占位**留着：`found` 仍然为 false（不可渲染 ⇒ 旧切片绝不
+   * 覆盖新字、不参与补渲判据、点击命中照旧走 `exact` 闸门），只是带高盒/引擎断点可以继续用这份
+   * 数值把版面钉住。它**不是精确产物**：任何需要精确几何的判据（`decideTextBlockEditing` 的
+   * `geometry`、`renderable`、`notifyBlocksNeeded`）都只看 `found`，不受这个字段影响。
+   */
+  layoutHold?: boolean;
 }
 
 /**
@@ -131,6 +162,8 @@ export function toBlockTable(
     | "lineBreaks"
     | "lineCount"
     | "links"
+    | "edit"
+    | "listMarker"
   >[],
 ): BlockTable {
   const offsets: number[] = [];
@@ -180,6 +213,9 @@ export function toBlockTable(
       links: Array.isArray(b.links)
         ? b.links.filter((l) => l && typeof l.href === "string" && isSafeHref(l.href))
         : [],
+      // 文字对应证明 / 列表标记原样带过来（`null` = 旧后端 / 桩 / 不是列表项）
+      edit: b.edit ?? null,
+      listMarker: b.listMarker ?? null,
     });
   }
   return { doc, blocks };
@@ -539,15 +575,15 @@ export function remapBlocksThroughEdit(
         (b.from < span.to && b.to > span.from);
   // 退回源码：`found: false`（不可渲染）+ **清掉 noOutput** —— 这是"旧坐标/编译失败"的兜底，
   // 与"引擎说这块没输出"是两回事：误隐藏会让用户刚打的字凭空消失，宁可显示源码。
+  // **几何字段（heightPt / anchorBaselinePt / lineBreaks / lineCount）原样留着**并标
+  // `layoutHold`：它们只是"编译落地前把版面钉住"的占位，不是精确产物（见 Block.layoutHold）。
+  // 清掉它们会让整篇的带高盒与段距压缩在每次按键后关掉再打开 —— 那正是输入抖动的来源。
   const revealed = (b: Block): Block => ({
     ...b,
     found: false,
     noOutput: false,
     svg: "",
-    heightPt: 0,
-    // 退回源码的块不再用引擎断点：它的坐标是旧编译的，按它折行只会折错（见 Block.lineBreaks）
-    lineBreaks: [],
-    lineCount: 0,
+    layoutHold: true,
   });
   for (const b of blocks) {
     if (revealedBy(b)) {
@@ -563,7 +599,24 @@ export function remapBlocksThroughEdit(
           ? // 与改动段相交：区间**放宽**到"自己 ∪ 改动段"，只多显示源码，绝不盖住新打的字
             Math.max(from, b.to + span.delta, span.to + span.delta)
           : b.to;
-      out.push(revealed({ ...b, from, to }));
+      /**
+       * **引擎断点跟着改动平移**（占位布局的一部分，见 `Block.layoutHold`）。
+       *
+       * 断点是**旧文档的绝对位置**：改动点之前的原样、之后的 +delta，落在改动段里的直接丢掉 ——
+       * 丢一枚就与 `lineCount` 对不上，装饰层的自洽校验（`lineBreaks.length + 1 === lineCount`）
+       * 会让这一块退回浏览器的自然折行，绝不会拿错位的断点硬折。
+       *
+       * 为什么保留而不是像以前那样清空：清空之后这一块立刻改由浏览器贪心折行，而 Typst 的断点
+       * 与贪心结果本来就不同（每行差一个字左右），于是**每敲一个字整段都重排一次**、编译落地再
+       * 排回来。保留旧断点只是让它晚 150~300ms 对齐，中途版面完全不动。
+       */
+      const heldBreaks = b.lineBreaks
+        .filter((p) => p <= span.from || p >= span.to)
+        // 平移用 `p > span.from` 而不是 `p >= span.to`：**纯插入**时 `span.from === span.to`，
+        // 断点正好落在插入点意味着"断在插入的那个字之前"，位置不该动（这正是打字的常见路径）；
+        // 用 `>= span.to` 会把它也 +delta，于是整段断点集体后移一个字。
+        .map((p) => (p > span.from ? p + span.delta : p));
+      out.push(revealed({ ...b, from, to, lineBreaks: heldBreaks }));
       continue;
     }
     // 改动段之后：整体平移

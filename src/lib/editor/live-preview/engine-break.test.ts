@@ -95,6 +95,19 @@ describe("禁止浏览器折行的行装饰", () => {
     const b = block(0, 18, { lineBreaks: [4, 8], lineCount: 3 });
     expect(noWrapLines(doc, [cover(b)])).toEqual([]);
   });
+
+  it("引擎说只有一行时也要禁折（Typst 的行尾标点压缩会让浏览器差几像素多折一行）", () => {
+    // 实测 PKU：同一个纯中文列表项 typst=1 / browser=2，只是列宽余量差几个像素
+    const doc = "- 先去掉乘法交换律，得到四元数（4 维）：结合律、单位元、非零元有逆都还在。";
+    const b = block(0, doc.length, { kind: "ListItem", lineBreaks: [], lineCount: 1 });
+    expect(noWrapLines(doc, [cover(b)])).toEqual([0]);
+  });
+
+  it("拿不到行数（lineCount=0，老后端/桩/刚被编辑触碰）时不加禁折", () => {
+    const doc = "正文一段。";
+    const b = block(0, doc.length, { lineBreaks: [], lineCount: 0 });
+    expect(noWrapLines(doc, [cover(b)])).toEqual([]);
+  });
 });
 
 describe("buildEngineBreakDecorations", () => {
@@ -150,7 +163,7 @@ describe("buildEngineBreakDecorations", () => {
   it("断点前是 markup 引号时**照样折**（引号是 markup，不是复杂内容）", () => {
     const doc = "abcdefghijkl";
     const b = block(0, 12, { lineBreaks: [4], lineCount: 2 });
-    // 位置 3 落在 string 区域里（lexer 把未配对引号也登记成 string，见 isDirectlyEditableTextBlock）
+    // 位置 3 落在 string 区域里（lexer 把未配对引号也登记成 string，见 overlapsComplexRegion）
     const quote: Region[] = [{ from: 3, to: 4, kind: "string" }];
     expect(markedRanges(doc, [cover(b)], quote)).toEqual([[3, 4]]);
   });

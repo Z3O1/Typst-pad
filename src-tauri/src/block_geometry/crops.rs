@@ -100,8 +100,21 @@ pub struct BlockCrop {
     /// 该块 SVG **内部**的链接热区（相对裁剪带左上角，pt）：前端据此贴一层可点的透明方块。
     /// 只有窗口内的块才有（与 svg 同步取舍），没有链接时为空数组。
     pub links: Vec<CropLink>,
+    /// **列表项的渲染标记**（任务 2）：typst 实际画出的符号与正文起点偏移。
+    ///
+    /// 只有 `ListItem` / `EnumItem` 块才可能有；其它块是 `None`。
+    /// 前端据此画标记（符号/缩进/编号与 typst 完全一致），不再用"按缩进计数"的近似。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_marker: Option<ListMarkerProof>,
     /// 该块的 SVG（空串 = 没有渲染结果，前端保持源码显示）
     pub svg: String,
+    /// **文字对应证明**（任务 1）：这一块的可见内容能否严格对应回它的源码区间。
+    ///
+    /// `None` = 没有几何 / 没有可证明的产物（前端按"证不出来"处理，保持切片或源码）。
+    /// **旧后端不发这个字段** ⇒ 前端拿到 `undefined` ⇒ 走旧的语法判据（见 `core/editable-subset`）。
+    /// 这是"新增编译字段必须有清晰失败/旧后端默认值"的那条默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit: Option<BlockEditProof>,
 }
 
 /// 切片上的一个链接热区（相对裁剪带左上角，pt —— 与 SVG 的坐标系一致）
@@ -300,6 +313,17 @@ pub fn compile_blocks(
         }
     }
 
+    // **定义/规则块与编译前缀**的区间：这些地方的 content value 在使用处的字形 span 指回
+    // 定义处，不能算"外来墨迹"（见 text_proof 的 `definitions`）。前缀 = `doc_start` 之前的
+    // 注入行 + 编译前缀。
+    let mut definitions: Vec<Range<usize>> = Vec::new();
+    if doc_start > 0 {
+        definitions.push(0..doc_start);
+    }
+    for b in blocks.iter().filter(|b| b.no_output) {
+        definitions.push((b.range.start + doc_start)..(b.range.end + doc_start));
+    }
+
     // 文档正文实际字号：行断点聚类要拿它兜底，`store_hit_geometry` 之后 stats 就没了，
     // 所以提到切片循环之前算一次。
     let text_pt = document_text_pt(&stats);
@@ -436,7 +460,43 @@ pub fn compile_blocks(
                 .collect(),
             line_count: (lines.count > 0).then_some(lines.count),
             links,
+            // 列表符号：只有列表项才取（其它块的 `DetachedInk` 是 `dif` 这类合成件，不是标记）
+            list_marker: matches!(blocks[*idx].kind, "ListItem" | "EnumItem")
+                .then(|| {
+                    list_marker_of(
+                        &stats.detached_ink,
+                        &items,
+                        (blocks[*idx].range.start + doc_start)
+                            ..(blocks[*idx].range.end + doc_start),
+                        g.page,
+                        rect,
+                        text_pt,
+                        line_spacing,
+                    )
+                })
+                .flatten(),
             svg,
+            // 文字对应证明：用这一块**最终**的裁剪带（含夹紧后的边界）判断"带内有没有外来墨迹"。
+            // 源码文本与几何必须成套 —— 前端会拿 `source` 与当前文档逐字比对。
+            edit: Some(prove_block_text(
+                &doc_text[blocks[*idx].range.clone()],
+                (blocks[*idx].range.start + doc_start)..(blocks[*idx].range.end + doc_start),
+                g.page,
+                rect,
+                // 原子区间换成"相对块起点"（证明只关心块内位置）
+                &blocks[*idx]
+                    .atoms
+                    .iter()
+                    .map(|a| {
+                        a.start.saturating_sub(blocks[*idx].range.start)
+                            ..a.end.saturating_sub(blocks[*idx].range.start)
+                    })
+                    .collect::<Vec<_>>(),
+                &definitions,
+                &items,
+                &stats.foreign_ink,
+                line_spacing,
+            )),
         });
     }
 
@@ -460,7 +520,10 @@ pub fn compile_blocks(
             bands: 0,
             anchor_baseline_pt: None,
             links: Vec::new(),
+            list_marker: None,
             svg: String::new(),
+            // 没有几何 = 引擎这块没画 ⇒ 没有可证明的呈现，前端保持源码
+            edit: None,
         }));
     }
 

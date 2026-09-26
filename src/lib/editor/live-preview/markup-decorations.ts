@@ -6,7 +6,7 @@ import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import type { MarkupDecoration, MarkupKind } from "../../core/markup-ranges";
 import type { Region } from "../../core/typst-lex";
-import { TextWidget } from "./widgets";
+import { ListMarkerWidget, TextWidget } from "./widgets";
 import type { MathRange } from "../../core/math-ranges";
 import { selectionTouchesRange } from "../../core/math-ranges";
 import { CodeBlockWidget } from "./widgets";
@@ -23,6 +23,23 @@ const MARKUP_CLASS: Record<MarkupKind, string> = {
   link: "cm-markup-link",
   "raw-block": "cm-markup-raw", // 块级代码块由 widget 呈现，样式类仅作兜底
 };
+
+/**
+ * 列表标记盒的 CSS 变量（**呈现态与揭示态共用**，见下面 list-marker 分支的说明）。
+ *
+ * `width` = 引擎给的**正文起点**（相对列左缘，pt → px 的 4/3 与 widget 同一口径），
+ * `padding-left` = 标记起点（`marker-align: end` 的序号要右对齐，圆点则在列左缘：
+ * 实测 `markerXPt` 是 −0.0014 这种负抖动，所以只在 > 0 时才写）。
+ */
+function listMarkerBoxStyle(markerXPt: number, bodyOffsetPt: number): string {
+  const widthPx = (bodyOffsetPt * 4) / 3;
+  const markerXPx = (markerXPt * 4) / 3;
+  const parts = [`--write-list-w:${widthPx.toFixed(3)}px`];
+  if (markerXPx > 0 && Number.isFinite(markerXPx)) {
+    parts.push(`--write-list-pad:${markerXPx.toFixed(3)}px`);
+  }
+  return parts.join(";");
+}
 
 /**
  * 常用标记的装饰（标题 / 粗体 / 斜体 / 行内代码 / 列表符号）：
@@ -47,6 +64,12 @@ export function buildMarkupDecorations(
    * 关掉时行为与加带高盒之前**逐字节一致**（源码模式、块表过期、jsdom 都走这条）。
    */
   bandBoxes = false,
+  /**
+   * 取某个位置所在块的**列表标记**（引擎给的符号 + 正文起点偏移，任务 2）。
+   * 取到就用 `ListMarkerWidget` 按引擎偏移画（符号/缩进/编号与 typst 一致）；
+   * 取不到（非列表项 / 旧后端 / 自定义 marker 指回定义处）回退到扫描器的近似文本。
+   */
+  listMarkerAt?: (pos: number) => { text: string; markerXPt: number; bodyOffsetPt: number } | null,
 ): Range<Decoration>[] {
   const doc = scan.docString;
   const marks = scan.markup;
@@ -108,9 +131,45 @@ export function buildMarkupDecorations(
     }
     for (const marker of item.markers) {
       if (marker.from >= marker.to) continue;
-      // 只在光标/选区真正靠近这一枚标记时显示它。正文内部始终保持排版样式，避免光标
-      // 在标题或强调文字中移动时，两端定界符一起出现、引起可见文字横向跳动。
-      if (selectionTouchesRange(marker, selections)) continue;
+      /**
+       * **列表标记：呈现态与揭示态共用同一套盒子模型**（任务 2 的后续，2026-09-26）。
+       *
+       * 呈现态是 `ListMarkerWidget`（定宽 inline-block + 伪元素画符号）；揭示态以前**什么都不加**，
+       * 源码 `- ` 就按自然字宽画 —— 于是点击项目符号时正文左缘会往左跳：真实夹具实测
+       * `- 第一项：无序列表` 的正文从 66.47px 跳到 61.97px（−4.5px），序号项 `+ 有序一` 从
+       * 71.38 跳到 61.97（**−9.4px**），点过的那一项与同级其它项的文字**对不齐**了；用户报的
+       * "点击后缩进/排版明显不同"就是这条。
+       *
+       * 现在揭示态给源码套一个 `Decoration.mark`（**不是 replace** —— 源码必须仍然可编辑），
+       * 盒宽/左内边距与 widget 完全相同（`--write-list-w` / `--write-list-pad`），于是正文左缘
+       * 在点击前后一致，唯一变化就是符号本身（`•` → 可编辑的 `- `，那是允许的局部揭示）。
+       */
+      const exact =
+        item.kind === "list-marker" ? (listMarkerAt?.(item.content.from) ?? null) : null;
+      if (selectionTouchesRange(marker, selections)) {
+        if (exact && exact.text !== "") {
+          decorations.push(
+            Decoration.mark({
+              class: "cm-markup-list-indent",
+              attributes: { style: listMarkerBoxStyle(exact.markerXPt, exact.bodyOffsetPt) },
+            }).range(marker.from, marker.to),
+          );
+        }
+        continue;
+      }
+      // 列表符号：优先用**引擎实际画出来的**标记（符号/缩进/编号，见 ListMarkerWidget）
+      if (exact && exact.text !== "") {
+        decorations.push(
+          Decoration.replace({
+            widget: new ListMarkerWidget(
+              exact.text,
+              (exact.markerXPt * 4) / 3,
+              (exact.bodyOffsetPt * 4) / 3,
+            ),
+          }).range(marker.from, marker.to),
+        );
+        continue;
+      }
       decorations.push(
         marker.text !== undefined
           ? Decoration.replace({ widget: new TextWidget(marker.text) }).range(

@@ -27,6 +27,16 @@ export interface WriteTestBlocks {
 interface HookHost {
   __typstPadBlocks?: WriteTestBlocks | null;
   __typstPadScheduleStats?: () => WritingCompileSchedulerStats;
+  /**
+   * **会话恢复完成**（`+page.svelte` 的 `onMount` 把存档落到 `$state` 之后置 true）。
+   *
+   * 为什么需要（2026-09-26）：子组件（编辑器）的 `onMount` 比父页面的**先**跑，所以
+   * `waitFor('.cm-content')` 返回时主题/设置/恢复的内容**可能还没应用**。验收脚本在这段窗口里
+   * 打字，会撞上两件事：① 断言量到的是默认主题（暗色切片那两条就这样红的）；② 应用随后那次
+   * 300ms 防抖写盘把"还没恢复完"的默认值写回存档，把测试种进去的设置盖掉（wysiwyg 的"关掉启动
+   * 自动检查更新"那条）。有了这个标记，`goto` 之后就能等到"设置真的生效了"再动手。
+   */
+  __typstPadRestored?: boolean;
 }
 
 function hookHost(): HookHost {
@@ -37,6 +47,12 @@ function hookHost(): HookHost {
 export function registerWriteTestHooks(stats: () => WritingCompileSchedulerStats): void {
   if (!browserDevEnabled()) return;
   hookHost().__typstPadScheduleStats = stats;
+}
+
+/** 报告"存档已经落到 $state 上"（`onMount` 的恢复段结束处调用；桌面版是空操作） */
+export function reportSessionRestored(): void {
+  if (!browserDevEnabled()) return;
+  hookHost().__typstPadRestored = true;
 }
 
 /** 报告块表出身（每次块表落地都调；`null` = 块表已清空） */
@@ -51,4 +67,5 @@ export function unregisterWriteTestHooks(): void {
   const host = hookHost();
   delete host.__typstPadBlocks;
   delete host.__typstPadScheduleStats;
+  delete host.__typstPadRestored;
 }

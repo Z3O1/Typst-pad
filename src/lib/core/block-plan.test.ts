@@ -37,6 +37,10 @@ function crop(start: number, end: number, opts: Partial<BlockCrop> = {}): BlockC
     heightPt: opts.heightPt ?? 20,
     bands: 1,
     svg: opts.svg ?? "<svg/>",
+    // 带高盒与引擎断点用到的字段也要能透传（占位布局那组用例要真几何）
+    anchorBaselinePt: opts.anchorBaselinePt,
+    lineBreaks: opts.lineBreaks,
+    lineCount: opts.lineCount,
   };
 }
 
@@ -432,7 +436,10 @@ describe("changedSpan / remapBlocksThroughEdit（编译失败时保留没被改�
     const middle = out.blocks[1];
     expect(middle.found).toBe(false);
     expect(middle.svg).toBe("");
-    expect(middle.heightPt).toBe(0);
+    // **几何字段留作占位**（`layoutHold`，见 Block.layoutHold）：编辑前那次编译的带高，
+    // 只用来在编译落地前把版面钉住；"不可渲染"这一条仍然成立（found=false、svg 清空）。
+    expect(middle.layoutHold).toBe(true);
+    expect(middle.heightPt).toBe(20);
     // 改动段之后的第三块平移 +1，切片照旧
     expect(out.blocks[2]).toMatchObject({ from: 11, to: 14, svg: "<svg/>" });
     expect(out.kept).toBe(2);
@@ -464,6 +471,73 @@ describe("changedSpan / remapBlocksThroughEdit（编译失败时保留没被改�
 
   it("空块表 → 空结果", () => {
     expect(remapBlocksThroughEdit([], "", "x")).toEqual({ blocks: [], kept: 0 });
+  });
+
+  /**
+   * **输入抖动回归**（见 `Block.layoutHold`）：编辑后被触碰的块要**留住上一次的几何**当占位，
+   * 否则带高盒与"空行归零"会在整篇范围内关掉又打开（实测整篇高度 −13.4px、编译落地再跳回）。
+   * 这一组锁的是"留住什么、以及断点怎么平移"。
+   */
+  describe("占位布局（layoutHold）", () => {
+    /** 纯 ASCII 文档（字节偏移 == 位置）：H / abcdefg / end. 三块 */
+    const before = "H\n\nabcdefg\n\nend.\n";
+    /**
+     * 块表：标题 + 带两个引擎断点（3 视觉行）的段落 + 收尾段。
+     * **夹具/后端契约里 `lineBreaks` 是"相对块起点的字节偏移"**（见 `toBlockTable`），
+     * 段落起点是 3，所以 `[3, 5]` 在文档坐标里是 6 与 8。
+     */
+    const held = toBlockTable(before, [
+      crop(0, 1, { kind: "Heading", yPt: 10, heightPt: 17.26, anchorBaselinePt: 23 }),
+      crop(3, 10, {
+        yPt: 30,
+        heightPt: 74.96,
+        anchorBaselinePt: 42,
+        lineBreaks: [3, 5],
+        lineCount: 3,
+      }),
+      crop(12, 16, { yPt: 110, heightPt: 20, anchorBaselinePt: 122 }),
+    ]).blocks;
+
+    it("被触碰的块：found/svg 清掉（旧切片绝不盖新字），几何与断点留下当占位", () => {
+      const after = "H\n\nabcXdefg\n\nend.\n"; // 段中插入一个字符
+      const out = remapBlocksThroughEdit(held, before, after);
+      const touched = out.blocks[1];
+      expect(touched).toMatchObject({
+        found: false,
+        svg: "",
+        layoutHold: true,
+        heightPt: 74.96,
+        anchorBaselinePt: 42,
+        lineCount: 3,
+      });
+      // 断点是绝对位置：插入点之后的 +1（原来的 6/8 → 6/9）
+      expect(touched.lineBreaks).toEqual([6, 9]);
+      // "不可渲染"这条不能被占位破坏（renderable 的第一条就是 found）
+      const covers = planBlockCovers(out.blocks, Text.of(after.split("\n")));
+      expect(covers[1].renderable).toBe(false);
+      // 区间仍然包住改动后的新字
+      expect(touched.to).toBeGreaterThanOrEqual(7);
+    });
+
+    it("断点落在改动段里 → 丢掉那一枚（与 lineCount 对不上时装饰层整块退回自然折行）", () => {
+      const after = "H\n\nabXYfg\n\nend.\n"; // 把 cde(6..9) 换成 XY：断点 8 落在改动段内
+      const out = remapBlocksThroughEdit(held, before, after);
+      const touched = out.blocks[1];
+      expect(touched.layoutHold).toBe(true);
+      // 6 落在改动段 [5,8) 里被丢掉；8 平移到改动后的 7 → 1+1 ≠ lineCount 3
+      expect(touched.lineBreaks).toEqual([7]);
+      expect(touched.lineBreaks.length + 1).not.toBe(touched.lineCount);
+    });
+
+    it("块没被碰到时不带 layoutHold（占位只属于正在编辑的那一块）", () => {
+      const after = "H\n\nabcdefg\n\nend!\n"; // 只改最后一段
+      const out = remapBlocksThroughEdit(held, before, after);
+      expect(out.blocks[0].layoutHold).toBeUndefined();
+      expect(out.blocks[0].found).toBe(true);
+      expect(out.blocks[1].layoutHold).toBeUndefined();
+      expect(out.blocks[1].found).toBe(true);
+      expect(out.blocks[2].layoutHold).toBe(true);
+    });
   });
 });
 

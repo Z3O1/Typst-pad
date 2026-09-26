@@ -61,7 +61,7 @@
     /**
      * 写作模式的**块级切片**（父组件每次 compile_blocks 后更新）：
      * 含代码/raw/注释的复杂块显示成引擎自己画的那一块；普通正文与标题始终是真实文本
-     * （不建切片，见 live-preview 的 isDirectlyEditableTextBlock）。
+     * （不建切片，见 core/editable-subset 的 decideTextBlockEditing）。
      * null / 空 = 关闭（源码模式、后端不支持该命令时都走这条路，行为与加此功能前一致）。
      * 见 docs/development/writing-rendering.md。
      */
@@ -808,6 +808,18 @@
     line-height: var(--write-band-lh, inherit);
   }
 
+  /* **占位带高盒**（编辑已发生、编译还没落地）：与上面同源，只是**只能长不能缩**。
+     为什么不用同一个类：精确块的盒高就是引擎给的带高，而占位块的内容可能已经多了一行
+     （回车 / 粘贴），钉死高度会让新行溢出盒子压到下一块上。内容没变时两者逐像素一致（版面不动），
+     内容变多时立刻长出来（一次符合内容变化的位移），编译落地后再校正回精确带高。
+     见 block-decorations 的 `layoutHold` 与 core/block-plan 的 `Block.layoutHold`。 */
+  .editor-host.write :global(.cm-line.cm-block-band-hold) {
+    box-sizing: border-box;
+    min-height: var(--write-band-h, auto);
+    height: auto;
+    line-height: var(--write-band-lh, inherit);
+  }
+
   /* 带高盒里标题的 span **必须**跟着行的行高走：标题 span 自带 1.4em/1.2em 的字号，
      它自己的 `line-height: 1.65`（相对更大字号）会把行盒的上升部顶得比 strut 还高，
      基线于是被压低 5~7px —— 带高盒刚对上的位置又丢了。改成 inherit 后标题的相对偏移只剩
@@ -817,7 +829,13 @@
   .editor-host.write :global(.cm-block-band .cm-markup-heading-3),
   .editor-host.write :global(.cm-block-band .cm-markup-heading-4),
   .editor-host.write :global(.cm-block-band .cm-markup-heading-5),
-  .editor-host.write :global(.cm-block-band .cm-markup-heading-6) {
+  .editor-host.write :global(.cm-block-band .cm-markup-heading-6),
+  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-1),
+  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-2),
+  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-3),
+  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-4),
+  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-5),
+  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-6) {
     line-height: inherit;
   }
 
@@ -853,6 +871,26 @@
   /* 列表符号/序号：替换出来的字符与正文同色、不与正文基线错位 */
   .editor-host.write :global(.cm-markup-replacement) {
     color: var(--fg-dim);
+  }
+  /* 列表标记用伪元素画（见 ListMarkerWidget 的说明）：标记是装饰，不进文本层 ——
+     inline-block 里的文本节点会多出一条与正文不同的基线，把一行的列表项数成两行。 */
+  .editor-host.write :global(.cm-markup-list-marker)::before {
+    content: attr(data-marker);
+  }
+
+  /* **揭示态的列表标记**（见 markup-decorations 的 listMarkerBoxStyle）：光标/选区触到标记时
+     源码 `- ` 原样露出（仍然可编辑，不是 replace），但套一个与 widget **同一个盒子模型**的定宽
+     行内盒 —— 宽度 = 引擎给的正文起点，于是正文左缘在"点击前后"完全一致；不套这一层时源码按自然
+     字宽画，圆点项正文左移 4.5px、序号项 9.4px（实测），点过的那一项会和同级其它项对不齐。
+     负字距补偿与 widget 同口径：那是给正文的（见 .cm-content 的 letter-spacing），标记不参与。 */
+  .editor-host.write :global(.cm-markup-list-indent) {
+    display: inline-block;
+    box-sizing: border-box;
+    width: var(--write-list-w, auto);
+    padding-left: var(--write-list-pad, 0px);
+    text-align: left;
+    white-space: pre;
+    letter-spacing: 0;
   }
 
   /* 行内代码与公式 widget 的字号跟随正文 */

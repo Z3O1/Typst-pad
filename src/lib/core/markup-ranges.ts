@@ -194,7 +194,78 @@ export function scanMarkupDecorations(
   // ---- 链接：`#link("url")[文字]` ----
   scanLinks(doc, opaque, out);
 
+  // ---- 简单函数白名单（任务 4）：`#strong[文字]` / `#emph[文字]` ----
+  scanInlineCalls(doc, opaque, out);
+
   return out.sort((a, b) => a.content.from - b.content.from);
+}
+
+/**
+ * 简单函数白名单（任务 4）：`#strong[文字]` 与 `#emph[文字]`。
+ *
+ * 只认**静态、完整闭合、正文是唯一 content block**的形态：代码区域恰好是 `#strong` / `#emph`、
+ * 紧跟一个方括号内容块。任意自定义函数、`#figure`/`#table`/`#grid`/`#stack`/`#place`、
+ * 以及带额外参数或非内容块参数的写法**一律不认**（整块切片或源码）。
+ *
+ * 隐藏的是 `#strong[` 与 `]` 两个标记，正文照常是真实文本 —— 与 `*strong*` 同一条呈现路径，
+ * 所以选中、输入、删除都落在正文源码上，函数调用与定界符原样保留（除非用户主动把光标移进标记）。
+ */
+const INLINE_CALL_RE = /^#(strong|emph)$/;
+
+/**
+ * 白名单调用的**正文**必须是我们能可靠呈现的简单 markup。
+ *
+ * 为什么要这一条：lexer 不一定进得了内容块（实测 `#strong[#h(1em)字]` 只报出外层的 `#strong`），
+ * 而里面的 `#h(1em)` 在 typst 里画成空白、在编辑器里却会原样显示成源码 —— 那就是"视觉上像文字"
+ * 但对应不上排版。宁可整块切片：拒绝含 `#`（代码）、`` ` ``（raw）、`\`（转义/换行）、
+ * `<`/`>`（标签）与换行的正文。`$公式$` 与 `*强调*` 有自己的呈现路径，放行。
+ */
+function isSimpleCallContent(content: string): boolean {
+  return !/[#`\\<>\n]/.test(content);
+}
+
+/**
+ * 白名单行内调用的**代码区间**（`#strong` 那一段）：决策的"复杂区域"判据把它们放行。
+ *
+ * 与 `scanInlineCalls` 同一口径（同一份 `INLINE_CALL_RE` 与同一个括号配对），
+ * 避免"能显示"与"能编辑"两处判据漂移。
+ */
+export function scanAllowedInlineCode(
+  doc: string,
+  opaque: readonly Region[] = scanNonMarkupRegions(doc),
+): { from: number; to: number }[] {
+  const out: { from: number; to: number }[] = [];
+  for (const region of opaque) {
+    if (region.kind !== "code") continue;
+    if (!INLINE_CALL_RE.test(doc.slice(region.from, region.to))) continue;
+    if (doc[region.to] !== "[") continue;
+    const close = matchBracket(doc, region.to);
+    if (close <= region.to + 1) continue;
+    if (!isSimpleCallContent(doc.slice(region.to + 1, close))) continue;
+    out.push({ from: region.from, to: region.to });
+  }
+  return out;
+}
+
+/** 白名单行内调用的标记（`#strong[` / `]`）与正文范围 → 隐藏标记 + 给正文加样式 */
+function scanInlineCalls(doc: string, opaque: Region[], out: MarkupDecoration[]): void {
+  for (const region of opaque) {
+    if (region.kind !== "code") continue;
+    const m = INLINE_CALL_RE.exec(doc.slice(region.from, region.to));
+    if (!m) continue;
+    if (doc[region.to] !== "[") continue;
+    const close = matchBracket(doc, region.to);
+    if (close <= region.to + 1) continue; // 空内容不加装饰（与 `**` 未写完同一条约定）
+    if (!isSimpleCallContent(doc.slice(region.to + 1, close))) continue;
+    out.push({
+      kind: m[1] === "strong" ? "strong" : "emph",
+      markers: [
+        { from: region.from, to: region.to + 1 }, // `#strong[`
+        { from: close, to: close + 1 }, // `]`
+      ],
+      content: { from: region.to + 1, to: close },
+    });
+  }
 }
 
 /**

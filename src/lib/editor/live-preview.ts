@@ -84,6 +84,33 @@ export function livePreview(opts: LivePreviewOptions): Extension {
       const covered = covers
         .filter((c) => !c.revealed)
         .map((c) => ({ from: c.coverFrom, to: c.coverTo }));
+      /**
+       * 位置 → 所在块（格子首尾相接且按 `coverFrom` 升序 ⇒ 二分）。
+       * 只给列表标记用：引擎给了 `listMarker` 的列表项按真实符号与正文偏移画
+       * （见 ListMarkerWidget 的说明）。
+       */
+      const blockAt = (pos: number) => {
+        let lo = 0;
+        let hi = covers.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          const c = covers[mid];
+          if (pos < c.coverFrom) hi = mid;
+          else if (pos >= c.coverTo) lo = mid + 1;
+          else return c.block;
+        }
+        return null;
+      };
+      /**
+       * 列表标记只在**块的第一行**用引擎值：`block.listMarker` 说的是这一块第一个条目的标记，
+       * 而嵌套/多源码行块的后续行各有自己的标记与缩进 —— 拿外层标记去画内层行会错位。
+       * 那些块本来就被判为切片/源码，后续行退回扫描器的近似符号（旧行为）。
+       */
+      const listMarkerAt = (pos: number) => {
+        const block = blockAt(pos);
+        if (!block || !block.listMarker) return null;
+        return pos <= state.doc.lineAt(block.from).to ? block.listMarker : null;
+      };
       // **块级带高盒**（见 block-decorations 的 buildBlockBandFitDecorations）：整篇可编辑正文都能
       // 拿到带高与首行主基线时才启用。要求"每一个可编辑正文块都有几何"是刻意的 —— 半套规则
       // （一部分块撑到带高、一部分按自然行盒）比不启用更差：后者只是漂移，前者会错位。
@@ -103,7 +130,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         // 浏览器的贪心折行。块表过期（沿用旧坐标）时 lineBreaks 已在 remap 里清空，不会折错。
         ...buildEngineBreakDecorations(state, covers, opaque, math),
         ...buildMathDecorations(state, opts, math, context, covered),
-        ...buildMarkupDecorations(state, scan, covered, bandBoxes),
+        ...buildMarkupDecorations(state, scan, covered, bandBoxes, listMarkerAt),
       ];
       return {
         // sort=true：两个来源的装饰按位置统一排序（CodeMirror 要求有序）

@@ -152,5 +152,6 @@ mod crops;
 mod hit;
 mod partition;
 mod probes;
+mod proof;
 mod text_size;
 mod window;

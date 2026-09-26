@@ -96,6 +96,7 @@
   // 新排版戳、写作模式的编译次数与调度器运行次数对得上 —— 这两件事在 DOM 里都看不出来。
   import {
     registerWriteTestHooks,
+    reportSessionRestored,
     reportWriteTestBlocks,
     unregisterWriteTestHooks,
   } from "$lib/dev/write-test-hook";
@@ -1877,6 +1878,9 @@
       statusText = "已恢复上次内容";
     }
     mark("persist-restore");
+    // 浏览器验收的只读标记：**存档已经落到 $state 上**（`?browserdev=1` 才写；见 write-test-hook）。
+    // 子组件的 onMount 比这里先跑完，所以验收脚本必须等这个标记再动手（见那边的说明）。
+    reportSessionRestored();
 
     // 关于弹窗版本号：从 Tauri 运行时读取（getVersion 返回 tauri.conf.json 的
     // version，如 0.4.0）；失败静默忽略，弹窗显示占位符

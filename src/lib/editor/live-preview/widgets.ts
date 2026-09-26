@@ -45,6 +45,63 @@ export class TextWidget extends WidgetType {
   }
 }
 
+/**
+ * **列表标记 widget**（任务 2）：按引擎给的**正文起点偏移**画一个右对齐的定宽盒子。
+ *
+ * 为什么不继续用 `TextWidget("• ")`：`• ` 的宽度是浏览器猜的，而 typst 的正文起点是
+ * `indent + marker_width + body_indent`（`marker_width` 还取决于同一层里最宽的标记，
+ * 比如 `1.` 与 `10.`）。把宽度钉成引擎给的偏移、内容右对齐，符号与缩进就与 typst 一致，
+ * 序号也直接用引擎画出来的文字（自定义 numbering/start 不会画错）。
+ */
+export class ListMarkerWidget extends WidgetType {
+  constructor(
+    private readonly text: string,
+    /** 标记起点相对列左缘的 CSS 像素（= `markerXPt × 4/3`） */
+    private readonly markerXPx: number,
+    /** 正文起点相对列左缘的 CSS 像素（= `bodyOffsetPt × 4/3`，盒子的总宽） */
+    private readonly widthPx: number,
+  ) {
+    super();
+  }
+  eq(other: ListMarkerWidget): boolean {
+    return (
+      other.text === this.text &&
+      other.markerXPx === this.markerXPx &&
+      other.widthPx === this.widthPx
+    );
+  }
+  toDOM(): HTMLElement {
+    const span = document.createElement("span");
+    span.className = "cm-markup-replacement cm-markup-list-marker";
+    /**
+     * 标记用**伪元素**画（`content: attr(data-marker)`），不放文本节点。
+     *
+     * 为什么：标记是装饰、不是正文（源码里的 `- ` 仍然是复制/保存的来源），而放文本节点会让
+     * 它进入文本层 —— 浏览器验收按"文本节点/公式 widget 的基线条数"数视觉行时，inline-block
+     * 里那个文本节点的基线可能与正文差出一截，于是**一行的列表项被数成两行**
+     * （PKU 高代周二 L101/L185 实测）。伪元素不进文本层，就没有这条假基线。
+     */
+    span.setAttribute("data-marker", this.text);
+    if (this.widthPx > 0 && Number.isFinite(this.widthPx)) {
+      span.style.display = "inline-block";
+      // `border-box` + 左内边距 = 标记起点：盒子总宽正好等于正文起点，标记落在引擎给的位置
+      span.style.boxSizing = "border-box";
+      span.style.width = `${this.widthPx.toFixed(3)}px`;
+      if (this.markerXPx > 0 && Number.isFinite(this.markerXPx)) {
+        span.style.paddingLeft = `${this.markerXPx.toFixed(3)}px`;
+      }
+      span.style.textAlign = "left";
+      // 正文的负字距补偿（`.cm-content` 的 letter-spacing）不能作用在标记上：
+      // 否则符号本身被压窄，与"正文起点钉在引擎偏移上"这条自相矛盾。
+      span.style.letterSpacing = "0";
+    }
+    return span;
+  }
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
 /** 公式 widget：内联显示 Rust 侧编出的 SVG，点击回到源码编辑 */
 export class MathWidget extends WidgetType {
   constructor(

@@ -48,11 +48,13 @@ mod crops;
 mod hit;
 mod probe;
 mod render;
+mod text_proof;
 
 pub use blocks::*;
 pub use collect::*;
 pub use crops::*;
 pub use hit::*;
+pub use text_proof::*;
 // 探针对外路径与拆分前一致（`crate::block_geometry::probe_blocks` 等）：它只被测试与
 // `--ignored` 用例调用，但**别把 `pub use` 省掉** —— 省掉就等于把三个 `pub` 项从
 // `block_geometry` 之外变成不可达（PR #61 审查第 1 条）。今天 crate 内没有别的调用方，

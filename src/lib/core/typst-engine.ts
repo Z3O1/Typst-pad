@@ -278,6 +278,13 @@ export interface BlockCrop {
    * 只有窗口内的块才有（与 svg 同步取舍）；没有链接时为空/缺省。
    */
   links?: CropLink[];
+  /**
+   * **文字对应证明**（任务 1）：这一块的可见内容能否严格对应回它的源码区间。
+   * 缺省 = 旧后端 / 只给几何的桩（前端退回旧的语法判据）；见 `BlockEditProof`。
+   */
+  edit?: BlockEditProof;
+  /** 列表项的渲染标记（任务 2）；缺省 = 非列表项 / 取不到引擎标记 */
+  listMarker?: ListMarkerProof;
 }
 
 /** 切片上的一个链接热区（相对裁剪带左上角，pt） */
@@ -287,6 +294,37 @@ export interface CropLink {
   widthPt: number;
   heightPt: number;
   href: string;
+}
+
+/**
+ * **文字对应证明**（任务 1，Rust 侧 `block_geometry::BlockEditProof`）：
+ * 这一块画出来的可见内容能不能严格对应回它的源码区间。
+ *
+ * 只有 `verdict === "verified"` 才算证明成立；`found` / SVG 存在 / 字形有 `Span` 都不构成证明。
+ * **旧后端不发这个字段** ⇒ 这里是 `undefined` ⇒ 决策退回旧的语法判据（见 `editable-subset`）。
+ */
+export interface BlockEditProof {
+  verdict: "verified" | "unknown";
+  /** 机器可读原因码（`ok` / `straddle` / `order` / `gap` / `foreign-ink` …） */
+  reason: string;
+  /** 编译时这一块的源码文本：前端与当前文档逐字比对（旧结果不得为新文档授权） */
+  source: string;
+}
+
+/**
+ * **列表项的渲染标记**（任务 2，Rust 侧 `block_geometry::ListMarkerProof`）：
+ * typst 实际画出的符号（`•` / `1.` / `a)` …）与**正文起点**相对列左缘的偏移（pt）。
+ *
+ * 为什么不能让前端自己算：前端的"按缩进计数"近似在 `#set enum(numbering:)`、`start:`、
+ * `full:` 或复杂列表上会冒充真实结果。取不到引擎标记（如 `#set list(marker: [--])` 这种
+ * 内容值指回定义处）时后端返回缺省 ⇒ 前端不开放列表项直接编辑（切片）。
+ */
+export interface ListMarkerProof {
+  text: string;
+  /** 标记起点相对列左缘的偏移（pt）：`marker-align` 非默认时也不假设对齐方式 */
+  markerXPt: number;
+  /** 正文起点相对列左缘的偏移（pt） */
+  bodyOffsetPt: number;
 }
 
 interface RawBlocksOutput {

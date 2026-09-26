@@ -36,6 +36,10 @@ export function fakeBlocks(doc: string): {
     svg: string;
     /** 与真 Rust 侧同形：超大块被有意跳过渲图（见 block_geometry::MAX_CROP_SOURCE_BYTES） */
     skipped: boolean;
+    /** 与真 Rust 侧同形：文字对应证明（桩按源码投影渲染，所以简单块都是 verified） */
+    edit: { verdict: "verified" | "unknown"; reason: string; source: string };
+    /** 与真 Rust 侧同形：列表项的渲染标记（桩按默认符号/序号给，够验收用） */
+    listMarker?: { text: string; markerXPt: number; bodyOffsetPt: number };
   }[];
   pages: number;
   pageWidthPt: number;
@@ -54,9 +58,15 @@ export function fakeBlocks(doc: string): {
   const out: ReturnType<typeof fakeBlocks>["blocks"] = [];
   let i = 0;
   let y = MARGIN;
+  /** 摊平的假列表只有一个层级：按种类分别计数，够验收断言"序号取自标记" */
+  let bulletSeq = 0;
+  let enumSeq = 0;
   while (i < lines.length) {
     const line = lines[i];
     if (line.trim() === "") {
+      // 空行结束一个列表（typst 也是）：序号从这里重新数，桩不能把两段列表连起来数
+      bulletSeq = 0;
+      enumSeq = 0;
       i++;
       continue;
     }
@@ -103,6 +113,24 @@ export function fakeBlocks(doc: string): {
     // 前端必须把它与"缺切片"区分开（否则会每 150ms 要求补渲一次）。桩按同样的 8KB 判据走，
     // 这样 `&blocks=1` 的验收也能覆盖这条契约（见 live-preview.test.ts 的同名用例）。
     const skipped = lineEnd(j - 1) - lineStart[i] > STUB_MAX_CROP_SOURCE_BYTES;
+    // 文字对应证明：桩的切片本来就是"源码去掉标记"的投影，所以这里的 source 一定与
+    // 编辑器里的这一块文本逐字相同 —— 前端决策据此放行（真后端由 Rust 侧证明）。
+    const source = lines.slice(i, j).join("\n");
+    // 列表标记：与 typst 默认排版同一量级（`marker_width + 0.5em`，见 typst lists.rs）。
+    // 真产物由 Rust 侧从帧里取（支持自定义 numbering/start），桩只覆盖默认形态。
+    let listMarker: { text: string; markerXPt: number; bodyOffsetPt: number } | undefined;
+    if (isList) {
+      const ordered = /^\s*\+\s/.test(line);
+      if (ordered) enumSeq++;
+      else bulletSeq++;
+      // 默认 `marker-align: end`：序号右对齐（`1.` 宽约 5.5pt），圆点本身在列左缘
+      listMarker = ordered
+        ? { text: `${enumSeq}.`, markerXPt: 5.5, bodyOffsetPt: 11 }
+        : { text: "•", markerXPt: 0, bodyOffsetPt: 9.36 };
+    } else {
+      bulletSeq = 0;
+      enumSeq = 0;
+    }
     out.push({
       start: lineStart[i],
       end: lineEnd(j - 1),
@@ -117,6 +145,8 @@ export function fakeBlocks(doc: string): {
       bands: rows,
       svg: skipped ? "" : svg,
       skipped,
+      edit: { verdict: "verified", reason: "stub", source },
+      listMarker,
     });
     y += heightPt;
     i = j;
