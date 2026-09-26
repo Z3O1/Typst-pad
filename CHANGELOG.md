@@ -2,6 +2,32 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.4] - 2026-09-26
+
+主题是**「写作模式的可编辑子集落地，输入与列表不再抖」**：一个块能不能直接编辑，从"看着像文字"改成四条**同时**成立的判据（源码白名单 + 后端文字对应证明 + 几何 + 新鲜度），证不出来的一律回退切片；简单单行 `-`/`+` 列表项按引擎给的标记与正文起点开放编辑。同时修掉两处手感问题 —— 输入时整篇版面先跳后跳回、点列表项的项目符号后正文左缘左移。验收侧只删重复的准备与空等，可比套件耗时降约三分之一。
+
+### Added
+
+- **可编辑子集的决策接口**（`src/lib/core/editable-subset.ts`）：`decideTextBlockEditing` 是唯一判据（纯函数，块级装饰只消费结论、不再另写语法判据），返回四个独立信号 `syntax` / `text` / `geometry` / `fresh` 与机器可读的 `reason`。旧后端不带证明字段时按 `no-proof` 保持历史行为。
+- **后端文字对应证明**（`src-tauri/src/block_geometry/text_proof.rs`）：只用帧里的字形几何与源码字节证明"这一块画出来的字确实对应回这段源码"—— 字形落在块内与带内、非原子字形的阅读序单调、字母数字覆盖、无外来墨迹；证不出来（`unknown`）一律退回切片，不看"视觉上像不像文字"。
+- **简单列表项可直接编辑**：单源码行、顶格的 `-`/`+` 项，标记（符号/缩进/编号）与正文起点都取引擎值（`ListMarkerWidget` 按 `bodyOffsetPt` 画定宽盒）。
+- **`#strong[文字]` / `#emph[文字]` 白名单**：隐藏调用语法、正文照常加样式；其它 `#…` 一律切片，不自动改写成 markup 简写。
+- 文档：`docs/development/writable-subset.md`（已实现 / 保守回退 / 待研究的状态表）、`docs/design/structured-editing.md`（表格、图片属性、图注、引用选择器的有限结构化编辑**提案**，仅设计）。
+- 已知边界（保守回退，均为有意为之）：行内 raw / 链接 / 脚注正文仍整块切片；`<label>` / `@ref` 是原子、不再阻塞整块资格但引用仍以源码形态显示；含行内公式的列表项、嵌套与多段落列表仍走切片；`/ 术语:` 与 `#text(...)` 属待研究。
+
+### Fixed
+
+- **写作模式输入不再抖动**：新增 `Block.layoutHold` 占位布局 —— 编辑已发生、编译结果还没落地的那段窗口里，被改块**保留**上一次成功编译的带高/首行基线与引擎断点（`found=false`、切片清空，任何需要精确几何的判据都不消费它，旧切片绝不覆盖新字），于是整篇的带高盒与"空行归零"不再因为一次按键整片关掉又打开。逐帧实测：修复前整篇逐行高之和 147.14 → 182.15px、被编辑那一段 99.9 → 72.6px、光标顶 164.81 → 200.73px、引擎断点 4 → 0；修复后这些量在窗口内一个都没变。
+- **点列表项的项目符号后正文左缘不再跳**：揭示态给源码套一个与呈现态**同一盒子模型**的行内定宽盒（`cm-markup-list-indent`，仍是可编辑源码而不是 replace）。修复前圆点项正文左缘 66.47 → 61.97px、序号项 71.38 → 65.08px，点过的那一项与同级其它项对不齐；修复后 0.00px，字号/字重/行高/行盒高与相邻块一概不动。
+- **两类失败回归**：`writing-blocks-visual` 第 ⑧ 节（真实夹具 + `&blockslow=1` 撑开窗口，断言窗口内带高盒、逐行高、每行屏幕位置、断点与光标都不动，并 fail-closed 要求量到的确实是"编辑后、编译落地前"）、第 ⑨ 节（真实夹具下点项目符号 / 点正文的前后对照，外加"输入改的是这一项、撤销回原文"）；单测 `core/block-plan.test.ts` 与 `live-preview/block-band-fit.test.ts` 钉住占位几何、断点平移与"整篇带高盒不许关"。两处都验证过"回退修复立刻变红"。
+
+### Test / CI
+
+- 浏览器验收：wysiwyg 305、writing-blocks 137、writing-blocks-visual **99**（81→99）、writing-blocks-hit 34、writing-mode-scenes 85、wysiwyg-visual 20、writing-stability 107、computed-style 17、PKU 真实作业 **76/76**。
+- **验收提速**（只删重复准备，断言与 fail-closed 守卫一条不动）：`ONLY` 按套件依赖导出夹具、`goto`/`boot` 各只导航一次（`Storage.clearDataForOrigin` 清存档，不再先跳 `about:blank`）、预热只加载一遍（`WARMUP_LOADS=2` 可回退）、命中套件的固定 `sleep(220)` 与"本就不该有切片"夹具的 8s 空等改成条件等待、每条断言记耗时并在收尾打印最慢 10 条。可比套件合计 **441.4s → 282.1s（−36%）**；`writing-blocks-hit` 72.9 → 14.9s，预热 8.2 → 4.1s。
+- 本地门禁：`npm test` 64 文件 1111 项、`cargo test` 88 项（7 ignored）、`cargo clippy --all-targets -- -D warnings`、`cargo fmt --check`、`npm run check` 0 错、`npm run format:check` 干净、`npm run build` 通过。
+- **真机结论更新**：本机（设 `WAYLAND_DISPLAY=wayland-0`）`npm run tauri dev` 能起、webview 创建成功且进程存活 ≥30s；但仍无法脚本化交互（Linux 端是 WebKitGTK、没有 CDP，本机也没有 WebDriver），两处依赖 WebKit 行盒计算的行为（占位带高盒的 `min-height`、揭示态的行内定宽标记盒）仍待真机抽查，见 `docs/development/testing.md`。
+
 ## [0.10.3] - 2026-09-26
 
 主题是**「夜间模式真正变深」**：此前菜单、右键菜单、四个弹窗和错误／警告浮层被钉在一组固定白色变量上（深色主题下也是一块白板），整页预览直接显示 Typst 生成的白纸，写作模式的块切片只做 `invert(1)`、白纸被翻成比编辑区还黑的纯黑块。现在弹出面板跟随主题，整页预览与切片／公式共用同一条反色滤镜，切主题不再需要重新编译。
