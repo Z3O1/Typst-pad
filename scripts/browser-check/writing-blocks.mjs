@@ -289,8 +289,11 @@ await new Promise((r) => setTimeout(r, 800));
 const REVEALED = `Array.from(document.querySelectorAll(".cm-line")).map((el) => (el.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean)`;
 const revealedNow = async () => (await c.evaluate(REVEALED)).join(" | ");
 /**
- * 光标所在的**源码行**（第几行、第几列、行文本）+ 光标的屏幕 x + 当前展开的块文本。
- * 逐行移动的验收全靠它：空行上没有文本，"光标在哪一行"只能这样读。
+ * 光标所在的**源码行**（第几行、第几列、行文本）+ 光标的**屏幕几何** + 当前展开的块文本。
+ *
+ * 逐**可见行**移动的验收全靠它：空行上没有文字，"光标在哪一行"只能这样读；而"停在一堆零高
+ * 分隔行上、看起来没动"这种假前进**只看行号是抓不到的**，所以 `y`（屏幕坐标）与选区源码
+ * (`selText`) 一起量回来 —— 用户报的"卡在两段之间"就是几何上没真动。
  */
 const CARET = `(() => {
   const el = document.querySelector(".cm-content");
@@ -309,12 +312,30 @@ const CARET = `(() => {
     docLines: view.state.doc.lines,
     docLength: view.state.doc.length,
     x: coords ? coords.left : null,
+    y: coords ? coords.top : null,
+    selText: view.state.sliceDoc(sel.from, sel.to),
     revealed: Array.from(document.querySelectorAll(".cm-line"))
       .map((e) => (e.textContent || "").replace(/\\s+/g, " ").trim())
       .filter(Boolean)
       .join(" | "),
   };
 })()`;
+/**
+ * **纯段落分隔行**的行号（`.cm-write-parbreak`，见 core/paragraph-breaks）：它们在版面上只有
+ * 0~3px 高（段距由相邻块的带高承载），**不是**竖直导航的停靠点。行号从 DOM 反读，量的是页面上
+ * 真实生效的装饰，而不是套件的期望值。
+ */
+const SEPARATOR_LINES = `(() => {
+  const el = document.querySelector(".cm-content");
+  const view = el && el.cmTile && el.cmTile.root && el.cmTile.root.view;
+  if (!view) return null;
+  return Array.from(document.querySelectorAll(".cm-content > .cm-line.cm-write-parbreak"))
+    .map((line) => {
+      try { return view.state.doc.lineAt(view.posAtDOM(line, 0)).number; } catch { return null; }
+    })
+    .filter((n) => n !== null);
+})()`;
+const separatorLines = () => c.evaluate(SEPARATOR_LINES);
 const caret = () => c.evaluate(CARET);
 const arrowDown = async () => {
   await c.key("ArrowDown", { code: "ArrowDown", keyCode: 40 });
@@ -326,77 +347,111 @@ const arrowUp = async () => {
   await new Promise((r) => setTimeout(r, 250));
   return caret();
 };
+/** 光标在两次按键之间**屏幕上真的动了一条可见行**（分隔行只有 0~3px，会露馅） */
+const movedVisibly = (a, b) => a.y !== null && b.y !== null && Math.abs(b.y - a.y) >= 8;
 
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home → 文档开头（第一块）
 await new Promise((r) => setTimeout(r, 400));
 const start = await caret();
+const separators = await separatorLines();
 check(
   `起点：光标在第 1 行第 1 列（标题块展开源码）`,
   start.line === 1 && start.col === 0 && start.revealed.includes("标题"),
   JSON.stringify(start),
 );
+check(
+  // 这一篇的空行在源码里是第 2、4、6 行；DOM 里只读得到**被渲染出来**的那些（第 6 行此刻还盖在
+  // 列表块的切片里）。判据因此是"读到的分隔行都落在段落之间"，而不是"必须读到三条"。
+  `DOM 里的纯分隔行都落在段落之间（实际 ${JSON.stringify(separators)}）`,
+  Array.isArray(separators) &&
+    separators.length >= 2 &&
+    separators.every((n) => [2, 4, 6].includes(n)) &&
+    !separators.includes(1) &&
+    !separators.includes(7) &&
+    !separators.includes(8),
+  JSON.stringify(separators),
+);
 
-// ① ↓ 逐行走：段落之间那条空行也要停一拍（代码模式如此）
+// ① ↓ 一次跨过段落分隔行，直达下一条**可见**文字；落点绝不是那条零高的分隔行
 const d1 = await arrowDown();
 check(
-  `↓ 一次 → 第 2 行（段落之间那条空行，不是直接进下一段）`,
-  d1.line === 2 && d1.lineText === "" && d1.revealed.includes("标题"),
+  `↓ 一次 → 第 3 行（跨过第 2 行那条分隔行，直达下一段可见文字）`,
+  d1.line === 3 &&
+    d1.col === 0 &&
+    d1.lineText.startsWith("第一段") &&
+    d1.revealed.includes("第一段"),
   JSON.stringify(d1),
 );
-const d2 = await arrowDown();
+const sepsAfterD1 = await separatorLines();
 check(
-  `↓ 再一次 → 第 3 行第 1 列（下一块正文开头，那一块因此展开）`,
-  d2.line === 3 &&
-    d2.col === 0 &&
-    d2.lineText.startsWith("第一段") &&
-    d2.revealed.includes("第一段"),
-  JSON.stringify(d2),
+  `↓ 的落点不是纯分隔行（第 ${d1.line} 行；此刻 DOM 里的分隔行 ${JSON.stringify(sepsAfterD1)}）`,
+  !sepsAfterD1.includes(d1.line),
+  JSON.stringify({ line: d1.line, separators: sepsAfterD1 }),
 );
 check(
-  // 新规则：正文/标题**始终**是真实文本（跨到下一块也不会变回切片），只有复杂块进/出时才切换形态。
-  // 所以这条改成"复杂块（列表项）仍然保持切片形态"，比原来那条"标题变回切片"更贴合现在的行为。
-  `跨到下一块之后，复杂块（列表项）仍是切片、正文是真实文本`,
-  !d2.revealed.includes("列表项") && d2.revealed.includes("第一段"),
-  d2.revealed,
+  `↓ 在屏幕上真的走了一条可见行（y ${start.y?.toFixed(1) ?? "?"} → ${d1.y?.toFixed(1) ?? "?"}）`,
+  movedVisibly(start, d1),
+  JSON.stringify({ start: start.y, d1: d1.y }),
 );
-// ② ↑ 逐行走：第二块行首的上面是那条空行（不是上一块的行尾、更不是文档开头）
+check(
+  // 正文/标题**始终**是真实文本（跨到下一块也不会变回切片），只有复杂块进/出时才切换形态。
+  `跨到下一段之后，复杂块（列表项）仍是切片、正文是真实文本`,
+  !d1.revealed.includes("列表项") && d1.revealed.includes("第一段"),
+  d1.revealed,
+);
+
+// ② ↑ 一次回到上一段（不是停在分隔行上、更不是文档开头）
 const u1 = await arrowUp();
 check(
-  `↑ 一次 → 回到第 2 行（空行；不是上一块的末字符、不是文档开头）`,
-  u1.line === 2 && u1.head !== 0,
+  // 落点允许是第 1~3 列：写作模式把标题的 `= ` 标记**藏起来**了（位置 0~2 都在被藏的那一段里），
+  // 所以"行首可见文本处"就是位置 2 —— 与"点在标题行最左边"落到的位置一致。**不是**第 2 行那条
+  // 分隔行（那才是旧行为）。
+  `↑ 一次 → 回到第 ${u1.line} 行（上一段可见文字；不是第 2 行那条分隔行）`,
+  u1.line === 1 && u1.col <= 2,
   JSON.stringify(u1),
 );
-const u2 = await arrowUp();
-// 落点允许是第 1~3 列：写作模式把标题的 `= ` 标记**藏起来**了（位置 0~2 都在被藏的那一段里），
-// 所以"行首可见文本处"就是位置 2 —— 与"点在标题行最左边"落到的位置一致。
+const sepsAfterU1 = await separatorLines();
 check(
-  `↑ 再一次 → 第 1 行（列 ${u2.col} 落在标题行首，写作模式藏了 \`= \` 标记）`,
-  u2.line === 1 && u2.col <= 2,
-  JSON.stringify(u2),
+  `↑ 的落点也不是纯分隔行（第 ${u1.line} 行；此刻 DOM 里的分隔行 ${JSON.stringify(sepsAfterU1)}）`,
+  !sepsAfterU1.includes(u1.line),
+  JSON.stringify({ line: u1.line, separators: sepsAfterU1 }),
 );
-check(`连续 ↑ 到底也没有跳回/跳过（停在位置 ${u2.head}）`, u2.head <= 2, JSON.stringify(u2));
 
-// ③ 列保留：从段落行尾往下走两行，光标仍落在**同一水平位置**上（代码模式的目标列语义）
+// ③ 列保留：从段落行尾往下一次跨段，光标仍落在**同一水平位置**上（目标列语义）
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 300));
-await arrowDown(); // → 空行
-await arrowDown(); // → 第一段
+await arrowDown(); // → 第 3 行（第一段）
 await c.key("End", { code: "End", keyCode: 35 }); // 行尾
 await new Promise((r) => setTimeout(r, 250));
 const colStart = await caret();
-const colStep1 = await arrowDown(); // → 空行（夹到第 1 列）
-const colStep2 = await arrowDown(); // → 列表项那一行
+const colStep1 = await arrowDown(); // 一次就到列表项那一行（不再经过分隔行）
+const sepsAtCol = await separatorLines();
 check(
-  `列保留：从「第一段。」行尾（列 ${colStart.col}）往下两行后仍在同一水平位置（x ${colStart.x?.toFixed(0) ?? "?"} → ${colStep2.x?.toFixed(0) ?? "?"}）`,
-  colStep1.lineText === "" &&
-    colStep2.lineText.includes("- 列表项") &&
-    colStart.x !== null &&
+  `列保留：从「第一段。」行尾（列 ${colStart.col}）**一次** ↓ 直达列表项行（第 ${colStep1.line} 行，不是分隔行）`,
+  colStart.line === 3 &&
+    colStep1.line === 5 &&
+    colStep1.lineText.includes("- 列表项") &&
+    !sepsAtCol.includes(colStep1.line),
+  JSON.stringify({ colStart, colStep1 }),
+);
+check(
+  `列保留：跨段后仍在同一水平位置（x ${colStart.x?.toFixed(0) ?? "?"} → ${colStep1.x?.toFixed(0) ?? "?"}）`,
+  colStart.x !== null && colStep1.x !== null && Math.abs(colStep1.x - colStart.x) <= 16,
+  JSON.stringify({ colStart: colStart.x, colStep1: colStep1.x }),
+);
+// 再跨一段（列表项 → 最后一段）：目标列继续带过去，不会掉回第 0 列
+const colStep2 = await arrowDown();
+check(
+  `列保留：再跨一段仍带着目标列（第 ${colStep2.line} 行「${colStep2.lineText}」，x ${colStep2.x?.toFixed(0) ?? "?"} vs 起点 ${colStart.x?.toFixed(0) ?? "?"}）`,
+  colStep2.line === 7 &&
+    colStep2.lineText.startsWith("最后一段") &&
+    colStep1.x !== null &&
     colStep2.x !== null &&
     Math.abs(colStep2.x - colStart.x) <= 16,
-  JSON.stringify({ colStart, colStep1: colStep1.head, colStep2 }),
+  JSON.stringify({ colStart: colStart.x, colStep1: colStep1.x, colStep2: colStep2.x }),
 );
 
-// ④ 从文档末尾连续 ↑：**一次一行**地往回走，绝不跳回文档开头（原来那条用户报的 bug）
+// ④ 从文档末尾连续 ↑：**每一步都落在上一条可见行**上（跳过分隔行），顿挫感来自真实行盒
 await c.key("End", { code: "End", keyCode: 35, modifiers: 2 }); // Ctrl+End → 文档末尾
 await new Promise((r) => setTimeout(r, 400));
 const fromEnd = await caret();
@@ -406,26 +461,47 @@ check(
   JSON.stringify(fromEnd),
 );
 const ups = [fromEnd];
-for (let i = 0; i < 5; i++) ups.push(await arrowUp());
-const backwards = ups.slice(1).every((s, i) => s.line === ups[i].line - 1);
+for (let i = 0; i < 4; i++) ups.push(await arrowUp());
+const backSteps = ups.slice(1);
 check(
-  `连续 ↑ 每次只退一行（行号 ${ups.map((s) => s.line).join(" → ")}）`,
-  backwards,
+  `连续 ↑ 每次退到上一条**可见**行（行号 ${ups.map((s) => s.line).join(" → ")}）`,
+  // 行号必须严格递减，且每一步都跳过中间那些分隔行（所以会出现 -2 的步长）
+  backSteps.every((s, i) => s.line < ups[i].line && s.line >= 1) && ups[ups.length - 1].line === 1,
   JSON.stringify(ups.map((s) => ({ line: s.line, col: s.col, head: s.head }))),
 );
+const sepsAtEnd = await separatorLines();
 check(
-  `第一次按上不会直接跳回文档开头（位置 ${ups[1].head}）`,
-  ups[1].head !== 0,
-  JSON.stringify(ups[1]),
+  `连续 ↑ 的每一步都停在非分隔行上（落点 ${JSON.stringify(backSteps.map((s) => s.line))}；DOM 里的分隔行 ${JSON.stringify(sepsAtEnd)}）`,
+  backSteps.every((s) => !sepsAtEnd.includes(s.line)),
+  JSON.stringify({ lines: backSteps.map((s) => s.line), separators: sepsAtEnd }),
 );
 check(
-  "按到第 1 行后不再动（位置 0）",
-  ups[ups.length - 1].line > 1 || ups[ups.length - 1].head === 0,
-  JSON.stringify(ups[ups.length - 1]),
+  `连续 ↑ 每一步在屏幕上都退了一条可见行（y ${ups.map((s) => (s.y === null ? "?" : s.y.toFixed(0))).join(" → ")}）`,
+  backSteps.every((s, i) => movedVisibly(s, ups[i])),
+  JSON.stringify(ups.map((s) => s.y)),
+);
+check(
+  `第一次按上不会直接跳回文档开头（位置 ${ups[1].head}，第 ${ups[1].line} 行）`,
+  ups[1].head !== 0 && ups[1].line === 7,
+  JSON.stringify(ups[1]),
+);
+// 到顶之后再按一次 ↑：**不许离开第 1 行、不许把页面往上滚**。CodeMirror 自己在"上面没有行了"
+// 时会退到 `moveToLineBoundary`（落到本行行首），所以这里允许列回到 0（第 1~3 列都在被隐藏的
+// `= ` 标记那一段里，画出来的光标位置相同），但不允许再往上走。
+const topAgain = await arrowUp();
+check(
+  `按到第 1 行后不再往上走（位置 ${topAgain.head}，列 ${topAgain.col}，y ${topAgain.y?.toFixed(0) ?? "?"}）`,
+  topAgain.line === 1 &&
+    topAgain.col <= 2 &&
+    topAgain.y !== null &&
+    ups[ups.length - 1].y !== null &&
+    topAgain.y >= ups[ups.length - 1].y - 1,
+  JSON.stringify({ top: ups[ups.length - 1], topAgain }),
 );
 check("状态栏没有脚本错误", !(await c.evaluate(`document.body.innerText`)).includes("脚本错误"));
 
-// ⑤ Shift+↓：扩选也走同一套语义（过去没接管 → CodeMirror 默认会跳过整块切片）
+// ⑤ Shift+↓：扩选走同一套可见行语义（过去没接管 → CodeMirror 默认会跳过整块切片），
+//    而且选中的是**准确的 Typst 源码** —— 段落之间的分隔换行必须一起被选进来。
 await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 300));
 const shiftStart = await caret();
@@ -436,16 +512,54 @@ await c.key("ArrowDown", { code: "ArrowDown", keyCode: 40, modifiers: 8 });
 await new Promise((r) => setTimeout(r, 250));
 const shift2 = await caret();
 check(
-  `Shift+↓ 逐行扩选（行号 ${shiftStart.line} → ${shift1.line} → ${shift2.line}，anchor 不动）`,
+  `Shift+↓ 按可见行扩选（行号 ${shiftStart.line} → ${shift1.line} → ${shift2.line}，anchor 不动）`,
   !shift2.empty &&
     shift2.anchor === shiftStart.head &&
-    shift1.line === shiftStart.line + 1 &&
-    shift2.line === shiftStart.line + 2 &&
+    shift1.line === 3 &&
+    shift2.line === 5 &&
     shift2.head < shift2.docLength,
   JSON.stringify({ shiftStart, shift1, shift2 }),
 );
+check(
+  `Shift+↓ 选中的是准确源码（含段落分隔换行：${JSON.stringify(shift2.selText.slice(0, 16))}…）`,
+  shift2.selText.startsWith("= 标题\n\n第一段。") &&
+    shift2.selText.includes("\n\n") &&
+    shift2.selText.length === shift2.head - shift2.anchor,
+  JSON.stringify({ selText: shift2.selText, head: shift2.head, anchor: shift2.anchor }),
+);
 await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 }); // 收起选区（非空选区按 ↑ = 收到一端）
 await new Promise((r) => setTimeout(r, 250));
+
+// ⑥ 段内自动折行：↑/↓ 每次走**一条可见行**（不是一次跳过整段），跨行时才换源码行
+await c.click(400, 300);
+await c.selectAll();
+// 90 个汉字远超一行（1400px 视口下列宽约 789px）→ 必然折成 2 条以上视觉行
+await c.type(`${"长".repeat(90)}\n\n短句\n`);
+await new Promise((r) => setTimeout(r, 800));
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+const wrapRows = [await caret()];
+for (let i = 0; i < 3; i++) wrapRows.push(await arrowDown());
+check(
+  `段内折行：↓ 先在**同一源码行内**推进（列 ${wrapRows[0].col} → ${wrapRows[1].col}），再跨到下一段（第 ${wrapRows[2].line} 行「${wrapRows[2].lineText}」）`,
+  wrapRows[0].line === 1 &&
+    wrapRows[1].line === 1 &&
+    wrapRows[1].col > wrapRows[0].col &&
+    wrapRows[2].line === 3 &&
+    wrapRows[2].lineText === "短句",
+  JSON.stringify(wrapRows.map((s) => ({ line: s.line, col: s.col, y: s.y, text: s.lineText }))),
+);
+check(
+  `段内折行：每一步都真的换了一条可见行的高度（y ${wrapRows.map((s) => (s.y === null ? "?" : s.y.toFixed(0))).join(" → ")}）`,
+  wrapRows.slice(1).every((s, i) => movedVisibly(s, wrapRows[i])),
+  JSON.stringify(wrapRows.map((s) => s.y)),
+);
+const wrapSeps = await separatorLines();
+check(
+  `段内折行：跨段那一步落在可见行上、不是那条分隔行（第 ${wrapRows[2].line} 行；分隔行 ${JSON.stringify(wrapSeps)}）`,
+  !wrapSeps.includes(wrapRows[2].line) && wrapSeps.includes(2),
+  JSON.stringify({ line: wrapRows[2].line, separators: wrapSeps }),
+);
 
 // ---------------------------------------------------------------------------
 // 阶段 2：点击定位 / 点击与刷新时的滚动锚定 / 翻页 / 编译失败不整篇作废

@@ -52,14 +52,14 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 | 套件（位于 `scripts/browser-check/`） | 证明的行为 |
 | --- | --- |
 | `wysiwyg.mjs` | 公式与标记、菜单快捷键、恢复、缩放、字体、诊断和更新 UI；不证明真实编译 |
-| `writing-blocks.mjs` | 假切片下的编辑、选择、导航、补渲、输入法、模式往返 |
-| `writing-blocks-visual.mjs` | 真实产物的复杂块裁剪几何与链接热区；正文是否保留文本、以及"敲一个字后编译落地前版面不跳"（`&blockslow=1` 撑开窗口）与"点列表项的项目符号后正文左缘不动"也要断言 |
+| `writing-blocks.mjs` | 假切片下的编辑、选择、导航（按**可见行**跨段：落点不是纯分隔行、每步光标屏幕 y 都动、目标列保留、Shift 扩选选中准确源码）、补渲、输入法、模式往返 |
+| `writing-blocks-visual.mjs` | 真实产物的复杂块裁剪几何与链接热区；正文是否保留文本、以及"敲一个字后编译落地前版面不跳"、"点列表项的项目符号后正文左缘不动"、"Enter 落在可见的新段落行上且输入/撤字/撤销都不抖"（都靠 `&blockslow=1` 撑开窗口）也要断言 |
 | `writing-blocks-hit.mjs` | 真实探针的点击到字符映射与 geometryId 校验 |
-| `writing-mode-scenes.mjs` | 标题、中文、列表、公式、表格、默认段距、连续空行与文末输入等场景的真实呈现及截图；防空数组假绿 |
+| `writing-mode-scenes.mjs` | 标题、中文、列表、公式、表格、默认段距、**分隔行与用户空段落的分工**与文末输入等场景的真实呈现及截图；防空数组假绿 |
 | `wysiwyg-visual.mjs` | 真实公式的基线、pt 尺寸、居中、暗色与墨迹边界 |
 | `writing-stability.mjs` | 点击/键盘进入公式与复杂块、模式往返、过期命中、调度、输入法与逐帧几何 |
 | `computed-style.mjs` | 作用域 box-sizing、窄视口溢出、CSS 源序与原有 content-box 边界 |
-| `writing-pku-docs.mjs` | PKU 真实作业（`PKU_ROOT`）的逐块几何：正文/标题/列表/公式切片同一张位置表，同页相邻锚点 ≤2px、页内累计 ≤5px；夹具缺失/原文哈希不符直接失败 |
+| `writing-pku-docs.mjs` | PKU 真实作业（`PKU_ROOT`）的逐块几何：正文/标题/列表/公式切片同一张位置表，同页相邻锚点 ≤2px、页内累计 ≤5px；编辑回放再用真实夹具钉住 Enter 的落点（可见新段落行，不是纯分隔行）与"输入两字后光标不被顶走"；夹具缺失/原文哈希不符直接失败 |
 
 ### 验收耗时基线与提速纪律（2026-09-26）
 

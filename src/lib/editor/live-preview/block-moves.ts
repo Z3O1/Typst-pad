@@ -1,13 +1,13 @@
 // **跨块竖直移动 / 翻页**：切片把非光标块换成图片之后，上下键与 PageUp/PageDown 不能按
-// "一次跨一整块"走（那样一块就跳过一整段正文），要按**源码行**走、并且落到同一屏幕高度上。
+// "一次跨一整块"走（那样一块就跳过一整段正文），要按**可见行**走、并且落到同一屏幕高度上。
 //
-// 从 `live-preview.ts` 的组装层拆出来。它只需要 `getCovers`：块表由组装层的 StateField 提供，
-// 本模块不反向依赖组装层。
+// 从 `live-preview.ts` 的组装层拆出来。它只需要两个取数口：`getCovers`（块表由组装层的
+// StateField 提供）与 `getSeparatorLines`（纯段落分隔行的行首集合，来自段距扫描）。
 //
 // 契约（改这里之前先读）：目标位置一律交给 `scrollIntoView`（**别自己写 scrollTop**，红线）；
-// 默认没跨切片就交回默认键位（`return false`）；跨了才按源码行走一步。
+// 默认没跨切片也没落到分隔行上就交回默认键位（`return false`）。
 import { EditorSelection, Prec } from "@codemirror/state";
-import type { EditorState } from "@codemirror/state";
+import type { EditorState, SelectionRange } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { crossesCollapsedCover, sourceVerticalTarget } from "../../core/block-plan";
 import type { BlockCover } from "../../core/block-plan";
@@ -16,22 +16,36 @@ import { anchorPosEffect } from "../scroll-anchor";
 /** 见 `createBlockMoves` 的说明 */
 export function createBlockMoves({
   getCovers,
+  getSeparatorLines,
 }: {
   getCovers: (state: EditorState) => BlockCover[];
+  /**
+   * **纯段落分隔行的行首集合**（`paragraph-breaks` 的段距扫描结果，见 live-preview 的收集）。
+   *
+   * 为什么竖直移动需要它（用户 2026-09-26）：这些行在版面上只有 0~3px 高（段距由相邻块的带高
+   * 承载），`moveVertically` 的半行步长会一步跨过它们 —— 而旧实现在"默认落点跳过了源码行"时
+   * 反而要按源码行接管一次，于是光标被钉在这种行上：看起来"卡在两段之间"，且 Enter 的落点
+   * 正好也压在这种行上（那正是"按 Enter 光标跳动"的一半来源）。
+   * 现在这些行**不是停靠点**，但它们**仍是可编辑的源码行**（只是不该被 ↑/↓ 选中）。
+   */
+  getSeparatorLines: (state: EditorState) => ReadonlySet<number>;
 }) {
   /**
-   * **写作模式的竖直移动 = 代码模式的语义**（用户 2026-09-16：「我希望光标移动和代码模式的光标移动一样」）。
+   * **写作模式的竖直移动 = 可见行语义**（用户 2026-09-16 要求"和代码模式一样"，
+   * 2026-09-26 追加"按可见行与可见段落移动，像 Typora 那样连续"）。
    *
-   * 规则只有两条（判定全是纯函数，可单测）：
-   *  1. `crossesCollapsedCover` 说"默认走法**没有**跨过未展开的切片" → 一律**交回 CodeMirror 默认**：
-   *     `moveVertically` 逐可见行扫、保留目标列、空行也停 —— 那就是代码模式的行为（写作模式与
-   *     源码模式的差别只剩"没展开的块显示成图片"，移动规则本身不该有差别）；
-   *  2. 跨过了 → 默认把 widget 当空气跳过去了（可能跳一整块，也可能一路扫回文档开头），
-   *     改按**源码行**走：一次一行、列保留；落点在切片里就把那一块展开（"光标进入即展开"）。
+   * 规则只有三条（判定全是纯函数，可单测）：
+   *  1. `crossesCollapsedCover` 说"默认走法**没有**跨过未展开的切片"、且默认落点**不是**
+   *     纯分隔行 → 一律**交回 CodeMirror 默认**：`moveVertically` 逐可见行扫、保留目标列 ——
+   *     这就是代码模式的行为（写作模式与源码模式的差别只剩"没展开的块显示成图片"）。
+   *     实测（2026-09-26）：这一步恰好也给出"目标行较短就落在它可见末端"的正确列；
+   *  2. 默认落到了**纯分隔行**上 → 它不是停靠点，按可见行走到下一个停靠行（`前段\n\n后段`
+   *     按一次 ↓ 直达后段；连续 Enter 建出来的**空段落**仍是停靠行，不在分隔行集合里）；
+   *  3. 跨过了未展开的切片 → 默认把 widget 当空气跳过去了（可能跳一整块，也可能一路扫回
+   *     文档开头），改按**可见行**走：落点在切片里就把那一块展开（"光标进入即展开"）。
    *
    * 别退回"一次跨一整块"（0.7.x 那版 `verticalBlockTarget`）：它跳过段落之间那条空行、也丢掉
-   * 目标列 —— 从第二段行首按 ↑ 会落到第一段的**行尾**、从第一段行尾按 ↓ 会直接进第二段，
-   * 都与代码模式不一样（用户就是这么发现的）。
+   * 目标列 —— 从第二段行首按 ↑ 会落到第一段的**行尾**、从第一段行尾按 ↓ 会直接进第二段。
    *
    * Shift 变体（扩选）过去**没接管**，于是走到 CM 默认的 `selectLineDown` —— 那个同样会跳过所有
    * 切片（选中范围会突然跨过一整块）。现在与不带 Shift 的走法完全同源。
@@ -107,15 +121,31 @@ export function createBlockMoves({
       const restY = caret ? caret.top : box.top + box.height / 2;
       const x = caret ? caret.left + 1 : view.contentDOM.getBoundingClientRect().left + 2;
       // 目标 = "滚过一屏之后会出现在光标那个屏幕高度"的内容 → 现在是屏幕上的 restY ± 一屏
-      const pos = view.posAtCoords({ x, y: restY + (forward ? dist : -dist) }, false);
+      let pos = view.posAtCoords({ x, y: restY + (forward ? dist : -dist) }, false);
       if (pos === null) return false;
+      /**
+       * **翻页也不停在纯分隔行上**（同一条规则，见 `block_verticalMoves` 的说明）：翻页是按屏幕
+       * 高度取位置的，正好压到块间那条零高行上时，光标会落在几乎看不见的地方。
+       * 用 `sourceVerticalTarget` 从落点走到最近的停靠行（分隔行不算停靠点）。
+       */
+      const separators = getSeparatorLines(view.state);
+      const landedOnSeparator = separators.has(view.state.doc.lineAt(pos).from);
+      if (landedOnSeparator) {
+        const stop = sourceVerticalTarget(
+          view.state.doc,
+          pos,
+          forward ? 1 : -1,
+          1,
+          pos - view.state.doc.lineAt(pos).from,
+          (from) => separators.has(from),
+        );
+        if (stop !== null) pos = stop;
+      }
       if (!extend && pos === head) return false; // 位置没动（到头了）：交回默认
       // 把"一屏位移"表达成滚动目标：光标回到原来的屏幕高度 = 内容正好走了一屏
       const anchor = anchorPosEffect(view, pos, restY, "center");
       view.dispatch({
-        selection: extend
-          ? EditorSelection.range(sel.main.anchor, pos)
-          : EditorSelection.cursor(pos),
+        selection: extend ? rangeTo(sel.main.anchor, pos, null) : cursorAt(pos, 0, null),
         effects: anchor ?? undefined,
       });
       return true;
@@ -124,6 +154,23 @@ export function createBlockMoves({
       return false;
     }
   }
+
+  /**
+   * **把光标/选区落进一个真的 `EditorSelection` 里**。
+   *
+   * 坑（2026-09-26 实测）：`EditorSelection.cursor(...)` / `.range(...)` 返回的是 **`SelectionRange`**，
+   * 而 `dispatch({ selection })` 只认 `EditorSelection`；传别的进去时 CodeMirror 会按
+   * `EditorSelection.single(sel.anchor, sel.head)` 重建 —— **assoc 与 goalColumn 被静默丢掉**
+   * （源码：`resolveTransactionInner` 的三元判断）。表现就是"目标列每跨一段就掉回行首 /
+   * 连续 ↑↓ 落点不一致"。所以这里统一包一层。
+   */
+  function asSelection(range: SelectionRange): EditorSelection {
+    return EditorSelection.create([range]);
+  }
+  const cursorAt = (pos: number, assoc: number, goalX: number | null) =>
+    asSelection(EditorSelection.cursor(pos, assoc, undefined, goalX ?? undefined));
+  const rangeTo = (anchor: number, head: number, goalX: number | null) =>
+    asSelection(EditorSelection.range(anchor, head, goalX ?? undefined));
 
   /**
    * 光标当前的**横向目标列**（px，相对内容左缘）。
@@ -148,25 +195,100 @@ export function createBlockMoves({
   }
 
   /**
-   * **按几何校正目标列**（`verticalMove` 的第 2 步）：在**目标行**上按横向目标列取一个位置。
+   * **目标行上、这一方向的那一条"可见行"矩形**（折行段落里就是第一条/最后一条视觉行）。
+   *
+   * 为什么要按视觉行取：段落折行时 ↑/↓ 必须落在**正确的那一行**上 —— 向下进入一个折行的
+   * 目标段落要落在它的第一行，向上进入要落在它的最后一行。只用 `coordsAtPos(行首)` 会永远
+   * 拿到第一行，向上时就把光标拉回了上一行（"重复落点"的一半来源）。
+   *
+   * 用 DOM Range 而不是 `coordsAtPos(行首)` 还有第二个理由：行首（或行内任意位置）可能落在
+   * 被隐藏的标记（`= ` / `- ` 的 replace widget）里，那里的 `coordsAtPos` 给的是零宽 widget 的
+   * 矩形，y 与真实文字行对不上，`posAtCoords` 于是按 above/below 兜底、把列丢掉。
+   *
+   * 同一视觉行要取**并集**（不是第一条矩形）：`getClientRects()` 会把行首空白、被隐藏标记留下的
+   * 内联 widget 与正文各自返回一条，只拿第一条会把目标列过早夹到"行首空白"的右缘 —— 实测
+   * `  - 列表项` 那一行目标列 63px 被夹到 28px（列从第 7 列掉回第 4 列）。
+   *
+   * 返回 null = 目标行不在 DOM 里（还在切片里没展开 / 不在视口）或环境没有布局（jsdom）。
+   */
+  function rowRect(
+    view: EditorView,
+    lineFrom: number,
+    forward: boolean,
+  ): { left: number; right: number; top: number; bottom: number } | null {
+    try {
+      const dom = view.domAtPos(lineFrom, 1);
+      let el: Element | null =
+        dom.node.nodeType === 3 ? dom.node.parentElement : (dom.node as Element);
+      while (el && !el.classList?.contains("cm-line")) el = el.parentElement;
+      if (!el) return null;
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const rects = Array.from(range.getClientRects()).filter((r) => r.height > 0 && r.width > 0);
+      if (rects.length === 0) {
+        const own = el.getBoundingClientRect();
+        return own.height > 0 && own.width > 0 ? own : null;
+      }
+      // 按"视觉行"分组：同一行的矩形**垂直重叠**（行首空白、被隐藏标记留下的内联 widget 与正文
+      // 各自一条，box 高可以差好几像素），所以判据用"重叠超过较小者的 60%"，而不是比较 top。
+      const rows: { top: number; bottom: number; left: number; right: number }[] = [];
+      for (const r of rects) {
+        const row = rows.find((x) => {
+          const overlap = Math.min(x.bottom, r.bottom) - Math.max(x.top, r.top);
+          const smaller = Math.min(x.bottom - x.top, r.bottom - r.top);
+          return overlap > smaller * 0.6;
+        });
+        if (row) {
+          row.top = Math.min(row.top, r.top);
+          row.bottom = Math.max(row.bottom, r.bottom);
+          row.left = Math.min(row.left, r.left);
+          row.right = Math.max(row.right, r.right);
+        } else {
+          rows.push({ top: r.top, bottom: r.bottom, left: r.left, right: r.right });
+        }
+      }
+      rows.sort((a, b) => a.top - b.top);
+      return forward ? rows[0] : rows[rows.length - 1];
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * **按几何校正目标列**（`verticalMove` 的第 2 步）：在**目标行的那一条可见行**上，按横向目标列
+   * 取一个位置。
    *
    * 为什么这里量得到：切片里量不到字符位置（图片里没有文本），所以第一步只能按**字符列**估；
    * 但落点那一块在**同一次事务**里已经从切片变回源码，CodeMirror 的 DOM 也是同步更新的
    * （实测：dispatch 之后立刻 `coordsAtPos` 已经是展开后的行），所以紧接着做一次布局读取就能
-   * 拿到真实几何 —— "目标行的中线 + 光标原本的横向列"取到的位置，就是代码模式会落到的那一列。
-   * 一次同步布局读取换来"列与代码模式完全一致"，比"先估、下一帧再修"（会看到光标跳一下）划算。
+   * 拿到真实几何。两次 dispatch 都在同一次按键处理里同步完成，浏览器只画一帧 —— 用户只看到
+   * 最终光标位置，看不到"先跳到估算位置再修正"（见 docs/development/writing-rendering.md）。
    *
-   * 返回 null = 量不到（目标行不在视口 / 环境没有布局，如 jsdom）或几何过期（取到的位置在别的行上）
-   * —— 调用方保留字符列的估算值，绝不乱挪。
+   * 列按目标行的**可见范围**夹住：目标行较短时落在它的可见末端（用户要求）；
+   * 返回 null = 量不到（目标行不在视口 / 环境没有布局，如 jsdom）或几何对不上（取到的位置在
+   * 别的行、或不在同一条视觉行上）—— 调用方保留字符列的估算值，绝不乱挪。
    */
-  function measureColumn(view: EditorView, pos: number, goalX: number): number | null {
+  function measureColumn(
+    view: EditorView,
+    pos: number,
+    goalX: number,
+    forward: boolean,
+  ): number | null {
     try {
       const row = view.state.doc.lineAt(pos);
-      const coords = view.coordsAtPos(row.from);
-      if (!coords) return null;
-      const x = view.contentDOM.getBoundingClientRect().left + goalX;
-      const hit = view.posAtCoords({ x, y: (coords.top + coords.bottom) / 2 });
+      const rect = rowRect(view, row.from, forward);
+      if (!rect) return null;
+      const contentLeft = view.contentDOM.getBoundingClientRect().left;
+      const x = Math.min(
+        Math.max(contentLeft + goalX, rect.left),
+        Math.max(rect.left, rect.right - 1),
+      );
+      const midY = (rect.top + rect.bottom) / 2;
+      const hit = view.posAtCoords({ x, y: midY });
       if (hit === null || view.state.doc.lineAt(hit).number !== row.number) return null;
+      // 必须还在**同一条视觉行**上：否则就是把光标拉回了上一行（折行段落里的重复落点）
+      const hitCoords = view.coordsAtPos(hit, -1);
+      if (!hitCoords || Math.abs((hitCoords.top + hitCoords.bottom) / 2 - midY) > 2) return null;
       return hit;
     } catch {
       return null;
@@ -186,8 +308,9 @@ export function createBlockMoves({
   let carryGoal: { head: number; x: number } | null = null;
 
   /**
-   * ↑/↓（含 Shift 扩选）：**默认走法正常就交回默认**，否则按源码行走一步（见 `blockVerticalMoves`）。
-   * 返回 false = 交给 CodeMirror 的默认绑定（永远安全：默认至少不会"什么都不做"）。
+   * ↑/↓（含 Shift 扩选）：**默认走法落到可见行上就交回默认**，否则按可见行走一步
+   * （见 `blockVerticalMoves`）。返回 false = 交给 CodeMirror 的默认绑定（永远安全：
+   * 默认至少不会"什么都不做"）。
    */
   function verticalMove(view: EditorView, forward: boolean, extend: boolean): boolean {
     try {
@@ -202,23 +325,35 @@ export function createBlockMoves({
       const doc = view.state.doc;
       const head = range.head;
       const line = doc.lineAt(head);
+      const separators = getSeparatorLines(view.state);
+      const isSeparator = (from: number) => separators.has(from);
       const fallback = view.moveVertically(range, forward);
       /**
-       * 两种情况下默认走法不能用，改按**源码行**走一步：
+       * 两种情况下默认走法不能用，改按**可见行**走一步：
        *
-       * 1. **跨过了未展开的切片**（`crossesCollapsedCover`）：默认会把 widget 当空气，
+       * 1. **默认落到了纯分隔行上**（`isSeparator`）：那不是停靠点 —— 它只有 0~3px 高（段距由
+       *    相邻块的带高承载），停上去光标几乎看不见。`前段\n\n后段` 按一次 ↓ 应该直达后段。
+       *    实测（2026-09-26）：块带生效时 `moveVertically` 的半行步长会落到这条零高行上
+       *    （旧实现反而据此断定"默认跳过了源码行"、再按源码行接管一次，把光标钉死在这里）。
+       * 2. **跨过了未展开的切片**（`crossesCollapsedCover`）：默认把 widget 当空气，
        *    可能跳一整块、也可能一路扫回文档开头（用户报过「在 `== 6` 前面按上跳回开头」）。
-       * 2. **跳过了源码行**（`skipped`）：默认是"逐可见行"扫的，而写作模式里块间那条空源码行
-       *    只有几个像素高（贴 Typst 段距的代价），`moveVertically` 的半行步长会**一步跨过它** ——
-       *    表现为 ↑/↓ 把空行吃掉（实测 8 行文档走出 8→7→6→5→3→1，跳过第 4、2 行）。
-       *    判据只看"默认落点与当前行隔了不止一行"，所以行内折行（同一源码行内换视觉行）
-       *    仍然是 CodeMirror 的逐可见行行为，不会被这条接管。
+       *
+       * 注意**不再**用"默认落点与当前行隔了不止一行"当接管判据：跨越纯分隔行正是我们想要的
+       * 行为（用户 2026-09-26 明确作废了旧规则「空行也停一拍」）。行内折行（同一源码行内换视觉行）
+       * 永远由 CodeMirror 逐可见行处理，不受这里影响。
        */
       const crossed = crossesCollapsedCover(covers, head, fallback.head);
-      const skipped = Math.abs(doc.lineAt(fallback.head).number - line.number) > 1;
-      if (!crossed && !skipped) return false;
-      // 跨过了切片 / 跳过了源码行：按源码行走**一行**（空行也停、列保留、落点所在块会因此展开）
-      const pos = sourceVerticalTarget(doc, head, forward ? 1 : -1, 1, head - line.from);
+      const landedOnSeparator = isSeparator(doc.lineAt(fallback.head).from);
+      if (!crossed && !landedOnSeparator) return false;
+      // 跨过分隔行 / 未展开的切片：按可见行走**一步**（分隔行不算停靠点，用户的空段落照停）
+      const pos = sourceVerticalTarget(
+        doc,
+        head,
+        forward ? 1 : -1,
+        1,
+        head - line.from,
+        isSeparator,
+      );
       if (pos === null || pos === head) return false;
       const goalX =
         range.goalColumn ??
@@ -230,26 +365,22 @@ export function createBlockMoves({
       // 记住这一步的目标列：下一步若落在空行上，光标的 x 量不出它（见 carryGoal 的说明）
       carryGoal = goalX === null ? null : { head: pos, x: goalX };
       view.dispatch({
-        selection: extend
-          ? EditorSelection.range(range.anchor, pos, goalX ?? undefined)
-          : EditorSelection.cursor(pos, assoc, undefined, goalX ?? undefined),
+        selection: extend ? rangeTo(range.anchor, pos, goalX) : cursorAt(pos, assoc, goalX),
         scrollIntoView: true,
       });
       /**
        * 列：先用**字符列**估着落下去（切片里量不到像素位置），紧接着按真实几何校正一次 ——
        * 目标那一块在上一条 dispatch 里已经展开成源码，所以这里量得到（见 measureColumn）。
-       * 量不到就保留字符列估算值。
+       * 量不到就保留字符列估算值。两次 dispatch 都在同一次按键里同步完成：只画一帧。
        */
       if (goalX !== null) {
-        const hit = measureColumn(view, pos, goalX);
+        const hit = measureColumn(view, pos, goalX, forward);
         if (hit !== null && hit !== pos) {
           const target = doc.lineAt(hit);
           const hitAssoc = target.length > 0 && hit === target.to ? -1 : 1;
           carryGoal = { head: hit, x: goalX };
           view.dispatch({
-            selection: extend
-              ? EditorSelection.range(range.anchor, hit, goalX)
-              : EditorSelection.cursor(hit, hitAssoc, undefined, goalX),
+            selection: extend ? rangeTo(range.anchor, hit, goalX) : cursorAt(hit, hitAssoc, goalX),
           });
         }
       }

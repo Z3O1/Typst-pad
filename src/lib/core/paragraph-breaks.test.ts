@@ -19,9 +19,37 @@ describe("scanParagraphGapRows", () => {
 
   it("连续空行共享一份段距，空白缩进也保留为源码", () => {
     const doc = "前段\n  \n\n后段";
-    expect(gaps(doc)).toEqual([
-      { from: 3, count: 2 },
-      { from: 6, count: 2 },
+    // 两条空白行里只有**第一条**是那两个段落之间必需的分隔行，第二条是用户自己创建的空段落
+    // （按普通行盒呈现、也是竖直导航的停靠点，见下面的用例）。段距因此只落在第一条上。
+    expect(gaps(doc)).toEqual([{ from: 3, count: 1 }]);
+  });
+
+  it("两个正文段落之间：只有第一条空白行是必需的分隔行，其余是用户的空段落", () => {
+    // 用户 2026-09-26：「要区分"维持两个段落所必需的分隔换行"与"额外创建的空段落"」。
+    // 一次 Enter 建出一条空段落（Enter 落在最后那条空白行上），它必须仍是停靠点。
+    expect(gaps("前段\n\n后段")).toEqual([{ from: 3, count: 1 }]);
+    expect(gaps("前段\n\n\n后段")).toEqual([{ from: 3, count: 1 }]);
+    // 连续按 Enter：只有第一条压缩，其余（用户建的两条空段落）保持普通行盒。
+    expect(gaps("前段\n\n\n\n后段")).toEqual([{ from: 3, count: 1 }]);
+    // 标题 / 列表行同样是"正文行"，与相邻段落之间适用同一条规则。
+    const heading = "= 标题\n\n\n正文";
+    expect(gaps(heading)).toEqual([{ from: heading.indexOf("\n\n\n") + 1, count: 1 }]);
+    const list = "正文\n\n\n- 列表项";
+    expect(gaps(list)).toEqual([{ from: list.indexOf("\n\n\n") + 1, count: 1 }]);
+  });
+
+  it("贴着规则 / 注释 / 代码的空白串仍整串按分隔行压缩（几何由裁剪带承载）", () => {
+    // 反例保护：这些构造两侧的空白行如果也长出一条可见空行，整页就会偏离真实排版
+    // （PKU 高代周一实测 `#pagebreak()` 后面那两条空行）。
+    const pagebreak = "#pagebreak()\n\n\n// 注释\n";
+    expect(gaps(pagebreak)).toEqual([
+      { from: pagebreak.indexOf("\n\n\n") + 1, count: 2 },
+      { from: pagebreak.indexOf("\n\n\n") + 2, count: 2 },
+    ]);
+    const rule = "#let x = 1\n\n\n正文";
+    expect(gaps(rule)).toEqual([
+      { from: rule.indexOf("\n\n\n") + 1, count: 2 },
+      { from: rule.indexOf("\n\n\n") + 2, count: 2 },
     ]);
   });
 
@@ -29,9 +57,13 @@ describe("scanParagraphGapRows", () => {
     expect(gaps("\n首段\n\n尾段\n")).toEqual([{ from: 4, count: 1 }]);
     expect(gaps("正文\n\n")).toEqual([{ from: 3, count: 1 }]);
     expect(gaps("正文\n\n  ")).toEqual([{ from: 3, count: 1 }]);
-    expect(gaps("正文\n\n\n")).toEqual([
-      { from: 3, count: 2 },
-      { from: 4, count: 2 },
+    // 文末连续 Enter：最后一行是光标所在的新段落（不压缩），其余只有第一条是必需的分隔行 ——
+    // 与两个正文段落之间的规则同源（用户 2026-09-26：连续 Enter 建出的空段落都要能进入）。
+    expect(gaps("正文\n\n\n")).toEqual([{ from: 3, count: 1 }]);
+    // 贴在规则行后面的文末空行没有裁剪带承载几何，整串仍按分隔行压缩（但最后一行照旧留给光标）。
+    expect(gaps("#let x = 1\n\n\n")).toEqual([
+      { from: 11, count: 2 },
+      { from: 12, count: 2 },
     ]);
   });
 

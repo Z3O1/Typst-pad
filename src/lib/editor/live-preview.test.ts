@@ -142,11 +142,19 @@ describe("livePreview 扩展", () => {
     expect(host.querySelector(".cm-write-parbreak")).toBeNull();
   });
 
-  it("连续段落分隔行按总段距分配，且不把空行替换成 widget", () => {
+  it("两个正文段落之间只有第一条空白行承担段距，其余是用户的空段落，且都不替换成 widget", () => {
+    // 用户 2026-09-26 的新口径：`前段\n\n\n后段` 里只有**第一条**空白行是"维持两个段落所必需
+    // 的分隔行"（承担 Typst 的段距），第二条是用户自己创建的空段落 —— 按普通行盒呈现、仍是
+    // 可编辑源码，也是竖直导航的停靠点（见 core/block-plan 的 sourceVerticalTarget）。
     mount("前段\n\n\n后段");
     const rows = Array.from(host.querySelectorAll(".cm-line.cm-write-parbreak"));
-    expect(rows).toHaveLength(2);
-    expect(rows.every((row) => row.getAttribute("style")?.includes("0.104000em"))).toBe(true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].getAttribute("style")).toContain("0.208000em");
+    // 空段落那一行**不该**拿到段距装饰（拿到就说明它又被当成分隔行压缩了）
+    const emptyParagraph = Array.from(host.querySelectorAll(".cm-line")).find(
+      (line) => !line.classList.contains("cm-write-parbreak") && line.textContent === "",
+    );
+    expect(emptyParagraph).toBeTruthy();
     expect(host.querySelectorAll(".cm-widgetBuffer")).toHaveLength(0);
     expect(view.state.doc.toString()).toBe("前段\n\n\n后段");
   });
@@ -1322,19 +1330,21 @@ describe("livePreview 块级切片", () => {
     expect(host.querySelectorAll(".cm-block-crop-dark").length).toBe(1);
   });
 
-  // **红线**：竖直移动不许退回"一次跨一整块"（0.7.x 那版 `verticalBlockTarget`）。这里直接验
-  // `block-moves.ts` 的分支：当**默认走法跨过了未展开的切片**时，它要按源码行只走一行。
+  // **红线**：竖直移动不许退回"一次跨一整块"（0.7.x 那版 `verticalBlockTarget`），也不许在
+  // "跳过分隔行"的名义下多走几条可见行。这里直接验 `block-moves.ts` 的分支：当**默认走法跨过了
+  // 未展开的切片**时，它要按**可见行**只走一步 —— 分隔行不算停靠点，正文行一步也不能多跳。
   //
   // jsdom 没有真实几何，`view.moveVertically` 量不到坐标（默认会原地不动，于是"没跨过切片"
   // 那条早退分支吃掉一切）。所以**把这个默认走法换成"跳到文档开头"**（等价于"默认把切片当空气
-  // 直接跨过去"），正是我们要拦的那种情形 —— 断言光标落在**上一行**，而不是第一块的行首。
+  // 直接跨过去"），正是我们要拦的那种情形 —— 断言光标落在**上一段**（`bbb` 行首，pos 5），
+  // 而不是被跨过去的中间那几条（空行 / 文档开头）。
   //
   // 前提（改这块时注意）：本用例**依赖 `view.moveVertically` 这个接缝**来伪造"默认走法"，
   // 换掉默认落点的求法就会假红；只覆盖 ArrowUp（ArrowDown / Shift 变体同源同分支）。
   // 列校正分支（`coordsAtPos` 有真实几何才有意义）不在单测范围，见
   // `scripts/browser-check/writing-blocks.mjs` 的竖直移动那组。
-  it("跨块竖直移动：默认走法跨过切片时按**源码行走一行**（不是跨一整块）", () => {
-    mount("aaa\n\nbbb\n\nccc\n", [crop(0, 3), crop(5, 8), crop(10, 13)], 5);
+  it("跨块竖直移动：默认走法跨过切片时按**可见行走一步**（跳过分隔行、不跨一整块）", () => {
+    mount("aaa\n\nbbb\n\nccc\n", [crop(0, 3), crop(5, 8), crop(10, 13)], 10);
     // 默认走法（被替换）：直接跳到第一块的行首 —— 就是"跨一整块"的坏行为
     const spy = vi
       .spyOn(EditorView.prototype, "moveVertically")
@@ -1352,7 +1362,33 @@ describe("livePreview 块级切片", () => {
     } finally {
       spy.mockRestore();
     }
-    // 正确落点：上一行（第 1 行那个空行，pos 4），而不是 pos 0
-    expect(view.state.selection.main.head).toBe(4);
+    // 正确落点：上一条**可见行** = `bbb` 行首（pos 5）；中间那条空分隔行不算停靠点（不落在 9），
+    // 更不是把整块跨过去落到文档开头（0）。
+    expect(view.state.selection.main.head).toBe(5);
+  });
+
+  // ↑ 到上一段时，若中间隔的是**用户自己创建的空段落**，它必须仍是停靠点（否则连续 Enter
+  // 建出来的空段落就没法用 ↑/↓ 回去 —— 用户 2026-09-26 的第 4 条要求）。
+  it("跨块竖直移动：用户的空段落仍是停靠行（只有纯分隔行被跳过）", () => {
+    mount("aaa\n\n\nbbb\n", [crop(0, 3), crop(6, 9)], 6);
+    const spy = vi
+      .spyOn(EditorView.prototype, "moveVertically")
+      .mockReturnValue(EditorSelection.cursor(0));
+    try {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowUp",
+          code: "ArrowUp",
+          keyCode: 38,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    // 文档：`aaa\n\n\nbbb\n` → 行 1 aaa(0-3)、行 2 空(4)、行 3 空(5)、行 4 bbb(6-9)。
+    // 行 2 是必需的分隔行（跳过），行 3 是用户的空段落 → 落点是行 3 行首 5。
+    expect(view.state.selection.main.head).toBe(5);
   });
 });

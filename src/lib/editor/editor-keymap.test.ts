@@ -20,6 +20,21 @@ import { basicSetup } from "codemirror";
 import { createEditorKeymap, editorKeymap } from "./editor-keymap";
 import { typst_lezer } from "codemirror-lang-typst/lezer";
 import { INDENT_UNIT } from "./auto-indent";
+import { scanNonMarkupRegions } from "../core/typst-lex";
+import { scanMathRanges } from "../core/math-ranges";
+import { scanMarkupDecorations } from "../core/markup-ranges";
+import { scanParagraphGapRows } from "../core/paragraph-breaks";
+
+/**
+ * 文档里**纯段落分隔行**的行首集合（与写作渲染的段距装饰同源：`paragraphGapRows` 就是那些
+ * 被压缩到 Typst 段距、因而不是竖直导航停靠点的行，见 core/block-plan 的 sourceVerticalTarget）。
+ */
+function separatorLineStarts(doc: string): Set<number> {
+  const opaque = scanNonMarkupRegions(doc);
+  const math = scanMathRanges(doc, opaque);
+  const markup = scanMarkupDecorations(doc, { opaque, math });
+  return new Set(scanParagraphGapRows(doc, opaque, math, markup).map((row) => row.from));
+}
 
 // 与 Editor.svelte buildExtensions 的键位相关扩展保持一致（typst() 不含键位，不影响断言）
 // indentUnit 也要带上：Tab 一档缩进多宽由它决定（应用里是 4 个空格，见 auto-indent.ts）
@@ -255,6 +270,29 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     view.destroy();
   });
 
+  it("写作模式：Enter 新建的空段落不是「只用于分隔的空源码行」，光标就落在它上面", () => {
+    // 用户 2026-09-26：「按 Enter 后光标会跳动」+「真正的空段落仍须能进入、输入和删除」。
+    // 判据用**段距扫描**（与写作渲染同一份纯函数）：Enter 的落点那一行不得是纯分隔行 ——
+    // 分隔行在版面上只有 0~3px 高（段距由相邻块的带高承载），旧实现把两者混在一起，于是
+    // Enter 之后光标先落到那条看不见的行上、编译落地再跳回来。
+    for (const { doc, pos } of [
+      { doc: "前段\n\n后段", pos: 2 }, // 两段之间：新空段落插在中间
+      { doc: "前段", pos: 2 }, // 文末：新空段落在文末（必须可进入）
+      { doc: "前段\n", pos: 2 }, // 行尾已经有换行
+    ]) {
+      const view = makeWriteView(doc);
+      view.dispatch({ selection: { anchor: pos } });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+      const text = view.state.doc.toString();
+      const head = view.state.selection.main.head;
+      const line = view.state.doc.lineAt(head);
+      const info = JSON.stringify({ doc, text, head, line: line.number });
+      expect(separatorLineStarts(text).has(line.from), info).toBe(false);
+      expect(head, info).toBe(line.from); // 落在新段落的可输入起点（行首）
+      view.destroy();
+    }
+  });
+
   it("写作模式：只替换实际选区，markup 引号仍按普通正文处理", () => {
     let view = makeWriteView('带 "引号" 的正文');
     view.dispatch({ selection: { anchor: 4 } });
@@ -329,6 +367,24 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
         view.destroy();
       }
     }
+  });
+
+  it("写作模式：Shift+Enter 不产生空行 —— 换行后的内容是一条普通可见行（不是分隔行）", () => {
+    // 用户 2026-09-26 的第 2 条：「Shift+Enter 保持 Typst 显式行内换行语义；上下键将换行后的
+    // 内容当作下一条可见行」。判据：整篇**没有任何纯段落分隔行**（所以竖直移动不会把它跳过），
+    // 而且光标落在换行后的那一条源码行起点上。
+    const view = makeWriteView("前段\n后段");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
+    const text = view.state.doc.toString();
+    const head = view.state.selection.main.head;
+    const line = view.state.doc.lineAt(head);
+    const info = JSON.stringify({ text, head, line: line.number });
+    expect(text, info).toBe("前段\\\n后段");
+    expect(line.number, info).toBe(2);
+    expect(head - line.from, info).toBe(0);
+    expect(separatorLineStarts(text).size, info).toBe(0);
+    view.destroy();
   });
 
   it("写作模式：Enter 和 Shift+Enter 各作为一次编辑撤销，完整恢复源码和光标", () => {

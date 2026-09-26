@@ -16,6 +16,7 @@ import type { EditorState, Extension } from "@codemirror/state";
 import { scanDocument } from "./live-preview/doc-scan";
 import { revealBlocksWithDiagnostics } from "../core/block-plan";
 import type { BlockCover } from "../core/block-plan";
+import type { ParagraphGapRow } from "../core/paragraph-breaks";
 import { dbg } from "../core/debug";
 import { MATH_TEXT_PT } from "../core/typst-engine";
 import { createBlockDrag } from "./live-preview/block-drag";
@@ -42,6 +43,21 @@ export { refreshLivePreview } from "./live-preview/options";
 export { docScanStats, resetDocScanCache } from "./live-preview/doc-scan";
 export type { LivePreviewOptions, MathRequest } from "./live-preview/options";
 
+/** 空的分隔行集合（没有块级渲染 / 没扫到段距时空集合，不要每帧新建 Set） */
+const EMPTY_LINES: ReadonlySet<number> = new Set<number>();
+
+/**
+ * 段距扫描结果 → **纯段落分隔行的行首集合**（竖直移动用，见 `live-preview/block-moves`）。
+ *
+ * `paragraphGapRows` 里的每一行都是被压缩到 Typst 段距的"必需的分隔行"；用户自己创建的空段落
+ * 不在其中（`paragraph-breaks` 里按"只有第一条是分隔行"分类），所以这份集合就是"↑/↓ 不该停的
+ * 那些行"的权威来源 —— 与空行高度装饰同源，不会出现"看起来是分隔行、导航却当停靠点"的漂移。
+ */
+function separatorLines(rows: readonly ParagraphGapRow[]): ReadonlySet<number> {
+  if (rows.length === 0) return EMPTY_LINES;
+  return new Set(rows.map((row) => row.from));
+}
+
 /**
  * 所见即所得扩展：公式内联渲染（widget 装饰 + 选区进出展开 + 渲染请求）。
  *
@@ -56,9 +72,11 @@ export function livePreview(opts: LivePreviewOptions): Extension {
    * 任何装饰计算出的意外都必须退化成"不挂装饰"（源码照常显示、编辑照常可用），
    * 并把原因写进控制台，绝不冒泡到 CodeMirror 的事务里。
    */
-  const collect = (state: EditorState): { deco: DecorationSet; covers: BlockCover[] } => {
+  const collect = (
+    state: EditorState,
+  ): { deco: DecorationSet; covers: BlockCover[]; separators: ReadonlySet<number> } => {
     try {
-      if (!opts.enabled()) return { deco: Decoration.none, covers: [] };
+      if (!opts.enabled()) return { deco: Decoration.none, covers: [], separators: EMPTY_LINES };
       // 扫描结果走**文档扫描缓存**（`doc-scan.ts`）：docChanged / 选区变化 / 刷新三种事务
       // 都要重建装饰，而只有第一种真的改了文档 —— 身份判据（CM 的 Text 对象）让后两种
       // 直接复用，纯选区移动不再全文重扫（报告 T3 / P1）。
@@ -137,14 +155,24 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         deco: all.length === 0 ? Decoration.none : Decoration.set(all, true),
         // 格子表交给"跨块竖直移动"用（见 blockVerticalMoves）：它要按格子找相邻块
         covers,
+        /**
+         * **纯段落分隔行的行首集合**（竖直移动用，见 block-moves 的说明）：这些行只有 0~3px 高
+         * （段距由相邻块的带高承载），不是 ↑/↓ 的停靠点。它们与装饰用的是**同一份扫描结果**
+         * （`doc-scan` 按 CM `Text` 身份缓存），所以不会与空行高度口径漂移。
+         */
+        separators: separatorLines(scan.paragraphGapRows),
       };
     } catch (e) {
       console.error("[live-preview] 装饰重建失败，已退化为源码显示：", e);
-      return { deco: Decoration.none, covers: [] };
+      return { deco: Decoration.none, covers: [], separators: EMPTY_LINES };
     }
   };
 
-  const decoField = StateField.define<{ deco: DecorationSet; covers: BlockCover[] }>({
+  const decoField = StateField.define<{
+    deco: DecorationSet;
+    covers: BlockCover[];
+    separators: ReadonlySet<number>;
+  }>({
     create: (state) => collect(state),
     update(value, tr) {
       const refreshed = tr.effects.some((e) => e.is(refreshLivePreview));
@@ -161,8 +189,12 @@ export function livePreview(opts: LivePreviewOptions): Extension {
   const getCovers = (state: EditorState): BlockCover[] =>
     state.field(decoField, false)?.covers ?? [];
 
+  /** 当前纯段落分隔行的行首集合（见 `createBlockMoves` 的 `getSeparatorLines`） */
+  const getSeparatorLines = (state: EditorState): ReadonlySet<number> =>
+    state.field(decoField, false)?.separators ?? EMPTY_LINES;
+
   const cropMouseSelection = createBlockDrag({ opts, getCovers });
-  const blockVerticalMoves = createBlockMoves({ getCovers });
+  const blockVerticalMoves = createBlockMoves({ getCovers, getSeparatorLines });
   const requester = createRequester({ opts });
 
   return [decoField, cropMouseSelection, blockVerticalMoves, requester, mathWidgetTheme];

@@ -570,4 +570,212 @@ console.log("\n=== 点列表项的项目符号：正文左缘/行高/相邻项�
   );
 }
 
+// ---------------------------------------------------------------------------
+// ⑩ **Enter 的落点与抖动**（2026-09-26）：真实夹具下按 Enter，光标必须落在**可见的新段落行**上
+//     （不是那条 0~3px 高的纯分隔行），而且输入首字 / 撤字 / 撤销都不许让它动。
+//
+// 旧行为：Enter 的落点正好压在"段落之间那条空源码行"上 —— 那条行只有 0~3px 高（段距由相邻块的
+// 带高承载），光标几乎看不见；编译落地时它的高度再变一次，看起来就是"按 Enter 光标先跳走再跳回"。
+// 现在两条空白行分开：第一条承担段距，后面那条是**用户的空段落**（真实行盒、也是导航停靠点）。
+//
+// 用真实夹具 + `&blockslow=1`：夹具提供真实带高（`layoutHold` 在编译落地前保住它），慢编译把
+// "落地前"那段窗口撑开。撤销之后文档重新命中夹具 → 版面回到与 Enter 前**逐像素相同**。
+console.log("\n=== Enter 的落点：必须落在可见的新段落行上（真实夹具 + 慢编译窗口）");
+{
+  await c.goto(`${URL_BLOCKS}&blockslow=1`);
+  const fx = fixtures.find((f) => f.name === "标题层级");
+  await replaceDocument(c, fx.doc);
+  await c.waitFor(`window.__browserDevBlocksMatched === true`, { timeout: 20000 });
+  await new Promise((r) => setTimeout(r, 400));
+
+  /**
+   * 光标所在行的**行盒几何** + 它是不是纯分隔行 + 整篇逐行 top + 编译状态。
+   * 逐行 top 用来对"撤销之后版面回到原样"，分隔行标记用来钉"落点不是分隔行"。
+   */
+  const ENTER_STATE = `(() => {
+    const view = window.__typstPadView;
+    const sel = view.state.selection.main;
+    const line = view.state.doc.lineAt(sel.head);
+    const coords = view.coordsAtPos(sel.head, sel.assoc);
+    const lines = Array.from(document.querySelectorAll(".cm-content > .cm-line"));
+    const domLine = (n) => lines.find((l) => {
+      try { return view.state.doc.lineAt(view.posAtDOM(l, 0)).number === n; } catch { return false; }
+    });
+    const el = domLine(line.number);
+    const box = el ? el.getBoundingClientRect() : null;
+    const gap = lines.find((l) => l.classList.contains("cm-write-parbreak"));
+    return {
+      head: sel.head, line: line.number, col: sel.head - line.from, text: line.text,
+      doc: view.state.doc.toString(),
+      separator: el ? el.classList.contains("cm-write-parbreak") : null,
+      boxTop: box ? +box.top.toFixed(2) : null,
+      boxHeight: box ? +box.height.toFixed(2) : null,
+      caretTop: coords ? +coords.top.toFixed(2) : null,
+      gapHeight: gap ? +gap.getBoundingClientRect().height.toFixed(2) : null,
+      lineTops: lines.map((l) => +l.getBoundingClientRect().top.toFixed(2)),
+      exact: window.__typstPadBlocks ? window.__typstPadBlocks.exact === true : null,
+      compiles: window.__browserDevCallCounts?.compile_blocks ?? 0,
+    };
+  })()`;
+
+  // 光标放到第一段末尾（那一段是有真实带高的可编辑正文）
+  const placed = await c.evaluate(`(() => {
+    const view = window.__typstPadView;
+    const doc = view.state.doc.toString();
+    const line = doc.split("\\n").findIndex((t) => t.startsWith("一级标题下的段落"));
+    if (line < 0) return null;
+    const pos = view.state.doc.line(line + 1).to;
+    view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+    view.focus();
+    return { line: line + 1, pos };
+  })()`);
+  check("夹具里有可编辑正文段（否则这一节量不到 Enter 的落点）", !!placed, JSON.stringify(placed));
+  await new Promise((r) => setTimeout(r, 250));
+  const before = await c.evaluate(ENTER_STATE);
+  check(
+    "Enter 前：光标在正文段行尾、那一行是真实行盒（不是分隔行）",
+    before.separator === false && before.boxHeight !== null && before.boxHeight >= 20,
+    JSON.stringify(before),
+  );
+
+  // ① Enter：落点必须是**新的空段落行**（真实行盒），不是那条零高的分隔行
+  await c.key("Enter", { code: "Enter", keyCode: 13 });
+  const afterEnter = await c.evaluate(ENTER_STATE);
+  check(
+    `量到的确实是"编辑后、编译落地前"的窗口（exact ${before.exact} → ${afterEnter.exact}，compile_blocks ${before.compiles} → ${afterEnter.compiles}）`,
+    before.exact === true && afterEnter.exact === false,
+    JSON.stringify({ before: before.exact, after: afterEnter.exact }),
+  );
+  check(
+    `Enter 落在**新空段落**上而不是纯分隔行（第 ${afterEnter.line} 行，separator=${afterEnter.separator}）`,
+    afterEnter.doc === before.doc.replace("段落。\n\n==", "段落。\n\n\n==") &&
+      afterEnter.text === "" &&
+      afterEnter.separator === false,
+    JSON.stringify(afterEnter),
+  );
+  check(
+    `新空段落是真实行盒、光标画在它上面（盒高 ${afterEnter.boxHeight}px，top ${afterEnter.boxTop} / 光标 ${afterEnter.caretTop}）`,
+    afterEnter.boxHeight !== null &&
+      afterEnter.boxHeight >= 20 &&
+      afterEnter.boxTop !== null &&
+      afterEnter.caretTop !== null &&
+      afterEnter.caretTop >= afterEnter.boxTop - 1 &&
+      afterEnter.caretTop <= afterEnter.boxTop + afterEnter.boxHeight + 1,
+    JSON.stringify(afterEnter),
+  );
+  check(
+    `段距仍由那条分隔行承担（分隔行高 ${afterEnter.gapHeight}px；带高盒生效时为 0）`,
+    afterEnter.gapHeight !== null && afterEnter.gapHeight <= 3.3,
+    JSON.stringify({ gapHeight: afterEnter.gapHeight }),
+  );
+
+  // ② 输入首字 / ③ 撤字：光标与行盒都不许动
+  await c.type("字");
+  const afterTyping = await c.evaluate(ENTER_STATE);
+  check(
+    `输入首字后光标不动（${afterEnter.caretTop} → ${afterTyping.caretTop}px，行盒 top ${afterEnter.boxTop} → ${afterTyping.boxTop}）`,
+    afterTyping.caretTop !== null &&
+      afterEnter.caretTop !== null &&
+      Math.abs(afterTyping.caretTop - afterEnter.caretTop) <= 1 &&
+      afterTyping.boxTop === afterEnter.boxTop,
+    JSON.stringify({ afterEnter, afterTyping }),
+  );
+  await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+  const afterDelete = await c.evaluate(ENTER_STATE);
+  check(
+    `撤掉首字后光标仍不动、文本回到新空段落（${afterDelete.doc.length} 字符，光标 ${afterDelete.caretTop}px）`,
+    afterDelete.doc === afterEnter.doc &&
+      afterDelete.caretTop !== null &&
+      afterEnter.caretTop !== null &&
+      Math.abs(afterDelete.caretTop - afterEnter.caretTop) <= 1,
+    JSON.stringify(afterDelete),
+  );
+
+  // ④ 撤销：文档回到夹具原文、并且**重新命中真实夹具**（几何回到原样，逐行 top 一致）
+  //
+  // 等的是 `exact && matched` 两个一起：撤销（一次编辑）会把块表标成"估算"（`exact=false`），
+  // 而 `matched` 在编辑后那次编译落地**之前**仍是上一次的 `true` —— 只等 `matched` 会在
+  // Enter 那次假块编译还没落地时就误判为"已经回来了"（实测就是这么红的）。
+  await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+  await c.waitFor(
+    `window.__typstPadBlocks && window.__typstPadBlocks.exact === true && window.__browserDevBlocksMatched === true`,
+    { timeout: 20000 },
+  );
+  await new Promise((r) => setTimeout(r, 300));
+  const afterUndo = await c.evaluate(ENTER_STATE);
+  check(
+    `撤销后文档回到夹具原文且重新命中真实夹具（exact=${afterUndo.exact}）`,
+    afterUndo.doc === fx.doc && afterUndo.exact === true,
+    JSON.stringify({ doc: afterUndo.doc.slice(0, 24), exact: afterUndo.exact }),
+  );
+  check(
+    `撤销后版面回到 Enter 前（逐行 top ${JSON.stringify(before.lineTops)} vs ${JSON.stringify(afterUndo.lineTops)}）`,
+    JSON.stringify(afterUndo.lineTops) === JSON.stringify(before.lineTops),
+    JSON.stringify({ before: before.lineTops, afterUndo: afterUndo.lineTops }),
+  );
+
+  // ⑤ **连续 Enter**：每一条空段落都是**可见行**，也都是 ↑/↓ 的停靠点（一个都不许被跳过）
+  //
+  // 用户 2026-09-26 的第 4 条要求："不能把用户有意创建的所有空段落都跳过"。旧实现里这些空行全被
+  // 压到 1~3px 高，↑ 会一次掠过好几条；现在只有"维持两个段落所必需的那一条"压缩，其余是用户的
+  // 空段落（真实行盒）。这里两次 Enter 之后逐条量：可见、能往里打字、↑ 能逐条退回去。
+  const caretAtEnd = await c.evaluate(`(() => {
+    const view = window.__typstPadView;
+    const doc = view.state.doc.toString();
+    const line = doc.split("\\n").findIndex((t) => t.startsWith("一级标题下的段落"));
+    view.dispatch({ selection: { anchor: view.state.doc.line(line + 1).to }, scrollIntoView: true });
+    view.focus();
+    return view.state.selection.main.head;
+  })()`);
+  check(
+    "连续 Enter 的前提：光标在正文段末（撤销之后）",
+    typeof caretAtEnd === "number",
+    String(caretAtEnd),
+  );
+  await c.key("Enter", { code: "Enter", keyCode: 13 });
+  await new Promise((r) => setTimeout(r, 250));
+  const empty1 = await c.evaluate(ENTER_STATE);
+  await c.key("Enter", { code: "Enter", keyCode: 13 });
+  await new Promise((r) => setTimeout(r, 250));
+  const empty2 = await c.evaluate(ENTER_STATE);
+  check(
+    `连续 Enter：两条空段落都长成了**真实行盒**（separator ${empty1.separator}/${empty2.separator}，盒高 ${empty1.boxHeight}/${empty2.boxHeight}px）`,
+    empty1.separator === false &&
+      empty2.separator === false &&
+      empty1.boxHeight !== null &&
+      empty2.boxHeight !== null &&
+      empty1.boxHeight >= 20 &&
+      empty2.boxHeight >= 20 &&
+      empty1.text === "" &&
+      empty2.text === "",
+    JSON.stringify({ empty1, empty2 }),
+  );
+  check(
+    `连续 Enter：每按一次光标都往下走一条**可见行**（y ${empty1.caretTop} → ${empty2.caretTop}px）`,
+    empty1.caretTop !== null && empty2.caretTop !== null && empty2.caretTop - empty1.caretTop >= 8,
+    JSON.stringify({ empty1: empty1.caretTop, empty2: empty2.caretTop }),
+  );
+  await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 });
+  await new Promise((r) => setTimeout(r, 250));
+  const upToEmpty1 = await c.evaluate(ENTER_STATE);
+  check(
+    `连续 Enter：↑ 退回到**第一条空段落**（y ${upToEmpty1.caretTop}px ≈ ${empty1.caretTop}px），不是直接跳过它`,
+    upToEmpty1.caretTop !== null &&
+      empty1.caretTop !== null &&
+      Math.abs(upToEmpty1.caretTop - empty1.caretTop) <= 2 &&
+      upToEmpty1.separator === false,
+    JSON.stringify({ upToEmpty1, empty1 }),
+  );
+  // 收尾：两次撤销回到夹具原文（让这一节结束时不留改动）
+  for (let i = 0; i < 2; i++) {
+    await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check(
+    "连续 Enter 之后两次撤销回夹具原文",
+    (await c.evaluate(`window.__typstPadView.state.doc.toString()`)) === fx.doc,
+  );
+  await c.screenshot(SHOT("writing-blocks-visual-enter"));
+}
+
 finish(`通过 ${state.passed} 项检查；截图：.browser-check/writing-blocks-visual-*.png`);

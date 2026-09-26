@@ -142,21 +142,34 @@ if (paragraphScene) {
     JSON.stringify(paragraphGeometry),
   );
 
+  // **两条空白行**（用户 2026-09-26 的新口径）：只有第一条是"维持两个段落所必需的分隔行"，
+  // 第二条是用户自己创建的空段落 —— 按**普通行盒**呈现，也是竖直导航的停靠点。
+  // 旧口径是"连续空行共享同一份段距、两条都压缩"；那会让用户按出来的空段落只剩 1.5px 高，
+  // ↑/↓ 停上去看不见（"卡在两段之间"）。规则改了，这里的判据跟着改：段距仍由**第一条**承担，
+  // 空段落必须是真实行盒。
   await replaceDocument(c, "1\n\n\n 1", 100);
   const repeatedGap = await c.evaluate(
-    '(() => { const lines = Array.from(document.querySelectorAll(".cm-content > .cm-line")); const gaps = lines.filter((line) => line.classList.contains("cm-write-parbreak")); const textTop = (el) => { const rg = document.createRange(); rg.selectNodeContents(el); const r = rg.getBoundingClientRect(); return r.width > 0 || r.height > 0 ? r.top : el.getBoundingClientRect().top; }; return { count: gaps.length, totalHeight: gaps.reduce((sum, line) => sum + line.getBoundingClientRect().height, 0), glyphTopDelta: textTop(lines.at(-1)) - textTop(lines[0]), editableRows: gaps.every((line) => line.matches(".cm-line") && line.querySelector(".cm-widget") === null) }; })()',
+    '(() => { const lines = Array.from(document.querySelectorAll(".cm-content > .cm-line")); const gaps = lines.filter((line) => line.classList.contains("cm-write-parbreak")); const textTop = (el) => { const rg = document.createRange(); rg.selectNodeContents(el); const r = rg.getBoundingClientRect(); return r.width > 0 || r.height > 0 ? r.top : el.getBoundingClientRect().top; }; const boxes = lines.map((line) => ({ gap: line.classList.contains("cm-write-parbreak"), text: (line.textContent || "").trim(), h: +line.getBoundingClientRect().height.toFixed(2) })); return { lineCount: lines.length, gapCount: gaps.length, separatorHeight: boxes.find((b) => b.gap)?.h ?? null, emptyParagraphHeight: boxes.find((b) => !b.gap && b.text === "")?.h ?? null, glyphTopDelta: textTop(lines.at(-1)) - textTop(lines[0]), editableRows: gaps.every((line) => line.matches(".cm-line") && line.querySelector(".cm-widget") === null), bands: document.querySelectorAll(".cm-line.cm-block-band, .cm-line.cm-block-band-hold").length }; })()',
   );
   check(
-    "连续空行共享同一份段距，且各自仍是源码行",
-    repeatedGap.count === 2 &&
-      Math.abs(repeatedGap.glyphTopDelta - typstGapPx) <= 1 &&
-      repeatedGap.editableRows,
+    "两条空白行里只有第一条承担段距，第二条是用户空段落（各自仍是源码行）",
+    repeatedGap.lineCount === 4 && repeatedGap.gapCount === 1 && repeatedGap.editableRows,
+    JSON.stringify(repeatedGap),
+  );
+  check(
+    `分隔行仍按真实 Typst 段距、空段落按普通行盒呈现（分隔 ${repeatedGap.separatorHeight}px / 空段落 ${repeatedGap.emptyParagraphHeight}px，带高盒 ${repeatedGap.bands}）`,
+    // 带高盒生效 ⇒ 段距已在相邻块的带里，分隔行高 0；否则 = 0.208em ≈ 3.05px。
+    // 空段落那条必须是**真实行盒**（≥20px）：它就是 ↑/↓ 要停的那条可见空行。
+    repeatedGap.separatorHeight !== null &&
+      Math.abs(repeatedGap.separatorHeight - (repeatedGap.bands > 0 ? 0 : 3.05)) <= 0.25 &&
+      repeatedGap.emptyParagraphHeight !== null &&
+      repeatedGap.emptyParagraphHeight >= 20,
     JSON.stringify(repeatedGap),
   );
 } else {
   check("原文与三条可编辑源码行都保留", false, "场景夹具缺失");
   check("段距行高与真实 Typst 字形位置一致", false, "场景夹具缺失");
-  check("连续空行共享同一份段距", false, "场景夹具缺失");
+  check("两条空白行里只有第一条承担段距", false, "场景夹具缺失");
 }
 
 await replaceDocument(c, "#set par(spacing: 0.8em)\n\n1\n\n1", 100);
@@ -257,8 +270,10 @@ const blankLineBreak = await c.evaluate(
   '(() => { const view = window.__typstPadView; return { doc: view.state.doc.toString(), head: view.state.selection.main.head, gaps: document.querySelectorAll(".cm-write-parbreak").length }; })()',
 );
 check(
+  // 新的空行口径：`前段\n\n\n后段` 里只有**第一条**空白行是必需的分隔行（承担段距），
+  // 第二条是用户空段落 —— 所以 parbreak 装饰只有 1 条（旧口径是 2 条）。
   "带缩进的空行 Shift+Enter 只清理空白并新增源码行，不插入显式换行符",
-  blankLineBreak.doc === "前段\n\n\n后段" && blankLineBreak.head === 4 && blankLineBreak.gaps === 2,
+  blankLineBreak.doc === "前段\n\n\n后段" && blankLineBreak.head === 4 && blankLineBreak.gaps === 1,
   JSON.stringify(blankLineBreak),
 );
 await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });

@@ -466,10 +466,13 @@ export function crossesCollapsedCover(
 }
 
 /**
- * **按源码行走一步（或一屏的行数）** —— 写作模式 ↑/↓ 的落点（纯函数）。
+ * **按可见行走到最近的落点** —— 写作模式 ↑/↓（与翻页）的落点（纯函数）。
  *
- * 用户 2026-09-16 的要求：「光标移动和代码模式的光标移动一样」。所以这里的语义就照代码模式抄：
- *  - 一次走**一行源码**（`lines = 1`；翻页传一屏的行数），空行照样停一拍；
+ * 用户 2026-09-26 的新口径：**按可见行与可见段落移动**。所以这里的语义是：
+ *  - 一次走**一条停靠行**（`lines = 1`；翻页传一屏的行数）；
+ *  - **纯段落分隔行不算停靠行**（`isSeparator`）—— 它们在版面上只有 0~3px 高、光标停上去看不见，
+ *    而 `前段\n\n后段` 按一次 ↓ 本就该直达后段（旧口径「空行也停一拍」已作废）；
+ *  - **用户的空段落照停**（连续 Enter 建出来的空段落行不在 `isSeparator` 里）；
  *  - **保留列**（`chars`，按目标行的长度夹住）；
  *  - 到第一行 / 最后一行返回 null —— 调用方把按键交回默认行为（`cursorByLine` 在走不动时
  *    会落到行首/行尾，这个兜底也得留着）。
@@ -484,9 +487,23 @@ export function sourceVerticalTarget(
   dir: -1 | 1,
   lines: number,
   chars: number,
+  /**
+   * 判某行行首是不是**纯段落分隔行**（由 `paragraph-breaks` 的段距扫描给出，见 live-preview）。
+   * 缺省 undefined = 不跳任何行（旧的"逐源码行"语义，翻页与不关心分隔行的调用方仍可用）。
+   */
+  isSeparator?: (lineFrom: number) => boolean,
 ): number | null {
   const line = doc.lineAt(head);
-  const number = line.number + dir * Math.max(1, Math.round(lines));
+  let number = line.number;
+  let left = Math.max(1, Math.round(lines));
+  // 每条分隔行都白走（它不是一个停靠点），所以循环上界只能是"整篇行数"——
+  // 每一步都换一行，因此循环次数天然有界，`guard` 只是防御性的。
+  for (let guard = 0; left > 0 && guard <= doc.lines; guard++) {
+    number += dir;
+    if (number < 1 || number > doc.lines) return null;
+    if (isSeparator?.(doc.line(number).from)) continue;
+    left--;
+  }
   if (number < 1 || number > doc.lines) return null;
   const target = doc.line(number);
   return target.from + Math.max(0, Math.min(Math.round(chars), target.length));

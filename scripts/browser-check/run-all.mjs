@@ -36,10 +36,10 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 // 套件清单（期望项数写在这里，跑完直接对账；改套件计数时**两处一起改**）
 const SUITES = [
   ["wysiwyg.mjs", 305],
-  ["writing-blocks.mjs", 137],
-  ["writing-blocks-visual.mjs", 99],
+  ["writing-blocks.mjs", 146],
+  ["writing-blocks-visual.mjs", 114],
   ["writing-blocks-hit.mjs", 16],
-  ["writing-mode-scenes.mjs", 85],
+  ["writing-mode-scenes.mjs", 86],
   ["wysiwyg-visual.mjs", 20],
   // 写作模式的**动态稳定性**（报告 T0）：逐帧量"光标进出公式/复杂块"的几何（点击 / 左右键 /
   // Ctrl+E 三档等效几何、高块 widget 不钉的例外），补上另外七套都不管的那段动态手感
@@ -48,7 +48,7 @@ const SUITES = [
   ["computed-style.mjs", 17],
   // **PKU 真实作业逐块几何**（P0 主样本 + 三份 P1）。这一套要 `PKU_ROOT` 指到本地作业目录，
   // 原文不进仓库 ⇒ 没有 `PKU_ROOT` 时**跳过并明说**（不是悄悄报绿），见下面的 pkuRequested。
-  ["writing-pku-docs.mjs", 76],
+  ["writing-pku-docs.mjs", 79],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
 

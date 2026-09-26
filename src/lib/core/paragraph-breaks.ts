@@ -81,7 +81,13 @@ export function hasCustomParSpacing(source: string, regions: readonly Region[]):
 export interface ParagraphGapRow {
   /** CodeMirror line decoration 的位置（该源码行起点） */
   from: number;
-  /** 同一段落分隔中的行数，用于将总高度平均分配，避免多空行挤压段距 */
+  /**
+   * 同一串**分隔行**的条数，用于把段距总高平均分配，避免多空行挤压段距。
+   *
+   * 注意它不再是"这串空白行的条数"：一串空白行里只有前几条（通常一条）是必需的分隔行，
+   * 其余是用户自己创建的空段落、按普通行盒呈现 —— 它们**不在**这个数组里，
+   * 也因此在竖直导航里仍是停靠点（见 `block-plan.sourceVerticalTarget` 的 `isSeparator` 判据）。
+   */
   count: number;
 }
 
@@ -260,6 +266,14 @@ export function scanParagraphGapRows(
     isDisplayMathRow(row) ||
     isCodeRow(row);
 
+  /**
+   * **正文行**：普通段落行，或标题 / 列表项这类由标记开头的结构性正文行。
+   *
+   * 与 `isGapSideRow` 的差别：后者还包含规则行（`#set` / `#let`）、整行注释、行间公式与 `#` 代码行
+   * —— 那些构造的纵向几何由裁剪带承载，不该在段距扫描里额外长出一行（见下面的 gapCount）。
+   */
+  const isProseRow = (row: number): boolean => isPlainParagraphRow(row) || structuralLines.has(row);
+
   const rows: ParagraphGapRow[] = [];
   let row = 0;
   while (row < starts.length) {
@@ -272,10 +286,38 @@ export function scanParagraphGapRows(
     const count = row - first;
     if (first === 0 || !isGapSideRow(first - 1)) continue;
 
-    // 文末尚未输入内容的新段也要先拿到稳定段距：Enter 后的最后一行是光标所在段落，
-    // 前面的空白行负责段距。若等首字出现后才压缩这些行，光标会突然上跳约 1.44em。
+    /**
+     * **这一串空白行里哪几条是"维持两个段落所必需的分隔行"**（压缩到 Typst 的段距），
+     * 其余的是**用户自己创建的空段落**（按普通行盒呈现，也是竖直导航的停靠点）。
+     *
+     * 为什么必须分开（用户 2026-09-26）：写作模式的 ↑/↓ 过去沿源码行前进，"分隔行"也被当成
+     * 停靠点 —— 但它在版面上只有 0~3px 高（段距由相邻块的带高承载），光标停上去几乎看不见，
+     * 表现为"卡在两段之间"；而 Enter 的落点又正好压在这种行上，于是按完 Enter 光标先跳到那里、
+     * 编译落地再跳回来。改成按**可见行**移动，就必须先把两者区分开。
+     *
+     * 判定（`count` = 这一串空白行的条数）：
+     *  - **文末那一行永远是光标所在的新段落**（Typst 里它没有内容，但编辑器必须给光标一个可见
+     *    的行盒），所以它不参与分配 —— 下面先用 `movable = count - 1` 把它摘出去；
+     *  - **只余一条**（`正文\n\n`、`正文\n`、`前段\n\n后段`）：它就是那两个段落之间必需的分隔行；
+     *  - **余下多条、两侧都是正文行**：只有**第一条**是必需的分隔行，其余是用户的空段落
+     *    —— 连续按 Enter 建出来的空段落因此仍能进入、输入、删除；
+     *  - **贴着规则 / 注释 / 代码 / 行间公式**：整串仍按分隔行压缩。那些构造的几何由裁剪带
+     *    承载，多长出一条可见空行会让整页偏离真实排版（PKU 高代周一实测：`#pagebreak()`
+     *    后面那两条空行若各长出 24px，后续所有锚点会整段错位）。
+     */
     const trailingEmptyParagraph = row === starts.length;
-    const gapCount = trailingEmptyParagraph ? count - 1 : count;
+    const movable = trailingEmptyParagraph ? count - 1 : count;
+    let gapCount: number;
+    if (movable <= 0) {
+      // 文末只有一条空白行（`正文\n`）：它是光标所在的新段落，没有分隔行要压缩。
+      gapCount = 0;
+    } else if (movable === 1) {
+      gapCount = 1;
+    } else if (isProseRow(first - 1) && (trailingEmptyParagraph || isProseRow(row))) {
+      gapCount = 1;
+    } else {
+      gapCount = movable;
+    }
     if (gapCount <= 0) continue;
     if (!trailingEmptyParagraph && !isGapSideRow(row)) continue;
     // 多行非 markup 区域可能跨过看起来为空的源码行。

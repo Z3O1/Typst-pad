@@ -298,7 +298,7 @@ describe("carryOverCrops（窗口化：窗口外的块沿用上一轮切片）",
   });
 });
 
-describe("竖直移动的判定（写作模式照代码模式走：逐源码行、空行也停、列保留）", () => {
+describe("竖直移动的判定（写作模式按可见行走：跳过分隔行、用户空段落照停、列保留）", () => {
   /** 行：1 `aaa`(0-3) 2 空(4) 3 `bbb`(5-8) 4 空(9) 5 `ccc`(10-13) 6 空(14) */
   const DOC = "aaa\n\nbbb\n\nccc\n";
   /** 格子（空行归上一块）：[0,5) [5,10) [10,14)；光标在 cursor 处 → 那一格展开源码 */
@@ -308,13 +308,16 @@ describe("竖直移动的判定（写作模式照代码模式走：逐源码行�
     applyBlockSelection(c, [{ from: cursor, to: cursor, head: cursor }], DOC.length);
     return c;
   };
+  /** 段距扫描认出的纯分隔行（行 2 与行 4）——与写作渲染的空行压缩同一来源 */
+  const SEPARATORS = new Set([4, 9]);
+  const isSeparator = (from: number) => SEPARATORS.has(from);
 
   describe("crossesCollapsedCover（这一走要不要接管）", () => {
     it("块内移动（默认结果在同一格）→ 不接管，交回 CodeMirror 的逐行行为", () => {
       expect(crossesCollapsedCover(coversWith(6), 6, 5)).toBe(false);
     });
 
-    it("默认落到段落之间那条空行 → 不接管（代码模式也在这里停一拍）", () => {
+    it("默认落到段落之间那条空行 → 不接管（是不是分隔行由 block-moves 判）", () => {
       // 光标在第一块（位置 1）里，默认从 3 落到空行 4 —— 空行属**第一块自己的格子**（[0,5)）
       expect(crossesCollapsedCover(coversWith(1), 3, 4)).toBe(false);
       // 站在那条空行上再往上：落到 3 也还在第一格里
@@ -336,19 +339,31 @@ describe("竖直移动的判定（写作模式照代码模式走：逐源码行�
     });
   });
 
-  describe("sourceVerticalTarget（逐源码行走的落点）", () => {
+  describe("sourceVerticalTarget（按可见行走的落点）", () => {
     const doc = Text.of(DOC.split("\n"));
 
-    it("↓ 走一行：段落之间那条空行也停（不是直接进下一段）", () => {
+    it("不给分隔行判据时保持旧的逐源码行语义（翻页等调用方仍可用）", () => {
       expect(sourceVerticalTarget(doc, 1, 1, 1, 1)).toBe(4); // aaa 第 1 列 → 空行（列夹到 0）
+      expect(sourceVerticalTarget(doc, 4, 1, 1, 0)).toBe(5); // 空行 → 下一块正文开头
+      expect(sourceVerticalTarget(doc, 5, -1, 1, 0)).toBe(4); // 第二块行首 → 上面那条空行
     });
 
-    it("站在空行上再 ↓ → 下一块正文的开头", () => {
-      expect(sourceVerticalTarget(doc, 4, 1, 1, 0)).toBe(5);
+    it("给了分隔行判据：一次 ↓ 越过纯分隔行直达下一段（旧规则「空行也停」已作废）", () => {
+      // 用户 2026-09-26：「空源码行是段落分隔符，不是需要停靠的可见编辑行」。
+      expect(sourceVerticalTarget(doc, 1, 1, 1, 1, isSeparator)).toBe(5 + 1); // 列照旧保留
+      expect(sourceVerticalTarget(doc, 5, 1, 1, 2, isSeparator)).toBe(10 + 2); // 列照旧保留
+      // 反向一次 ↑ 也直达上一段（不是停在那条空行上）
+      expect(sourceVerticalTarget(doc, 5, -1, 1, 0, isSeparator)).toBe(0);
+      expect(sourceVerticalTarget(doc, 10, -1, 1, 1, isSeparator)).toBe(5 + 1);
     });
 
-    it("↑ 走一行：第二块行首的上面是那条空行，不是上一块的行尾", () => {
-      expect(sourceVerticalTarget(doc, 5, -1, 1, 0)).toBe(4);
+    it("用户的空段落仍是停靠行（只有纯分隔行被跳过）", () => {
+      // `aaa\n\n\nbbb`：行 2 是必需的分隔行，行 3 是用户自己建的**空段落** —— 它必须照停，
+      // 否则连续按 Enter 建出来的空段落就没法用 ↑/↓ 回去。
+      const withEmpty = Text.of("aaa\n\n\nbbb".split("\n"));
+      const sep = new Set([4]); // 只有行 2（from=4）是分隔行
+      expect(sourceVerticalTarget(withEmpty, 6, -1, 1, 0, (from) => sep.has(from))).toBe(5);
+      expect(sourceVerticalTarget(withEmpty, 0, 1, 1, 0, (from) => sep.has(from))).toBe(5);
     });
 
     it("列保留，但按目标行长度夹住", () => {
@@ -361,11 +376,15 @@ describe("竖直移动的判定（写作模式照代码模式走：逐源码行�
 
     it("走一屏的行数（翻页用同一套语义）", () => {
       expect(sourceVerticalTarget(doc, 0, 1, 3, 0)).toBe(9); // 第 1 行 → 第 4 行
+      // 跳过分隔行后，"一屏三步"落在第 3、5 行之后的下一条可见行上
+      expect(sourceVerticalTarget(doc, 0, 1, 2, 0, isSeparator)).toBe(10);
     });
 
     it("到第一/最后一行 → null（交回默认，那里有「落到行首/行尾」的兜底）", () => {
       expect(sourceVerticalTarget(doc, 1, -1, 1, 0)).toBeNull();
       expect(sourceVerticalTarget(doc, 14, 1, 1, 0)).toBeNull();
+      // 跳过分隔行之后，"上一段"也不存在时照样返回 null
+      expect(sourceVerticalTarget(doc, 1, -1, 1, 0, isSeparator)).toBeNull();
     });
   });
 });

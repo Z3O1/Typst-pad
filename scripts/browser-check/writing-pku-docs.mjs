@@ -371,6 +371,49 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
   );
   await waitMatched(before);
   check(`编辑回放：Enter 后命中真实夹具`, (await matched()) === true);
+  /**
+   * **Enter 的落点必须是可见的新段落行**（用户 2026-09-26；真实夹具 + 真编译，不是桩）。
+   *
+   * 旧行为：落点压在那条 0~3px 高的纯分隔行上（`cm-write-parbreak`），光标几乎看不见，
+   * 编译落地时它的高度再变一次 —— "按 Enter 光标跳动"的一半来源。这里量的是**夹具命中之后**
+   * （即真实 Typst 几何已经生效）的行盒与光标几何。
+   */
+  const enterCaret = await c.evaluate(`(() => {
+    const view = window.__typstPadView;
+    const sel = view.state.selection.main;
+    const line = view.state.doc.lineAt(sel.head);
+    const coords = view.coordsAtPos(sel.head, sel.assoc);
+    const lines = Array.from(document.querySelectorAll(".cm-content > .cm-line"));
+    const el = lines.find((l) => {
+      try { return view.state.doc.lineAt(view.posAtDOM(l, 0)).number === line.number; } catch { return false; }
+    });
+    const box = el ? el.getBoundingClientRect() : null;
+    const gap = lines.find((l) => l.classList.contains("cm-write-parbreak"));
+    return {
+      line: line.number, col: sel.head - line.from, text: line.text,
+      separator: el ? el.classList.contains("cm-write-parbreak") : null,
+      boxTop: box ? +box.top.toFixed(2) : null,
+      boxHeight: box ? +box.height.toFixed(2) : null,
+      caretTop: coords ? +coords.top.toFixed(2) : null,
+      gapCount: lines.filter((l) => l.classList.contains("cm-write-parbreak")).length,
+      gapHeight: gap ? +gap.getBoundingClientRect().height.toFixed(2) : null,
+    };
+  })()`);
+  check(
+    `编辑回放：Enter 落在**可见的新段落行**上而不是纯分隔行（第 ${enterCaret.line} 行，separator=${enterCaret.separator}）`,
+    enterCaret.separator === false && enterCaret.text === "",
+    JSON.stringify(enterCaret),
+  );
+  check(
+    `编辑回放：新段落行是真实行盒、光标画在它上面（盒高 ${enterCaret.boxHeight}px / 光标 ${enterCaret.caretTop}px）`,
+    enterCaret.boxHeight !== null &&
+      enterCaret.boxHeight >= 20 &&
+      enterCaret.boxTop !== null &&
+      enterCaret.caretTop !== null &&
+      enterCaret.caretTop >= enterCaret.boxTop - 1 &&
+      enterCaret.caretTop <= enterCaret.boxTop + enterCaret.boxHeight + 1,
+    JSON.stringify(enterCaret),
+  );
 
   // ② Ctrl+Z 撤销 → 文本与几何回到原始
   before = await compileCount();
@@ -399,14 +442,28 @@ if (existsSync(replayPath) && fixtures[0] === allFixtures[0]) {
     );
   }
 
-  // ③ 输入两个汉字
+  // ③ 输入两个汉字：光标**不许被顶走**（同一行继续打字，行盒与光标都不该动）
   await setCursor(anchorPos);
+  await sleep(200);
+  const caretBeforeTyping = await c.evaluate(
+    `(() => { const v = window.__typstPadView; const c = v.coordsAtPos(v.state.selection.main.head); return c ? +c.top.toFixed(2) : null; })()`,
+  );
   before = await compileCount();
   await c.type("测试");
   await sleep(400);
   check(`编辑回放：输入两字后文本与夹具一致`, (await docText()) === states[2].doc);
   await waitMatched(before);
   check(`编辑回放：输入后命中真实夹具`, (await matched()) === true);
+  const caretAfterTyping = await c.evaluate(
+    `(() => { const v = window.__typstPadView; const c = v.coordsAtPos(v.state.selection.main.head); return c ? +c.top.toFixed(2) : null; })()`,
+  );
+  check(
+    `编辑回放：输入两字后光标没被顶走（${caretBeforeTyping} → ${caretAfterTyping}px；真实夹具落地之后量的）`,
+    caretBeforeTyping !== null &&
+      caretAfterTyping !== null &&
+      Math.abs(caretAfterTyping - caretBeforeTyping) <= 1,
+    JSON.stringify({ caretBeforeTyping, caretAfterTyping }),
+  );
 
   // ④ 连按两次 Backspace → 回到原始
   before = await compileCount();
