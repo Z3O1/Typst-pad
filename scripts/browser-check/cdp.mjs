@@ -108,30 +108,34 @@ export async function connect() {
     close: () => ws.close(),
 
     /**
-     * 导航到目标地址并**等应用挂载出来**（`.cm-content` 出现为止）。三处讲究：
+     * 导航到目标地址并**等应用挂载出来**（`.cm-content` 出现为止）。
      *
-     * 1. 先跳 about:blank 再跳目标：同 URL 的 Page.navigate 不会重新加载，若上一次加载停在了
-     *    错误页（如 dev server 正在改写文件时的 500），会一直复现旧页面；
-     * 2. **最多重试 3 次**：验收脚本会反复换 URL / 反复重载（每次换 `&blockslow=1` 这类参数都算
-     *    一次导航），实测偶发被上一次导航打断、页面停在 about:blank —— 那一轮就白跑了。
-     * 3. **`Page.navigate` 自己报超时不算失败**（2026-09-25 实测的假故障）：冷启动时 Vite 要转译
-     *    整棵模块图，页面 `responseEnd` 实测 7.9s，机器更慢时整条导航的**回应**会超过 CDP 调用
-     *    超时 —— 但页面其实已经跳过去了、应用也起来了。以前这里把那个报错直接抛出去，整轮验收就
-     *    停在"Page.navigate 超时"上，而真正该看的判据是"应用挂载出来了没有"（下面两道 waitFor）。
-     *    所以导航调用一律 try/catch 吞掉，成败只看 waitFor。
+     * **一次导航就够**（2026-09-26 提速）：以前无论如何都先跳 `about:blank` 再跳目标 —— 两跳的
+     * 代价在长套件里是实打实的（`wysiwyg.mjs` 有 37 次 `goto`、`writing-stability` 有 6 次 boot
+     * 各含 2 次），而两跳只为绕开"同 URL 的 `Page.navigate` 不会重新加载"这一条：
+     *   * 目标与当前地址**相同** → 用 `Page.reload`（本身就是一次真正的重新加载）；
+     *   * 不同 → 直接 `Page.navigate`（换地址本来就会重新加载，中间那跳是多余的）。
+     * 第 2 次重试起退回原来的两跳写法（`about:blank` 中转能救"停在错误页"的那种状态），
+     * 所以最坏情况与改之前完全一致，只是常规路径少了一半导航。
+     *
+     * `Page.navigate` 自己报超时不算失败（2026-09-25 实测的假故障）：冷启动时 Vite 要转译整棵
+     * 模块图，页面 `responseEnd` 实测 7.9s，机器更慢时整条导航的**回应**会超过 CDP 调用超时 ——
+     * 但页面其实已经跳过去了、应用也起来了。所以导航调用一律 try/catch 吞掉，成败只看 waitFor。
      */
     async goto(url) {
       await send("Page.enable");
       let lastError = null;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          await send("Page.navigate", { url: "about:blank" });
-        } catch (e) {
-          lastError = e;
-        }
-        await new Promise((r) => setTimeout(r, 200));
-        try {
-          await send("Page.navigate", { url });
+          if (attempt === 1) {
+            const current = await evaluate("location.href").catch(() => null);
+            if (current === url) await send("Page.reload", { ignoreCache: false });
+            else await send("Page.navigate", { url });
+          } else {
+            await send("Page.navigate", { url: "about:blank" });
+            await new Promise((r) => setTimeout(r, 200));
+            await send("Page.navigate", { url });
+          }
         } catch (e) {
           lastError = e;
         }
@@ -140,6 +144,19 @@ export async function connect() {
             timeout: 30000,
           });
           await this.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+          /**
+           * **再等"存档已经落到页面上"**（`?browserdev=1` 才有的只读标记，见
+           * `src/lib/dev/write-test-hook.ts`）：子组件（编辑器）的 `onMount` 比父页面的先跑完，
+           * 所以 `.cm-content` 出现时主题/设置/恢复的内容**可能还没应用**。不等这个标记就有两类
+           * 假红：断言量到默认主题（`writing-blocks` 第 6 组的暗色切片）、以及应用随后那次
+           * 300ms 防抖写盘把"还没恢复完"的默认值写回存档、盖掉测试种进去的设置
+           * （`wysiwyg` 的"关掉启动自动检查更新"）。
+           *
+           * 非浏览器开发模式的页面没有这个标记（桌面版也不会挂它）—— 那时这一步会超时并把整条
+           * `goto` 判失败（**fail-closed**：本仓库所有套件都跑在 `?browserdev=1` 上，标记不见就是
+           * 钩子坏了或恢复没跑完，宁可响亮地红，也不要让断言在"设置还没生效"的状态上跑）。
+           */
+          await this.waitFor(`window.__typstPadRestored === true`, { timeout: 15000 });
           return;
         } catch (e) {
           lastError = e;

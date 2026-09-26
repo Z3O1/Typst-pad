@@ -18,6 +18,7 @@ import {
   boot,
   byteToPos,
   createChecker,
+  editableInFixture,
   finish,
   loadFixtures,
   replaceDocument,
@@ -32,17 +33,7 @@ console.log(`场景夹具：${fixtures.length} 篇（来自 Rust compile_blocks 
 const c = await connect();
 await boot(c, BLOCKS_URL, { blockFixtures: fixtures, settleMs: 600 });
 
-const directlyEditable = (fx, block) => {
-  if (!block.found || block.skipped || !["Paragraph", "Heading"].includes(block.kind)) return false;
-  const from = byteToPos(fx.doc, block.start);
-  const to = byteToPos(fx.doc, block.end);
-  const src = fx.doc.slice(from, to);
-  // 段内有单 LF 的段落走切片（Typst 当空白连排，逐源码行呈现必然多出行盒）
-  if (src.includes("\n")) return false;
-  // 与前端同口径：只有 code / raw / comment 算复杂；markup 里的直引号（lexer 登记的 string
-  // 区域）不算（见 live-preview/block-decorations.ts 的 isDirectlyEditableTextBlock）。
-  return !/(#|`|\/\/|\/\*)/.test(src);
-};
+const directlyEditable = (fx, block) => editableInFixture(fx.doc, block);
 
 /** 输入一篇文档（替换整篇），返回量到的切片几何 */
 async function loadScene(doc) {
@@ -197,25 +188,46 @@ await c.evaluate(
   '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; view.dispatch({ selection: { anchor: view.state.doc.length } }); })()',
 );
 await c.key("Enter", { code: "Enter", keyCode: 13 });
-const beforeFirstCharacter = await c.evaluate(
-  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; const caret = view.coordsAtPos(view.state.selection.main.head); const gap = document.querySelector(".cm-write-parbreak"); return { doc: view.state.doc.toString(), caretTop: caret?.top ?? null, gapHeight: gap?.getBoundingClientRect().height ?? null }; })()',
-);
+/**
+ * 量一段状态：文档、光标顶、空行高度、**这一态是不是带高盒模式**。
+ *
+ * 为什么要把 `bands` 一起量回来：空白行的高度有且只有两种合法值，取决于**版面模式** ——
+ * 带高盒生效时段距已经含在相邻块的带里，空行必须是 0；否则空行按真实 Typst 量出的 0.208em
+ * ≈3.05px 补段距。旧版这里把 3.05 写死，等于把"桩的假块没有 `anchorBaselinePt`"这个桩的
+ * 局限当成了产品契约：`remapBlocksThroughEdit` 现在会把编辑前那次编译的几何留作**占位**
+ * （`Block.layoutHold`，编译落地前不让整篇的带高盒关掉再打开），命中过真实夹具的那一轮里
+ * 空行会短暂走 0 —— 那是**修掉输入抖动**之后应有的形态，不是段距丢了。
+ * 现在改成"高度必须与模式自洽 + 三态之间不许跳"，既不放过真的抖动，也不再钉死桩的退化形态。
+ */
+const SAMPLE = `(() => {
+  const v = window.__typstPadView;
+  const caret = v.coordsAtPos(v.state.selection.main.head);
+  const gap = document.querySelector(".cm-write-parbreak");
+  return {
+    doc: v.state.doc.toString(),
+    caretTop: caret?.top ?? null,
+    gapHeight: gap?.getBoundingClientRect().height ?? null,
+    bands: document.querySelectorAll(".cm-line.cm-block-band, .cm-line.cm-block-band-hold").length,
+  };
+})()`;
+const beforeFirstCharacter = await c.evaluate(SAMPLE);
 await c.type("x");
-const afterFirstCharacter = await c.evaluate(
-  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; const caret = view.coordsAtPos(view.state.selection.main.head); const gap = document.querySelector(".cm-write-parbreak"); return { doc: view.state.doc.toString(), caretTop: caret?.top ?? null, gapHeight: gap?.getBoundingClientRect().height ?? null }; })()',
-);
+const afterFirstCharacter = await c.evaluate(SAMPLE);
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
-const afterDeletingLastCharacter = await c.evaluate(
-  '(() => { const view = document.querySelector(".cm-content").cmTile.root.view; const caret = view.coordsAtPos(view.state.selection.main.head); const gap = document.querySelector(".cm-write-parbreak"); return { doc: view.state.doc.toString(), caretTop: caret?.top ?? null, gapHeight: gap?.getBoundingClientRect().height ?? null }; })()',
-);
+const afterDeletingLastCharacter = await c.evaluate(SAMPLE);
+/** 空行高度必须与这一态的版面模式自洽（带高盒 ⇒ 0；否则 ⇒ 真实段距） */
+const gapMatchesMode = (sample) =>
+  sample.gapHeight !== null &&
+  (sample.bands > 0
+    ? Math.abs(sample.gapHeight) <= 0.25
+    : Math.abs(sample.gapHeight - 3.05) <= 0.25);
+const samples = [beforeFirstCharacter, afterFirstCharacter, afterDeletingLastCharacter];
 check(
   "文末新段在 Enter、首字输入和撤字时保持段距与光标位置稳定",
   beforeFirstCharacter.doc === "alpha\n\n" &&
     afterFirstCharacter.doc === "alpha\n\nx" &&
     afterDeletingLastCharacter.doc === "alpha\n\n" &&
-    [beforeFirstCharacter, afterFirstCharacter, afterDeletingLastCharacter].every(
-      (sample) => sample.caretTop !== null && Math.abs(sample.gapHeight - 3.05) <= 0.25,
-    ) &&
+    samples.every(gapMatchesMode) &&
     Math.abs(beforeFirstCharacter.caretTop - afterFirstCharacter.caretTop) <= 1 &&
     Math.abs(beforeFirstCharacter.caretTop - afterDeletingLastCharacter.caretTop) <= 1,
   JSON.stringify({ beforeFirstCharacter, afterFirstCharacter, afterDeletingLastCharacter }),

@@ -19,6 +19,7 @@ import {
   BLOCKS_URL as URL_BLOCKS,
   boot,
   createChecker,
+  flushStateSeed,
   finish,
   shotPath as SHOT,
 } from "./harness.mjs";
@@ -39,7 +40,10 @@ const LINES_TEXT = `Array.from(document.querySelectorAll(".cm-line")).map((el) =
 const CROPS = `document.querySelectorAll(".cm-block-crop").length`;
 const DARK_CROPS = `document.querySelectorAll(".cm-block-crop-dark").length`;
 
-/** 观察用的文档：正文/标题直接编辑；列表等复杂块仍走局部切片。 */
+/**
+ * 观察用的文档：正文/标题直接编辑；**顶格的简单列表项也直接编辑**（任务 2），
+ * 缩进的嵌套列表项与公式仍走局部切片。
+ */
 const DOC =
   "= 章节标题\n" +
   "\n" +
@@ -47,13 +51,15 @@ const DOC =
   "\n" +
   "第二段正文。\n" +
   "\n" +
-  "- 被切片的列表项一\n" +
+  "- 可直接编辑的列表项\n" +
   "\n" +
-  "- 被切片的列表项二\n" +
+  "  - 被切片的嵌套列表项一\n" +
+  "\n" +
+  "  - 被切片的嵌套列表项二\n" +
   "\n" +
   "$ x^2 + y^2 = z^2 $\n" +
   "\n" +
-  "- 活动列表项\n";
+  "  - 活动嵌套列表项\n";
 
 console.log("1) 正文/标题持续可编辑，复杂块保留切片");
 await c.click(400, 300);
@@ -64,11 +70,36 @@ await new Promise((r) => setTimeout(r, 600));
 const crops = await c.evaluate(CROPS);
 const linesText = await c.evaluate(LINES_TEXT);
 const contentText = await c.evaluate(CONTENT);
-check("复杂块（两个列表项）仍有局部切片（≥2 块）", crops >= 2, `实际 ${crops}`);
+check("复杂块（两个嵌套列表项）仍有局部切片（≥2 块）", crops >= 2, `实际 ${crops}`);
 check(
-  "光标所在块（活动列表项）保持源码形态",
-  linesText.includes("活动列表项"),
+  "光标所在块（活动嵌套列表项）保持源码形态",
+  linesText.includes("活动嵌套列表项"),
   JSON.stringify(linesText),
+);
+// 任务 2 的正向验收：顶格、单源码行、引擎给了标记的列表项是**真实文本**，
+// 标记按引擎给的正文起点画（桩的 9.36pt × 4/3 = 12.48px），不是前端近似。
+check(
+  "简单列表项是真实文本（任务 2）",
+  linesText.includes("可直接编辑的列表项") && !contentText.includes("- 可直接编辑的列表项"),
+  JSON.stringify(linesText),
+);
+const listMarker = await c.evaluate(`(() => {
+  const el = document.querySelector(".cm-markup-list-marker");
+  if (!el) return null;
+  return {
+    text: el.getAttribute("data-marker"),
+    width: parseFloat(el.style.width),
+    box: el.style.boxSizing,
+    pad: el.style.paddingLeft,
+  };
+})()`);
+check(
+  "列表标记取自引擎（符号 + 正文起点宽度、border-box 盒）",
+  !!listMarker &&
+    listMarker.text === "•" &&
+    Math.abs(listMarker.width - (9.36 * 4) / 3) <= 0.05 &&
+    listMarker.box === "border-box",
+  JSON.stringify(listMarker),
 );
 check(
   "普通正文始终是真实文本",
@@ -104,8 +135,16 @@ await c.click(firstCropY.x, firstCropY.y);
 await new Promise((r) => setTimeout(r, 400));
 const afterClick = await c.evaluate(LINES_TEXT);
 const cropsAfter = await c.evaluate(CROPS);
-check("被点的列表块展开了源码", afterClick.includes("被切片的列表项"), JSON.stringify(afterClick));
-check("原来的活动列表项变成切片", !afterClick.includes("活动列表项"), JSON.stringify(afterClick));
+check(
+  "被点的嵌套列表块展开了源码",
+  afterClick.includes("被切片的嵌套列表项"),
+  JSON.stringify(afterClick),
+);
+check(
+  "原来的活动嵌套列表项变成切片",
+  !afterClick.includes("活动嵌套列表项"),
+  JSON.stringify(afterClick),
+);
 check("切片数量不变（换了一块而已）", cropsAfter === crops, `${crops} → ${cropsAfter}`);
 check(
   "点击复杂块不改变标题的局部标记状态",
@@ -145,9 +184,19 @@ await new Promise((r) => setTimeout(r, 900));
 check("切回写作模式后切片回来", (await c.evaluate(CROPS)) >= 1, "没有切片");
 
 console.log("6) 暗色主题：切片挂 cm-block-crop-dark（白底黑字的切片要整体反色）");
-await c.evaluate(`localStorage.setItem("typst-pad:state", JSON.stringify({ theme: "dark" }))`);
+await flushStateSeed(c, { theme: "dark" }); // 等过应用的 300ms 防抖写盘，别让它把种进去的主题盖回去
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+/**
+ * 再等**主题真的应用**：存档里的主题是"异步恢复"的那批设置之一，而切片 widget 把当时的 `dark`
+ * **烘进了 DOM**（`cm-block-crop-dark`）—— 主题落地之前打字，切片就是浅色的，之后也不会自己变
+ * （切主题不会重建装饰）。`goto` 已经等过 `__typstPadRestored`，这里再钉一道**看得见的**判据，
+ * 免得将来恢复顺序一变就变成"偶尔红"（这条实测就这样红过两次）。
+ * 超时**不判失败**：真没应用上时，下面那条断言会带着"切片 N / 暗色 0"红，信息更准。
+ */
+await c
+  .waitFor(`!document.querySelector(".app")?.classList.contains("light")`, { timeout: 8000 })
+  .catch(() => {});
 await c.click(400, 300);
 await c.selectAll();
 await c.type(DOC);
@@ -173,14 +222,14 @@ await c.screenshot(SHOT("writing-blocks-dark"));
 
 console.log("7) 长文档 + 窗口化：滚动到没渲过的区域 → 去抖后补渲出切片");
 // 换成浅色主题 + 重新载入，再**直接输入**长文档（不依赖存档恢复）
-await c.evaluate(`localStorage.setItem("typst-pad:state", JSON.stringify({ theme: "light" }))`);
+await flushStateSeed(c, { theme: "light" }); // 等过应用的 300ms 防抖写盘，别让它把种进去的主题盖回去
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 // 每段 ≈ 90 字符 × 120 段 ≈ 10800 字符 > 窗口化阈值（BLOCK_WINDOW_MARGIN×2 = 8000）
 const SENTENCE = "这一段用来把文档撑过写作模式块级渲染的窗口化阈值，观察滚动时的补渲行为。";
 // **段落之间要有空行**：没有空行的话整篇就是一个块，光标一进去它整篇都是"活动块"，
 // 切片数会是 0（实测踩过）。
-const longDoc = Array.from({ length: 120 }, (_, i) => `- 第 ${i} 段。` + SENTENCE.repeat(3)).join(
+const longDoc = Array.from({ length: 120 }, (_, i) => `  - 第 ${i} 段。` + SENTENCE.repeat(3)).join(
   "\n\n",
 );
 await c.click(400, 300);
@@ -228,12 +277,12 @@ console.log(
 // crossesCollapsedCover + sourceVerticalTarget。
 // "按上不许跳回文档开头"这条仍然锁在这里：CodeMirror 的竖直移动会跳过所有 widget，
 // 一路扫到内容顶部返回**位置 0**（用户报过「在 == 6 前面按上跳回开头」）。
-await c.evaluate(`localStorage.setItem("typst-pad:state", JSON.stringify({ theme: "light" }))`);
+await flushStateSeed(c, { theme: "light" }); // 等过应用的 300ms 防抖写盘，别让它把种进去的主题盖回去
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
 await c.selectAll();
-await c.type("= 标题\n\n第一段。\n\n- 列表项\n\n最后一段。\n");
+await c.type("= 标题\n\n第一段。\n\n  - 列表项\n\n最后一段。\n");
 await new Promise((r) => setTimeout(r, 800));
 
 /** 当前"源码形态"的块文本（切片里的文字不算 —— 它们在 widget 里） */
@@ -340,7 +389,7 @@ const colStep2 = await arrowDown(); // → 列表项那一行
 check(
   `列保留：从「第一段。」行尾（列 ${colStart.col}）往下两行后仍在同一水平位置（x ${colStart.x?.toFixed(0) ?? "?"} → ${colStep2.x?.toFixed(0) ?? "?"}）`,
   colStep1.lineText === "" &&
-    colStep2.lineText.startsWith("- 列表项") &&
+    colStep2.lineText.includes("- 列表项") &&
     colStart.x !== null &&
     colStep2.x !== null &&
     Math.abs(colStep2.x - colStart.x) <= 16,
@@ -441,7 +490,7 @@ const MIDDLE_CROP = `(() => {
 })()`;
 
 console.log("9) 点击定位：点切片上的字 → 光标落到那一块里的对应位置（+ 点击锚定）");
-await c.evaluate(`localStorage.setItem("typst-pad:state", JSON.stringify({ theme: "light" }))`);
+await flushStateSeed(c, { theme: "light" }); // 等过应用的 300ms 防抖写盘，别让它把种进去的主题盖回去
 await c.goto(URL_BLOCKS);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await c.click(400, 300);
@@ -681,7 +730,7 @@ await c.goto(`${URL_BLOCKS}&blockslow=1`);
 await c.click(400, 300);
 await c.selectAll();
 // 行尾带 `// 注`（= 注释区域 → 复杂块）：普通正文/标题现在是真实文本、不再切片（见 live-preview
-// 的 isDirectlyEditableTextBlock），而这一组验的是"切片会不会被延迟搞坏"，必须有切片在。
+// 的可编辑判据），而这一组验的是"切片会不会被延迟搞坏"，必须有切片在。
 // 用注释而不是列表项：桩把 `- ` 渲染成 `• `，会让下面"每个源码行要么在源码里、要么在切片里"
 // 的探针误判成丢行；注释不被渲染层改写，行文本原样出现在切片里。
 await c.type("第一段。// 注\n\n第二段。// 注\n\n第三段。// 注\n");

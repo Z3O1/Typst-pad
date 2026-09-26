@@ -42,21 +42,58 @@ ONLY=writing-blocks-visual.mjs,writing-stability.mjs npm run verify:browser
 CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 ```
 
-以上环境变量语法用于 POSIX shell。运行器 `scripts/browser-check/run-all.mjs` 启动服务、连接或启动 Chromium、导出夹具、运行套件并汇总，默认 Vite 1425 / CDP 9335，避开桌面开发端口 1420。产物在 `.browser-check/`；它只清理自己启动的进程。`SKIP_DEV=1` 可复用服务；`SKIP_FIXTURES=1` 只在确认夹具与当前代码一致时使用。
+以上环境变量语法用于 POSIX shell。运行器 `scripts/browser-check/run-all.mjs` 启动服务、连接或启动 Chromium、**只导出本轮真会跑的套件声明过的夹具**（`SUITE_FIXTURES`）、运行套件并汇总，默认 Vite 1425 / CDP 9335，避开桌面开发端口 1420。产物在 `.browser-check/`；它只清理自己启动的进程。`SKIP_DEV=1` 可复用服务；`SKIP_FIXTURES=1` 只在确认夹具与当前代码一致时使用。
+
+`ONLY=…` 时**按依赖准备**：只有被点名套件声明过的夹具才会导出（例如 `ONLY=writing-blocks.mjs` 不再白导公式夹具）；没有 `ONLY` 时与旧的"两类夹具都导"完全一致。改动套件的夹具依赖时要同步改 `SUITE_FIXTURES`（漏写会让那套件在 `loadFixtures` 硬失败，不会静默少测）。每条命令的**墙钟耗时**都会打印在汇总里，并写进 `.browser-check/run-all-timing.json`，便于前后对比。
 
 单独运行脚本时自行准备服务、CDP 和夹具，通过 `BROWSER_CHECK_PORT` 或完整 `BROWSER_CHECK_URL` 指定页面，通过 `CDP_PORT` 指定浏览器。`run-all` 的服务端口变量是 `PORT`，不要与单套件变量混淆。
+
 
 | 套件（位于 `scripts/browser-check/`） | 证明的行为 |
 | --- | --- |
 | `wysiwyg.mjs` | 公式与标记、菜单快捷键、恢复、缩放、字体、诊断和更新 UI；不证明真实编译 |
 | `writing-blocks.mjs` | 假切片下的编辑、选择、导航、补渲、输入法、模式往返 |
-| `writing-blocks-visual.mjs` | 真实产物的复杂块裁剪几何与链接热区；正文是否保留文本也要断言 |
+| `writing-blocks-visual.mjs` | 真实产物的复杂块裁剪几何与链接热区；正文是否保留文本、以及"敲一个字后编译落地前版面不跳"（`&blockslow=1` 撑开窗口）与"点列表项的项目符号后正文左缘不动"也要断言 |
 | `writing-blocks-hit.mjs` | 真实探针的点击到字符映射与 geometryId 校验 |
 | `writing-mode-scenes.mjs` | 标题、中文、列表、公式、表格、默认段距、连续空行与文末输入等场景的真实呈现及截图；防空数组假绿 |
 | `wysiwyg-visual.mjs` | 真实公式的基线、pt 尺寸、居中、暗色与墨迹边界 |
 | `writing-stability.mjs` | 点击/键盘进入公式与复杂块、模式往返、过期命中、调度、输入法与逐帧几何 |
 | `computed-style.mjs` | 作用域 box-sizing、窄视口溢出、CSS 源序与原有 content-box 边界 |
 | `writing-pku-docs.mjs` | PKU 真实作业（`PKU_ROOT`）的逐块几何：正文/标题/列表/公式切片同一张位置表，同页相邻锚点 ≤2px、页内累计 ≤5px；夹具缺失/原文哈希不符直接失败 |
+
+### 验收耗时基线与提速纪律（2026-09-26）
+
+全量 `npm run verify:browser` 曾经一半以上时间花在**重复劳动**上，而不是断言本身。当前做法与实测：
+
+| 改动 | 依据 |
+| --- | --- |
+| `ONLY` 只导出声明过的夹具 | 一份夹具 = 一次 `cargo test`（实测 `fixtures:blocks` 4.4s、`fixtures:math` 4.5s） |
+| `goto` 一次导航（同 URL 用 `Page.reload`，不同 URL 直接 `Page.navigate`） | 以前**每次 `goto` 都先跳 `about:blank`**（2 次导航）；`wysiwyg.mjs` 有 37 次、`writing-stability` 6 次 boot 各 2 次 |
+| `boot` 用 `Storage.clearDataForOrigin` 清存档，一次导航 | 以前"先加载页面 → 清 localStorage → 再加载"= 4 次导航；`writing-stability` 6 次 boot |
+| `warmup` 加载一遍（`WARMUP_LOADS=2` 可回到两遍） | 一遍已经把 dev server 的转译缓存与浏览器的模块缓存都建好；第二遍实测 5.4s 是纯重复（`[8.2s → 4.1s]`） |
+| 命中套件把固定 `sleep(220)` 换成"等光标真的落到期望位置"（1.5s 超时） | 探针点合计 675 个 = 两分多钟空等；判据就是断言要看的那个值。`writing-blocks-hit` **72.9s → 12~45s** |
+| 命中套件对"本来就不该有切片"的夹具不再等 8s | 以前无条件 `waitFor(crop > 0)`，11 篇里一半是纯正文夹具、每篇等满 8s；改成等 `__browserDevBlocksMatched`（更确定：断言不会跑在旧表上） |
+| `createChecker` 每条断言记耗时，收尾打印最慢 10 条 | "哪一条在等"以前只能靠猜；耗时 ≥400ms 的条目直接在行尾标 `[N.Ns]` |
+
+**提速纪律**（别用这些换速度）：不跳过真实编译、不复用未经校验的旧夹具、不共享页面并行跑、不放宽任何超时或阈值。上面每一条都只删"重复的准备工作"，判据与断言数量不变（清单里的期望项数只在**新增断言**时同步）。
+
+**同环境前后实测**（本机 2026-09-26，`npm run verify:browser`，无 `PKU_ROOT`）：`computed-style`
+`11.7s → 3.1s`、`writing-blocks-hit` `72.9s → 12.5s`（单跑）、`writing-mode-scenes` `55.5s → 21.6s`、
+`writing-stability` `146.8s → 102.0s`、`wysiwyg-visual` `12.4s → 8.1s`、预热 `8.2s → 4.1s`。**注意两点**：
+`wysiwyg.mjs` 的旧数字（86.5s）是一次**中途崩溃**的运行（不完整），完整跑一轮要 400s 量级、是整套里
+最贵的一环；同一套件在不同轮次之间也有波动（`writing-mode-scenes` 单跑 21.6s、跟在 `wysiwyg` 后面
+曾到 55.5s），所以比较要用"同一次运行里的同一步骤"，别跨轮混用。
+
+### 浏览器验收的启动契约（`scripts/browser-check/`）
+
+- `cdp.goto` 等三件事：地址对上、`.cm-content` 挂载、以及 `window.__typstPadRestored === true`
+  （`?browserdev=1` 才有的只读标记，见 `src/lib/dev/write-test-hook.ts`）。第三条是 2026-09-26 补的：
+  子组件（编辑器）的 `onMount` 比父页面的**先**跑完，`.cm-content` 出现时主题/设置/恢复的内容可能还没
+  落到 `$state` 上 —— 那时打字会量到默认主题、并且应用随后那次 300ms 防抖写盘会把"还没恢复完"的默认值
+  写回存档（`writing-blocks` 第 6 组、`wysiwyg` 的"关掉启动自动检查更新"两条都这样红过）。
+- 测试自己种存档时用 `harness.flushStateSeed(c, state)` / `flushStateSeedJson(c, json)`：它等过应用的
+  300ms 防抖窗口再把**要种的那份**写一遍（回写"当前值"没用 —— 当前值可能已经被应用盖过了）。
+- 固定等待只在"逐帧采样 / 竞态测试"里保留；其余一律换成 `c.waitFor(条件, { timeout })`。
 
 ### PKU 真实作业验收（需要本机作业原文）
 
@@ -89,7 +126,27 @@ PKU_ROOT="$HOME/PKU" ONLY=writing-pku-docs.mjs npm run verify:browser   # 只跑
 
 浏览器套件用 dev 桩跑的是"同一套产物 + 同一套前端"，**不能**替代真机：真机的字体来自 `bundled_font` IPC、编译在 Rust 侧同一进程、PDF 资源从作业原目录读。所以每次改写作链路（装饰、公式、块几何、分页）都要在一台有桌面环境的机器上按下面清单抽查一次，并把结论（通过/差异/截图）记进验收报告。
 
-**本机结论（2026-09-25，无桌面会话的环境）**：`npm run tauri dev` 编译与启动都成功，随后 GTK 事件循环初始化失败并 panic —— `Failed to initialize gtk backend!: "Failed to initialize GTK"`（`tao-0.35.3/src/platform_impl/linux/event_loop.rs`，exit 101），**没有窗口**。属环境受限（没有可用的显示会话/GTK），不是代码问题；下面的清单必须在有桌面 WebView 的机器上执行。
+**本机结论（2026-09-26 更新）**：本机**能**起桌面应用，但**不能**脚本化交互 —— 两点都要记住：
+
+- **能起**：`WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 npm run tauri dev` 会打印
+  `[startup] rust phase:webview-created t:0.0` / `phase:ready t:0.1` 并继续运行；直接跑
+  `src-tauri/target/debug/typst-pad` 存活 ≥30s（由 `timeout` 杀掉，exit 124）。之前记的
+  「GTK 事件循环初始化失败 / 没有窗口」是**没有设 `WAYLAND_DISPLAY`** 时的现象，环境里其实有
+  `/run/user/1000/wayland-0`。日志里的 `dconf: Read-only file system`、`libEGL/MESA ZINK`、
+  `WebKitCache ... Failed to create hard link` 都是环境噪声（只读 runtime 目录 / 无 GPU / 缓存目录），
+  与代码无关。
+- **不能交互**：Linux 端是 WebKitGTK，**没有 CDP**；本机也没有 `WebKitWebDriver` / `tauri-driver` /
+  `xdotool`。`WEBKIT_INSPECTOR_SERVER=127.0.0.1:2999` 确实会监听，但它的远程检查器**不接受普通
+  WebSocket 连接**（`ws://…/`、`/socket/1`、`/devtools/page/1` 与 `inspector`/`webkit-inspector`
+  三种子协议全被拒），所以 `scripts/browser-check/` 那套 CDP 探针**无法**驱动真机窗口。
+  因此下面清单仍须在**能脚本化或能亲眼看**的机器上执行；本轮能给的只是"应用起得来"。
+
+**仍未在真机验证的两处引擎相关行为**（都属于 2026-09-26 的写作模式改动，且都依赖 WebKit 自己的
+inline-block / 行盒计算，Chromium 上绿不等于 WebKit 上绿）：
+① 占位带高盒用 `min-height` 而不是 `height`（`cm-block-band-hold`，见[写作渲染](writing-rendering.md)）；
+② 列表项揭示态那个行内定宽标记盒（`cm-markup-list-indent`）。
+
+下面的清单必须在有桌面 WebView 的机器上执行。
 
 准备：`npm run tauri dev`；作业原文放在 `~/PKU/26fall/...`（只读，不复制进仓库）。
 
@@ -107,7 +164,7 @@ PKU_ROOT="$HOME/PKU" ONLY=writing-pku-docs.mjs npm run verify:browser   # 只跑
 
 块几何验收比较相邻带、纵向位置与比例，不能只检查 widget 存在；直接可编辑正文已经不是切片，不应强求每篇/每块都有 SVG。复杂块集合必须有非零断言下界。公式验收使用多字号真实产物，核对 pt × 4/3 的 CSS 尺寸、行内基线（误差小于 1px）与墨迹范围。
 
-PKU 夹具把正文、标题、列表与公式切片放进同一张逐块位置表，用真实 Typst 的**首行锚点**对账。硬判据：同页相邻锚点 ≤2px、页内累计 ≤5px、**可编辑正文全部走带高盒**（盒高 = 带高，见[写作渲染](writing-rendering.md)），以及**可编辑正文的视觉行数与 Typst 一致**（Typst 侧 oracle = 按 Rust 侧实测行距的 0.75 倍聚类主基线，`lineCount`）。四条口径都必须写进结果、不能拿来绿：
+PKU 夹具把正文、标题、列表与公式切片放进同一张逐块位置表，用真实 Typst 的**首行锚点**对账。硬判据：同页相邻锚点 ≤2px、页内累计 ≤5px、**可编辑正文全部走带高盒**（盒高 = 带高，见[写作渲染](writing-rendering.md)），以及**可编辑正文的视觉行数与 Typst 一致**（Typst 侧 oracle = 按 Rust 侧实测行距的 0.75 倍聚类主基线，`lineCount`）。"走带高盒"接受两种类：精确产物的 `cm-block-band` 与"编辑后、编译落地前"的占位 `cm-block-band-hold`（见 `Block.layoutHold`）—— 这一段的量法都在沉降之后，正常只会见到前者。四条口径都必须写进结果、不能拿来绿：
 
 - **无输出块的假包围盒**：文档内 `#let` 宏在使用处的字形 `Span` 指回定义处，必须按 `no_output` 跳过几何匹配（见 `SourceBlock::no_output`）。
 - **浏览器侧的视觉行数按"基线"数**：文字节点的矩形顶 + 字体上升部 = 该行基线，行内公式用 widget 上的 `data-math-ascent` 落回同一条基线，容差取 Typst 行距的一半。逐字符 `coordsAtPos` 会被原子替换区间挡住（一行只有公式时量成 1 行），纵坐标固定 1px 容差会把同一条线里的公式/文字顶差（2~3px）数成折行，`盒高 ÷ line-height` 在带高盒生效后也不是行数（行高是按块反解的）。

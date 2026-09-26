@@ -28,6 +28,7 @@ import {
   boot,
   byteToPos,
   createChecker,
+  editableInFixture,
   finish,
   loadFixtures,
   replaceDocument,
@@ -39,6 +40,17 @@ const FULL = process.env.HIT_FULL === "1";
 const PROBE_PICK = FULL ? null : [0, 6, 11, 14];
 
 const { check, state } = createChecker();
+
+/**
+ * 这一篇夹具**期望**有几张复杂块切片（与套件末尾那三条期望判据同一口径）。
+ * 纯正文/标题的夹具是 0 —— 那些夹具就不该等切片出现（见循环里的等待说明）。
+ */
+function fixtureBlocksNeedingCrops(fx) {
+  const last = fx.blocks.at(-1);
+  return fx.blocks.filter(
+    (b) => b.svg && b.heightPt > 0.5 && b !== last && !editableInFixture(fx.doc, b),
+  ).length;
+}
 
 // 空夹具 / 没探针 = 0 次点击 + 退出码 0 的假绿 ⇒ 必须硬失败
 const fixtures = loadFixtures("block-fixtures.json", {
@@ -113,12 +125,22 @@ for (const fx of withProbes) {
   await replaceDocument(c, fx.doc);
   // 光标挪到文档开头：第一块成为"活动块"（源码形态），其余块都是切片
   await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
-  // 等切片真的出来：既有编译**去抖 150ms**，而首篇还会赶上"启动时恢复的长文档"那一轮编译，
-  // 不显式等就会偶发"所有探针都找不到切片"（实测踩过三次，都发生在首篇）
-  await c
-    .waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 })
-    .catch(() => {});
-  await new Promise((r) => setTimeout(r, 350));
+  /**
+   * 等这一篇的**产物真的到位**。判据是"桩命中了夹具"（`__browserDevBlocksMatched`）。
+   *
+   * 以前无条件等 `crop 数 > 0`：对**纯正文/标题**那几篇"本来就不该有切片"的夹具必然等满 8s
+   * 超时而白等（11 篇里有一半是这种，实测每篇 8s，合计半分钟以上）；而"没有切片"恰恰是本套件
+   * 对这些夹具的**期望**，不是失败信号。命中夹具才是"这一轮编译落地了、断言不跑在旧表上"的
+   * 确定信号。有切片的夹具再额外等一次切片出现。
+   */
+  const expectCrops = fixtureBlocksNeedingCrops(fx);
+  await c.waitFor(`window.__browserDevBlocksMatched === true`, { timeout: 8000 }).catch(() => {});
+  if (expectCrops > 0) {
+    await c
+      .waitFor(`document.querySelectorAll(".cm-block-crop").length > 0`, { timeout: 8000 })
+      .catch(() => {});
+  }
+  await new Promise((r) => setTimeout(r, 200));
   const initialCrops = await c.evaluate(
     `Array.from(document.querySelectorAll(".cm-block-crop")).map((el) => Number(el.dataset.blockFrom))`,
   );
@@ -166,11 +188,23 @@ for (const fx of withProbes) {
       }
       const before = await caret();
       await c.click(Math.round(pt.x), Math.round(pt.y));
-      await new Promise((r) => setTimeout(r, 220));
+      /**
+       * **等"光标真的落到引擎给的字节偏移上"**（有超时），不是固定 sleep(220)。
+       *
+       * 命中结果是异步回来的（真机走 Rust IPC、桩也走一个 Promise），可"回来得慢"与"回错了"
+       * 是两件事：固定 220ms 既会在慢机器上假红，又在本机白等 —— 这一套的探针点合计几百个
+       * （实测 675 个），按 220ms 算是**分把钟**的空等。轮询判据就是断言本身要看的那个值。
+       */
+      const expectPos = byteToPos(fx.doc, probe.o);
+      await c
+        .waitFor(
+          `document.querySelector(".cm-content").cmTile.root.view.state.selection.main.head === ${expectPos}`,
+          { timeout: 1500, interval: 20 },
+        )
+        .catch(() => {});
       const after = await caret();
       totalClicks++;
       clicked++;
-      const expectPos = byteToPos(fx.doc, probe.o);
       const ok = after.bytes === probe.o && after.head === expectPos;
       if (ok) {
         matched++;

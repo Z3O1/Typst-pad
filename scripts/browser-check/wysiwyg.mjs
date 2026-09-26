@@ -10,7 +10,14 @@
 // 因此这里验证的是**编辑器的装饰/选区/开关链路**；公式的真实排版由 Rust 单测覆盖
 // （cargo test compile_math）。
 import { connect, DEV_URL } from "./cdp.mjs";
-import { boot, createChecker, finish, shotPath as SHOT } from "./harness.mjs";
+import {
+  boot,
+  createChecker,
+  finish,
+  flushStateSeed,
+  flushStateSeedJson,
+  shotPath as SHOT,
+} from "./harness.mjs";
 
 // 断言 + 计数、截图路径、启动序列、收尾都来自 harness.mjs（六套件共用一份）
 const { check, state } = createChecker();
@@ -890,12 +897,14 @@ check(
 await c.screenshot(SHOT("wysiwyg-21-restore-session"));
 
 // 关掉开关：清空存档 → 输入 → 重载 → 应该是空文档
-await c.evaluate(`(() => {
+const seededRestore = await c.evaluate(`(() => {
   const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
   raw.restoreSession = false;
-  localStorage.setItem("typst-pad:state", JSON.stringify(raw));
-  return 1;
+  const json = JSON.stringify(raw);
+  localStorage.setItem("typst-pad:state", json);
+  return json;
 })()`);
+await flushStateSeedJson(c, seededRestore); // 等过应用的 300ms 防抖写盘，再把这份原样写回一次
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 900));
@@ -1625,12 +1634,15 @@ check(
 // （它不是应用的错误，报出来只会吓人），并把预览画布的重算推到下一帧。
 // ---------------------------------------------------------------------------
 console.log("28) 大缩放下状态栏仍是一行（≈660px 的 CSS 视口）");
-await c.evaluate(`(() => {
+const seededViewA = await c.evaluate(`(() => {
   const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
   raw.viewMode = "source";   // 双栏：状态栏项最多的情况
   raw.showPreview = true;
-  localStorage.setItem("typst-pad:state", JSON.stringify(raw));
+  const json = JSON.stringify(raw);
+  localStorage.setItem("typst-pad:state", json);
+  return json;
 })()`);
+await flushStateSeedJson(c, seededViewA); // 等过应用的 300ms 防抖写盘
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 700));
@@ -1694,13 +1706,16 @@ await c.send("Emulation.clearDeviceMetricsOverride");
 // ---------------------------------------------------------------------------
 console.log("29) 源码模式 Alt+Z 自动换行");
 // 源码模式 + 双栏（编辑区最窄的情形），并清掉上轮遗留的换行开关
-await c.evaluate(`(() => {
+const seededViewB = await c.evaluate(`(() => {
   const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
   raw.viewMode = "source";
   raw.showPreview = true;
   delete raw.editorWrap;
-  localStorage.setItem("typst-pad:state", JSON.stringify(raw));
+  const json = JSON.stringify(raw);
+  localStorage.setItem("typst-pad:state", json);
+  return json;
 })()`);
+await flushStateSeedJson(c, seededViewB); // 等过应用的 300ms 防抖写盘
 await c.goto(DEV_URL);
 await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
 await new Promise((r) => setTimeout(r, 700));
@@ -1889,7 +1904,7 @@ const previewProbe = `(() => {
 
 /** 预置「源码模式 + 双栏 + 指定缩放」，在给定 CSS 视口宽下加载，等重排编译跑完再量 */
 async function loadPreviewAt(viewportW, uiZoom, extraQuery = "") {
-  await c.evaluate(`(() => {
+  const seededPreview = await c.evaluate(`(() => {
     const raw = JSON.parse(localStorage.getItem("typst-pad:state") || "{}");
     raw.viewMode = "source";
     raw.showPreview = true;
@@ -1900,8 +1915,11 @@ async function loadPreviewAt(viewportW, uiZoom, extraQuery = "") {
     const lines = [];
     for (let i = 1; i <= 60; i++) lines.push("第 " + i + " 行内容");
     raw.content = lines.join("\\n");
-    localStorage.setItem("typst-pad:state", JSON.stringify(raw));
+    const json = JSON.stringify(raw);
+    localStorage.setItem("typst-pad:state", json);
+    return json;
   })()`);
+  await flushStateSeedJson(c, seededPreview); // 等过应用的 300ms 防抖写盘
   await c.send("Emulation.setDeviceMetricsOverride", {
     width: viewportW,
     height: 620,
@@ -2427,9 +2445,7 @@ const seedState = async (state) => {
   await c.evaluate(`localStorage.clear()`);
   await c.goto(DEV_URL); // 先落到应用源上，localStorage 才可写（about:blank 上会抛 SecurityError）
   await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
-  await c.evaluate(
-    `localStorage.setItem("typst-pad:state", ${JSON.stringify(JSON.stringify(state))})`,
-  );
+  await flushStateSeed(c, state); // 等过应用的 300ms 防抖写盘，再把种的那份写回一次
 };
 
 // 种进去的时间戳要留下来对账：判据不能只看"读回来时还没过多久"（那是拿夹具的墙钟赌启动耗时）。

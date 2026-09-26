@@ -36,8 +36,8 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 // 套件清单（期望项数写在这里，跑完直接对账；改套件计数时**两处一起改**）
 const SUITES = [
   ["wysiwyg.mjs", 305],
-  ["writing-blocks.mjs", 135],
-  ["writing-blocks-visual.mjs", 81],
+  ["writing-blocks.mjs", 137],
+  ["writing-blocks-visual.mjs", 99],
   ["writing-blocks-hit.mjs", 34],
   ["writing-mode-scenes.mjs", 85],
   ["wysiwyg-visual.mjs", 20],
@@ -51,6 +51,49 @@ const SUITES = [
   ["writing-pku-docs.mjs", 76],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
+
+/**
+ * **每个套件真正依赖哪些夹具**（`ONLY` 时据此只准备用得到的那些）。
+ *
+ * 为什么值得单独声明：一份夹具就是一次 `cargo test`（实测 `fixtures:blocks` 4.0s、
+ * `fixtures:math` 3.0s），而"只改了前端装饰"这种迭代跑 `ONLY=writing-blocks.mjs` 时
+ * 根本用不到公式夹具；两类都无条件导一遍纯属白等。声明是**显式**的：漏写会让对应套件
+ * 在 `loadFixtures` 那里硬失败（空夹具绝不静默变成"零断言全绿"），不会静默少测。
+ *
+ * 键是套件文件名，值是夹具名（下面对应 `npm run fixtures:*`）。**改动套件的夹具依赖时两处一起改。**
+ */
+const SUITE_FIXTURES = {
+  "wysiwyg.mjs": [],
+  "writing-blocks.mjs": [],
+  "writing-blocks-visual.mjs": ["blocks"],
+  "writing-blocks-hit.mjs": ["blocks"],
+  "writing-mode-scenes.mjs": ["blocks"],
+  "wysiwyg-visual.mjs": ["math"],
+  "writing-stability.mjs": ["blocks", "math"],
+  "computed-style.mjs": [],
+  "writing-pku-docs.mjs": ["pku"],
+};
+
+/** 同上，给 `STEPS` 里的按键/抓取步骤用（目前它们自己准备需要的东西） */
+const STEP_FIXTURES = {
+  "writing-pku-capture.mjs": [],
+};
+
+const FIXTURE_STEPS = {
+  blocks: ["fixtures-blocks", ["run", "fixtures:blocks"]],
+  math: ["fixtures-math", ["run", "fixtures:math"]],
+  pku: ["fixtures-pku-writing", ["run", "fixtures:pku-writing"]],
+};
+
+/**
+ * **按退出码判定的"步骤"**（不是套件：没有"通过 N 项"摘要），只在 `ONLY` 点名时跑。
+ *
+ * 目前只有 PKU 的编辑回放抓取（`writing-pku-capture.mjs`）：它要用真实按键把"实际会产生的输入
+ * 结果"抓下来（编辑器会给新行带自动缩进，Rust 推算不出来），必须有自己的 dev server + 浏览器，
+ * 所以放在这里、复用同一套生命周期。
+ */
+const STEPS = [["writing-pku-capture.mjs", "抓取编辑回放的实际结果"]];
+
 /**
  * PKU 真实作业那一套要不要跑：显式设了 `PKU_ROOT`，或 `ONLY` 里点名了它。
  * 两者都没有时**跳过**（原文不进仓库，别的机器上没有作业目录），绝不假装通过。
@@ -58,6 +101,24 @@ const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s
 const pkuRequested = !!process.env.PKU_ROOT || (only?.has("writing-pku-docs.mjs") ?? false);
 /** 实际进入循环的套件数：用来发现 `ONLY=` 写错（一个都没匹配上却报"全部通过"） */
 let ran = 0;
+
+/**
+ * **这一步要用到哪些夹具** —— 由"本轮真的会跑的套件/步骤"反推，而不是无条件全导。
+ *
+ * 默认（没有 `ONLY`、没有点名 PKU）时结果与原行为**完全一致**：两类夹具都导、PKU 不导。
+ * `ONLY=...` 时只导点名的那些套件声明过的夹具（见 SUITE_FIXTURES）。
+ * `SKIP_FIXTURES=1` 仍然整段跳过（"复用已确认一致的夹具"这条口子保留）。
+ */
+const neededFixtures = new Set();
+for (const [file] of SUITES) {
+  const willRun = (!only || only.has(file)) && !(file === "writing-pku-docs.mjs" && !pkuRequested);
+  if (!willRun) continue;
+  for (const dep of SUITE_FIXTURES[file] ?? []) neededFixtures.add(dep);
+}
+for (const [file] of STEPS) {
+  if (only && !only.has(file)) continue;
+  for (const dep of STEP_FIXTURES[file] ?? []) neededFixtures.add(dep);
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const children = [];
@@ -142,19 +203,35 @@ function findChrome() {
 }
 
 const results = [];
-function record(name, ok, note) {
-  results.push({ name, ok, note });
-  console.log(`${ok ? "✓" : "✗"} ${name}${note ? `（${note}）` : ""}`);
+/**
+ * 记录一步的结果。
+ *
+ * `ms` 是这一步的**墙钟耗时**（可选）：以前汇总表只有 ✓/✗，想知道"哪一步最贵"得自己去翻
+ * 时间戳 —— 于是优化测试耗时只能靠猜。现在每一步都带耗时，最后按耗时倒序打印一张表。
+ * **它只是观测**：不改变任何一步实际做的工作（见 docs/development/testing.md 的耗时基线一节）。
+ */
+function record(name, ok, note, ms) {
+  results.push({ name, ok, note, ms });
+  const secs = typeof ms === "number" ? ` [${(ms / 1000).toFixed(1)}s]` : "";
+  console.log(`${ok ? "✓" : "✗"} ${name}${note ? `（${note}）` : ""}${secs}`);
 }
 
-/** 只跑一条命令（夹具导出这类没有"项数"的步骤）：退出码即结果，输出留档 */
+/** 只跑一条命令（夹具导出这类没有"项数"的步骤）：退出码即结果，输出留档；返回耗时 ms */
 function runStep(name, cmd, args) {
   const logFile = join(OUT, `run-all-${name}.log`);
   // cargo 常在 ~/.cargo/bin，而本机默认 PATH 里可能没有（`fixtures:*` 里是裸 `cargo`）
   const env = { ...process.env, PATH: `${join(homedir(), ".cargo", "bin")}:${process.env.PATH}` };
+  const t0 = Date.now();
   const res = spawnSync(cmd, args, { cwd: ROOT, env, encoding: "utf8" });
+  const ms = Date.now() - t0;
   writeFileSync(logFile, `${res.stdout ?? ""}${res.stderr ?? ""}`);
-  record(name, res.status === 0, res.status === 0 ? "" : `退出码 ${res.status}；详情见 ${logFile}`);
+  record(
+    name,
+    res.status === 0,
+    res.status === 0 ? "" : `退出码 ${res.status}；详情见 ${logFile}`,
+    ms,
+  );
+  return ms;
 }
 
 console.log(`浏览器验收：dev ${APP_URL} / CDP ${CDP_PORT}`);
@@ -185,10 +262,11 @@ if (!SKIP_DEV) {
     );
     process.exit(1);
   } else {
+    const t0 = Date.now();
     launch("dev", "npm", ["run", "dev", "--", "--port", PORT, "--host", "0.0.0.0"]);
     // 冷启动的 Vite 要转译整棵模块图，60s 不够（实测本机 8s 起步、忙时更久）
     if (!(await waitFor("dev server", `http://127.0.0.1:${PORT}/`, 120))) process.exit(1);
-    console.log(`✓ dev server 就绪（:${PORT}）`);
+    console.log(`✓ dev server 就绪（:${PORT}，${((Date.now() - t0) / 1000).toFixed(1)}s）`);
   }
 }
 
@@ -233,10 +311,13 @@ if (reuseCdp && (await httpOk(`http://127.0.0.1:${CDP_PORT}/json/version`))) {
     "--window-size=1400,900",
     APP_URL,
   ]);
+  const t0 = Date.now();
   if (!(await waitFor("headless Chromium", `http://127.0.0.1:${cdpPort}/json/version`, 30))) {
     process.exit(1);
   }
-  console.log(`✓ headless Chromium 就绪（:${cdpPort}，${chrome}）`);
+  console.log(
+    `✓ headless Chromium 就绪（:${cdpPort}，${((Date.now() - t0) / 1000).toFixed(1)}s，${chrome}）`,
+  );
 }
 
 const env = {
@@ -252,7 +333,14 @@ const env = {
  * 或者 `waitFor(.cm-content)` 在 15s 上超时重试。这里先自己加载两遍（第二遍走缓存），
  * 各套件的 boot 就都是热的；应用根本起不来时也在这里**早失败**、报错清楚。
  */
+/**
+ * **预热点应用**：冷启动的 Vite 要转译整棵模块图（实测首屏 `responseEnd` 7.9s，机器忙时更久），
+ * 那笔开销以前是**第一个套件的第一次 boot** 付的 —— 于是 `Page.navigate` 的 CDP 调用超时、
+ * 或者 `waitFor(.cm-content)` 在 15s 上超时重试。这里先自己加载两遍（第二遍走缓存），
+ * 各套件的 boot 就都是热的；应用根本起不来时也在这里**早失败**、报错清楚。
+ */
 if (!SKIP_DEV || process.env.SKIP_WARMUP !== "1") {
+  const t0 = Date.now();
   const warm = spawnSync(process.execPath, [join(HERE, "warmup.mjs")], {
     cwd: ROOT,
     env,
@@ -267,25 +355,20 @@ if (!SKIP_DEV || process.env.SKIP_WARMUP !== "1") {
     );
     process.exit(1);
   }
-  console.log("✓ 应用已预热点（后续套件的 boot 都是热的）");
+  console.log(
+    `✓ 应用已预热点（${((Date.now() - t0) / 1000).toFixed(1)}s，后续套件的 boot 都是热的）`,
+  );
 }
 
 if (!SKIP_FIXTURES) {
-  runStep("fixtures-blocks", "npm", ["run", "fixtures:blocks"]);
-  runStep("fixtures-math", "npm", ["run", "fixtures:math"]);
-  // PKU 真实作业夹具要作业原文（`PKU_ROOT`，默认 `$HOME/PKU`）；只有显式要求那一套时才导，
-  // 否则默认 `verify:browser` 会在没有作业的机器上红掉 —— 但那不是产品回归。
-  if (pkuRequested) runStep("fixtures-pku-writing", "npm", ["run", "fixtures:pku-writing"]);
+  // 按**依赖**导夹具（见 neededFixtures）：没被任何要跑的套件声明的夹具不导。
+  for (const name of ["blocks", "math", "pku"]) {
+    if (!neededFixtures.has(name)) continue;
+    const [step, args] = FIXTURE_STEPS[name];
+    runStep(step, "npm", args);
+  }
 }
 
-/**
- * **按退出码判定的"步骤"**（不是套件：没有"通过 N 项"摘要），只在 `ONLY` 点名时跑。
- *
- * 目前只有 PKU 的编辑回放抓取（`writing-pku-capture.mjs`）：它要用真实按键把"实际会产生的输入
- * 结果"抓下来（编辑器会给新行带自动缩进，Rust 推算不出来），必须有自己的 dev server + 浏览器，
- * 所以放在这里、复用同一套生命周期。
- */
-const STEPS = [["writing-pku-capture.mjs", "抓取编辑回放的实际结果"]];
 for (const [file, label] of STEPS) {
   if (!only || !only.has(file)) continue;
   ran += 1;
@@ -295,10 +378,12 @@ for (const [file, label] of STEPS) {
     record(label, false, "脚本不存在");
     continue;
   }
+  const t0 = Date.now();
   const res = spawnSync(process.execPath, [full], { cwd: ROOT, env, encoding: "utf8" });
+  const ms = Date.now() - t0;
   writeFileSync(logFile, `${res.stdout ?? ""}${res.stderr ?? ""}`);
   const tail = `${res.stdout ?? ""}${res.stderr ?? ""}`.trimEnd().split("\n").slice(-1)[0] ?? "";
-  record(label, res.status === 0, res.status === 0 ? "" : `${tail}；详情见 ${logFile}`);
+  record(label, res.status === 0, res.status === 0 ? "" : `${tail}；详情见 ${logFile}`, ms);
 }
 
 for (const [file, expectCount] of SUITES) {
@@ -316,14 +401,16 @@ for (const [file, expectCount] of SUITES) {
     continue;
   }
   const logFile = join(OUT, `run-all-${file.replace(/\.mjs$/, "")}.log`);
+  const t0 = Date.now();
   const res = spawnSync(process.execPath, [full], { cwd: ROOT, env, encoding: "utf8" });
+  const ms = Date.now() - t0;
   const text = `${res.stdout ?? ""}${res.stderr ?? ""}`;
   // 完整输出留档，控制台只留最后一行（每套件几百行 ✓ 刷屏没法看）
   writeFileSync(logFile, text);
   const tail = text.trimEnd().split("\n").slice(-1)[0] ?? "";
   const m = text.match(/通过 (\d+) 项检查/);
   const count = m ? Number(m[1]) : null;
-  if (res.status !== 0) record(file, false, `${tail}；详情见 ${logFile}`);
+  if (res.status !== 0) record(file, false, `${tail}；详情见 ${logFile}`, ms);
   else if (count === null)
     // **fail-closed**：读不到摘要行就当失败。以前这里把"没有摘要"记成通过，只要有人改了
     // `finish()` 的措辞（或摘要被 `process.exit` 截断），期望项数这道守卫就静默失效了。
@@ -331,14 +418,16 @@ for (const [file, expectCount] of SUITES) {
       file,
       false,
       `退出码 0 但读不到「通过 N 项检查」摘要（改过 finish 的措辞？）；详情见 ${logFile}`,
+      ms,
     );
   else if (count !== expectCount)
     record(
       file,
       false,
       `${count} 项 ≠ 期望 ${expectCount} 项（计数变了就同步改 run-all.mjs 的 SUITES）`,
+      ms,
     );
-  else record(file, true, `${count} 项`);
+  else record(file, true, `${count} 项`, ms);
 }
 
 // ONLY 写错（少写 `.mjs`、拼错名字）会让循环一次都不进 —— 那时绝不能报"全部通过"
@@ -353,6 +442,30 @@ if (only && ran === 0) {
 console.log("\n===== 汇总 =====");
 for (const r of results)
   console.log(`${r.ok ? "✓" : "✗"} ${r.name}${r.note ? ` — ${r.note}` : ""}`);
+
+/**
+ * **耗时明细**（按墙钟倒序）：只用来看"全量验收的钱花在哪一步"，不参与判定。
+ * 各套件的耗时也写进 `.browser-check/run-all-timing.json`，方便前后对比（优化测试耗时用）。
+ */
+const timed = results.filter((r) => typeof r.ms === "number").sort((a, b) => b.ms - a.ms);
+if (timed.length > 0) {
+  const total = timed.reduce((sum, r) => sum + r.ms, 0);
+  console.log("\n===== 耗时（墙钟，倒序；各步骤串行相加） =====");
+  for (const r of timed)
+    console.log(
+      `${(r.ms / 1000).toFixed(1).padStart(6)}s  ${r.name}${r.ms > 0 ? ` (${((r.ms / total) * 100).toFixed(0)}%)` : ""}`,
+    );
+  console.log(`${(total / 1000).toFixed(1).padStart(6)}s  合计（不含 dev server / 浏览器启动）`);
+  writeFileSync(
+    join(OUT, "run-all-timing.json"),
+    JSON.stringify(
+      { generatedAt: new Date().toISOString(), totalMs: total, steps: timed },
+      null,
+      1,
+    ),
+  );
+}
+
 const failed = results.filter((r) => !r.ok);
 console.log(failed.length ? `\n${failed.length} 步失败` : "\n全部通过");
 process.exit(failed.length ? 1 : 0);

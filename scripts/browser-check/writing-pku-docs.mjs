@@ -24,6 +24,7 @@ import {
   boot,
   byteToPos,
   createChecker,
+  editableInFixture,
   finish,
   shotPath as SHOT,
   sleep,
@@ -100,14 +101,10 @@ check(
 // ---------------------------------------------------------------------------
 // 判据（与实现同口径的辅助函数）
 // ---------------------------------------------------------------------------
-const COMPLEX_RE = /(#|`|\/\/|\/\*)/;
-/** 与 `isDirectlyEditableTextBlock` 同口径：纯 markup 的段落/标题直接在编辑器里呈现 */
+/** 与 `core/editable-subset` 同口径：纯 markup 的段落/标题/简单列表项直接在编辑器里呈现 */
 function directlyEditable(doc, b) {
-  if (!b.found || b.skipped || !["Paragraph", "Heading"].includes(b.kind)) return false;
-  const src = doc.slice(byteToPos(doc, b.start), byteToPos(doc, b.end));
-  // 段内有单 LF 的段落走切片（见 isDirectlyEditableTextBlock 的说明）
-  if (src.includes("\n")) return false;
-  return !COMPLEX_RE.test(src);
+  // 与产品决策（core/editable-subset）同口径的共享实现：kind 白名单 + 文字对应证明 + 列表标记
+  return editableInFixture(doc, b);
 }
 /** Typst 行数：把 `lineTopsPt`（0.5pt 去重的字形顶）按"半个行距"聚类（同一行的上下标不拆行） */
 function typstLineCount(block, textPt, parLeading) {
@@ -1102,7 +1099,10 @@ for (const fx of fixtures) {
       if (rows === 0) rows = 1;
       return {
         from: ${s.from}, mode: 'text', top, height, anchor: top, baseline, rows,
-        band: el.classList.contains('cm-block-band'),
+        // 带高盒有两种类：精确产物的 cm-block-band、以及"编辑后、编译落地前"的占位
+        // cm-block-band-hold（见 core/block-plan 的 Block.layoutHold）。判据是"这一块有没有
+        // 由引擎带高承载"，两者都算；量到的都是已成型的版面（这一段在沉降之后才跑）。
+        band: el.classList.contains('cm-block-band') || el.classList.contains('cm-block-band-hold'),
         dom: { cls: String(el.className), h: Math.round(el.getBoundingClientRect().height), rendered },
       };
     })()`);
