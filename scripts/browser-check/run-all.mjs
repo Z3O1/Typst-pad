@@ -81,6 +81,7 @@ const SUITE_FIXTURES = {
 /** 同上，给 `STEPS` 里的按键/抓取步骤用（目前它们自己准备需要的东西） */
 const STEP_FIXTURES = {
   "writing-pku-capture.mjs": [],
+  "writing-perf.mjs": [],
 };
 
 const FIXTURE_STEPS = {
@@ -97,7 +98,13 @@ const FIXTURE_STEPS = {
  * 结果"抓下来（编辑器会给新行带自动缩进，Rust 推算不出来），必须有自己的 dev server + 浏览器，
  * 所以放在这里、复用同一套生命周期。
  */
-const STEPS = [["writing-pku-capture.mjs", "抓取编辑回放的实际结果"]];
+const STEPS = [
+  ["writing-pku-capture.mjs", "抓取编辑回放的实际结果"],
+  // **输入性能基线**（报告第二批）：2k/20k/100k 的输入延迟、长任务、扫描/装饰重建次数。
+  // 只按退出码判定；量到的数字写进 `.browser-check/perf-baseline.json`。**不进默认套件**：
+  // 它量的是基线不是功能回归，门槛也故意宽松（报告明确"暂不凭代码量推断卡顿"）。
+  ["writing-perf.mjs", "输入性能基线（2k/20k/100k）"],
+];
 
 /**
  * PKU 真实作业那一套要不要跑：显式设了 `PKU_ROOT`，或 `ONLY` 里点名了它。

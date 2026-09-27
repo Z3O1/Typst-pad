@@ -48,6 +48,30 @@ export type { LivePreviewOptions, MathRequest } from "./live-preview/options";
 const EMPTY_LINES: ReadonlySet<number> = new Set<number>();
 
 /**
+ * **装饰重建计数**（诊断 / 性能基线用，报告第二批"每次输入扫描 / 装饰重建次数"）。
+ *
+ * 与 `doc-scan.ts` 的 `docScanStats` 同一套口径：计数是**只读观测**，不改变任何行为；
+ * 每次 `collect` 都要整篇重算装饰集（扫描本身按 CM `Text` 身份缓存），所以"每次按键重建几次"
+ * 只能在这里数。纯数字自增，开销可忽略，桌面上没有人读它。
+ */
+let decoRebuilds = 0;
+let decoErrors = 0;
+
+/** 装饰字段重建次数（`errors` = 退化成源码显示的次数，正常应为 0） */
+export function livePreviewStats(): {
+  rebuilds: number;
+  errors: number;
+} {
+  return { rebuilds: decoRebuilds, errors: decoErrors };
+}
+
+/** 性能基线用：清计数（缓存不动 —— 那是 `resetDocScanCache` 的事） */
+export function resetLivePreviewStats(): void {
+  decoRebuilds = 0;
+  decoErrors = 0;
+}
+
+/**
  * 段距扫描结果 → **纯段落分隔行的行首集合**（竖直移动用，见 `live-preview/block-moves`）。
  *
  * `paragraphGapRows` 里的每一行都是被压缩到 Typst 段距的"必需的分隔行"；用户自己创建的空段落
@@ -76,6 +100,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
   const collect = (
     state: EditorState,
   ): { deco: DecorationSet; covers: BlockCover[]; separators: ReadonlySet<number> } => {
+    decoRebuilds += 1;
     try {
       if (!opts.enabled()) return { deco: Decoration.none, covers: [], separators: EMPTY_LINES };
       // 扫描结果走**文档扫描缓存**（`doc-scan.ts`）：docChanged / 选区变化 / 刷新三种事务
@@ -164,6 +189,7 @@ export function livePreview(opts: LivePreviewOptions): Extension {
         separators: separatorLines(scan.paragraphGapRows),
       };
     } catch (e) {
+      decoErrors += 1;
       console.error("[live-preview] 装饰重建失败，已退化为源码显示：", e);
       return { deco: Decoration.none, covers: [], separators: EMPTY_LINES };
     }
