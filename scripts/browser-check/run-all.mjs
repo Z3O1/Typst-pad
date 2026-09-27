@@ -37,6 +37,9 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 const SUITES = [
   ["wysiwyg.mjs", 305],
   ["writing-blocks.mjs", 158],
+  // **列表结构变化的真实状态回放**（报告 2026-09-28 第一批第 3 条）：8 个预编译状态逐字比对 +
+  // 几何对账（真实 typst 产物）、单字输入不位移、新增一行不先缩、标记→正文起点稳定
+  ["writing-list-states.mjs", 75],
   ["writing-blocks-visual.mjs", 114],
   ["writing-blocks-hit.mjs", 16],
   ["writing-mode-scenes.mjs", 86],
@@ -65,6 +68,7 @@ const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s
 const SUITE_FIXTURES = {
   "wysiwyg.mjs": [],
   "writing-blocks.mjs": [],
+  "writing-list-states.mjs": ["list"],
   "writing-blocks-visual.mjs": ["blocks"],
   "writing-blocks-hit.mjs": ["blocks"],
   "writing-mode-scenes.mjs": ["blocks"],
@@ -81,6 +85,7 @@ const STEP_FIXTURES = {
 
 const FIXTURE_STEPS = {
   blocks: ["fixtures-blocks", ["run", "fixtures:blocks"]],
+  list: ["fixtures-list-states", ["run", "fixtures:list-states"]],
   math: ["fixtures-math", ["run", "fixtures:math"]],
   pku: ["fixtures-pku-writing", ["run", "fixtures:pku-writing"]],
 };
@@ -358,7 +363,7 @@ if (!SKIP_DEV || process.env.SKIP_WARMUP !== "1") {
 
 if (!SKIP_FIXTURES) {
   // 按**依赖**导夹具（见 neededFixtures）：没被任何要跑的套件声明的夹具不导。
-  for (const name of ["blocks", "math", "pku"]) {
+  for (const name of ["blocks", "list", "math", "pku"]) {
     if (!neededFixtures.has(name)) continue;
     const [step, args] = FIXTURE_STEPS[name];
     if (!runStep(step, "npm", args)) {

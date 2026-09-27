@@ -117,6 +117,70 @@ const SCENE_DOCS: &[(&str, &str)] = &[
     ),
 ];
 
+/// **列表编辑状态**的文档文本（报告 2026-09-28 第一批第 3 条：初始 / 空续项 / 首字 / 继续输入 /
+/// 再续一项 / 嵌套 / 空嵌套项回车 / 退出列表 / 拆分，外加「嵌套后继」一对）。每一条都是浏览器里
+/// 用**真实按键**产生过的文本（`scripts/browser-check/writing-list-states.mjs` 按同一串按键重放），
+/// 这里预编译成逐字夹具。
+///
+/// **两处一起改**：改了这里就要同步改回放套件的按键序列与期望（否则桩命中不了夹具，
+/// 回放会以"文档与夹具不一致"硬失败，而不是静默退回假块）。
+const LIST_STATE_DOCS: &[(&str, &str)] = &[
+    ("初始", "- 甲\n- 乙\n- 丙\n"),
+    ("空续项", "- 甲\n- 乙\n- 丙\n- \n"),
+    ("首字", "- 甲\n- 乙\n- 丙\n- 丁\n"),
+    ("继续输入", "- 甲\n- 乙\n- 丙\n- 丁戊\n"),
+    ("再续一项", "- 甲\n- 乙\n- 丙\n- 丁戊\n- \n"),
+    ("嵌套", "- 甲\n- 乙\n- 丙\n- 丁戊\n    - \n"),
+    ("退出列表", "- 甲\n- 乙\n- 丙\n- 丁戊\n\n"),
+    ("拆分", "- 甲\n- 乙\n-\n- 丙\n"),
+    // **嵌套后继**（报告第 3 节的具体形态：第一项末尾 Enter，后继的嵌套列表块与"第三项"
+    // 都在它下面）。`初始` = 「列表与嵌套」场景原文；`续项` = 在初始文档的第一项后面插进一个
+    // 新的空项。typst 里那一行**没有字形输出**（`found: false`、`yPt = 0`），但它**仍然占纵向
+    // 空间** —— 实测上一项的带高 17.221pt → 24.414pt、后面所有块整体下移 7.194pt（9.59px）。
+    // 这正是"后继块从切片变回多行源码会不会额外推走版面"要量的地方。
+    (
+        "嵌套列表·初始",
+        "= 清单\n\n- 第一项：无序列表\n- 第二项：带嵌套\n  - 嵌套一\n  - 嵌套二\n- 第三项\n\n+ 有序一\n+ 有序二\n+ 有序三\n\n列表之后的收尾段落。\n",
+    ),
+    (
+        "嵌套列表·续项",
+        "= 清单\n\n- 第一项：无序列表\n- \n- 第二项：带嵌套\n  - 嵌套一\n  - 嵌套二\n- 第三项\n\n+ 有序一\n+ 有序二\n+ 有序三\n\n列表之后的收尾段落。\n",
+    ),
+];
+
+/// **列表编辑状态回放**的真实产物夹具（报告 2026-09-28 第一批第 3 条）：
+///   `npm run fixtures:list-states`
+/// 消费方 `scripts/browser-check/writing-list-states.mjs`：它按真实按键重放到每个状态，
+/// 断言文档**逐字**等于这里的 `doc`、桩命中（`__browserDevBlocksMatched`）、并且渲染几何来自
+/// 这份真实产物，而不是假块。几何不一致时回放套件必须红 —— 这是"结构变化不能只靠旧项占位修好"
+/// 的验收基座。
+#[test]
+#[ignore = "按需运行：导出列表编辑状态的真实产物夹具"]
+fn dump_list_state_fixtures() {
+    const COLUMN_PT: f64 = 371.25;
+    for (name, src) in LIST_STATE_DOCS {
+        let out = compile_blocks(
+            src.to_string(),
+            0,
+            None,
+            &fonts_dir(),
+            &FontConfig::default(),
+            COLUMN_PT,
+            None,
+            None,
+        );
+        assert!(out.ok, "[{name}] 编译应成功：{:?}", out.diagnostics);
+        let json = serde_json::json!({
+            "name": name,
+            "doc": src,
+            "contentWidthPt": COLUMN_PT,
+            "pageWidthPt": out.page_width_pt,
+            "blocks": out.blocks,
+        });
+        println!("LISTSTATE:{}", json);
+    }
+}
+
 /// 阶段 0 主探针：把上面每篇文档跑一遍并打印统计 + 逐块表格。
 /// 运行：`cargo test --manifest-path src-tauri/Cargo.toml dump_block_geometry -- --ignored --nocapture`
 #[test]

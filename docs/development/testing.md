@@ -54,6 +54,7 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 | `wysiwyg.mjs` | 公式与标记、菜单快捷键、恢复、缩放、字体、诊断和更新 UI；不证明真实编译 |
 | `writing-blocks.mjs` | 假切片下的编辑、选择、导航（按**可见行**跨段：落点不是纯分隔行、每步光标屏幕 y 都动、目标列保留、Shift 扩选选中准确源码）、**←/→ 的横向停靠与段中 Enter 的新段落行盒**（第 ⑦⑧ 组：→ 直达下一段行首、← 退回上一段行尾、Shift+→ 跳过零高行但选中 `\n\n`、用户自己建的空段落照停、活动光标行盒 ≥18px）、补渲、输入法、模式往返 |
 | `writing-blocks-visual.mjs` | 真实产物的复杂块裁剪几何与链接热区；正文是否保留文本、以及"敲一个字后编译落地前版面不跳"、"点列表项的项目符号后正文左缘不动"、"Enter 落在可见的新段落行上且输入/撤字/撤销都不抖"（都靠 `&blockslow=1` 撑开窗口）也要断言 |
+| `writing-list-states.mjs` | **列表结构变化的真实状态回放**（10 个状态：初始 / 空续项 / 首字 / 继续输入 / 再续一项 / 嵌套 / 退出列表 / 拆分 / 嵌套列表·初始 / 嵌套列表·续项，由 `npm run fixtures:list-states` 用真实 typst 预编译）：文档逐字命中、`matched && exact` 与块数一起验（不凭桩的 matched 宣称"已匹配新产物"）、每个有输出的块都在 DOM 里且可编辑行/切片的相对纵向位置与真实产物一致（同比例时 ±2.5px）、没有输出的块不占独立行盒（光标行豁免）、活动光标行盒可见；另有"单字输入前三项一像素不动""Enter 新增一行不许先缩再恢复""标记→正文起点来自引擎且跨状态稳定（12.479px）"。混用切片与可编辑行时只验在场（比例不可加，像素级对账归真机/桌面） |
 | `writing-blocks-hit.mjs` | 真实探针的点击到字符映射与 geometryId 校验 |
 | `writing-mode-scenes.mjs` | 标题、中文、列表、公式、表格、默认段距、**分隔行与用户空段落的分工**与文末输入等场景的真实呈现及截图；防空数组假绿 |
 | `wysiwyg-visual.mjs` | 真实公式的基线、pt 尺寸、居中、暗色与墨迹边界 |
@@ -162,7 +163,9 @@ inline-block / 行盒计算，Chromium 上绿不等于 WebKit 上绿）：
 
 ## 真实夹具与覆盖边界
 
-`npm run fixtures:blocks` / `npm run fixtures:math` 从 Rust 的 ignored 探针提取真实产物。Cargo 必须在 PATH 上；过滤器未命中任何用例仍可能返回成功，因此生成器和消费者必须在空夹具/空探针时硬失败，不能跑零次断言而报告通过。公式夹具注入桩时须补 `{ ok: true, ...fixture }`。
+`npm run fixtures:blocks` / `npm run fixtures:math` / `npm run fixtures:list-states` 从 Rust 的 ignored 探针提取真实产物。Cargo 必须在 PATH 上；过滤器未命中任何用例仍可能返回成功，因此生成器和消费者必须在空夹具/空探针时硬失败，不能跑零次断言而报告通过。公式夹具注入桩时须补 `{ ok: true, ...fixture }`。
+
+`fixtures:list-states` 的文档文本写死在 Rust 的 `LIST_STATE_DOCS`（`dump_list_state_fixtures`）里，每一条都是浏览器里用真实按键产生过的状态（`writing-list-states.mjs` 用同一串按键重放）。**改了按键/自动缩进行为就要两处一起改**：Rust 的文档文本 + 回放套件的按键序列，否则套件会在"文档逐字等于预编译状态"那一步硬失败（这是刻意的 fail-closed，不许静默退回假块）。
 
 块几何验收比较相邻带、纵向位置与比例，不能只检查 widget 存在；直接可编辑正文已经不是切片，不应强求每篇/每块都有 SVG。复杂块集合必须有非零断言下界。公式验收使用多字号真实产物，核对 pt × 4/3 的 CSS 尺寸、行内基线（误差小于 1px）与墨迹范围。
 
