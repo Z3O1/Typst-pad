@@ -26,8 +26,9 @@ export interface PersistedState {
    */
   editorWrap: boolean;
   /**
-   * 上次会话结束时是否有未保存修改。恢复会话时据此还原脏标记：
-   * 存过盘又没再改的文档恢复出来不该显示"未保存"圆点、也不该在关闭时追问。
+   * 上次会话结束时是否有未保存修改（= 正文与基线不同，见 `doc-utils.isDocModified`）。
+   * **基线本身不存**（它就是整篇正文，再存一份会把 localStorage 撑成两倍）：恢复时这个标记
+   * 为真 ⇒ 页面把基线当"未知"（`null`），圆点留着直到用户保存一次；为假 ⇒ 恢复出来的正文就是基线。
    */
   dirty: boolean;
   /**
@@ -87,7 +88,8 @@ export function loadState(): Partial<PersistedState> {
     if (state.showPreview === undefined) state.showPreview = state.viewMode === "source";
     // 源码模式自动换行（0.7.6 后的存档才有）：默认关
     if (state.editorWrap === undefined) state.editorWrap = false;
-    // 旧存档没有这两个字段：脏标记保守取 false（内容非空的恢复逻辑会另行判定），恢复会话默认开
+    // 旧存档没有这两个字段：脏标记保守取 false（恢复出来的正文就当基线，不显示"未保存"圆点），
+    // 恢复会话默认开
     if (state.dirty === undefined) state.dirty = false;
     if (state.restoreSession === undefined) state.restoreSession = true;
     // 自动更新（0.7.2 后的存档才有）：默认开；没检查过时时间戳为 null（→ 启动即检查一次）

@@ -1,9 +1,9 @@
-// doc-utils：空文档判断 / 实际未保存修改判断 / 路径取文件名 / 前缀规范化纯函数单元测试
-// （关闭确认弹窗的前置判断逻辑 + 窗口标题用的文件名 + 编译前缀补尾随换行）
+// doc-utils：空文档判断 / 未保存修改判断 / 路径取文件名 / 前缀规范化纯函数单元测试
+// （启动恢复的空白闸门 + 窗口标题圆点与各确认框共用的判据 + 窗口标题用的文件名 + 前缀补尾随换行）
 import { describe, it, expect } from "vitest";
 import {
   isBlankDoc,
-  isEffectiveDirty,
+  isDocModified,
   ensureTrailingNewline,
   fileNameOf,
   isTypPath,
@@ -38,27 +38,27 @@ describe("isBlankDoc", () => {
   });
 });
 
-describe("isEffectiveDirty", () => {
-  it("dirty 且内容为空：视为未修改（输入过又删光，无可丢失内容）", () => {
-    expect(isEffectiveDirty(true, "")).toBe(false);
+describe("isDocModified", () => {
+  it("正文与基线逐字符相同：未修改（改了又撤销回原样也走这条）", () => {
+    expect(isDocModified("正文", "正文")).toBe(false);
+    expect(isDocModified("", "")).toBe(false); // 未命名新文档：输入过又全删光 ⇒ 回到基线
+    expect(isDocModified("  \n", "  \n")).toBe(false);
   });
 
-  it("dirty 且仅空白字符：视为未修改（空格/制表符/换行/回车）", () => {
-    expect(isEffectiveDirty(true, "   ")).toBe(false);
-    expect(isEffectiveDirty(true, "\t\n ")).toBe(false);
-    expect(isEffectiveDirty(true, "　")).toBe(false);
+  it("**打开有内容的文件再全选删光：仍是未保存修改**（空白不等于没改过，这是旧判据报错的那条）", () => {
+    expect(isDocModified("", "磁盘上的正文")).toBe(true);
+    expect(isDocModified("  \n\n", "磁盘上的正文")).toBe(true);
   });
 
-  it("dirty 且有可见内容：视为有未保存修改", () => {
-    expect(isEffectiveDirty(true, "Hello")).toBe(true);
-    expect(isEffectiveDirty(true, " 你好 ")).toBe(true);
-    expect(isEffectiveDirty(true, "\n#set page(margin: 2cm)\n")).toBe(true);
+  it("正文比基线多、少、改动：都算未保存修改", () => {
+    expect(isDocModified("正文加一句", "正文")).toBe(true);
+    expect(isDocModified("正", "正文")).toBe(true);
+    expect(isDocModified("另起一段", "正文")).toBe(true);
   });
 
-  it("非 dirty：无论内容如何均视为未修改", () => {
-    expect(isEffectiveDirty(false, "")).toBe(false);
-    expect(isEffectiveDirty(false, "   ")).toBe(false);
-    expect(isEffectiveDirty(false, "Hello")).toBe(false);
+  it("基线为 `null`（存档恢复的未保存文档）：一律按有修改处理（保守，保存一次才落到真实基线）", () => {
+    expect(isDocModified("恢复出来的正文", null)).toBe(true);
+    expect(isDocModified("", null)).toBe(true); // 基线未知时连"空正文"也不敢判干净
   });
 });
 

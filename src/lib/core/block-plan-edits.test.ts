@@ -99,7 +99,7 @@ const OPS: EditOp[] = [
   { name: "输入 `$` （行间公式脚手架）", run: (d, at) => ins(d, at, "$  $") },
   { name: "输入围栏代码块", run: (d, at) => ins(d, at, "```\ncode\n```") },
   { name: "粘贴多段文本", run: (d, at) => ins(d, at, "新段一。\n\n新段二。\n\n") },
-  { name: "Tab 缩进（行首插 4 空格）", run: (d, at) => ins(d, lineStartOf(d, at), "    ") },
+  { name: "Ctrl+Tab 缩进（行首插 4 空格）", run: (d, at) => ins(d, lineStartOf(d, at), "    ") },
   // ---- 删除类 ----
   { name: "退格删一个字符", run: (d, at) => del(d, at - 1, at) },
   { name: "Delete 删一个字符", run: (d, at) => del(d, at, at + 1) },

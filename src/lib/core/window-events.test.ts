@@ -1,5 +1,6 @@
 // 窗口级事件两条规则的单测：拖放（覆盖层开关 + 只认 .typ + 什么时候才提示"仅支持 .typ"）与
-// 关闭确认（按内容判定、空文档不许拦、每次请求都重新读状态）。**不调用** Tauri / DOM API。
+// 关闭确认（正文与基线比较、改回原样/全删光各自的结论、基线未知保守拦、每次请求都重新读状态）。
+// **不调用** Tauri / DOM API。
 import { beforeEach, describe, expect, it } from "vitest";
 import { REJECT_DROP_STATUS, createCloseGuard, createDropHandler } from "./window-events";
 import type { DragPayload } from "./window-events";
@@ -108,7 +109,7 @@ describe("createCloseGuard", () => {
   it("有未保存内容：拦下关闭并弹确认（preventDefault + prompt）", () => {
     const guard = createCloseGuard({
       doc: () => "写了一半",
-      dirty: () => true,
+      baseline: () => "磁盘上的正文", // 正文 ≠ 基线 = 有未保存修改
       prompt: () => {
         prompted += 1;
       },
@@ -121,7 +122,7 @@ describe("createCloseGuard", () => {
   it("干净文档：直接放行（不拦、不弹）", () => {
     const guard = createCloseGuard({
       doc: () => "写完了",
-      dirty: () => false,
+      baseline: () => "写完了",
       prompt: () => {
         prompted += 1;
       },
@@ -131,36 +132,62 @@ describe("createCloseGuard", () => {
     expect(prompted).toBe(0);
   });
 
-  it("**空文档**：`dirty` 仍是 true 也不拦（输入过又删光 = 没什么可丢的）", () => {
-    for (const blank of ["", "   ", "\n\t "]) {
+  it("**正文被全选删光（基线本来有内容）**：这是实实在在的修改，必须拦（旧判据「空白不拦」在这里放走内容）", () => {
+    const guard = createCloseGuard({
+      doc: () => "",
+      baseline: () => "磁盘上的正文",
+      prompt: () => {
+        prompted += 1;
+      },
+    });
+    expect(close(guard)).toBe(true);
+    expect(prevented).toBe(1);
+    expect(prompted).toBe(1);
+  });
+
+  it("输入过又删光 / 改了又撤销回原样：正文 = 基线，不拦关闭", () => {
+    // 「未命名.typ」这类新文档的基线是空串：输入过又删光 ⇒ 回到基线
+    for (const baseline of ["", "  \n"]) {
       const guard = createCloseGuard({
-        doc: () => blank,
-        dirty: () => true,
+        doc: () => baseline,
+        baseline: () => baseline,
         prompt: () => {
           prompted += 1;
         },
       });
-      expect(close(guard), `空文档 ${JSON.stringify(blank)} 不该拦关闭`).toBe(false);
+      expect(close(guard), `正文 ${JSON.stringify(baseline)} = 基线，不该拦关闭`).toBe(false);
     }
     expect(prevented).toBe(0);
     expect(prompted).toBe(0);
   });
 
-  it("**每次关闭请求都重新读 `doc`/`dirty`**（缓存成创建那一刻的值 = 关闭确认永不弹、静默丢内容）", () => {
-    let text = "";
-    let dirty = false;
+  it("基线未知（`null`，存档恢复的未保存文档）：保守拦下，别静默丢内容", () => {
     const guard = createCloseGuard({
-      doc: () => text,
-      dirty: () => dirty,
+      doc: () => "恢复出来的正文",
+      baseline: () => null,
       prompt: () => {
         prompted += 1;
       },
     });
-    expect(close(guard)).toBe(false); // 创建时是空文档：放行
-
-    text = "写了一半"; // 创建之后才变脏（真实场景：用户开始打字）
-    dirty = true;
-    expect(close(guard)).toBe(true); // 必须按"当下"的内容拦
+    expect(close(guard)).toBe(true);
     expect(prompted).toBe(1);
+  });
+
+  it("**每次关闭请求都重新读 `doc`/`baseline`**（缓存成创建那一刻的值 = 关闭确认永不弹、静默丢内容）", () => {
+    let text = "";
+    let baseline = "";
+    const guard = createCloseGuard({
+      doc: () => text,
+      baseline: () => baseline,
+      prompt: () => {
+        prompted += 1;
+      },
+    });
+    expect(close(guard)).toBe(false); // 创建时正文 = 基线：放行
+
+    text = "写了一半"; // 创建之后才改（真实场景：用户开始打字）
+    expect(close(guard)).toBe(true); // 必须按"当下"的正文与基线判
+    expect(prompted).toBe(1);
+    expect(baseline).toBe(""); // 基线没被谁顺手改掉
   });
 });

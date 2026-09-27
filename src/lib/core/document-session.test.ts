@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
-// 文档生命周期的单测：脏文档必问（含"打开的就是当前这个文件"）、取消就不动状态、
-// 另存为取消不写盘、失败文案带原因、新建连存档一起清、桌面/浏览器两套确认框，
-// 外加三个状态迁移纯函数（契约 3：`doc` 与 `editorDoc` 必须同源）。
+// 文档生命周期的单测：有未保存修改必问（含"打开的就是当前这个文件"、正文被删光、基线未知）、
+// 改回原样不算修改、取消就不动状态、另存为取消不写盘、失败文案带原因、新建连存档一起清、
+// 桌面/浏览器两套确认框，外加三个状态迁移纯函数（契约 3：`doc` 与 `editorDoc` 必须同源）。
 // 依赖全注入 + 假文件，不碰 DOM（除了 `window.confirm` 那一条，jsdom 里有）、不碰 Tauri。
 //
 // 读断言时的约定：`calls` 记的是**完整 hook 序列**，`toEqual` 整串比较就是契约本身
@@ -14,33 +14,33 @@ import { fileNameOf, UNTITLED_TITLE } from "./doc-utils";
 import type { DocumentSessionHooks } from "./document-session";
 
 describe("状态迁移纯函数", () => {
-  it("loadedState：`doc` 与 `editorDoc` 同源（落后一次就丢未保存内容），标题跟路径走、脏标记清掉", () => {
+  it("loadedState：`doc` 与 `editorDoc` 同源（落后一次就丢未保存内容），标题跟路径走、基线就是读到的内容", () => {
     expect(loadedState("磁盘内容", "C:\\Users\\me\\论文.typ")).toEqual({
       doc: "磁盘内容",
       editorDoc: "磁盘内容", // 契约 3：两处镜像必须同一份
       filePath: "C:\\Users\\me\\论文.typ",
       fileTitle: "论文.typ",
-      dirty: false,
+      baseline: "磁盘内容", // 刚读完盘：正文 = 基线 ⇒ 不算未保存修改
     });
   });
 
-  it("savedState：**内容不变**（两处镜像原样带回），只换路径/标题、清脏标记", () => {
+  it("savedState：**内容不变**（两处镜像原样带回），只换路径/标题、基线推到当前正文", () => {
     expect(savedState("/tmp/另存为.typ", "正在写的正文")).toEqual({
       doc: "正在写的正文",
       editorDoc: "正在写的正文",
       filePath: "/tmp/另存为.typ",
       fileTitle: "另存为.typ",
-      dirty: false,
+      baseline: "正在写的正文",
     });
   });
 
-  it("newState：内容两处都空、路径置空、标题回到「未命名.typ」", () => {
+  it("newState：内容两处都空、路径置空、标题回到「未命名.typ」、基线回到空串", () => {
     expect(newState()).toEqual({
       doc: "",
       editorDoc: "",
       filePath: null,
       fileTitle: UNTITLED_TITLE,
-      dirty: false,
+      baseline: "",
     });
     expect(UNTITLED_TITLE).toBe("未命名.typ"); // 页面 fileTitle 的初值也用它
   });
@@ -51,7 +51,8 @@ describe("createDocumentSession", () => {
     doc: string;
     filePath: string | null;
     fileTitle: string;
-    dirty: boolean;
+    /** 未保存修改的判据基线（`doc-utils.isDocModified`）；夹具默认与 `doc` 相同 = 干净 */
+    baseline: string | null;
     status: string;
   };
   let calls: string[];
@@ -70,26 +71,26 @@ describe("createDocumentSession", () => {
       doc: () => state.doc,
       filePath: () => state.filePath,
       fileTitle: () => state.fileTitle,
-      dirty: () => state.dirty,
+      baseline: () => state.baseline,
       applyLoaded: (content, path) => {
         calls.push(`applyLoaded:${path}`);
         state.doc = content;
         state.filePath = path;
         state.fileTitle = fileNameOf(path);
-        state.dirty = false;
+        state.baseline = content;
       },
       applySaved: (path) => {
         calls.push(`applySaved:${path}`);
         state.filePath = path;
         state.fileTitle = fileNameOf(path);
-        state.dirty = false;
+        state.baseline = state.doc;
       },
       applyNew: () => {
         calls.push("applyNew");
         state.doc = "";
         state.filePath = null;
         state.fileTitle = "未命名.typ";
-        state.dirty = false;
+        state.baseline = "";
       },
       afterLoad: () => calls.push("afterLoad"),
       afterSave: () => calls.push("afterSave"),
@@ -121,7 +122,13 @@ describe("createDocumentSession", () => {
   }
 
   beforeEach(() => {
-    state = { doc: "正文", filePath: "/tmp/a.typ", fileTitle: "a.typ", dirty: false, status: "" };
+    state = {
+      doc: "正文",
+      filePath: "/tmp/a.typ",
+      fileTitle: "a.typ",
+      baseline: "正文",
+      status: "",
+    };
     calls = [];
     confirmed = true;
     confirmMessages = [];
@@ -150,11 +157,11 @@ describe("createDocumentSession", () => {
     expect(state.doc).toBe("磁盘内容");
     expect(state.filePath).toBe("/tmp/另一篇.typ");
     expect(state.fileTitle).toBe("另一篇.typ"); // 标题跟着落盘路径走（窗口标题 / 拖放文案都读它）
-    expect(state.dirty).toBe(false);
+    expect(state.baseline).toBe("磁盘内容"); // 刚读完盘 ⇒ 正文 = 基线，圆点不该亮
   });
 
   it("脏 + 另一份文件：问通用文案；取消 → 一个字节都不读、状态不变", async () => {
-    state.dirty = true;
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     confirmed = false;
     const s = make();
     await expect(s.openPath("/tmp/b.typ")).resolves.toBe(false);
@@ -166,7 +173,7 @@ describe("createDocumentSession", () => {
   });
 
   it("脏 + **就是当前这个文件**：文案带书名号标题，确认后照样重读（否则拖放会静默丢内容）", async () => {
-    state.dirty = true;
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const s = make();
     await expect(s.openPath("/tmp/a.typ")).resolves.toBe(true);
     expect(confirmMessages).toEqual([
@@ -175,8 +182,27 @@ describe("createDocumentSession", () => {
     expect(calls).toContain("read:/tmp/a.typ");
   });
 
+  it("正文改回原样（撤销）**不算**未保存修改：不问、直接读", async () => {
+    state.baseline = "磁盘上的正文";
+    state.doc = "磁盘上的正文"; // 改了又撤销回去：与基线逐字符相同
+    const s = make();
+    await expect(s.openPath("/tmp/b.typ")).resolves.toBe(true);
+    expect(confirmMessages).toEqual([]);
+    expect(calls).toContain("read:/tmp/b.typ");
+  });
+
+  it("基线未知（存档恢复的未保存文档，`baseline === null`）：保守当有修改，必须问", async () => {
+    state.baseline = null;
+    confirmed = false;
+    const s = make();
+    await expect(s.openPath("/tmp/b.typ")).resolves.toBe(false);
+    expect(confirmMessages).toEqual([
+      "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？",
+    ]);
+  });
+
   it("同名但不同目录**不算**同路径：走通用文案（判据是完整路径，不是文件名）", async () => {
-    state.dirty = true;
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const s = make();
     await s.openPath("/tmp/其他/a.typ"); // 与当前 /tmp/a.typ 同名
     expect(confirmMessages).toEqual([
@@ -184,13 +210,15 @@ describe("createDocumentSession", () => {
     ]);
   });
 
-  it("空白文档不算脏（`isEffectiveDirty`）：脏标记为真但正文只有空白时也不弹确认", async () => {
-    state.dirty = true;
+  it("**正文被全选删光也照样要问**：空白不等于没改过（旧判据 `dirty && !isBlankDoc` 在这里静默放行）", async () => {
+    state.baseline = "磁盘上的正文"; // 打开时磁盘上有内容，现在正文只剩空白
     state.doc = "  \n\n";
     const s = make();
     await expect(s.openPath("/tmp/b.typ")).resolves.toBe(true);
-    expect(confirmMessages).toEqual([]);
-    expect(state.dirty).toBe(false); // 读盘把脏标记清掉（从 true 起断言，不是恒真）
+    expect(confirmMessages).toEqual([
+      "当前文档有未保存的修改，打开新文件将丢失这些修改。仍要打开吗？",
+    ]);
+    expect(state.baseline).toBe("磁盘内容"); // 读盘后基线推到读到的那份（从"不同"起断言，不是恒真）
   });
 
   it("读盘返回的路径与请求不同（规范化）时，路径与标题跟**返回的**那个", async () => {
@@ -226,28 +254,29 @@ describe("createDocumentSession", () => {
     ]);
   });
 
-  it("save：把当前路径与正文交给写盘；成功只动路径/标题/脏标记（不重编译）", async () => {
-    state.dirty = true;
+  it("save：把当前路径与正文交给写盘；成功只动路径/标题/基线（不重编译）", async () => {
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const s = make();
     await expect(s.save()).resolves.toBe("/tmp/a.typ");
     expect(calls).toEqual(["write:/tmp/a.typ:正文", "applySaved:/tmp/a.typ", "afterSave"]);
     expect(state.doc).toBe("正文"); // 保存不改内容
+    expect(state.baseline).toBe("正文"); // 基线推到刚写下去的那份 ⇒ 圆点灭
   });
 
   it("save：未命名文档走另存为，成功后路径/标题都跟新路径", async () => {
     state.filePath = null;
     state.fileTitle = UNTITLED_TITLE;
-    state.dirty = true;
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const s = make();
     await expect(s.save()).resolves.toBe("/tmp/另存为.typ");
     expect(calls).toEqual(["write:<null>:正文", "applySaved:/tmp/另存为.typ", "afterSave"]);
     expect(state.filePath).toBe("/tmp/另存为.typ");
     expect(state.fileTitle).toBe("另存为.typ");
-    expect(state.dirty).toBe(false);
+    expect(state.baseline).toBe("正文"); // 保存成功 ⇒ 基线推到刚写下去的正文
   });
 
-  it("save：另存为对话框里取消（写盘返回 null）→ 路径与脏标记都不许动", async () => {
-    state.dirty = true;
+  it("save：另存为对话框里取消（写盘返回 null）→ 路径与基线都不许动", async () => {
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     state.filePath = null;
     state.fileTitle = "未命名.typ";
     const s = make({
@@ -259,7 +288,7 @@ describe("createDocumentSession", () => {
     await expect(s.save()).resolves.toBeNull();
     expect(calls).toEqual(["write:取消另存为"]);
     expect(state.filePath).toBeNull();
-    expect(state.dirty).toBe(true);
+    expect(state.baseline).toBe("磁盘上的正文"); // 取消另存为 ⇒ 基线一个字节都不许动
   });
 
   it("save：写盘抛错 → 状态栏「保存失败：原因」，不认成功", async () => {
@@ -272,7 +301,7 @@ describe("createDocumentSession", () => {
 
   it("reload：未命名文档直接忽略（连确认框都不问）", async () => {
     state.filePath = null;
-    state.dirty = true;
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const s = make();
     await s.reload();
     expect(calls).toEqual([]);
@@ -280,7 +309,7 @@ describe("createDocumentSession", () => {
   });
 
   it("reload：脏 → 专用文案；确认后重读并写「已重新读取」", async () => {
-    state.dirty = true;
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const s = make();
     await s.reload();
     expect(confirmMessages).toEqual([
@@ -292,7 +321,7 @@ describe("createDocumentSession", () => {
       "afterLoad",
       "status:已重新读取",
     ]);
-    expect(state.dirty).toBe(false);
+    expect(state.baseline).toBe("磁盘内容"); // 重读后基线 = 刚从磁盘读到的正文
   });
 
   it("reload：失败写「重新读取失败：原因」", async () => {
@@ -302,8 +331,8 @@ describe("createDocumentSession", () => {
     expect(state.status).toBe("重新读取失败：目录无效");
   });
 
-  it("createNew：脏 + 取消 → 不清空、不清存档、不重编译", async () => {
-    state.dirty = true;
+  it("createNew：有未保存修改 + 取消 → 不清空、不清存档、不重编译", async () => {
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     confirmed = false;
     const s = make();
     await s.createNew();
@@ -313,18 +342,19 @@ describe("createDocumentSession", () => {
   });
 
   it("createNew：确认 → 清空 + 清存档 + 重编译，**不写会话存档**（那是 clearState 的活）", async () => {
-    state.dirty = true;
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const s = make();
     await s.createNew();
     expect(calls).toEqual(["applyNew", "clearSession", "afterNew", "status:已新建"]);
     expect(state.doc).toBe("");
     expect(state.filePath).toBeNull();
     expect(state.fileTitle).toBe("未命名.typ");
+    expect(state.baseline).toBe(""); // 新文档的基线是空串 ⇒ 空正文不算未保存修改
     expect(calls).not.toContain("afterSave");
   });
 
   it("桌面（Tauri）走原生确认框并带上标题；浏览器回退 window.confirm", async () => {
-    state.dirty = true;
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const native = make({ isDesktop: () => true });
     await native.openPath("/tmp/b.typ");
     expect(confirmMessages).toEqual([
@@ -334,7 +364,7 @@ describe("createDocumentSession", () => {
 
     // 浏览器：jsdom 里有 window.confirm，spy 成"取消"
     const spy = vi.spyOn(window, "confirm").mockReturnValue(false);
-    state.dirty = true;
+    state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     calls.length = 0;
     confirmMessages.length = 0;
     const web = make({ isDesktop: () => false });

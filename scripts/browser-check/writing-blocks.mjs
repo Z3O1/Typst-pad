@@ -1085,10 +1085,10 @@ const SCENARIOS = [
     },
   },
   {
-    name: "Tab 缩进行首",
+    name: "Ctrl+Tab 缩进行首",
     act: async () => {
       await home();
-      await c.key("Tab", { code: "Tab", keyCode: 9 });
+      await c.key("Tab", { code: "Tab", keyCode: 9, modifiers: 2 });
     },
   },
   {

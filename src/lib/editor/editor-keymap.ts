@@ -3,7 +3,8 @@ import { keymap } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
 import { EditorSelection, Prec } from "@codemirror/state";
 import {
-  indentWithTab,
+  indentLess,
+  indentMore,
   deleteLine,
   copyLineDown,
   toggleBlockComment,
@@ -259,7 +260,17 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
   const isWriteMode = opts.isWriteMode ?? (() => false);
   return Prec.high(
     keymap.of([
-      indentWithTab, // Tab 缩进 / Shift+Tab 反缩进
+      // 缩进 / 反缩进 = **Ctrl+Tab / Ctrl+Shift+Tab**（2026-09-28 用户要求从 Tab 改到 Ctrl+Tab）。
+      // 普通 Tab 刻意**不接管**：它回到 WebView 的默认行为（移动焦点），所以这里只拦 Ctrl+Tab 这一对。
+      //
+      // 为什么写 `Ctrl-` 而不是本文件其它键位用的 `Mod-`：macOS 上 Mod = Cmd，而 Cmd+Tab 是系统
+      // 切换应用、根本到不了页面（Ctrl+Tab 在 Windows / macOS 两边都空着）。桌面版能收到它是因为
+      // 浏览器加速键已在 Rust 侧关掉（见 src-tauri/src/lib.rs 的 DisableBrowserAccelerators）；
+      // **真实浏览器里 Ctrl+Tab 是浏览器级手势、页面收不到**，所以这条只能在桌面版与浏览器验收的
+      // 注入事件（CDP）里验，别指望在 Chrome 里手按。
+      // `preventDefault: true` 与本文件其它自定义键位同款：命令返回 false（只读文档）时也吃掉按键。
+      { key: "Ctrl-Tab", run: indentMore, preventDefault: true },
+      { key: "Ctrl-Shift-Tab", run: indentLess, preventDefault: true },
       {
         key: "Enter",
         run: listAwareEnter(isWriteMode, insertNewTypstListItem, false),

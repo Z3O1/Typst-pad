@@ -5,11 +5,13 @@
 // （CodeMirror 的 keydown 处理挂在 contentDOM 上，事件按真实浏览器路径派发）
 // 说明：行为测试不引入 typst() 语言扩展——其 wasm 解析器在 Node 环境下对文档
 // 变更会 panic；注释符号改用 EditorState.languageData 注入，键位语义不受影响。
+// 缩进键自 2026-09-28 起是 Ctrl+Tab / Ctrl+Shift+Tab（普通 Tab 不再缩进，见 editor-keymap.ts）。
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap as keymapFacet } from "@codemirror/view";
 import {
-  indentWithTab,
+  indentLess,
+  indentMore,
   deleteLine,
   copyLineDown,
   toggleBlockComment,
@@ -37,7 +39,7 @@ function separatorLineStarts(doc: string): Set<number> {
 }
 
 // 与 Editor.svelte buildExtensions 的键位相关扩展保持一致（typst() 不含键位，不影响断言）
-// indentUnit 也要带上：Tab 一档缩进多宽由它决定（应用里是 4 个空格，见 auto-indent.ts）
+// indentUnit 也要带上：Ctrl+Tab 一档缩进多宽由它决定（应用里是 4 个空格，见 auto-indent.ts）
 const bindingExtensions = [basicSetup, editorKeymap, indentUnit.of(INDENT_UNIT)];
 
 /** 行为测试用扩展：basicSetup + 自定义键位 + 注释符号定义（代替 typst()） */
@@ -76,7 +78,10 @@ describe("editorKeymap 导出与绑定", () => {
     expect(keys).toContain("Enter");
     expect(keys).toContain("Shift-Enter");
     expect(keys).toContain("Backspace");
-    expect(keys).toContain("Tab");
+    // 缩进键：Ctrl+Tab（反缩进 Ctrl+Shift+Tab）——普通 Tab 已经不接管
+    expect(keys).toContain("Ctrl-Tab");
+    expect(keys).toContain("Ctrl-Shift-Tab");
+    expect(keys).not.toContain("Tab"); // 普通 Tab 交回浏览器默认（移动焦点）
     expect(keys).toContain("Mod-Shift-d");
     expect(keys).toContain("Mod-d");
     expect(keys).toContain("Mod-Shift-/");
@@ -85,8 +90,9 @@ describe("editorKeymap 导出与绑定", () => {
 
   it("各键位绑定到预期命令", () => {
     const bindings = allBindings();
-    // 注册顺序上的第一个 Tab / Mod-d 才是生效的绑定（先返回 true 者胜出）
-    expect(bindings.find((b) => b.key === "Tab")?.run).toBe(indentWithTab.run);
+    // 注册顺序上的第一个 Ctrl+Tab / Mod-d 才是生效的绑定（先返回 true 者胜出）
+    expect(bindings.find((b) => b.key === "Ctrl-Tab")?.run).toBe(indentMore);
+    expect(bindings.find((b) => b.key === "Ctrl-Shift-Tab")?.run).toBe(indentLess);
     expect(bindings.find((b) => b.key === "Mod-d")?.run).toBe(deleteLine);
     expect(bindings.find((b) => b.key === "Mod-Shift-d")?.run).toBe(copyLineDown);
     expect(bindings.find((b) => b.key === "Mod-Shift-/")?.run).toBe(toggleBlockComment);
@@ -148,16 +154,25 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     );
   }
 
-  it("Tab 一档缩进 = 4 个空格、Shift+Tab 反缩进一层", () => {
+  it("Ctrl+Tab 一档缩进 = 4 个空格、Ctrl+Shift+Tab 反缩进一层", () => {
     const view = makeView("#foo\n");
     view.dispatch({ selection: { anchor: 0 } });
-    press(view, { key: "Tab", code: "Tab", keyCode: 9 });
-    // 用户要求「Tab 应该是四格缩进」：一档就是 INDENT_UNIT（4 个空格），不是 CM 默认的 2 个
+    press(view, { key: "Tab", code: "Tab", keyCode: 9, ctrlKey: true });
+    // 用户要求「缩进应该是四格」：一档就是 INDENT_UNIT（4 个空格），不是 CM 默认的 2 个
     expect(view.state.doc.toString()).toBe("    #foo\n");
     expect(view.state.facet(indentUnit)).toBe(INDENT_UNIT);
     expect(INDENT_UNIT).toBe("    ");
 
-    // Shift+Tab 反缩进一层
+    // Ctrl+Shift+Tab 反缩进一层
+    press(view, { key: "Tab", code: "Tab", keyCode: 9, ctrlKey: true, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("#foo\n");
+    view.destroy();
+  });
+
+  it("**普通 Tab 不再缩进**（交回浏览器默认的移动焦点），正文一字不动", () => {
+    const view = makeView("#foo\n");
+    view.dispatch({ selection: { anchor: 0 } });
+    press(view, { key: "Tab", code: "Tab", keyCode: 9 });
     press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
     expect(view.state.doc.toString()).toBe("#foo\n");
     view.destroy();
@@ -197,10 +212,10 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     sourceView.destroy();
   });
 
-  it("Tab 缩进与回车继承是同一套宽度：Tab 出来的 4 格，回车后照抄", () => {
+  it("Ctrl+Tab 缩进与回车继承是同一套宽度：缩出来的 4 格，回车后照抄", () => {
     const view = makeView("#foo\n");
     view.dispatch({ selection: { anchor: 0 } });
-    press(view, { key: "Tab", code: "Tab", keyCode: 9 });
+    press(view, { key: "Tab", code: "Tab", keyCode: 9, ctrlKey: true });
     expect(view.state.doc.toString()).toBe("    #foo\n");
     // 光标移到行尾再回车：新行缩进 = 上一行实际的 4 个空格
     view.dispatch({ selection: { anchor: view.state.doc.length - 1 } });

@@ -2744,7 +2744,7 @@ check(
   JSON.stringify(afterEscUpdate),
 );
 
-console.log("36) 回车换行继承上一行缩进 + Tab 四格缩进（用户要求）");
+console.log("36) 回车换行继承上一行缩进 + Ctrl+Tab 四格缩进（用户要求）");
 await c.evaluate(`localStorage.clear()`);
 await c.goto(DEV_URL);
 await c.click(400, 300);
@@ -2810,12 +2810,12 @@ check(
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
-// ⑥ Tab 缩进也算缩进
-await retype("前文\n\tTab 缩进");
+// ⑥ 行首那个制表符也算缩进
+await retype("前文\n\t制表符缩进");
 await enter();
 check(
   "制表符缩进照抄（`\\t` 不算成空格）",
-  (await c.evaluate(savedContent)) === "前文\n\tTab 缩进\n\n\t",
+  (await c.evaluate(savedContent)) === "前文\n\t制表符缩进\n\n\t",
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
@@ -2828,30 +2828,30 @@ check(
   JSON.stringify(await c.evaluate(savedContent)),
 );
 
-// ⑧ Tab 一档缩进 = 4 个空格（用户要求「Tab 应该是四格缩进」）
+// ⑧ Ctrl+Tab 一档缩进 = 4 个空格（用户要求「缩进应该是四格」；2026-09-28 从 Tab 改到 Ctrl+Tab）
 await retype("第一行");
-await c.key("Tab", { code: "Tab", keyCode: 9 });
+await c.key("Tab", { code: "Tab", keyCode: 9, modifiers: 2 });
 await new Promise((r) => setTimeout(r, 500));
 check(
-  "Tab 一档缩进 = 4 个空格（不是 CM 默认的 2 格）",
+  "Ctrl+Tab 一档缩进 = 4 个空格（不是 CM 默认的 2 格）",
   (await c.evaluate(savedContent)) === "    第一行",
   JSON.stringify(await c.evaluate(savedContent)),
 );
-// ⑨ 紧接着回车：新行照抄 Tab 出来的那 4 格（两处宽度是同一套）
+// ⑨ 紧接着回车：新行照抄 Ctrl+Tab 出来的那 4 格（两处宽度是同一套）
 await c.key("End", { code: "End", keyCode: 35 });
 await enter();
 check(
-  "Tab 缩进后的回车照抄同一宽度（4 格）",
+  "Ctrl+Tab 缩进后的回车照抄同一宽度（4 格）",
   (await c.evaluate(savedContent)) === "    第一行\n\n    ",
   JSON.stringify(await c.evaluate(savedContent)),
 );
-// ⑩ Shift+Tab 反缩进一层：把光标放回第一行，它整好少掉 4 格（第二行的 4 格不动）
+// ⑩ Ctrl+Shift+Tab 反缩进一层：把光标放回第一行，它整好少掉 4 格（第二行的 4 格不动）
 await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 });
 await c.key("Home", { code: "Home", keyCode: 36 });
-await c.key("Tab", { code: "Tab", keyCode: 9, modifiers: 8 });
+await c.key("Tab", { code: "Tab", keyCode: 9, modifiers: 2 | 8 });
 await new Promise((r) => setTimeout(r, 500));
 check(
-  "Shift+Tab 反缩进一层（4 格 → 行首）",
+  "Ctrl+Shift+Tab 反缩进一层（4 格 → 行首）",
   (await c.evaluate(savedContent)) === "第一行\n\n    ",
   JSON.stringify(await c.evaluate(savedContent)),
 );
@@ -2959,51 +2959,96 @@ const writesProbe = `(window.__browserDevWrites || []).map((w) => ({
 }))`;
 const statusProbe = `document.querySelector(".statusbar").innerText`;
 
-// ① 空文档上按 Ctrl+N：没有可丢的内容 → 不确认，直接新建（守卫不能把正常新建也拦死）
+// ① 干净的空文档上按 Ctrl+N：没有可丢的内容 → 不确认，直接新建（守卫不能把正常新建也拦死）
 //
-// 判据用**存档里的 dirty 翻转 + 内容为空**，不读状态栏、也不读 `innerText`：
-//  · 状态栏会被紧接着的一次编译从「已新建」顶成「就绪」（实测 500ms 后已经是「就绪」）；
-//  · `.cm-content` 的 innerText 对空文档返回的是 `"\n"`（1 个字符），不是 `""`（实测踩到，写检查时踩过一次）；
-//  · 存档会先被 `clearState()` 清掉（实测 +120ms 时还是 null），约 300ms 后又被一次设置持久化
-//    写回"空会话"（content 空 + dirty false），所以"存档为 null"这种瞬时状态不能当判据。
-// dirty 从 true 变 false 只有 `docSession.createNew()`（本组里没有保存/打开）能做到：确认一发就会被桩取消、
-// dirty 会留在 true，所以它正好能区分"弹了但被取消"和"没弹、直接新建"。
+// 判据：**原生确认命令一次都没发**（`__browserDevCallCounts`；桩里 `plugin:dialog|confirm` 返回
+// false，"弹过但被取消"就会留下计数）+ 存档最终是"空会话 + dirty false"（`createNew` 会把基线置空，
+// 派生出来的 dirty 就是 false）+ 零写盘。
+// 不再拿"输入过又删光 ⇒ dirty 留在 true"当判据：2026-09-28 起脏判定改成「正文 ≠ 基线」
+// （`doc-utils.isDocModified`），在基线本来就是空串的新文档上打字再删光**回到干净**，那个翻转信号
+// 已经不存在；"删光但仍算改过"的情形由下面 ①′ 单独钉住。
+await c.evaluate(`localStorage.clear()`);
+await c.goto(DEV_URL); // 全新会话：正文空、基线也是空串（干净文档）
 await c.click(400, 300);
+// 输入再删光：会触发一次 300ms 防抖落盘，于是"空会话"这份存档一定存在（不用赌启动时会不会写）
 await c.type("先随便写点，再删光，制造「空文档」这种状态\n");
 await new Promise((r) => setTimeout(r, 500));
 await c.selectAll();
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await new Promise((r) => setTimeout(r, 700)); // 等存档防抖落地
 await c.evaluate(`(() => { window.__browserDevWrites = []; })()`);
+// ⚠️ `@tauri-apps/plugin-dialog` 的 `confirm()` 实际发的是 **`plugin:dialog|message`**
+// （插件里 confirm → messageCommand，2026-09-28 抓到这条：按 `plugin:dialog|confirm` 数会永远是 0，
+// 检查就成了永远绿的假断言）；两个名字都数，插件换实现也不至于静默失效。
+const confirmCalls = `((window.__browserDevCallCounts || {})["plugin:dialog|message"] || 0) +
+  ((window.__browserDevCallCounts || {})["plugin:dialog|confirm"] || 0)`;
 const archiveProbe = `(() => {
   const raw = localStorage.getItem("typst-pad:state");
   const s = raw ? JSON.parse(raw) : null;
   return {
     content: s ? s.content : null,
     dirty: s ? s.dirty : null,
+    confirms: ${confirmCalls},
     writes: (window.__browserDevWrites || []).length,
   };
 })()`;
 const beforeBlankNew = await c.evaluate(archiveProbe);
 await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 });
-// 新建先 clearState，再由 300ms 防抖写回空会话；等最终存档，避免把中间的 null 误判成失败。
+// 证据：`createNew` 会同步 `clearState()` 把存档抹掉（全工程只有这一处清存档），紧接着才由一次
+// 设置/编译触发的 300ms 防抖把"空会话"写回来 —— 所以按下去 ~100ms 内读到 `null` 就证明
+// 新建**真的执行了**（不是按键被吞、也不是被确认框拦下：那两种情况存档都会原样留着）。
+await new Promise((r) => setTimeout(r, 100));
+const rightAfterNew = await c.evaluate(archiveProbe);
+// 等最终存档，避免把中间的 null 误判成失败。
 await c
   .waitFor(
-    `(() => { const s = ${archiveProbe}; return s.content === "" && s.dirty === false; })()`,
-    {
-      timeout: 5000,
-    },
+    `(() => { const s = ${archiveProbe}; return (s.content ?? "") === "" && s.dirty === false; })()`,
+    { timeout: 5000 },
   )
   .catch(() => {});
 const newOnBlank = await c.evaluate(archiveProbe);
 check(
-  "空文档上 Ctrl+N：没有可丢的内容 → 不弹确认，直接新建（dirty 被新建翻成 false）",
+  "干净的空文档上 Ctrl+N：没有可丢的内容 → 不弹确认，直接新建（dirty 保持 false、零写盘）",
   beforeBlankNew.content === "" &&
-    beforeBlankNew.dirty === true &&
-    newOnBlank.content === "" &&
-    newOnBlank.dirty === false &&
+    beforeBlankNew.dirty === false && // 打字再删光 = 回到基线，不再是"脏"文档
+    beforeBlankNew.confirms === 0 &&
+    newOnBlank.confirms === 0 && // 一次原生确认都没发 = 没弹过
+    rightAfterNew.content === null && // clearState 跑过 = 新建真的执行了
+    (newOnBlank.content ?? "") === "" &&
+    newOnBlank.dirty !== true &&
     newOnBlank.writes === 0,
-  JSON.stringify({ before: beforeBlankNew, after: newOnBlank }),
+  JSON.stringify({ before: beforeBlankNew, cleared: rightAfterNew, after: newOnBlank }),
+);
+
+// ①′ 反过来：**正文被删光但仍然算改过**（存档恢复出来的未保存会话，基线未知）→ Ctrl+N 必须先确认。
+// 这是"判断未修改的逻辑"改对之后的正向证据：空白 ≠ 没改过，守卫不能再被"全选删光"绕过。
+await flushStateSeed(c, {
+  theme: "dark",
+  content: "磁盘上的正文",
+  filePath: null,
+  fileTitle: null,
+  dirty: true,
+  restoreSession: true,
+});
+await c.goto(DEV_URL); // 恢复出一篇"未保存"的文档（存过盘又改过：基线未知）
+await c.click(400, 300);
+await c.selectAll();
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await new Promise((r) => setTimeout(r, 700)); // 等存档防抖落地
+await c.evaluate(`(() => { window.__browserDevWrites = []; })()`);
+const beforeBlankDirty = await c.evaluate(archiveProbe);
+await c.key("N", { code: "KeyN", keyCode: 78, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 600)); // 桩里的确认返回 false（= 取消），留足一个来回
+const afterBlankDirty = await c.evaluate(archiveProbe);
+check(
+  "正文删光但仍算改过（基线未知）：Ctrl+N 先弹原生确认；桩里取消 ⇒ 不新建（dirty 不被翻掉）",
+  beforeBlankDirty.content === "" &&
+    beforeBlankDirty.dirty === true &&
+    beforeBlankDirty.confirms === 0 &&
+    afterBlankDirty.confirms === beforeBlankDirty.confirms + 1 && // = 弹过确认
+    afterBlankDirty.dirty === true && // 取消 ⇒ createNew 没跑（跑了基线置空、dirty 会翻成 false）
+    afterBlankDirty.writes === 0,
+  JSON.stringify({ before: beforeBlankDirty, after: afterBlankDirty }),
 );
 
 // ② 输入内容（等过持久化防抖）→ 一次写盘都不该发生：应用从不自己写 .typ

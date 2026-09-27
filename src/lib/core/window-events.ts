@@ -7,12 +7,14 @@
 //    落下时**只认 `.typ`**（`pickTypPath` 取第一个），一个 `.typ` 都没有时**只有在真的拿到路径**
 //    （`paths.length > 0`）才提示「仅支持打开 .typ 文件」——拖了别的文件要提示，而系统没给路径
 //    （拖到窗口空白处之类）就别无中生有一句报错。
-// 2. **关闭确认**：**按内容判定**而不是看 `dirty` 标志（`isEffectiveDirty`）——输入过又删光的文档
-//    `dirty` 仍是 true，但已经没什么可丢的，此时**不许拦**关闭；有内容才 `preventDefault()` 并弹
-//    前端自定义的三按钮弹窗（不用 dialog 插件的返回值，保证 保存/不保存/取消 语义可靠）。
+// 2. **关闭确认**：判据是正文与基线（上次打开/保存时的内容）**不同**（`isDocModified`），
+//    不是"编辑过没有"的标志位、也不是"正文是不是空白"——打开一篇有内容的文件再全选删光是一条
+//    实实在在的修改，关窗前必须问；反过来，打字后又撤销回原样、或「未命名.typ」输入过又删光
+//    （基线本来就是空串）都不该拦。有修改才 `preventDefault()` 并弹前端自定义的三按钮弹窗
+//    （不用 dialog 插件的返回值，保证 保存/不保存/取消 语义可靠）。
 // （`open-file` 广播的接球规则在隔壁 `open-file-claim.ts`：那是**应用广播**、要挑窗口与兜底定时器；
 // 这里管的是**原生窗口事件**，无状态、可重入。）
-import { isEffectiveDirty, pickTypPath } from "./doc-utils";
+import { isDocModified, pickTypPath } from "./doc-utils";
 
 /** 拖放事件类型（Tauri `onDragDropEvent` 的 `payload.type`） */
 export type DragEventType = "over" | "enter" | "drop" | "leave";
@@ -66,11 +68,12 @@ export interface CloseRequestEvent {
 }
 
 export interface CloseGuardHooks {
-  /** 当前正文（`doc`/`dirty` 都是**取值函数**：每次关闭请求重新调用，**不许缓存** —— 缓存成
+  /** 当前正文（`doc`/`baseline` 都是**取值函数**：每次关闭请求重新调用，**不许缓存** —— 缓存成
    * 创建那一刻的值，关闭确认就永远不会弹，用户的内容会被静默丢掉） */
   doc(): string;
-  dirty(): boolean;
-  /** 有可丢内容时弹确认（页面里 `showClosePrompt = true`） */
+  /** 未保存修改的判据基线（`null` = 基线未知，见 `isDocModified`） */
+  baseline(): string | null;
+  /** 有未保存修改时弹确认（页面里 `showClosePrompt = true`） */
   prompt(): void;
 }
 
@@ -81,8 +84,8 @@ export interface CloseGuard {
 export function createCloseGuard(hooks: CloseGuardHooks): CloseGuard {
   return {
     handle(event) {
-      // 没有可丢的内容（干净 / 空文档）→ 什么都不做，放行关闭
-      if (!isEffectiveDirty(hooks.dirty(), hooks.doc())) return;
+      // 正文与基线一致（干净 / 输入过又删光 / 撤销回原样）→ 什么都不做，放行关闭
+      if (!isDocModified(hooks.doc(), hooks.baseline())) return;
       event.preventDefault();
       hooks.prompt();
     },

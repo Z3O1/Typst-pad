@@ -56,7 +56,7 @@
   import { loadState, saveState } from "$lib/core/persistence";
   import { decideAppKey, runAppKeyAction, topModal } from "$lib/editor/app-keys";
   import type { AppModal } from "$lib/editor/app-keys";
-  import { isEffectiveDirty, ensureTrailingNewline, UNTITLED_TITLE } from "$lib/core/doc-utils";
+  import { isDocModified, ensureTrailingNewline, UNTITLED_TITLE } from "$lib/core/doc-utils";
   import {
     createDocumentSession,
     loadedState,
@@ -209,14 +209,12 @@
   }
 
   let fileTitle = $state(UNTITLED_TITLE);
-  let dirty = $state(false);
   let cursorLine = $state(1);
   let cursorCol = $state(1);
   let statusText = $state("就绪");
   let theme: "system" | "dark" | "light" = $state("system");
   let resolvedTheme: "dark" | "light" = $state("dark");
 
-  // $state：窗口标题 effect 依赖内容——输入过又删光后 dirty 不变，须由内容变化驱动圆点实时清除
   let doc: string = $state(SAMPLE_DOC);
   // 编辑器文档的**镜像**：既作为"外部推送"通道（打开/新建/重读时赋新值 → 编辑器替换全文），
   // 也随每次输入同步（handleDocChange）。**必须保持镜像同步**：若只更新 doc，editorDoc 会停在
@@ -224,6 +222,18 @@
   // 都会把旧值当成"外部文档"推回去，表现为"切个模式未保存的新内容就退回上一个版本"。
   let editorDoc = $state(SAMPLE_DOC);
   let filePath: string | null = null;
+  /**
+   * 未保存修改的判据基线 = **上次打开 / 保存时**的正文（`null` = 基线未知，见 `doc-utils`
+   * 的 `isDocModified`）；打开/重新读取/保存/新建四条路都由 `core/document-session` 的状态迁移
+   * 纯函数给（见 applyDocState）。未命名文档的初值：空正文的基线就是空串。
+   */
+  let baseline: string | null = $state("");
+  /**
+   * 有没有未保存修改：由「正文 vs 基线」**现算**，不是自己维护的标志位 ——
+   * 标志位在"打开有内容的文件后全选删光"（会判成干净）与"改了又撤销回原样"（会一直带圆点）
+   * 这两种情况下都会和正文脱节。圆点、打开/重读/新建/关闭的确认框读的都是它。
+   */
+  const dirty = $derived(isDocModified(doc, baseline));
   let previewStatus: "idle" | "ready" | "error" = $state("idle");
   let previewError = $state("");
   let pageCount = $state(0);
@@ -889,7 +899,7 @@
   function handleDocChange(newDoc: string) {
     doc = newDoc;
     editorDoc = newDoc; // 镜像同步（见 editorDoc 声明处）：陈旧镜像 = 切模式/重挂载时丢内容
-    dirty = true;
+    // 脏标记不用手动置位：`dirty` 由 doc 与 baseline 现算（见其声明处），改回原样/删光都自然跟上
     // 文档修订 +1：在途的编译结果据此判废（见 runCompile 的戳比较）
     blockDocRevision += 1;
     remapBlocksForEdit(newDoc);
@@ -956,17 +966,18 @@
   // ---------------------------------------------------------------------------
   // 这里只注入页面状态与文件读写；四条契约（脏文档必问、写盘唯一入口、`applyLoaded` 只此一份、
   // 新建连会话存档一起清）的完整说明在那边。**读页面状态的 hook 全是箭头函数**，在调用时取值 ——
-  // 别改成创建时快照（`filePath` / `dirty` / `doc` 每次都不同）；`isDesktop` / `readFile` /
+  // 别改成创建时快照（`filePath` / `baseline` / `doc` 每次都不同）；`isDesktop` / `readFile` /
   // `writeFile` / `pickFile` 直接引用 import 进来的纯函数，它们不读 `$state`。
   //
   // **唯一**把文档状态写回 `$state` 的地方：字段清单与"迁移后该长什么样"都在
   // `core/document-session.ts` 的三个纯函数里（`loadedState` / `savedState` / `newState`），
-  // 这里只负责赋值。`editorDoc` 放**最后**落 —— 它是编辑器内容的实时镜像（见其声明处）。
+  // 这里只负责赋值（`dirty` 从中派生，见其声明处）。`editorDoc` 放**最后**落 —— 它是编辑器内容的
+  // 实时镜像（见其声明处）。
   function applyDocState(next: DocumentState) {
     doc = next.doc;
     filePath = next.filePath;
     fileTitle = next.fileTitle;
-    dirty = next.dirty;
+    baseline = next.baseline;
     editorDoc = next.editorDoc;
   }
 
@@ -974,7 +985,7 @@
     doc: () => doc,
     filePath: () => filePath,
     fileTitle: () => fileTitle,
-    dirty: () => dirty,
+    baseline: () => baseline,
     applyLoaded: (content, path) => applyDocState(loadedState(content, path)),
     applySaved: (path) => applyDocState(savedState(path, doc)),
     applyNew: () => applyDocState(newState()),
@@ -1652,12 +1663,16 @@
     }, 250);
   }
 
-  /** 窗口标题同步为“文件名 - Typst-pad”；未保存修改时文件名后加圆点（Tauri） */
+  /**
+   * 窗口标题同步为“文件名 - Typst-pad”；有未保存修改时文件名后加圆点（Tauri）。
+   *
+   * 圆点用 `•`（U+2022）而不是 `●`（U+25CF）：原生标题栏的字号由系统定、改不了，只有换更小的
+   * 字形这一条路（用户 2026-09-28 反馈「圆点太大」）。判据是 `dirty`（正文 ≠ 基线），
+   * 不再看"编辑过没有"的标志位——见 `isDocModified`。
+   */
   function syncWindowTitle() {
     if (!isTauri()) return;
-    getCurrentWindow().setTitle(
-      `${fileTitle}${isEffectiveDirty(dirty, doc) ? " ●" : ""} - Typst-pad`,
-    );
+    getCurrentWindow().setTitle(`${fileTitle}${dirty ? " •" : ""} - Typst-pad`);
   }
 
   // fileTitle / dirty 变化时（打开/保存/新建/编辑）同步窗口标题
@@ -1789,7 +1804,7 @@
   });
   const closeGuard = createCloseGuard({
     doc: () => doc,
-    dirty: () => dirty,
+    baseline: () => baseline,
     prompt: () => {
       showClosePrompt = true;
     },
@@ -1874,7 +1889,10 @@
       editorDoc = plan.content.text; // 镜像同步，见 editorDoc 声明处
       filePath = plan.content.filePath;
       fileTitle = plan.content.fileTitle;
-      dirty = plan.content.dirty;
+      // 存档只存了"还有没有未保存修改"，**没存基线**（基线就是整篇正文，再存一份会把
+      // localStorage 撑成两倍）：还有未保存修改 ⇒ 基线未知（`null`，圆点先留着，保存一次就落到
+      // 真实基线）；上次是干净的 ⇒ 恢复出来的正文就是基线（与磁盘一致）。
+      baseline = plan.content.dirty ? null : plan.content.text;
       statusText = "已恢复上次内容";
     }
     mark("persist-restore");
@@ -1986,7 +2004,7 @@
       invoke<boolean>("get_debug_flag")
         .then(setCliDebug)
         .catch(() => {});
-      // 关闭确认：有实际未保存修改（dirty 且内容非空）才拦下来弹三按钮弹窗（规则见
+      // 关闭确认：只有正文与基线不同（有未保存修改）才拦下来弹三按钮弹窗（规则见
       // `core/window-events.ts` 的 `createCloseGuard`）
       keepUnlisten(getCurrentWindow().onCloseRequested((event) => closeGuard.handle(event)));
       // 窗口级拖放：把 .typ 文件拖到窗口内自动打开（覆盖层开关与"只认 .typ"的规则同上）

@@ -2,6 +2,29 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.6] - 2026-09-28
+
+主题是**「改过没有只有一条判据」**：以前"有没有未保存修改"看的是"编辑过的标志位 + 正文是不是空白"，于是打开一篇有内容的文件再全选删光会被判成**未修改**（窗口标题的未保存圆点消失，关窗、新建、重读、打开另一份文件都不再确认，改过的内容可以静默丢掉），而改了又撤销回原样却一直带着未保存标记。现在只有一条标准：正文与**基线**（上次打开／保存／新建时的内容）逐字符不同，窗口标题圆点与四处确认共用这一条判据。同批还有两处手感调整：标题栏的未保存圆点换成更小的字形，缩进快捷键从 `Tab` 改到 `Ctrl+Tab`（普通 `Tab` 回到默认的焦点移动）。
+
+### Fixed
+
+- **「未保存修改」改成与基线比较**（`src/lib/core/doc-utils.ts` 的 `isDocModified` 取代 `isEffectiveDirty`）：把有内容的文件全选删光算改过（旧判据在这里判成"干净"），打字后又撤销回原样不算（旧判据在这里一直判成"脏"）。页面的 `dirty` 从一个手动置位的 `$state` 标志位改成由 `doc` 与 `baseline` 现算的 `$derived`（`+page.svelte`），基线的四路来处由 `core/document-session` 的三个状态迁移纯函数给：打开／重读 = 刚读到的内容，保存 = 刚写下去的内容，新建 = 空串。
+- **四处确认与标题圆点不再各判一套**：打开、重读、新建、关闭（`core/document-session.ts` 的三处 `confirmDiscard` 与 `core/window-events.ts` 的 `createCloseGuard`）读的都是 `isDocModified(doc, baseline)`，不再看"编辑过没有"的标志位、也不再看"正文是不是空白"。
+- **存档恢复出来的未保存文档按"有修改"保守处理**：存档只记"还有没有未保存修改"，**不记基线** —— 基线就是整篇正文，再存一份会把 localStorage 撑成两倍。恢复时这份文档的基线记作 `null`（未知），圆点先留着，用户保存一次就落到真实基线。`session-restore` 的"空白内容不算上次内容"闸门保持原样：它是"这份存档值不值得恢复"，与"改过没有"是两件事。
+- **验收里两处会判成假绿的旧探针**：`wysiwyg.mjs` 第 38 组原先拿"存档里的 `dirty` 翻转"当"确认框没弹"的证据，而 `@tauri-apps/plugin-dialog` 的 `confirm()` 实际发的是 `plugin:dialog|message`（旧探针按 `plugin:dialog|confirm` 数，永远是 0，断言恒真）。现在直接数真实的确认命令（两个名字都认，插件换实现也不至于静默失效），并补一条"正文删光但仍算改过 ⇒ 必须先确认"的正向断言。
+
+### Changed
+
+- **标题栏的未保存圆点换成更小的字形**：`●`（U+25CF）→ `•`（U+2022）。原生标题栏的字号由系统定、页面改不了，只有换字形这一条路。
+- **缩进 / 反缩进从 `Tab` / `Shift+Tab` 改成 `Ctrl+Tab` / `Ctrl+Shift+Tab`**（`src/lib/editor/editor-keymap.ts`，一档仍是 4 个空格，多行选区语义不变）。普通 `Tab` 不再被编辑器接管，回到 WebView 默认的焦点移动。键名写 `Ctrl-` 而不是本文件其它绑定的 `Mod-`：macOS 上 Mod = Cmd，而 Cmd+Tab 是系统切换应用、根本到不了页面。桌面版能收到 `Ctrl+Tab` 是因为 WebView2 的浏览器加速键已在 Rust 侧关掉（`src-tauri/src/lib.rs` 的 `DisableBrowserAccelerators`）；真实浏览器里它是浏览器级手势、页面收不到。
+- 文档同步：`docs/user/shortcuts.md` 的快捷键表、`docs/development/frontend.md` 的缩进说明、`docs/user/editing-modes.md` 与 `docs/user/troubleshooting.md` 的列表边界，以及 `docs/development/files-and-security.md` 里"未保存修改"的判据定义。
+
+### Test / CI
+
+- 单测：`doc-utils` / `document-session` / `window-events` 三处判据断言按基线重写，新增"打开有内容的文件再删光仍要问""撤销回原样不问""基线未知保守问"三条回归；`editor-keymap` 新增"普通 `Tab` 不再缩进"（正文一字不动）。
+- 浏览器验收：wysiwyg **306**（305 → 306，第 38 组两条改成按基线判定 + 数真实确认命令）、writing-blocks **146**（场景改名「Ctrl+Tab 缩进行首」并改按 `Ctrl+Tab`），其余套件计数不变。
+- 本地门禁：`npm test`、`npm run check`、`npm run format:check`、`npm run build`、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 全绿。
+
 ## [0.10.5] - 2026-09-26
 
 主题是**「换行与上下键按可见行走」**：写作模式过去把"段落之间那条空源码行"也当成一个停靠点 —— 它只有 0~3px 高（段距由相邻块的带高承载），于是 Enter 的落点正好压在它上面，↑/↓ 停在它上面时几乎看不见（用户报「按 Enter 后光标会跳动；按 ↑/↓ 时光标会卡在两段之间」）。现在把"维持两个段落所必需的那一条分隔行"与"用户自己创建的空段落"分开：前者压缩到 Typst 段距、**不是**竖直导航的停靠点，后者按普通行盒呈现、仍可进入与删除；竖直移动改成按**可见行与可见段落**走 —— 跨段一次到达、保留水平目标列。

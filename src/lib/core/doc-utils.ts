@@ -1,29 +1,37 @@
 // doc-utils：文档层纯函数（独立模块便于单测）。三类：
-// - 内容判定：isBlankDoc / isEffectiveDirty
+// - 内容判定：isBlankDoc / isDocModified
 // - 路径 / 名字：fileNameOf / UNTITLED_TITLE / isTypPath / pickTypPath
 // - 编译前缀：ensureTrailingNewline
 // 名字类只有这两个、合计十来行，先放一起；**再往这里加名字类函数就该拆 `doc-names.ts`**。
 
 /**
- * 判断文档是否为"空文档"（无有效内容，可直接关闭、无需保存确认）：
- * 内容为空字符串或仅由空白字符（空格、制表符、换行等）组成时视为空。
+ * 判断文档是否为"空文档"（无有效内容）：内容为空字符串或仅由空白字符（空格、制表符、换行等）组成时视为空。
  *
- * 注意：关闭判断以**内容**为准而非 dirty 标志——
- * 用户输入过内容又全部删光后 dirty 仍为 true，但此时已无可丢失的内容。
+ * 今天只有启动恢复用它（空白的存档不算"上次内容"，见 `session-restore` 的 `planContent`）。
+ * **它不再是"未修改"的判据** —— 一篇"打开时有内容、被用户全选删光"的文档是空白文档，但它
+ * 当然是改过的；判断有没有未保存修改只看 `isDocModified`。
  */
 export function isBlankDoc(doc: string): boolean {
   return doc.trim().length === 0;
 }
 
 /**
- * 判断是否存在"实际未保存的修改"（打开其他文件/重新读取/窗口标题圆点等判断用）：
- * dirty 为 true 且内容非空（含仅空白视为空）时才有可丢失的内容，需要确认。
+ * 判断正文相对「基线」有没有未保存修改 —— 窗口标题圆点、打开/重读/新建/关闭的确认框共用这一条判据。
  *
- * 语义 = dirty && !isBlankDoc(doc)：用户输入过内容又全部删光后 dirty 仍为 true，
- * 但此时内容为空、无可丢失的内容，视为未修改。
+ * 基线 = **上次打开 / 保存时**的正文（页面 `baseline` 状态）。"改过没有"只有一条标准：
+ * `doc !== baseline`，**不许**退化成"正文是不是空白"或"编辑过没有"这类标志位：
+ * - 打开一篇有内容的文件再全选删光：正文为空，但与基线不同 ⇒ **是**未保存修改。
+ *   旧判据 `dirty && !isBlankDoc(doc)` 在这里判成"未修改"（圆点消失、关窗不问），
+ *   用户报的「判断未修改的逻辑根本不对」就是它。
+ * - 打字后又撤销回原样：正文与基线逐字符相同 ⇒ 圆点实时清掉，不必等保存。
+ * - 「未命名.typ」新文档的基线是空串：输入过又全删光 ⇒ 与基线相同 ⇒ 不算修改。
+ *
+ * `baseline` 为 `null` = 基线未知：存档恢复出来的未保存文档只存了正文与脏标记、没存基线
+ * （基线就是整篇正文，再存一份会把 localStorage 撑成两倍），此时按"有修改"保守处理 ——
+ * 圆点留着，用户保存一次就落到真实基线。
  */
-export function isEffectiveDirty(dirty: boolean, doc: string): boolean {
-  return dirty && !isBlankDoc(doc);
+export function isDocModified(doc: string, baseline: string | null): boolean {
+  return baseline === null || doc !== baseline;
 }
 
 /** 未命名文档的标题（页面 `fileTitle` 的初值、"新建"、以及"存档里没路径时"都用它） */

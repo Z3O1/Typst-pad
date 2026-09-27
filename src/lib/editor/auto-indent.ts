@@ -11,10 +11,10 @@ export function isBlankLine(lineText: string): boolean {
 }
 
 /**
- * 一档缩进 = **4 个空格**（用户要求「Tab 应该是四格缩进」，2026-09-14）。
+ * 一档缩进 = **4 个空格**（用户要求「缩进应该是四格」，2026-09-14）。
  *
  * 交给 CodeMirror 的 `indentUnit` facet（见 `Editor.svelte` 的 buildExtensions）：
- * Tab / Shift+Tab（`indentWithTab` → indentMore / indentLess）与任何语言侧的自动缩进都用它。
+ * **Ctrl+Tab / Ctrl+Shift+Tab**（见 editor-keymap.ts 的绑定）与任何语言侧的自动缩进都用它。
  * **回车那条不用它** —— 新行缩进是照抄上一行**实际**的空白（见 indentForNewLine），
  * 所以老文档里已有的 2 空格缩进不会被强行改成 4 格。
  *

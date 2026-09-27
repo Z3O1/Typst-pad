@@ -8,6 +8,8 @@
 // 1. **有未保存修改就必须确认**，包括"打开的正是当前这个文件"（`filePath === path`）：
 //    早先用路径相同放行，Windows 上把同一个 .typ 拖进窗口（或从资源管理器"用 Typst-pad 打开"）
 //    会静默拿磁盘内容覆盖未保存的输入，用户看到的是"内容退回上次保存的版本"。
+//    "有未保存修改"的**唯一判据**是 `isDocModified(doc, baseline)`（正文 ≠ 上次打开/保存时的
+//    内容）；别再退回"脏标记 && 正文非空"那种写法 —— 把有内容的文件全选删光也算改过。
 // 2. **写盘只有一条路**：`save()` → 注入的 `writeFile`（页面侧就是 `saveTypFile` → Rust `write_file`）。
 //    没有自动保存、没有旁路；`writeFile` 返回 `null`（用户在另存为对话框里取消）时**什么都不改**。
 // 3. **`applyLoaded` 只此一份**：打开 / 重新读取都要同时落 `doc` 与 `editorDoc` 两处
@@ -15,7 +17,7 @@
 // 4. **新建要连会话存档一起清**：它是全应用唯一"不问就丢内容"的路（清空编辑器 + `filePath` 置空
 //    + `clearState()`）；确认框是这个洞唯一的闸门。清存档**只由主窗口做**，页面用注入的
 //    `clearSession` 自己判断副窗口。
-import { fileNameOf, isEffectiveDirty, UNTITLED_TITLE } from "./doc-utils";
+import { fileNameOf, isDocModified, UNTITLED_TITLE } from "./doc-utils";
 import { failureStatus } from "./failure-text";
 import type { OpenedFile } from "./file-ops";
 
@@ -28,6 +30,9 @@ const DISCARD_TITLE = "未保存的修改";
  * 为什么要有这组纯函数：契约 3（`doc` 与 `editorDoc` 必须同源）与"保存不改内容"这两条，
  * 在页面的 hook 里只是几行赋值，**单测够不着**（`?browserdev=1` 里打开对话框返回 null，
  * 浏览器验收也走不到真打开）。把"迁移后的状态长什么样"提到这里之后，红线就有了能跑红的断言。
+ *
+ * 注意这里**没有**脏标记：有没有未保存修改由 `doc` 与 `baseline` 现算（`isDocModified`），
+ * 标志位会在"改了又撤销回原样""全选删光"这类情况下跟正文脱节（见那个函数的说明）。
  */
 export interface DocumentState {
   doc: string;
@@ -35,34 +40,35 @@ export interface DocumentState {
   editorDoc: string;
   filePath: string | null;
   fileTitle: string;
-  dirty: boolean;
+  /** 未保存修改的判据基线 = 这份正文的来处（打开/保存时的内容）；`null` 见 `isDocModified` */
+  baseline: string | null;
 }
 
-/** 载入（打开 / 重新读取）之后的状态：`doc` 与 `editorDoc` **必须同源**（契约 3） */
+/** 载入（打开 / 重新读取）之后的状态：`doc` 与 `editorDoc` **必须同源**（契约 3），基线就是读到的内容 */
 export function loadedState(content: string, path: string): DocumentState {
   return {
     doc: content,
     editorDoc: content,
     filePath: path,
     fileTitle: fileNameOf(path),
-    dirty: false,
+    baseline: content,
   };
 }
 
-/** 保存成功之后的状态：**内容一个字节都不变**（把当前 `doc` 两处镜像原样带回去），只换路径/标题、清脏标记 */
+/** 保存成功之后的状态：**内容一个字节都不变**（把当前 `doc` 两处镜像原样带回去），只换路径/标题、基线推到当前正文 */
 export function savedState(path: string, doc: string): DocumentState {
   return {
     doc,
     editorDoc: doc,
     filePath: path,
     fileTitle: fileNameOf(path),
-    dirty: false,
+    baseline: doc,
   };
 }
 
-/** 新建（清空）之后的状态：内容两处都空、路径置空、标题回到「未命名.typ」、脏标记复位 */
+/** 新建（清空）之后的状态：内容两处都空、路径置空、标题回到「未命名.typ」、基线回到空串 */
 export function newState(): DocumentState {
-  return { doc: "", editorDoc: "", filePath: null, fileTitle: UNTITLED_TITLE, dirty: false };
+  return { doc: "", editorDoc: "", filePath: null, fileTitle: UNTITLED_TITLE, baseline: "" };
 }
 
 export interface DocumentSessionHooks {
@@ -70,12 +76,13 @@ export interface DocumentSessionHooks {
   doc: () => string;
   filePath: () => string | null;
   fileTitle: () => string;
-  dirty: () => boolean;
-  /** 把磁盘内容落到页面状态：`doc` / `editorDoc` / `filePath` / `fileTitle` / `dirty`（契约 3） */
+  /** 未保存修改的判据基线（`null` = 未知，见 `isDocModified`）：与 `doc` 一起决定"要不要问" */
+  baseline: () => string | null;
+  /** 把磁盘内容落到页面状态：`doc` / `editorDoc` / `filePath` / `fileTitle` / `baseline`（契约 3） */
   applyLoaded: (content: string, path: string) => void;
-  /** 保存成功后只动路径 / 标题 / 脏标记 —— **不碰 `doc` 与 `editorDoc`**（保存不改内容） */
+  /** 保存成功后只动路径 / 标题 / 基线 —— **不碰 `doc` 与 `editorDoc`**（保存不改内容） */
   applySaved: (path: string) => void;
-  /** 新建：清空文档、路径置空、标题回到「未命名.typ」、脏标记复位 */
+  /** 新建：清空文档、路径置空、标题回到「未命名.typ」、基线回到空串 */
   applyNew: () => void;
   /** 载入（打开 / 重新读取）之后统一的后继动作：作废公式缓存与块表 → 重编译 → 存会话 */
   afterLoad: () => void;
@@ -121,7 +128,7 @@ export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSess
 
   async function openPath(path: string): Promise<boolean> {
     // 契约 1：**包括打开的就是当前这个文件**也算"会丢内容"，必须问
-    if (isEffectiveDirty(hooks.dirty(), hooks.doc())) {
+    if (isDocModified(hooks.doc(), hooks.baseline())) {
       const same = hooks.filePath() === path;
       const ok = await confirmDiscard(
         same
@@ -155,7 +162,7 @@ export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSess
     // 不按保存，磁盘上的文件一个字节也不会动。
     try {
       const saved = await hooks.writeFile(hooks.filePath(), hooks.doc());
-      if (!saved) return null; // 另存为对话框里取消了：路径 / 脏标记都不许动
+      if (!saved) return null; // 另存为对话框里取消了：路径 / 基线都不许动（正文照旧算未保存修改）
       hooks.applySaved(saved);
       hooks.afterSave();
       return saved;
@@ -168,7 +175,7 @@ export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSess
   async function reload(): Promise<void> {
     const path = hooks.filePath();
     if (!path) return; // 未命名文档：忽略
-    if (isEffectiveDirty(hooks.dirty(), hooks.doc())) {
+    if (isDocModified(hooks.doc(), hooks.baseline())) {
       const ok = await confirmDiscard(
         "当前文档有未保存的修改，重新读取将丢失这些修改。仍要重新读取吗？",
       );
@@ -185,7 +192,7 @@ export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSess
   }
 
   async function createNew(): Promise<void> {
-    if (isEffectiveDirty(hooks.dirty(), hooks.doc())) {
+    if (isDocModified(hooks.doc(), hooks.baseline())) {
       const ok = await confirmDiscard("当前文档有未保存的修改，新建将丢弃这些修改。仍要新建吗？");
       if (!ok) return;
     }
