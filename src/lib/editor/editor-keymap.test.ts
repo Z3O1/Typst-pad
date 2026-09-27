@@ -353,6 +353,59 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     }
   });
 
+  it("写作模式：列表结构化退格（空项降级 / 反嵌套 / 行首并项 / 体首退成段落）", () => {
+    // 审计 P0-2：旧行为是 CodeMirror 默认的"删一个字符 / 并两行"，会留下 `- 甲- 乙`、`-乙` 这种
+    // 语法垃圾（标记与正文粘在一起就不再是标记）。这里锁的是 `list-structure.ts` 的四种结构动作。
+    const cases = [
+      // 空项体首退格 → 整条标记抹掉，留一个空段落（不留下孤立的 `-`）
+      { doc: "- 甲\n- \n", pos: 6, expected: "- 甲\n\n", head: 4 },
+      // 嵌套项体首退格 → 反嵌套一层
+      { doc: "甲\n  - 乙\n", pos: 6, expected: "甲\n- 乙\n", head: 4 },
+      // 行首退格 → 并进上一项（标记与换行一起消掉）
+      { doc: "- 甲\n- 乙\n", pos: 4, expected: "- 甲乙\n", head: 3 },
+      // 体首退格 → 取消列表，正文退成普通段落
+      { doc: "- 甲\n- 乙\n", pos: 6, expected: "- 甲\n乙\n", head: 4 },
+    ];
+    for (const { doc, pos, expected, head } of cases) {
+      const view = makeWriteView(doc);
+      view.dispatch({ selection: { anchor: pos } });
+      press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+      expect(view.state.doc.toString(), JSON.stringify({ doc, pos })).toBe(expected);
+      expect(view.state.selection.main.head).toBe(head);
+      view.destroy();
+    }
+  });
+
+  it("退格链：空 $ 配对照旧优先；正文里 / 代码里 / 源码模式都不接管结构", () => {
+    // ① 空 `$` 配对整对删还在（Backspace 换成了组合命令，这条防止顺手把它弄丢）
+    let view = makeWriteView("$$");
+    view.dispatch({ selection: { anchor: 1 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("");
+    view.destroy();
+
+    // ② 正文里退格 = 删一个字符（不动结构）
+    view = makeWriteView("- 甲乙\n");
+    view.dispatch({ selection: { anchor: 4 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("- 甲\n");
+    view.destroy();
+
+    // ③ 代码块里的 `- 乙` 不是列表项 → 默认退格（行首并两行），不套列表语义
+    view = makeWriteView("```\n- 乙\n");
+    view.dispatch({ selection: { anchor: 4 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("```- 乙\n");
+    view.destroy();
+
+    // ④ 源码模式不套写作段落/列表语义（默认退格：并两行）
+    view = makeView("- 甲\n- 乙\n");
+    view.dispatch({ selection: { anchor: 4 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("- 甲- 乙\n");
+    view.destroy();
+  });
+
   it("写作模式：跨公式或 raw 的选区只做安全换行，不在残余源码里插入段落符", () => {
     for (const { doc, from, to, expected } of [
       { doc: "a $x$ b", from: 2, to: 5, expected: "a \n b" },

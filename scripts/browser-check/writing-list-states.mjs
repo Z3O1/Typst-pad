@@ -419,9 +419,13 @@ check(
   JSON.stringify({ preTail, postTail: tailTops(nestedPost, 3) }),
 );
 
-// ⑦ 退格合并（当前是**默认行为**，报告把"段首合并"的一致命令语义列在 P1）：行首退格把相邻两项
-//    并成一项；空项正文处退格退掉标记后的空格（`- ` → `-`），typst 把那一行并进上一项。
-//    先把这两份真实产物钉住 —— P1 改合并语义时它会红，提醒同步夹具。
+// ⑦ 结构化退格（typora-parity 审计 P0-2）：判定在 `src/lib/editor/list-structure.ts`，
+//    接线在 `editor-keymap.ts` 的 Backspace（空 `$` 配对优先 → 列表结构 → 默认）。
+//    这里按真实按键走一遍并把结果与**预编译产物**逐字对账：
+//      · 行首退格 → 并进上一项（`- 乙` + `丙` → `- 乙丙`，不再留下 `- 乙- 丙`）
+//      · 空项退格 → 整条标记抹掉，留一个空段落（不再留下孤立的 `-`）
+//      · 嵌套项退格 → 反嵌套一层（与 Shift+Tab 同一语义）
+//      · 体首退格 → 取消列表，正文退成普通段落（不再是 `-乙`）
 await resetDoc();
 await setCaret(8); // 第 3 项（"- 丙"）行首
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
@@ -432,6 +436,31 @@ await c.key("Enter", { code: "Enter", keyCode: 13 });
 await assertState("空续项");
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await assertState("合并·空项退格");
+
+// ⑦b 反嵌套 / 取消列表：从 `- 甲\n- 乙\n` 出发（这份中间态不是夹具文档，几何由桩的假块顶着，
+//     但只要按键的**文本结果**对上夹具，落地后的几何就回到真实产物上 —— 判据与别处同源）。
+console.log("\n=== 结构化退格：反嵌套（Tab 之后退格）与取消列表（体首退格）");
+await c.click(400, 300);
+await c.selectAll();
+await c.type("- 甲\n- 乙\n");
+await sleep(500);
+await setCaret(6); // 第二项正文起点
+await c.key("Tab", { code: "Tab", keyCode: 9 });
+const nestedNow = await c.evaluate(`window.__typstPadView.state.doc.toString()`);
+check(
+  `Tab 把顶层项嵌套起来（${JSON.stringify(nestedNow)}，Tab/Shift+Tab 本来就按缩进嵌套）`,
+  nestedNow === "- 甲\n    - 乙\n",
+  JSON.stringify(nestedNow),
+);
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await assertState("反嵌套");
+await c.click(400, 300);
+await c.selectAll();
+await c.type("- 甲\n- 乙\n");
+await sleep(500);
+await setCaret(6); // 第二项正文起点
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await assertState("取消列表");
 
 // ⑧ 多源码行块里打字（报告第 3 节风险 ① 的实测）：光标进「列表与嵌套」那个**多源码行**的列表项，
 //    敲一个字、等真实产物落地。实测（2026-09-28，本机 1400×900）：

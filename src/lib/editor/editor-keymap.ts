@@ -13,6 +13,7 @@ import type { Command } from "@codemirror/view";
 import { insertNewTypstListItem, insertTypstListContinuation } from "codemirror-lang-typst/lezer";
 import { emptyPairBackspace } from "./auto-pair";
 import { indentForNewLine, isBlankLine } from "./auto-indent";
+import { planListBackspace } from "./list-structure";
 import { scanMathRanges } from "../core/math-ranges";
 import { scanNonMarkupRegions } from "../core/typst-lex";
 import type { Region } from "../core/typst-lex";
@@ -252,6 +253,39 @@ function listAwareEnter(
   };
 }
 
+/**
+ * 写作模式的**结构化退格**（typora-parity 审计 P0-2 / 上一报告 P1「段首合并」）。
+ *
+ * 判定全在 `list-structure.ts` 的纯函数里（空项降级、嵌套项反嵌套、行首并进上一项、体首退成段落），
+ * 这里只做三件事：① 先让"空 `$` 配对整对删"照旧优先（既有行为）；② 选区必须是一个空光标、
+ * 且不在代码 / raw / 注释里；③ 执行一次 `dispatch`。任何不满足的情形都返回 false 交回默认退格 ——
+ * 输入链路绝不吞按键。
+ */
+function listAwareBackspace(isWriteMode: () => boolean): Command {
+  return (view) => {
+    if (deleteEmptyDollarPair(view)) return true;
+    if (!isWriteMode()) return false;
+    const { state } = view;
+    if (state.readOnly) return false;
+    const sel = state.selection;
+    if (sel.ranges.length !== 1 || !sel.main.empty) return false; // 多光标 / 非空选区：交回默认
+    const doc = state.doc.toString();
+    const opaque = scanNonMarkupRegions(doc);
+    const math = scanMathRanges(doc, opaque);
+    const pos = sel.main.head;
+    // 代码 / raw / 注释 / 公式里的 `- x` 不是列表项，别在那里动结构
+    if (touchesOpaqueContext(pos, pos, doc, opaque, math)) return false;
+    const plan = planListBackspace(doc, pos);
+    if (!plan) return false;
+    view.dispatch({
+      changes: { from: plan.from, to: plan.to, insert: plan.insert },
+      selection: { anchor: plan.caret },
+      userEvent: "delete",
+    });
+    return true;
+  };
+}
+
 // CM6 中同一按键的多条绑定按注册顺序执行、先返回 true 者胜出，因此把自定义键位放在
 // basicSetup 之后无法覆盖其默认绑定（例如 Mod-d 会被 searchKeymap 的"选中下一处"
 // 在空选区时抢先返回 true）。用 Prec.high 提升优先级，保证自定义快捷键先被检查。
@@ -270,7 +304,7 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
         run: listAwareEnter(isWriteMode, insertTypstListContinuation, true),
         preventDefault: true,
       },
-      { key: "Backspace", run: deleteEmptyDollarPair, preventDefault: true }, // 空配对整对删
+      { key: "Backspace", run: listAwareBackspace(isWriteMode), preventDefault: true }, // 空配对整对删 + 列表结构化退格
       { key: "Mod-Shift-d", run: copyLineDown, preventDefault: true }, // 复制当前行到下方（VS Code 语义）
       { key: "Mod-d", run: deleteLine, preventDefault: true }, // 删除当前行（有意覆盖 searchKeymap 的"选中下一处"）
       { key: "Mod-Shift-/", run: toggleBlockComment, preventDefault: true }, // 块注释
