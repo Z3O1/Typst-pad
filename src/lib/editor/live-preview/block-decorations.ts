@@ -236,6 +236,20 @@ export function buildEngineBreakDecorations(
         skipped++;
         continue;
       }
+      /**
+       * **断点正好落在源码换行处 → 这一刀是多余的，别插**（2026-09-28 实测的 24.2px"打字先涨后落"）。
+       *
+       * 多源码行块里，引擎的"视觉行边界"往往就是**源码行尾**：CodeMirror 已经按 `\n` 断开了行盒，
+       * 再在行尾插一个 `\A` 当时看不出问题（mark 正好是行内最后一个元素，实测行高仍是 1 行）；
+       * 可**用户一在行尾打字**，`\A` 就不再是最后一个元素 —— 新字被孤立到下一行，后面所有内容
+       * 整体下移 24.2px；等真实产物落地、断点跟着移到新行尾，那一行又收回去。这正是报告第 3 节
+       * 风险 ④「断行占位有过渡风险」的实测形态。
+       *
+       * 这不是"断点落不上"（那种要整块不折，见下面的 `skipped`）：源码换行**已经**提供了同一个
+       * 断点，跳过它不改变行数（源码 3 行 + 中间 2 刀 = 视觉 3 行；跳掉 2 刀仍是 3 行）。
+       */
+      const next = pos < docLength ? state.doc.sliceString(pos, pos + 1) : "";
+      if (next === "\n" || pos >= docLength) continue;
       marks.push(Decoration.mark({ class: "cm-write-engine-break" }).range(at, pos));
     }
     /**

@@ -583,6 +583,33 @@ describe("changedSpan / remapBlocksThroughEdit（编译失败时保留没被改�
       expect(touched.lineBreaks.length + 1).not.toBe(touched.lineCount);
     });
 
+    it("贴在源码换行上的断点跟着**行尾**走（行尾打字不会把新字孤立成一行）", () => {
+      // 报告 2026-09-28 实测：多源码行块的"视觉行边界"常常就是源码行尾（两个断点正好是两个 `\n`）。
+      // 在行尾打字时，插入的字属于这一行 —— 断点必须跟到新行尾；原地不动的话 `\A` 会把新字孤立成
+      // 一行（行高 24.2 → 48.41px），真实产物落地后又缩回去。
+      const doc = "aaa\nbbb\nccc\n"; // 换行在 3 与 7
+      const table = (breaks: number[]) =>
+        toBlockTable(doc, [
+          crop(0, 3, {
+            kind: "ListItem",
+            yPt: 10,
+            heightPt: 60,
+            anchorBaselinePt: 23,
+            lineBreaks: breaks,
+            lineCount: 3,
+          }),
+        ]).blocks;
+      const afterTyped = "aaaX\nbbb\nccc\n"; // 在第一行行尾（3）插入 X
+      // 断点原本贴在两个 `\n` 上 → 重锚到改动后同一条源码行的行尾（4 / 8）
+      expect(remapBlocksThroughEdit(table([3, 7]), doc, afterTyped).blocks[0].lineBreaks).toEqual([
+        4, 8,
+      ]);
+      // 对照：断点在行中间（2 与 6，都不是换行）→ 仍按"落在插入点原地不动"的旧规则
+      expect(remapBlocksThroughEdit(table([2, 6]), doc, afterTyped).blocks[0].lineBreaks).toEqual([
+        2, 7,
+      ]);
+    });
+
     it("块没被碰到时不带 layoutHold（占位只属于正在编辑的那一块）", () => {
       const after = "H\n\nabcdefg\n\nend!\n"; // 只改最后一段
       const out = remapBlocksThroughEdit(held, before, after);

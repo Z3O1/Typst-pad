@@ -573,6 +573,11 @@ export function remapBlocksThroughEdit(
   if (before === after) return { blocks: [...blocks], kept: blocks.length };
   const span = changedSpan(before, after);
   /**
+   * 参数 `after`（改动后的文本）在下面的循环体里被一个同名布尔遮蔽
+   * （`const after = b.from >= span.to`）—— 断点重锚要用**文本**，所以这里先留一份引用。
+   */
+  const afterText = after;
+  /**
    * 改动**落在块与块之间**（空行上打字、段落之间插字、文末追加）时没有任何块与它相交 ——
    * 但那段新文本会落进**相邻块的格子**：块与块之间的空行按 `planBlockCovers` 归**后面那一块**
    * （`cover_i` 从"上一块的最后一行之后"开始），文末则归最后一块（末格的 `coverTo` 是文末）。
@@ -662,10 +667,24 @@ export function remapBlocksThroughEdit(
        */
       const heldBreaks = b.lineBreaks
         .filter((p) => p <= span.from || p >= span.to)
-        // 平移用 `p > span.from` 而不是 `p >= span.to`：**纯插入**时 `span.from === span.to`，
-        // 断点正好落在插入点意味着"断在插入的那个字之前"，位置不该动（这正是打字的常见路径）；
-        // 用 `>= span.to` 会把它也 +delta，于是整段断点集体后移一个字。
-        .map((p) => (p > span.from ? p + span.delta : p));
+        /**
+         * **贴在源码换行上的断点要重锚到"改动后同一条源码行的行尾"**（2026-09-28 实测的 24.2px
+         * "打字先涨后落"，报告第 3 节风险 ④「断行占位有过渡风险」）。
+         *
+         * 多源码行块的"视觉行边界"常常就是**源码行尾**（实测「列表与嵌套」的第二项：两个断点与两个
+         * `\n` 一一对应）。这种断点表达的是"这一源码行到此为止"：用户在**行尾**打字时，插入的字属于
+         * 这一行，断点必须跟着行尾走。原来一律按 `p > span.from` 平移 —— 断点正好落在插入点上时
+         * 原地不动，于是那个 `\A` 把新字孤立成一行（行高 24.2 → 48.41px），后面所有内容整体下移；
+         * 真实产物落地、断点移到新行尾之后又缩回去，正是"打字先涨后落"。
+         *
+         * 重锚之后，装饰层会把这种"下一字符就是换行"的断点直接跳过（换行本身已经断行），
+         * 行数不受影响；找不到换行（那一行被合并到文档末尾等）就退回原来的平移规则。
+         */
+        .map((p) => {
+          if (before.charCodeAt(p) !== 10) return p > span.from ? p + span.delta : p;
+          const end = afterText.indexOf("\n", p);
+          return end < 0 ? (p > span.from ? p + span.delta : p) : end;
+        });
       out.push(revealed({ ...b, from, to, lineBreaks: heldBreaks }));
       continue;
     }

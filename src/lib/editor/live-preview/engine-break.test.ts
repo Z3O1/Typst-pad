@@ -150,6 +150,25 @@ describe("buildEngineBreakDecorations", () => {
     expect(out).toEqual([]);
   });
 
+  it("断点正好落在源码换行处 → 不插 mark（换行已经断开行盒；插了会在行尾打字时多出一行）", () => {
+    // 报告 2026-09-28 实测（真实夹具「列表与嵌套」的多源码行列表项）：引擎的"视觉行边界"就是
+    // 源码行尾时，那个 `\A` 当时看不出问题（mark 恰好是行内最后一个元素，行高仍是 1 行）；用户
+    // 一行尾打字，`X` 就被 `\A` 孤立到下一行（行高 24.2 → 48.41px），后面所有内容整体下移，
+    // 真实产物落地后又缩回去。
+    const doc = "第一行文字\n第二行文字\n第三行文字";
+    const first = doc.indexOf("\n");
+    const second = doc.indexOf("\n", first + 1);
+    const multi = block(0, doc.length, { lineBreaks: [first, second], lineCount: 3 });
+    expect(markedRanges(doc, [cover(multi)])).toEqual([]);
+    // 对照：同样的断点数值，但没有那个换行（单源码行块内部的折行）→ 照旧插 mark
+    const flat = "第一行文字第二行文字第三行文字";
+    const wrapped = block(0, flat.length, { lineBreaks: [first, second], lineCount: 3 });
+    expect(markedRanges(flat, [cover(wrapped)])).toEqual([
+      [first - 1, first],
+      [second - 1, second],
+    ]);
+  });
+
   it("断点前那个字符落在公式/代码区间里 → **整块**不折（不是只跳过那一枚）", () => {
     const doc = "abcdefghijkl";
     const b = block(0, 12, { lineBreaks: [4, 8], lineCount: 3 });
