@@ -195,8 +195,12 @@ export async function connect() {
       return path;
     },
 
-    /** 视口坐标点击（左键单击） */
-    async click(x, y) {
+    /**
+     * 视口坐标点击（左键单击）。
+     * `modifiers` 是 CDP 位掩码（1=Alt 2=Ctrl 4=Meta 8=Shift）：可编辑段落里的链接用
+     * Ctrl/Cmd+点击打开（与 `key` / `wheel` 同一套掩码）。
+     */
+    async click(x, y, { modifiers = 0 } = {}) {
       await send("Input.dispatchMouseEvent", {
         type: "mousePressed",
         x,
@@ -204,6 +208,7 @@ export async function connect() {
         button: "left",
         clickCount: 1,
         buttons: 1,
+        modifiers,
       });
       await send("Input.dispatchMouseEvent", {
         type: "mouseReleased",
@@ -212,6 +217,7 @@ export async function connect() {
         button: "left",
         clickCount: 1,
         buttons: 0,
+        modifiers,
       });
     },
 

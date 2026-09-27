@@ -10,7 +10,11 @@ import type { EditorState } from "@codemirror/state";
 import { planBlockCovers } from "../../core/block-plan";
 import type { Block, BlockCover } from "../../core/block-plan";
 import { decideTextBlockEditing } from "../../core/editable-subset";
-import { scanAllowedInlineCode, scanAllowedInlineRaw } from "../../core/markup-ranges";
+import {
+  scanAllowedInlineCode,
+  scanAllowedInlineLink,
+  scanAllowedInlineRaw,
+} from "../../core/markup-ranges";
 import { scanNonMarkupRegions } from "../../core/typst-lex";
 import type { Region } from "../../core/typst-lex";
 import { PREFETCH_MARGIN } from "./options";
@@ -58,6 +62,7 @@ export function buildBlockCovers(
   const allowedInline = [
     ...scanAllowedInlineCode(doc, opaque),
     ...scanAllowedInlineRaw(doc, opaque),
+    ...scanAllowedInlineLink(doc, opaque),
   ];
   for (const cover of covers) {
     if (cover.noOutput) continue;

@@ -2,6 +2,7 @@
 import { describe, it, expect } from "vitest";
 import {
   scanAllowedInlineCode,
+  scanAllowedInlineLink,
   scanAllowedInlineRaw,
   scanMarkupDecorations,
 } from "./markup-ranges";
@@ -243,6 +244,21 @@ describe("简单函数白名单（任务 4）：`#strong[文字]` / `#emph[文�
     expect(scanAllowedInlineCode("#strong[没闭合")).toEqual([]);
     expect(scanAllowedInlineCode("#strong[]")).toEqual([]);
     expect(scanAllowedInlineCode("#strong[$x$ 与 *粗*]")).toHaveLength(1);
+  });
+
+  it("链接的允许区间与装饰同源：字面量 URL + 非空内容块放行，变量 / 无内容块不放行", () => {
+    const doc = '看 #link("https://typst.app")[官方文档]。';
+    const call = { from: 2, to: doc.indexOf(")") + 1 };
+    expect(scanAllowedInlineLink(doc)).toEqual([call]);
+    // 装饰侧要能认出同一个构造（kind=link + 标记 + 正文），否则"放行"就只是半个功能
+    const deco = scanMarkupDecorations(doc).find((d) => d.kind === "link");
+    expect(deco?.content.from).toBe(doc.indexOf("[") + 1);
+    // 变量 URL / 无内容块 / 空内容都不放行（与呈现层同一条判据）
+    expect(scanAllowedInlineLink("看 #link(url)[文字]。")).toEqual([]);
+    expect(scanAllowedInlineLink('看 #link("https://typst.app")。')).toEqual([]);
+    expect(scanAllowedInlineLink('看 #link("https://typst.app")[]。')).toEqual([]);
+    // 内容块里夹带别的代码（lexer 未必进得了内容块）⇒ 与 `#strong[#h(1em)字]` 同一条拒绝
+    expect(scanAllowedInlineLink('看 #link("https://typst.app")[#h(1em)文档]。')).toEqual([]);
   });
 
   it("行内 raw 的允许区间与装饰同源：单行闭合放行，未闭合 / 围栏不放行", () => {

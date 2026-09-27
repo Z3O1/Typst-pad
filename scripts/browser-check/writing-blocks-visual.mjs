@@ -126,7 +126,17 @@ for (const fx of fixtures) {
 
   // ⑥ 链接热区（阶段 3"链接可点"）：真实产物里 `#link("…")[…]` 的方框要变成可点的热区，
   //    位置按"带内相对 pt → 百分比"对得上（拿夹具里的 links 逐条比），点下去交给 opener 插件。
-  const fixtureLinks = fx.blocks.flatMap((b, i) => (b.links ?? []).map((l) => ({ i, ...l })));
+  /**
+   * **只有被切片的块才需要链接热区**：可编辑段落里的链接是真实文本（走 Ctrl/Cmd+点击，见
+   * `live-preview/link-click.ts`），不会渲染成 `.cm-block-crop-link`。夹具里的 `links` 是引擎
+   * 画的链接矩形，两种形态都有 —— 所以这里按 `editableInFixture` 分成两组分别验。
+   */
+  const fixtureLinks = fx.blocks.flatMap((b, i) =>
+    directlyEditable(fx, b) ? [] : (b.links ?? []).map((l) => ({ i, ...l })),
+  );
+  const editableLinks = fx.blocks.flatMap((b, i) =>
+    directlyEditable(fx, b) ? (b.links ?? []).map((l) => ({ i, ...l })) : [],
+  );
   if (fixtureLinks.length > 0) {
     const overlays = await c.evaluate(`(() => {
       const out = [];
@@ -213,6 +223,64 @@ for (const fx of fixtures) {
         `${fx.name}：点热区之后焦点仍在编辑内容元素上（不然点完链接打不进字）`,
         focused.isContent === true,
         JSON.stringify(focused),
+      );
+      await c.evaluate(`window.__browserDevOpenUrls = []`);
+    }
+  }
+
+  // ⑥b **可编辑段落里的链接**：真实文本 + Ctrl/Cmd+点击打开；普通点击留给"落光标改字"。
+  if (editableLinks.length > 0) {
+    const mark = await c.evaluate(`(() => {
+      const el = document.querySelector(".cm-line .cm-markup-link");
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), text: el.textContent };
+    })()`);
+    check(
+      `${fx.name}：可编辑段落里的链接是**真实文本**（${mark ? JSON.stringify(mark.text) : "没找到 .cm-markup-link"}）`,
+      mark !== null,
+      JSON.stringify({ editableLinks: editableLinks.length, mark }),
+    );
+    if (mark) {
+      const expected = new Set(editableLinks.map((l) => l.href));
+      await c.evaluate(`window.__browserDevOpenUrls = []`);
+      const headBefore = await c.evaluate(
+        `document.querySelector(".cm-content").cmTile.root.view.state.selection.main.head`,
+      );
+      await c.click(mark.x, mark.y); // 普通点击：不打开
+      await new Promise((r) => setTimeout(r, 300));
+      const plain = await c.evaluate(`window.__browserDevOpenUrls ?? []`);
+      check(
+        `${fx.name}：普通点击**不**打开链接（留给落光标改字）`,
+        Array.isArray(plain) && plain.length === 0,
+        JSON.stringify({ plain }),
+      );
+      // **普通点击之后要重新取一次坐标**：那一下会把光标放进正文，编辑区可能因此滚动/重排，
+      // 旧坐标就可能落在别的元素上了（实测「链接」场景会因此"点了没反应"）。
+      const headBeforeCtrl = await c.evaluate(
+        `document.querySelector(".cm-content").cmTile.root.view.state.selection.main.head`,
+      );
+      const again = await c.evaluate(`(() => {
+        const el = document.querySelector(".cm-line .cm-markup-link");
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      if (again) await c.click(again.x, again.y, { modifiers: 2 }); // Ctrl+点击：打开
+      await new Promise((r) => setTimeout(r, 400));
+      const opened = await c.evaluate(`window.__browserDevOpenUrls ?? []`);
+      check(
+        `${fx.name}：Ctrl+点击打开链接（${JSON.stringify(opened)} ∈ ${JSON.stringify([...expected])}）`,
+        Array.isArray(opened) && opened.length === 1 && expected.has(opened[0]),
+        JSON.stringify({ opened, expected: [...expected] }),
+      );
+      const headAfter = await c.evaluate(
+        `document.querySelector(".cm-content").cmTile.root.view.state.selection.main.head`,
+      );
+      check(
+        `${fx.name}：Ctrl+点击链接不挪光标（${headBeforeCtrl} → ${headAfter}；普通点击那一下已经把光标放进正文）`,
+        headAfter === headBeforeCtrl,
+        JSON.stringify({ headBefore, headBeforeCtrl, headAfter }),
       );
       await c.evaluate(`window.__browserDevOpenUrls = []`);
     }

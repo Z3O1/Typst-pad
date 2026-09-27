@@ -35,6 +35,7 @@ import { buildMarkupDecorations } from "./live-preview/markup-decorations";
 import { blockRangeFor, buildMathDecorations } from "./live-preview/math-decorations";
 import { refreshLivePreview } from "./live-preview/options";
 import type { LivePreviewOptions } from "./live-preview/options";
+import { createLinkClick } from "./live-preview/link-click";
 import { createRequester } from "./live-preview/requests";
 import { mathWidgetTheme } from "./live-preview/theme";
 
@@ -195,7 +196,8 @@ export function livePreview(opts: LivePreviewOptions): Extension {
 
   const cropMouseSelection = createBlockDrag({ opts, getCovers });
   const blockVerticalMoves = createBlockMoves({ getCovers, getSeparatorLines });
+  const linkClick = createLinkClick(opts);
   const requester = createRequester({ opts });
 
-  return [decoField, cropMouseSelection, blockVerticalMoves, requester, mathWidgetTheme];
+  return [decoField, cropMouseSelection, blockVerticalMoves, linkClick, requester, mathWidgetTheme];
 }

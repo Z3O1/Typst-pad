@@ -274,15 +274,27 @@ function scanInlineCalls(doc: string, opaque: Region[], out: MarkupDecoration[])
  */
 const LINK_RE = /^#link\s*\(\s*"[^"]*"\s*\)$/;
 
+/**
+ * `#link("url")[…]` 的**代码区间判定**：认出来就返回内容块 `[` 的下标，否则 -1。
+ *
+ * `scanLinks`（呈现）与 `scanAllowedInlineLink`（可编辑资格）**共用这一份判据** ——
+ * 两处各写一套必然漂移（"能显示"与"能编辑"对不上，正是 `scanAllowedInlineCode` 注释里的教训）。
+ * 只认字面量 URL + 非空内容块；`#link(url)`（变量）、无内容块、内容为空都不认。
+ */
+function linkContentOpen(doc: string, region: Region): number {
+  if (region.kind !== "code") return -1;
+  if (!LINK_RE.test(doc.slice(region.from, region.to))) return -1;
+  if (doc[region.to] !== "[") return -1;
+  const close = matchBracket(doc, region.to);
+  if (close < 0 || close <= region.to + 1) return -1;
+  return region.to;
+}
+
 function scanLinks(doc: string, opaque: Region[], out: MarkupDecoration[]): void {
   for (const region of opaque) {
-    if (region.kind !== "code") continue;
-    if (!LINK_RE.test(doc.slice(region.from, region.to))) continue;
-    if (doc[region.to] !== "[") continue;
-    const close = matchBracket(doc, region.to);
-    if (close < 0) continue;
-    const content = { from: region.to + 1, to: close };
-    if (content.from >= content.to) continue;
+    const open = linkContentOpen(doc, region);
+    if (open < 0) continue;
+    const close = matchBracket(doc, open);
     out.push({
       kind: "link",
       markers: [
@@ -290,9 +302,39 @@ function scanLinks(doc: string, opaque: Region[], out: MarkupDecoration[]): void
         { from: region.to, to: region.to + 1 },
         { from: close, to: close + 1 },
       ],
-      content,
+      content: { from: region.to + 1, to: close },
     });
   }
+}
+
+/**
+ * 链接的**允许区间**（`#link("url")` 那一段代码）：与 `scanLinks` 同源，放行含它的段落直接编辑。
+ *
+ * 注意只放行**调用语法**本身：内容块里的代码 / raw 仍按各自的白名单判（例如
+ * `#link("u")[#h(1em)X]` 里的 `#h(1em)` 不在白名单 ⇒ 整块照样切片）。URL 原样留在源码里，
+ * 呈现层隐藏它；可编辑段落里的链接用 **Ctrl/Cmd+点击**打开（见 `live-preview` 的点击处理器），
+ * 切片里的链接仍走热区。
+ */
+export function scanAllowedInlineLink(
+  doc: string,
+  opaque: readonly Region[] = scanNonMarkupRegions(doc),
+): { from: number; to: number }[] {
+  const out: { from: number; to: number }[] = [];
+  for (const region of opaque) {
+    const open = linkContentOpen(doc, region);
+    if (open < 0) continue;
+    /**
+     * **内容块必须是"简单 markup"**（与 `#strong`/`#emph` 同一条 `isSimpleCallContent`）。
+     *
+     * lexer 不一定进得了内容块（`#strong[#h(1em)字]` 只报外层调用，见 `isSimpleCallContent`），
+     * 而 `#h(1em)` 在 typst 里画成空白、在编辑器里会原样显示成源码 —— 放行就等于"屏幕上像文字、
+     * 排版里不是那回事"。宁可整块切片：拒绝含 `#`、反引号、反斜线、标签与换行的链接文字。
+     */
+    const close = matchBracket(doc, open);
+    if (!isSimpleCallContent(doc.slice(open + 1, close))) continue;
+    out.push({ from: region.from, to: region.to });
+  }
+  return out;
 }
 
 /**

@@ -4,7 +4,11 @@ import {
   overlapsComplexExcept,
   overlapsComplexRegion,
 } from "./editable-subset";
-import { scanAllowedInlineCode, scanAllowedInlineRaw } from "./markup-ranges";
+import {
+  scanAllowedInlineCode,
+  scanAllowedInlineLink,
+  scanAllowedInlineRaw,
+} from "./markup-ranges";
 import type { EditDecisionInput } from "./editable-subset";
 import { scanNonMarkupRegions } from "./typst-lex";
 import type { Block } from "./block-plan";
@@ -35,7 +39,11 @@ function decide(doc: string, b: EditDecisionInput["block"], edit?: Block["edit"]
     block: withProof,
     source: doc.slice(b.from, b.to),
     opaque,
-    allowedInline: [...scanAllowedInlineCode(doc, opaque), ...scanAllowedInlineRaw(doc, opaque)],
+    allowedInline: [
+      ...scanAllowedInlineCode(doc, opaque),
+      ...scanAllowedInlineRaw(doc, opaque),
+      ...scanAllowedInlineLink(doc, opaque),
+    ],
   });
 }
 
@@ -304,16 +312,22 @@ describe("行内原子（任务 3）：引用 / 标签放行，脚注与 raw / �
     });
   });
 
-  it("含链接的段落仍切片（点开链接与进入编辑的冲突还没定）；行内 raw 已开放", () => {
+  it("含字面量 URL 的链接段落开放；变量 URL / 内容块里的其它代码仍切片", () => {
     const link = '看 #link("https://typst.app")[官方文档]。';
     expect(decide(link, block({ from: 0, to: link.length }), verified(link))).toMatchObject({
-      editable: false,
-      reason: "complex",
-    });
-    const raw = "正文里有 `code` 一段。";
-    expect(decide(raw, block({ from: 0, to: raw.length }), verified(raw))).toMatchObject({
       editable: true,
       reason: "editable",
+    });
+    // 变量 URL：`#link(url)[…]` 的 URL 是代码不是字面量 ⇒ 不认
+    const variable = "看 #link(url)[官方文档]。";
+    expect(
+      decide(variable, block({ from: 0, to: variable.length }), verified(variable)),
+    ).toMatchObject({ editable: false, reason: "complex" });
+    // 内容块里夹带别的代码 ⇒ 那一处仍是复杂区域，整块照旧切片
+    const nested = '看 #link("https://typst.app")[#h(1em)官方文档]。';
+    expect(decide(nested, block({ from: 0, to: nested.length }), verified(nested))).toMatchObject({
+      editable: false,
+      reason: "complex",
     });
   });
 });

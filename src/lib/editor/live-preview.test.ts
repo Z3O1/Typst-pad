@@ -48,6 +48,8 @@ describe("livePreview 扩展", () => {
       lineHeight?: number;
       /** 可视高度（px）：占位上限 1 个可视高度（报告 T4） */
       viewportHeight?: number;
+      /** 外链打开回调（可编辑段落里的链接走 Ctrl/Cmd+点击，切片热区走普通点击） */
+      onOpenLink?: (href: string) => void;
     } = {},
   ) {
     const enabled = opts.enabled ?? true;
@@ -73,6 +75,7 @@ describe("livePreview 扩展", () => {
             ...(opts.viewportHeight === undefined
               ? {}
               : { viewportHeight: () => opts.viewportHeight! }),
+            ...(opts.onOpenLink ? { onOpenLink: opts.onOpenLink } : {}),
           }),
         ],
       }),
@@ -157,6 +160,33 @@ describe("livePreview 扩展", () => {
     expect(emptyParagraph).toBeTruthy();
     expect(host.querySelectorAll(".cm-widgetBuffer")).toHaveLength(0);
     expect(view.state.doc.toString()).toBe("前段\n\n\n后段");
+  });
+
+  it("可编辑段落里的链接：Ctrl/Cmd+点击打开 URL，普通点击不动（留给落光标编辑）", () => {
+    const hrefs: string[] = [];
+    mount('看 #link("https://typst.app")[官方文档]。', { onOpenLink: (h) => hrefs.push(h) });
+    const link = host.querySelector(".cm-markup-link");
+    expect(link).toBeTruthy();
+    // 链接文字是**真实文本**（可编辑），不是切片热区
+    expect(link?.textContent).toBe("官方文档");
+    const before = view.state.selection.main.head;
+    // 普通点击：不打开（点进正文改字）
+    link!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    expect(hrefs).toEqual([]);
+    expect(view.state.selection.main.head).toBe(before);
+    // Ctrl+点击：打开 URL，且不挪光标（与切片热区同一条"打开"语义）
+    link!.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true, ctrlKey: true }),
+    );
+    expect(hrefs).toEqual(["https://typst.app"]);
+    expect(view.state.selection.main.head).toBe(before);
+    // 没命中链接的位置（正文空白处）不打开：不吞点击
+    host
+      .querySelector(".cm-line")
+      ?.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, cancelable: true, ctrlKey: true }),
+      );
+    expect(hrefs).toEqual(["https://typst.app"]);
   });
 
   it("已缓存的公式被 widget 替换（源码里的 $ 不再出现）", () => {

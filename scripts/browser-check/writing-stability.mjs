@@ -63,11 +63,13 @@ const blockFixtures = loadFixtures("block-fixtures.json", {
   hint: "先跑 npm run fixtures:blocks",
   predicate: (list) =>
     ["公式形态", "代码与表格", "链接"].every((n) => list.some((f) => f.name === n)),
-  what: "块级夹具里缺少本套件要用的场景（公式形态 / 代码与表格 / 链接）",
+  what: "块级夹具里缺少本套件要用的场景（公式形态 / 代码与表格 / 切片里的链接）",
 });
 const sceneFormula = blockFixtures.find((f) => f.name === "公式形态");
 const sceneCode = blockFixtures.find((f) => f.name === "代码与表格");
-const sceneLink = blockFixtures.find((f) => f.name === "链接");
+// 链接必须取**仍被切片**的那一份产物：可编辑段落里的链接是真实文本（Ctrl/Cmd+点击打开），
+// 没有热区；改版心宽那组要验的是"切片与热区成套重建"。
+const sceneLink = blockFixtures.find((f) => f.name === "切片里的链接");
 
 /** 需要现成真产物的公式：body / display 必须与 Rust `dump_math_fixtures` 的用例逐字相同 */
 const REAL_MATH = [

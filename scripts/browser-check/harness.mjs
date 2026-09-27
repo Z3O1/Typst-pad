@@ -264,21 +264,25 @@ export function editableInFixture(doc, block) {
 /**
  * 源码里有没有"白名单之外"的代码 / raw / 注释（与 `markup-ranges` 同口径的保守近似）。
  *
- * 白名单 = `#strong` / `#emph` 的调用语法 + **单行闭合的行内 raw**（`scanAllowedInlineRaw`）。
- * 行内 raw 的判定照抄产品口径：同一条源码行里出现**等长**的反引号串才算闭合；未闭合、跨行、
- * 或三反引号的围栏一律算复杂（那些块的源码本来就含换行，调用方已经先挡掉）。
+ * 白名单 = `#strong` / `#emph` / **`#link("字面量URL")`** 的调用语法（内容块都照常要求"简单
+ * markup"：不含 `#`、反引号、反斜线、标签与换行）+ **单行闭合的行内 raw**。其余 `#…`、注释、
+ * 围栏 / 缩进 raw 一律算复杂 —— 与 `editable-subset` + `markup-ranges` 的白名单一一对应，
+ * 两边不一致时 `writing-blocks-visual` 的"切片只覆盖复杂块"会当场红（双实现一致性靠它守）。
  */
 function hasNonWhitelistedCode(src) {
-  const CALL = /^#(strong|emph)$/;
-  const matchBracket = (s, open) => {
+  const SIMPLE_CALL = /^#(strong|emph)$/;
+  const LINK_CALL = /^#link$/;
+  const simpleContent = (s) => !/[#`\\<>\n]/.test(s);
+  /** 从 `open` 处的开括号找配对的闭括号下标（跳过字符串）；不匹配返回 -1 */
+  const matchPair = (s, open, openCh, closeCh) => {
     let depth = 0;
     for (let i = open; i < s.length; i++) {
       const c = s[i];
       if (c === '"') {
         i++;
         while (i < s.length && s[i] !== '"') i += s[i] === "\\" ? 2 : 1;
-      } else if (c === "[") depth++;
-      else if (c === "]") {
+      } else if (c === openCh) depth++;
+      else if (c === closeCh) {
         depth--;
         if (depth === 0) return i;
       }
@@ -304,10 +308,19 @@ function hasNonWhitelistedCode(src) {
       let j = i + 1;
       while (j < src.length && /[A-Za-z0-9_-]/.test(src[j])) j++;
       const name = src.slice(i, j);
-      if (!CALL.test(name) || src[j] !== "[") return true;
-      const close = matchBracket(src, j);
-      if (close < 0) return true;
-      if (/[#`\\<>\n]/.test(src.slice(j + 1, close))) return true;
+      if (!SIMPLE_CALL.test(name) && !LINK_CALL.test(name)) return true;
+      if (LINK_CALL.test(name)) {
+        // 链接：URL 必须是**字面量**（`#link(url)` 不认），再跟一个非空内容块
+        if (src[j] !== "(") return true;
+        const paren = matchPair(src, j, "(", ")");
+        if (paren < 0) return true;
+        if (!/^\(\s*"[^"]*"\s*\)$/.test(src.slice(j, paren + 1))) return true;
+        j = paren + 1;
+      }
+      if (src[j] !== "[") return true;
+      const close = matchPair(src, j, "[", "]");
+      if (close < 0 || close <= j + 1) return true;
+      if (!simpleContent(src.slice(j + 1, close))) return true;
       i = close + 1;
       continue;
     }

@@ -13,7 +13,11 @@
 // 判定只在这里做一次：块级装饰（`live-preview/block-decorations`）只消费本模块的结论，
 // 不再自己写一套语法判据；后端只提供"帧里画了什么"的证明，不重写语法白名单。
 import type { Block, BlockEditProof } from "./block-plan";
-import { scanAllowedInlineCode, scanAllowedInlineRaw } from "./markup-ranges";
+import {
+  scanAllowedInlineCode,
+  scanAllowedInlineLink,
+  scanAllowedInlineRaw,
+} from "./markup-ranges";
 import { scanNonMarkupRegions } from "./typst-lex";
 import type { Region } from "./typst-lex";
 
@@ -70,7 +74,8 @@ export interface EditDecisionInput {
    * 单行闭合的行内 raw（`scanAllowedInlineRaw`）。这些 code / raw 区域不算"复杂"，块仍可直接编辑
    * （呈现走既有的 `strong` / `emph` / `raw-inline` 装饰，触及标记即露出源码）。
    *
-   * **链接（`#link("url")[文字]`）不在这里**：它的"点开链接"与"进入编辑"冲突还没定，仍整块切片。
+   * 链接（`#link("url")[文字]`）也在内：可编辑段落里的链接用 **Ctrl/Cmd+点击**打开，普通点击照常
+   * 落光标进编辑；切片里的链接仍走热区（两者不冲突）。
    */
   allowedInline?: readonly { from: number; to: number }[];
 }
@@ -200,6 +205,10 @@ export function decideTextBlockEditingIn(
     block,
     source: doc.slice(block.from, block.to),
     opaque,
-    allowedInline: [...scanAllowedInlineCode(doc, opaque), ...scanAllowedInlineRaw(doc, opaque)],
+    allowedInline: [
+      ...scanAllowedInlineCode(doc, opaque),
+      ...scanAllowedInlineRaw(doc, opaque),
+      ...scanAllowedInlineLink(doc, opaque),
+    ],
   });
 }
