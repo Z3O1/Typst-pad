@@ -1,6 +1,10 @@
 // 常用标记（标题 / 粗体 / 斜体 / 行内代码 / 列表符号）扫描的单元测试。
 import { describe, it, expect } from "vitest";
-import { scanAllowedInlineCode, scanMarkupDecorations } from "./markup-ranges";
+import {
+  scanAllowedInlineCode,
+  scanAllowedInlineRaw,
+  scanMarkupDecorations,
+} from "./markup-ranges";
 import { scanMathRanges } from "./math-ranges";
 
 /** 便捷断言：取某类装饰的标记文本与正文文本 */
@@ -239,5 +243,19 @@ describe("简单函数白名单（任务 4）：`#strong[文字]` / `#emph[文�
     expect(scanAllowedInlineCode("#strong[没闭合")).toEqual([]);
     expect(scanAllowedInlineCode("#strong[]")).toEqual([]);
     expect(scanAllowedInlineCode("#strong[$x$ 与 *粗*]")).toHaveLength(1);
+  });
+
+  it("行内 raw 的允许区间与装饰同源：单行闭合放行，未闭合 / 围栏不放行", () => {
+    // 只有 `code` 那一段（含反引号）放行 —— 与 `scanMarkupDecorations` 的 raw-inline 同一条判据
+    expect(scanAllowedInlineRaw("正文 `code` 收尾")).toEqual([{ from: 3, to: 9 }]);
+    // 双反引号里可以含单个反引号
+    expect(scanAllowedInlineRaw("a ``c`d`` b")).toHaveLength(1);
+    // 未闭合：lexer 的 raw 区域一路吃到文末 → 不放行（整块切片）
+    expect(scanAllowedInlineRaw("a `code b")).toEqual([]);
+    // 围栏 / 缩进代码块（多行）不放行
+    expect(scanAllowedInlineRaw("```\ncode\n```\n")).toEqual([]);
+    // 装饰侧也要能看到它的标记与正文，否则"放行"就只是半个功能
+    const deco = scanMarkupDecorations("正文 `code` 收尾").find((d) => d.kind === "raw-inline");
+    expect(deco).toMatchObject({ content: { from: 4, to: 8 } });
   });
 });

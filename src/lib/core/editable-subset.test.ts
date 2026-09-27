@@ -4,7 +4,7 @@ import {
   overlapsComplexExcept,
   overlapsComplexRegion,
 } from "./editable-subset";
-import { scanAllowedInlineCode } from "./markup-ranges";
+import { scanAllowedInlineCode, scanAllowedInlineRaw } from "./markup-ranges";
 import type { EditDecisionInput } from "./editable-subset";
 import { scanNonMarkupRegions } from "./typst-lex";
 import type { Block } from "./block-plan";
@@ -23,13 +23,19 @@ function block(geo: Partial<Block> = {}): EditDecisionInput["block"] {
   };
 }
 
-/** 用文档与块区间算一次决策（复制真实的调用口径）；`edit` 缺省 = 没有证明通道 */
+/**
+ * 用文档与块区间算一次决策（复制真实的调用口径：区域表与**行内白名单**都现算）；
+ * `edit` 缺省 = 没有证明通道。白名单与产品同源 —— `#strong`/`#emph` 的调用语法 +
+ * 单行闭合的行内 raw（`scanAllowedInlineCode` + `scanAllowedInlineRaw`）。
+ */
 function decide(doc: string, b: EditDecisionInput["block"], edit?: Block["edit"]) {
   const withProof = edit === undefined ? b : { ...b, edit };
+  const opaque = scanNonMarkupRegions(doc);
   return decideTextBlockEditing({
     block: withProof,
     source: doc.slice(b.from, b.to),
-    opaque: scanNonMarkupRegions(doc),
+    opaque,
+    allowedInline: [...scanAllowedInlineCode(doc, opaque), ...scanAllowedInlineRaw(doc, opaque)],
   });
 }
 
@@ -94,11 +100,12 @@ describe("decideTextBlockEditing：反例（推翻资格判据）", () => {
     expect(decide(doc, b, verified(doc))).toMatchObject({ editable: false, reason: "multi-line" });
   });
 
-  it("含行内 raw / 注释的块仍走切片", () => {
+  it("单行闭合的行内 raw 开放；注释仍然让整块走切片", () => {
+    // 行内 raw 现在与 `#strong`/`#emph` 同级放行（呈现走既有的 raw-inline 装饰、触及反引号即露出）
     const raw = "正文里有 `code` 一段。";
     expect(decide(raw, block({ from: 0, to: raw.length }), verified(raw))).toMatchObject({
-      editable: false,
-      reason: "complex",
+      editable: true,
+      reason: "editable",
     });
     const comment = "正文 // 注释";
     expect(
@@ -201,29 +208,37 @@ describe("decideTextBlockEditing：简单列表项（任务 2）", () => {
     });
   });
 
-  it("列表项里的行内 raw 仍走切片", () => {
+  it("列表项里的行内 raw 也开放（与正文同一条白名单；`$` 公式的限制不变）", () => {
     const doc = "- 有 `code` 的项";
     const b = { ...block({ from: 0, to: doc.length, kind: "ListItem" }), listMarker: bullet };
-    expect(decide(doc, b, verified(doc))).toMatchObject({ editable: false, reason: "complex" });
+    expect(decide(doc, b, verified(doc))).toMatchObject({ editable: true, reason: "editable" });
   });
 });
 
 describe("decideTextBlockEditing：简单函数白名单（任务 4）", () => {
-  /** 复制真实调用口径：区域表与白名单都由文档现算 */
-  function decideWithWhitelist(doc: string, b: EditDecisionInput["block"], source = doc) {
-    const opaque = scanNonMarkupRegions(doc);
-    return decideTextBlockEditing({
-      block: b,
-      source,
-      opaque,
-      allowedCode: scanAllowedInlineCode(doc, opaque),
-    });
-  }
-
   it("`#strong[文字]` / `#emph[文字]` 的正文块可以直接编辑", () => {
     const doc = "正文 #strong[加粗] 与 #emph[斜体] 收尾。";
     const b = block({ from: 0, to: doc.length });
-    expect(decideWithWhitelist(doc, b)).toMatchObject({ editable: true, reason: "editable" });
+    expect(decide(doc, b)).toMatchObject({ editable: true, reason: "editable" });
+  });
+
+  it("单行闭合的行内 raw 的正文块可以直接编辑；未闭合 / 多行 raw 仍然复杂", () => {
+    const doc = "正文有 `code` 与 `x = 1` 收尾。";
+    expect(decide(doc, block({ from: 0, to: doc.length }))).toMatchObject({
+      editable: true,
+      reason: "editable",
+    });
+    // 未闭合的反引号：lexer 的 raw 区域一路吃到文末 ⇒ 不放行
+    const unclosed = "正文有 `code 收尾。";
+    expect(decide(unclosed, block({ from: 0, to: unclosed.length }))).toMatchObject({
+      editable: false,
+      reason: "complex",
+    });
+    // 多行 raw（围栏 / 缩进代码块）仍是复杂区域
+    const fenced = "正文\n\n```typ\nlet a = 1\n```\n";
+    expect(decide(fenced, block({ from: 0, to: fenced.length }))).toMatchObject({
+      editable: false,
+    });
   });
 
   it("其它行内代码 / 自定义函数不开放", () => {
@@ -233,7 +248,7 @@ describe("decideTextBlockEditing：简单函数白名单（任务 4）", () => {
       "正文 #figure([图]) 收尾。",
       "正文 #place(top)[飘] 收尾。",
     ]) {
-      expect(decideWithWhitelist(doc, block({ from: 0, to: doc.length }))).toMatchObject({
+      expect(decide(doc, block({ from: 0, to: doc.length }))).toMatchObject({
         editable: false,
         reason: "complex",
       });
@@ -242,7 +257,7 @@ describe("decideTextBlockEditing：简单函数白名单（任务 4）", () => {
 
   it("白名单调用里夹带别的代码不放行", () => {
     const doc = "正文 #strong[#h(1em)字] 收尾。";
-    expect(decideWithWhitelist(doc, block({ from: 0, to: doc.length }))).toMatchObject({
+    expect(decide(doc, block({ from: 0, to: doc.length }))).toMatchObject({
       editable: false,
       reason: "complex",
     });
@@ -250,7 +265,7 @@ describe("decideTextBlockEditing：简单函数白名单（任务 4）", () => {
 
   it("未闭合的 `#strong[` 不算白名单（保持保守）", () => {
     const doc = "正文 #strong[没闭合";
-    expect(decideWithWhitelist(doc, block({ from: 0, to: doc.length }))).toMatchObject({
+    expect(decide(doc, block({ from: 0, to: doc.length }))).toMatchObject({
       editable: false,
       reason: "complex",
     });
@@ -289,13 +304,17 @@ describe("行内原子（任务 3）：引用 / 标签放行，脚注与 raw / �
     });
   });
 
-  it("含链接 / 行内 raw 的段落仍切片（呈现来源与揭示规则未定义完）", () => {
-    for (const doc of ['看 #link("https://typst.app")[官方文档]。', "正文里有 `code` 一段。"]) {
-      expect(decide(doc, block({ from: 0, to: doc.length }), verified(doc))).toMatchObject({
-        editable: false,
-        reason: "complex",
-      });
-    }
+  it("含链接的段落仍切片（点开链接与进入编辑的冲突还没定）；行内 raw 已开放", () => {
+    const link = '看 #link("https://typst.app")[官方文档]。';
+    expect(decide(link, block({ from: 0, to: link.length }), verified(link))).toMatchObject({
+      editable: false,
+      reason: "complex",
+    });
+    const raw = "正文里有 `code` 一段。";
+    expect(decide(raw, block({ from: 0, to: raw.length }), verified(raw))).toMatchObject({
+      editable: true,
+      reason: "editable",
+    });
   });
 });
 

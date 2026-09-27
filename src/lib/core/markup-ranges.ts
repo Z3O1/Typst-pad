@@ -295,6 +295,29 @@ function scanLinks(doc: string, opaque: Region[], out: MarkupDecoration[]): void
   }
 }
 
+/**
+ * 行内 raw（`` `code` ``）的**允许区间**：判定与 `scanMarkupDecorations` 里那条 raw 分支**同源**
+ * （同一个 `rawInlineInner` + 同一个 `rawBlockFor`），避免"能显示"与"能编辑"两处判据漂移
+ * （`scanAllowedInlineCode` 的注释里记过同一条教训）。
+ *
+ * 只有**单行、成对闭合**的行内 raw 放行；围栏 / 缩进代码块（多行）仍然是复杂区域 ⇒ 整块切片。
+ * 放行之后 raw 的呈现走已有的 `raw-inline` 装饰（反引号隐藏、正文等宽），触及反引号即露出源码。
+ */
+export function scanAllowedInlineRaw(
+  doc: string,
+  opaque: readonly Region[] = scanNonMarkupRegions(doc),
+): { from: number; to: number }[] {
+  const out: { from: number; to: number }[] = [];
+  for (const region of opaque) {
+    if (region.kind !== "raw") continue;
+    const text = doc.slice(region.from, region.to);
+    if (rawBlockFor(doc, region)) continue; // 块级 raw：整块切片，不在这里放行
+    if (!rawInlineInner(region, text)) continue;
+    out.push({ from: region.from, to: region.to });
+  }
+  return out;
+}
+
 /** 从 `[` 起找配对的 `]`（跳过字符串与嵌套方括号），返回 `]` 的下标；不匹配返回 -1 */
 function matchBracket(doc: string, open: number): number {
   let depth = 0;

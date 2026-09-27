@@ -261,7 +261,13 @@ export function editableInFixture(doc, block) {
   return true;
 }
 
-/** 源码里有没有"简单函数白名单之外"的代码 / raw / 注释（与 `markup-ranges` 同口径的保守近似） */
+/**
+ * 源码里有没有"白名单之外"的代码 / raw / 注释（与 `markup-ranges` 同口径的保守近似）。
+ *
+ * 白名单 = `#strong` / `#emph` 的调用语法 + **单行闭合的行内 raw**（`scanAllowedInlineRaw`）。
+ * 行内 raw 的判定照抄产品口径：同一条源码行里出现**等长**的反引号串才算闭合；未闭合、跨行、
+ * 或三反引号的围栏一律算复杂（那些块的源码本来就含换行，调用方已经先挡掉）。
+ */
 function hasNonWhitelistedCode(src) {
   const CALL = /^#(strong|emph)$/;
   const matchBracket = (s, open) => {
@@ -282,7 +288,18 @@ function hasNonWhitelistedCode(src) {
   let i = 0;
   while (i < src.length) {
     const ch = src[i];
-    if (ch === "`" || (ch === "/" && (src[i + 1] === "/" || src[i + 1] === "*"))) return true;
+    if (ch === "`") {
+      // 行内 raw：同一行里找**等长**的收尾串；找不到（未闭合 / 跨行）算复杂
+      let run = 0;
+      while (src[i + run] === "`") run++;
+      const fence = "`".repeat(run);
+      const close = src.indexOf(fence, i + run);
+      const lineEnd = src.indexOf("\n", i);
+      if (close < 0 || (lineEnd >= 0 && close > lineEnd)) return true;
+      i = close + run;
+      continue;
+    }
+    if (ch === "/" && (src[i + 1] === "/" || src[i + 1] === "*")) return true;
     if (ch === "#") {
       let j = i + 1;
       while (j < src.length && /[A-Za-z0-9_-]/.test(src[j])) j++;

@@ -40,9 +40,9 @@ const SUITES = [
   // **列表结构变化的真实状态回放**（报告 2026-09-28 第一批第 3 条）：8 个预编译状态逐字比对 +
   // 几何对账（真实 typst 产物）、单字输入不位移、新增一行不先缩、标记→正文起点稳定
   ["writing-list-states.mjs", 127],
-  ["writing-blocks-visual.mjs", 114],
-  ["writing-blocks-hit.mjs", 16],
-  ["writing-mode-scenes.mjs", 86],
+  ["writing-blocks-visual.mjs", 125],
+  ["writing-blocks-hit.mjs", 19],
+  ["writing-mode-scenes.mjs", 91],
   ["wysiwyg-visual.mjs", 20],
   // 写作模式的**动态稳定性**（报告 T0）：逐帧量"光标进出公式/复杂块"的几何（点击 / 左右键 /
   // Ctrl+E 三档等效几何、高块 widget 不钉的例外），补上另外七套都不管的那段动态手感

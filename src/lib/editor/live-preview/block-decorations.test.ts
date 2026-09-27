@@ -96,11 +96,17 @@ describe("buildBlockCovers：可编辑资格只由 core 决策给出", () => {
     expect(decideTarget(targetDoc, target, CONTROL).revealed).toBe(true);
   });
 
-  it("含代码 / raw / 注释或段内单 LF 的块不展开", () => {
+  it("单行行内 raw 展开；含代码 / 注释或段内单 LF 的块不展开", () => {
+    // 行内 raw 走与 `#strong`/`#emph` 同一条白名单（呈现是 raw-inline 装饰，触到反引号即露源码）
     const raw = "正文里有 `code`。";
     expect(decideTarget(raw, { ...block(0, raw.length), edit: proof(raw) }, CONTROL).revealed).toBe(
-      false,
+      true,
     );
+    const comment = "正文 // 注释";
+    expect(
+      decideTarget(comment, { ...block(0, comment.length), edit: proof(comment) }, CONTROL)
+        .revealed,
+    ).toBe(false);
     const multiline = "第一行，\n第二行。";
     expect(
       decideTarget(multiline, { ...block(0, multiline.length), edit: proof(multiline) }, CONTROL)

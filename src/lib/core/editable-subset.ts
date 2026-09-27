@@ -13,7 +13,7 @@
 // 判定只在这里做一次：块级装饰（`live-preview/block-decorations`）只消费本模块的结论，
 // 不再自己写一套语法判据；后端只提供"帧里画了什么"的证明，不重写语法白名单。
 import type { Block, BlockEditProof } from "./block-plan";
-import { scanAllowedInlineCode } from "./markup-ranges";
+import { scanAllowedInlineCode, scanAllowedInlineRaw } from "./markup-ranges";
 import { scanNonMarkupRegions } from "./typst-lex";
 import type { Region } from "./typst-lex";
 
@@ -66,10 +66,13 @@ export interface EditDecisionInput {
   /** 复杂区域（code/raw/comment），由 `scanNonMarkupRegions` 给出 */
   opaque: readonly Region[];
   /**
-   * **白名单行内调用**的代码区间（`#strong` / `#emph`，见 `scanAllowedInlineCode`）：
-   * 这些 code 区域不算"复杂"，块仍可直接编辑（正文照常逐字对应）。
+   * **白名单行内原子**的区间：`#strong` / `#emph` 的调用语法（`scanAllowedInlineCode`）与
+   * 单行闭合的行内 raw（`scanAllowedInlineRaw`）。这些 code / raw 区域不算"复杂"，块仍可直接编辑
+   * （呈现走既有的 `strong` / `emph` / `raw-inline` 装饰，触及标记即露出源码）。
+   *
+   * **链接（`#link("url")[文字]`）不在这里**：它的"点开链接"与"进入编辑"冲突还没定，仍整块切片。
    */
-  allowedCode?: readonly { from: number; to: number }[];
+  allowedInline?: readonly { from: number; to: number }[];
 }
 
 /**
@@ -140,7 +143,7 @@ export function overlapsComplexExcept(
  * 之所以把 `text` 放在最后，是因为它最贵（要后端产物），而前面的条件在旧后端/桩上也能成立。
  */
 export function decideTextBlockEditing(input: EditDecisionInput): EditDecision {
-  const { block, source, opaque, allowedCode } = input;
+  const { block, source, opaque, allowedInline } = input;
   const textKind = block.kind === "Paragraph" || block.kind === "Heading";
   const listKind = block.kind === "ListItem" || block.kind === "EnumItem";
   /**
@@ -161,7 +164,7 @@ export function decideTextBlockEditing(input: EditDecisionInput): EditDecision {
     // 宁可整项切片（切片就是 Typst 的真排版），也不在"文字像文字"时就放行。
     !source.includes("$");
   const multiLine = source.includes("\n");
-  const complex = overlapsComplexExcept(block.from, block.to, opaque, allowedCode ?? []);
+  const complex = overlapsComplexExcept(block.from, block.to, opaque, allowedInline ?? []);
   const syntax: EditSyntax =
     (textKind || listSimple) && !multiLine && !complex ? "simple" : "unsupported";
   const geometry: EditGeometry =
@@ -197,6 +200,6 @@ export function decideTextBlockEditingIn(
     block,
     source: doc.slice(block.from, block.to),
     opaque,
-    allowedCode: scanAllowedInlineCode(doc, opaque),
+    allowedInline: [...scanAllowedInlineCode(doc, opaque), ...scanAllowedInlineRaw(doc, opaque)],
   });
 }

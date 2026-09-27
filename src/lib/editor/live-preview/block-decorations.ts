@@ -10,7 +10,7 @@ import type { EditorState } from "@codemirror/state";
 import { planBlockCovers } from "../../core/block-plan";
 import type { Block, BlockCover } from "../../core/block-plan";
 import { decideTextBlockEditing } from "../../core/editable-subset";
-import { scanAllowedInlineCode } from "../../core/markup-ranges";
+import { scanAllowedInlineCode, scanAllowedInlineRaw } from "../../core/markup-ranges";
 import { scanNonMarkupRegions } from "../../core/typst-lex";
 import type { Region } from "../../core/typst-lex";
 import { PREFETCH_MARGIN } from "./options";
@@ -55,14 +55,17 @@ export function buildBlockCovers(
   // 只有**通过核心决策**（白名单 + 文字对应 + 几何 + 新鲜度）的块才获准直接编辑；
   // 复杂块、文字对不上的块、过期产物都不命中，仍保留原来的可靠退路（切片 / 源码）。
   // 白名单行内调用（`#strong` / `#emph`）的 code 区域不算"复杂"（任务 4）；一次算好给所有块用
-  const allowedCode = scanAllowedInlineCode(doc, opaque);
+  const allowedInline = [
+    ...scanAllowedInlineCode(doc, opaque),
+    ...scanAllowedInlineRaw(doc, opaque),
+  ];
   for (const cover of covers) {
     if (cover.noOutput) continue;
     const decision = decideTextBlockEditing({
       block: cover.block,
       source: doc.slice(cover.block.from, cover.block.to),
       opaque,
-      allowedCode,
+      allowedInline,
     });
     if (decision.editable) cover.revealed = true;
   }
