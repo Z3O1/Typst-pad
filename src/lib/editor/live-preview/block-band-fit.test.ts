@@ -187,6 +187,47 @@ describe("带高盒装到 DOM 上", () => {
    * 347.1 → 333.7px、被编辑那一段从 99.9px 掉到 72.6px，150~300ms 后再跳回来 —— 就是用户报的
    * "输入时短暂抖动"。现在被触碰的块带着 `layoutHold` 的占位几何（`cm-block-band-hold`）。
    */
+  /**
+   * **活动光标行不得零高**（报告 2026-09-28 P0 第 2 条）：带高盒生效时分隔行被压到 **0** 高
+   * （`--write-parbreak-height: 0em`），而光标仍可能通过鼠标 / IME / 程序化选区落到它上面 ——
+   * 那时 DOM 行高 0px、光标 17px，用户看到的是"光标停在一个不存在的行上"。
+   * 导航（`block-moves` 的 ←/→ / ↑/↓ / 翻页）保证正常路径不落上去，装饰这里保证任何路径都看得见。
+   */
+  it("活动光标落在纯分隔行上时，那一行不归零（恢复可见行盒）；没有光标的照旧归零", () => {
+    const doc = "aaa\n\nbbb\n\nccc\n";
+    const blocks = [editable(0, 3), editable(5, 8), editable(10, 13)];
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        // 光标压在**第一条**纯分隔行上（行 2 = pos 4）；第二条（行 4 = pos 9）没有光标
+        selection: { anchor: 4 },
+        extensions: [
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => blocks,
+            writeFontMetrics: () => ({ ascent: 17, descent: 4 }),
+          }),
+        ],
+      }),
+    });
+    try {
+      const rows = Array.from(host.querySelectorAll(".cm-line.cm-write-parbreak"));
+      const lines = rows.map((el) => view.state.doc.lineAt(view.posAtDOM(el, 0)).number);
+      expect(lines).toEqual([4]); // 行 2 不再带压缩装饰
+      expect(rows[0].getAttribute("style")).toContain("--write-parbreak-height: 0.000000em");
+    } finally {
+      view.destroy();
+      host.remove();
+    }
+  });
+
   it("编辑后编译落地前：整篇带高盒与引擎断点都还在（不能先跳后跳回）", () => {
     const before = "第一段。\n\nabcdefg\n\n第三段。\n";
     const after = "第一段。\n\nabcXdefg\n\n第三段。\n";

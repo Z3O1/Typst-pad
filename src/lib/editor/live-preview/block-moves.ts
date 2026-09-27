@@ -1,5 +1,6 @@
-// **跨块竖直移动 / 翻页**：切片把非光标块换成图片之后，上下键与 PageUp/PageDown 不能按
-// "一次跨一整块"走（那样一块就跳过一整段正文），要按**可见行**走、并且落到同一屏幕高度上。
+// **跨块竖直移动 / 横向停靠 / 翻页**：切片把非光标块换成图片之后，上下键与 PageUp/PageDown 不能按
+// "一次跨一整块"走（那样一块就跳过一整段正文），要按**可见行**走、并且落到同一屏幕高度上；
+// 左右键则不许停在"只有 0~3px 高"的纯段落分隔行上（那一行没有可见内容，光标停上去等于消失）。
 //
 // 从 `live-preview.ts` 的组装层拆出来。它只需要两个取数口：`getCovers`（块表由组装层的
 // StateField 提供）与 `getSeparatorLines`（纯段落分隔行的行首集合，来自段距扫描）。
@@ -8,8 +9,12 @@
 // 默认没跨切片也没落到分隔行上就交回默认键位（`return false`）。
 import { EditorSelection, Prec } from "@codemirror/state";
 import type { EditorState, SelectionRange } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
-import { crossesCollapsedCover, sourceVerticalTarget } from "../../core/block-plan";
+import { Direction, EditorView, keymap } from "@codemirror/view";
+import {
+  crossesCollapsedCover,
+  sourceHorizontalTarget,
+  sourceVerticalTarget,
+} from "../../core/block-plan";
 import type { BlockCover } from "../../core/block-plan";
 import { anchorPosEffect } from "../scroll-anchor";
 
@@ -50,7 +55,7 @@ export function createBlockMoves({
    * Shift 变体（扩选）过去**没接管**，于是走到 CM 默认的 `selectLineDown` —— 那个同样会跳过所有
    * 切片（选中范围会突然跨过一整块）。现在与不带 Shift 的走法完全同源。
    */
-  const blockVerticalMoves = Prec.high(
+  const blockMoves = Prec.high(
     keymap.of([
       {
         key: "ArrowUp",
@@ -61,6 +66,18 @@ export function createBlockMoves({
         key: "ArrowDown",
         run: (view) => verticalMove(view, true, false),
         shift: (view) => verticalMove(view, true, true),
+      },
+      // 左右键与上下键**同一条"分隔行不是停靠点"的规则**（见 horizontalMove）：
+      // 普通左右移动、Shift 扩选共用；Home/End 在行内移动、永不会走进分隔行，不需要接管。
+      {
+        key: "ArrowLeft",
+        run: (view) => horizontalMove(view, false, false),
+        shift: (view) => horizontalMove(view, false, true),
+      },
+      {
+        key: "ArrowRight",
+        run: (view) => horizontalMove(view, true, false),
+        shift: (view) => horizontalMove(view, true, true),
       },
       // PageUp/PageDown 另有语义（走一屏、光标留在原来的屏幕高度），见 pageMove
       {
@@ -124,7 +141,7 @@ export function createBlockMoves({
       let pos = view.posAtCoords({ x, y: restY + (forward ? dist : -dist) }, false);
       if (pos === null) return false;
       /**
-       * **翻页也不停在纯分隔行上**（同一条规则，见 `block_verticalMoves` 的说明）：翻页是按屏幕
+       * **翻页也不停在纯分隔行上**（同一条规则，见 `blockMoves` 的说明）：翻页是按屏幕
        * 高度取位置的，正好压到块间那条零高行上时，光标会落在几乎看不见的地方。
        * 用 `sourceVerticalTarget` 从落点走到最近的停靠行（分隔行不算停靠点）。
        */
@@ -309,7 +326,7 @@ export function createBlockMoves({
 
   /**
    * ↑/↓（含 Shift 扩选）：**默认走法落到可见行上就交回默认**，否则按可见行走一步
-   * （见 `blockVerticalMoves`）。返回 false = 交给 CodeMirror 的默认绑定（永远安全：
+   * （见 `blockMoves`）。返回 false = 交给 CodeMirror 的默认绑定（永远安全：
    * 默认至少不会"什么都不做"）。
    */
   function verticalMove(view: EditorView, forward: boolean, extend: boolean): boolean {
@@ -392,5 +409,65 @@ export function createBlockMoves({
     }
   }
 
-  return blockVerticalMoves;
+  /**
+   * ←/→（含 Shift 扩选）：**纯段落分隔行不是横向停靠点**。
+   *
+   * 用户 2026-09-28：光标异常主要发生在 ←/→ 与回车。回车那条已在 `paragraph-breaks` 修好
+   * （分隔换行 / 用户空段落分开，见 `docs/development/writing-rendering.md`），←/→ 缺同一条规则。
+   * 真实夹具 `1 \n\n 1` 实测：第一段末尾按一次 → 停在第 2 行（DOM 行高 **0px**、光标 17px），
+   * 再按一次才进第二段；← 原路经过同一个位置 —— "光标落在没有可见内容的行上"。
+   *
+   * 走法与 `@codemirror/commands` 的 `cursorCharRight` / `selectCharRight` **逐句同源**：
+   *  1. 非空选区 + 不带 Shift → 默认是"收起到选区的一端"（不依赖几何），交回默认；
+   *  2. 先按默认走一步（`view.moveByChar`：字符簇 / 折行 / 双向文本 / 原子范围都由它处理，
+   *     **不自己重写字符走法**）；落点是可见行 → 交回默认；
+   *  3. 只有落点压在纯分隔行上时才接管：用 `sourceHorizontalTarget` 沿同一个方向走出这一串
+   *     分隔行（→ 落下一条可见行行首、← 落上一条可见行行尾），`assoc` 与 CM 自己跨行走
+   *     时一致；Shift 变体保留锚点。
+   *
+   * 用户自己创建的空段落、标题、列表行都不在分隔行集合里 —— 它们照旧是停靠点（一个都不许跳）。
+   * 任何意外都返回 false 交回默认：输入链路绝不吞按键（与竖直移动同一条纪律）。
+   */
+  function horizontalMove(view: EditorView, right: boolean, extend: boolean): boolean {
+    try {
+      const covers = getCovers(view.state);
+      // 没有块级渲染（源码模式 / 还没编译过）→ 分隔行也没有被压缩，默认行为就是对的
+      if (covers.length === 0) return false;
+      const sel = view.state.selection;
+      if (sel.ranges.length !== 1) return false; // 多光标：交回默认
+      const range = sel.main;
+      if (!range.empty && !extend) return false;
+      const separators = getSeparatorLines(view.state);
+      if (separators.size === 0) return false;
+      const doc = view.state.doc;
+      const isSeparator = (from: number) => separators.has(from);
+      // 视觉右 = 逻辑向前（LTR）；RTL 下相反 —— 与 `ltrAtCursor` 的判法一致
+      const ltr = view.textDirectionAt(range.head) === Direction.LTR;
+      const forward = right === ltr;
+      const naive = view.moveByChar(range, forward);
+      if (!isSeparator(doc.lineAt(naive.head).from)) return false;
+      const pos = sourceHorizontalTarget(doc, naive.head, forward ? 1 : -1, isSeparator);
+      if (pos === null || pos === naive.head) return false;
+      // assoc 与 CM 跨行走（`visualLineSide`）一致：进下一行行首 = 1，退上一行行尾 = −1
+      const assoc = forward ? 1 : -1;
+      const next = extend
+        ? asSelection(
+            EditorSelection.range(
+              range.anchor,
+              pos,
+              undefined,
+              naive.bidiLevel || undefined,
+              assoc,
+            ),
+          )
+        : asSelection(EditorSelection.cursor(pos, assoc));
+      view.dispatch({ selection: next, scrollIntoView: true, userEvent: "select" });
+      return true;
+    } catch (e) {
+      console.error("[live-preview] 横向移动失败，交回默认：", e);
+      return false;
+    }
+  }
+
+  return blockMoves;
 }

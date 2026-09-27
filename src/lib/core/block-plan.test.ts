@@ -16,6 +16,7 @@ import {
   planBlockCovers,
   remapBlocksThroughEdit,
   revealBlocksWithDiagnostics,
+  sourceHorizontalTarget,
   sourceVerticalTarget,
   toBlockTable,
 } from "./block-plan";
@@ -385,6 +386,40 @@ describe("竖直移动的判定（写作模式按可见行走：跳过分隔行�
       expect(sourceVerticalTarget(doc, 14, 1, 1, 0)).toBeNull();
       // 跳过分隔行之后，"上一段"也不存在时照样返回 null
       expect(sourceVerticalTarget(doc, 1, -1, 1, 0, isSeparator)).toBeNull();
+    });
+  });
+
+  // 报告 2026-09-28 第 1 节：真实夹具 `1 \n\n 1` 里 ←/→ 会停在只有 0 高的分隔行上。
+  // 落点规则与竖直移动同源：分隔行不是停靠点（→ 落下一条可见行行首，← 落上一条可见行行尾）。
+  describe("sourceHorizontalTarget（←/→ 跳过纯分隔行）", () => {
+    const doc = Text.of(DOC.split("\n"));
+
+    it("当前行不是分隔行 → null（默认走法自己就对，不重写字符走法）", () => {
+      expect(sourceHorizontalTarget(doc, 1, 1, isSeparator)).toBeNull();
+      expect(sourceHorizontalTarget(doc, 6, -1, isSeparator)).toBeNull();
+      expect(sourceHorizontalTarget(doc, 10, 1, isSeparator)).toBeNull();
+    });
+
+    it("→ 落下一条可见行行首、← 落上一条可见行行尾（越过整串分隔行）", () => {
+      // 行 2(4) 与行 4(9) 是纯分隔行：aaa(0-3) bbb(5-8) ccc(10-13)
+      expect(sourceHorizontalTarget(doc, 4, 1, isSeparator)).toBe(5);
+      expect(sourceHorizontalTarget(doc, 4, -1, isSeparator)).toBe(3);
+      expect(sourceHorizontalTarget(doc, 9, 1, isSeparator)).toBe(10);
+      expect(sourceHorizontalTarget(doc, 9, -1, isSeparator)).toBe(8);
+    });
+
+    it("分隔行带缩进（整行空白）时照样越过：光标在里面也不停", () => {
+      const indented = Text.of("aaa\n  \nbbb".split("\n"));
+      const sep = (from: number) => from === 4;
+      expect(sourceHorizontalTarget(indented, 5, 1, sep)).toBe(7); // 行中 → 下一行行首
+      expect(sourceHorizontalTarget(indented, 5, -1, sep)).toBe(3); // 行中 → 上一行行尾
+    });
+
+    it("一路都是分隔行 / 已到文档边界 → null（交回默认，不吞按键）", () => {
+      expect(sourceHorizontalTarget(doc, 4, 1, () => true)).toBeNull();
+      expect(sourceHorizontalTarget(doc, 4, -1, () => true)).toBeNull();
+      // 最后一行（from=14）本身是分隔行、后面没有可见行
+      expect(sourceHorizontalTarget(doc, 14, 1, () => true)).toBeNull();
     });
   });
 });

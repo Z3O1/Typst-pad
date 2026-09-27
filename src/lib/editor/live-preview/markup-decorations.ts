@@ -76,8 +76,31 @@ export function buildMarkupDecorations(
   /** 切片格子的终点集合：空行紧跟在切片后面时，那份间距已经含在切片的带高里 */
   const coverEnds = new Set(covered.map((c) => c.to));
   const selections = state.selection.ranges.map((r) => ({ from: r.from, to: r.to }));
+  /**
+   * **活动光标 / 选区端点所在的行**（报告 P0 第 2 条）：这些行**绝不能是零高行**。
+   *
+   * 分隔行只该在"它不是用户此刻的编辑位置"时被压到 0~3px（段距由相邻块的带高承载）。
+   * 但光标仍可能通过别的入口落到它上面：鼠标点在段间缝隙、IME 组字、程序化设选区 / 撤销恢复、
+   * 后端产物落地后的选区映射 —— 那时把一个零高行留给光标，等于"光标消失在没有可见内容的位置"
+   * （报告第 1 节的实测表：DOM 行高 0px、光标 17px，用户看到的是"左右键停在一个不存在的行上"）。
+   *
+   * 所以这条是**渲染层的不变量**、与导航规则（`block-moves` 的 ←/→ / ↑/↓ 不停靠分隔行）互为兜底：
+   * 导航保证正常路径不落上去，这里保证任何路径落上去都看得见、打得进字。
+   * 代价：光标进入时那一行会从 0 长出正常行高（把后文推下去一点），离开时收回去 —— 这是
+   * "进入隐藏语法先建立可见编辑形态"的取舍（与公式 / 代码的"选区进入即展开"同一契约）。
+   *
+   * 只保护**端点**（光标、选区两端），不保护被选区完整盖住的分隔行：整段选中时中间那条 0 高行
+   * 没有端点，保持压缩才能让选区高度与真实排版一致。
+   */
+  const activeLines = new Set<number>();
+  for (const r of state.selection.ranges) {
+    activeLines.add(state.doc.lineAt(r.from).from);
+    activeLines.add(state.doc.lineAt(r.to).from);
+  }
   const decorations: Range<Decoration>[] = [];
   for (const row of scan.paragraphGapRows) {
+    // **活动行不得零高**（见上面 activeLines 的说明）：不给它压缩高度，按普通行盒呈现。
+    if (activeLines.has(row.from)) continue;
     // **空行高度要看上一块是不是"按带高渲染的切片"**：Typst 的段距已经含在切片的带高里
     // （每块带 = 自身墨迹 + 相邻间距的一半），再给空行留整份间距就是重复计高。PKU 高代周二实测：
     // 112 个空行 × 3.05px ≈ 342px，与"实际落位 − 各块带高之和"量到的 ~390px 同量级；

@@ -36,7 +36,7 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 // 套件清单（期望项数写在这里，跑完直接对账；改套件计数时**两处一起改**）
 const SUITES = [
   ["wysiwyg.mjs", 305],
-  ["writing-blocks.mjs", 146],
+  ["writing-blocks.mjs", 158],
   ["writing-blocks-visual.mjs", 114],
   ["writing-blocks-hit.mjs", 16],
   ["writing-mode-scenes.mjs", 86],

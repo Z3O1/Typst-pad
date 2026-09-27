@@ -1391,4 +1391,96 @@ describe("livePreview 块级切片", () => {
     // 行 2 是必需的分隔行（跳过），行 3 是用户的空段落 → 落点是行 3 行首 5。
     expect(view.state.selection.main.head).toBe(5);
   });
+
+  /** 在编辑器上派发方向键 keydown（与真实浏览器一致：`shiftKey` 反映到 Shift- 绑定上） */
+  const pressArrow = (key: "ArrowLeft" | "ArrowRight", shift = false) =>
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key,
+        code: key,
+        keyCode: key === "ArrowLeft" ? 37 : 39,
+        shiftKey: shift,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+  /**
+   * 横向停靠用例专用挂载：**带上真实默认键位**（basicSetup）—— 只有它才能同时验
+   * "落点正常时不接管、逐字符照旧走"（`mount` 那个精简视图里没有任何默认绑定，
+   * 我们的 keymap 返回 false 之后没人接手，会假红）。
+   */
+  function mountWithDefaults(doc: string, blocks: Block[], sel: number) {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: sel },
+        extensions: [
+          basicSetup,
+          livePreview({
+            enabled: () => true,
+            prefix: () => "",
+            lookup: () => undefined,
+            onRequest: () => {},
+            dark: () => false,
+            blocks: () => blocks,
+          }),
+        ],
+      }),
+    });
+  }
+
+  /**
+   * **报告 2026-09-28 第 1 节（用户补充：光标异常主要在 ←/→ 与回车）**：真实夹具 `1 \n\n 1` 里
+   * 第一段末尾按一次 → 停在源码第 2 行 —— 那一行在版面上**高度为 0**（段距由相邻块的带高承载），
+   * 光标落在没有可见内容的位置；再按一次才进第二段，← 原路经过同一处。
+   *
+   * ←/→ 因此与 ↑/↓ 共用同一条规则：**纯段落分隔行不是停靠点**，但仍是可编辑源码
+   * （源码模式 / 鼠标 / 程序化选区照旧能进；进去时由"活动行不得零高"给它可见行盒）。
+   */
+  it("跨块横向移动：→ 从段末直达下一段行首，不在零高分隔行上停靠", () => {
+    // 文档：`aaa\n\nbbb\n` → 行 1 aaa(0-3)、行 2 空(4)、行 3 bbb(5-8)。行 2 是纯分隔行（0 高）。
+    mountWithDefaults("aaa\n\nbbb\n", [crop(0, 3), crop(5, 8)], 3);
+    pressArrow("ArrowRight");
+    expect(view.state.selection.main.head).toBe(5); // 不是 4（分隔行行首）
+    // 落到可见行之后照旧逐字符走（不重写字符 / 折行 / 双向文本的走法）
+    pressArrow("ArrowRight");
+    expect(view.state.selection.main.head).toBe(6);
+    pressArrow("ArrowLeft");
+    expect(view.state.selection.main.head).toBe(5);
+    // ← 从下一段行首退回时同样跳过那条零高行，落到上一段行尾（而不是停在 4 上）
+    pressArrow("ArrowLeft");
+    expect(view.state.selection.main.head).toBe(3);
+  });
+
+  it("跨块横向移动：Shift+→ 扩选也跳过零高分隔行（选区不包含那条不可见的空行）", () => {
+    mountWithDefaults("aaa\n\nbbb\n", [crop(0, 3), crop(5, 8)], 3);
+    pressArrow("ArrowRight", true);
+    const sel = view.state.selection.main;
+    expect(sel.anchor).toBe(3);
+    expect(sel.head).toBe(5); // 不是 4：否则选中的是一条看不见的行
+  });
+
+  // 用户自己按 Enter 建出来的空段落**不是**分隔行，一个都不许跳（报告 P0 第 2 条的边界）：
+  // `aaa\n\n\nbbb\n` 里行 2(4) 承担段距、行 3(5) 是用户的空段落 —— → 应当停在行 3 行首 5。
+  it("跨块横向移动：用户自己建的空段落仍是停靠点（→ 停在它上面，不跳过去）", () => {
+    mountWithDefaults("aaa\n\n\nbbb\n", [crop(0, 3), crop(6, 9)], 3);
+    pressArrow("ArrowRight");
+    expect(view.state.selection.main.head).toBe(5);
+  });
+
+  // 报告 P0 第 2 条的另一半（渲染层不变量）：导航保证正常路径不落到分隔行上，但鼠标 / IME /
+  // 程序化选区（撤销恢复、后端落地后的选区映射）仍可能把光标放上去 —— 那时那一行必须**恢复
+  // 可见行盒**，不能让光标停在没有可见内容的位置（实测：DOM 行高 0px、光标 17px）。
+  it("活动光标落在纯分隔行上时，那一行恢复可见行盒（别的分隔行照旧压缩）", () => {
+    // 文档：`aaa\n\nbbb\n\nccc\n` → 行 2(4) 与行 4(9) 都是纯分隔行；光标放在 4 上。
+    // 不传块表：这里只量化分隔行的装饰（切片会把被盖住的行从 DOM 里换掉）
+    mount("aaa\n\nbbb\n\nccc\n", [], 4);
+    const rows = Array.from(host.querySelectorAll(".cm-line.cm-write-parbreak"));
+    const compressed = rows.map((el) => view.state.doc.lineAt(view.posAtDOM(el, 0)).number);
+    expect(compressed).toEqual([4]); // 只剩行 4 被压缩；光标所在的行 2 恢复普通行盒
+  });
 });

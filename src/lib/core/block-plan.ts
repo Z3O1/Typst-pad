@@ -510,6 +510,39 @@ export function sourceVerticalTarget(
 }
 
 /**
+ * **横向走到最近的可见停靠位置** —— 写作模式 ←/→ 的落点（纯函数，与 `sourceVerticalTarget` 同源）。
+ *
+ * 用户 2026-09-28 补充：光标异常主要发生在 **←/→ 与回车**。回车那条（分隔换行 / 用户空段落分开）
+ * 已在 `paragraph-breaks` 修好；←/→ 还缺同一条"分隔行不是停靠点"的规则：真实夹具 `1 \n\n 1` 里
+ * 第一段末尾按一次 → 会停在源码第 2 行 —— 那一行在版面上**高度为 0**（段距由相邻块的带高承载），
+ * 光标落在没有可见内容的位置上，再按一次 → 才进第二段（见报告第 1 节实测表）。
+ *
+ * 语义与竖直移动完全一致：**纯段落分隔行对光标透明**，但仍是可编辑源码（源码模式、鼠标、程序化
+ * 选区照旧能进；进去时靠 `markup-decorations` 的"活动行不得零高"给它一个可见行盒）。
+ *
+ * 只在**当前行本身就是分隔行**时返回落点：调用方先按 CodeMirror 默认走一步，默认落点正常就不接管
+ * （不重写字符 / 折行 / 双向文本的走法），落到分隔行上时才用这里走出去：
+ *  - `dir > 0`（→）落**下一条可见行行首**；`dir < 0`（←）落**上一条可见行行尾**；
+ *  - 一路都是分隔行（或已到文档边界）返回 null，调用方交回默认行为。
+ */
+export function sourceHorizontalTarget(
+  doc: Text,
+  head: number,
+  dir: -1 | 1,
+  isSeparator: (lineFrom: number) => boolean,
+): number | null {
+  const line = doc.lineAt(head);
+  if (!isSeparator(line.from)) return null;
+  for (let number = line.number + dir, guard = 0; guard <= doc.lines; number += dir, guard++) {
+    if (number < 1 || number > doc.lines) return null;
+    const target = doc.line(number);
+    if (isSeparator(target.from)) continue;
+    return dir > 0 ? target.from : target.to;
+  }
+  return null;
+}
+
+/**
  * **编译出错时保留"没被改到"的切片**（纯函数，阶段 2）。
  *
  * 背景：块切片与块表是**同一次编译的产物**，一编译失败就没有新表 —— 原先的做法是整表作废

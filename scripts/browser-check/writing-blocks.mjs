@@ -336,6 +336,28 @@ const SEPARATOR_LINES = `(() => {
     .filter((n) => n !== null);
 })()`;
 const separatorLines = () => c.evaluate(SEPARATOR_LINES);
+/**
+ * **光标所在行的行盒**（报告 2026-09-28 P0 的不变量）：活动光标行不得是零高行。
+ * 返回行号、行盒高度、以及这一行是不是纯分隔行（量的是页面上真实生效的装饰）。
+ */
+const ACTIVE_LINE_BOX = `(() => {
+  const el = document.querySelector(".cm-content");
+  const view = el && el.cmTile && el.cmTile.root && el.cmTile.root.view;
+  if (!view) return null;
+  const line = view.state.doc.lineAt(view.state.selection.main.head);
+  const dom = Array.from(document.querySelectorAll(".cm-content > .cm-line")).find((l) => {
+    try { return view.state.doc.lineAt(view.posAtDOM(l, 0)).number === line.number; } catch { return false; }
+  });
+  if (!dom) return null;
+  const r = dom.getBoundingClientRect();
+  return {
+    line: line.number,
+    height: +r.height.toFixed(2),
+    separator: dom.classList.contains("cm-write-parbreak"),
+    text: line.text,
+  };
+})()`;
+const activeLineBox = () => c.evaluate(ACTIVE_LINE_BOX);
 const caret = () => c.evaluate(CARET);
 const arrowDown = async () => {
   await c.key("ArrowDown", { code: "ArrowDown", keyCode: 40 });
@@ -344,6 +366,25 @@ const arrowDown = async () => {
 };
 const arrowUp = async () => {
   await c.key("ArrowUp", { code: "ArrowUp", keyCode: 38 });
+  await new Promise((r) => setTimeout(r, 250));
+  return caret();
+};
+/** ←/→（`shift` 走 Shift 扩选变体）：横向停靠的验收全靠它 */
+const arrowRight = async (shift = false) => {
+  await c.key("ArrowRight", {
+    code: "ArrowRight",
+    keyCode: 39,
+    ...(shift ? { modifiers: 8 } : {}),
+  });
+  await new Promise((r) => setTimeout(r, 250));
+  return caret();
+};
+const arrowLeft = async (shift = false) => {
+  await c.key("ArrowLeft", {
+    code: "ArrowLeft",
+    keyCode: 37,
+    ...(shift ? { modifiers: 8 } : {}),
+  });
   await new Promise((r) => setTimeout(r, 250));
   return caret();
 };
@@ -559,6 +600,131 @@ check(
   `段内折行：跨段那一步落在可见行上、不是那条分隔行（第 ${wrapRows[2].line} 行；分隔行 ${JSON.stringify(wrapSeps)}）`,
   !wrapSeps.includes(wrapRows[2].line) && wrapSeps.includes(2),
   JSON.stringify({ line: wrapRows[2].line, separators: wrapSeps }),
+);
+
+// ⑦ ←/→：**纯段落分隔行不是横向停靠点**（报告 2026-09-28 第 1 节）。
+//    用户补充"光标异常主要发生在左右方向键和回车"：真实夹具 `1 \n\n 1` 里第一段末尾按一次 →
+//    会停在源码第 2 行 —— 那一行在版面上**高度为 0**（段距由相邻块的带高承载），光标落在没有
+//    可见内容的位置；← 原路经过同一处。这里用同一形状的干净文档（两段正文 + 一条分隔行）量：
+//    → 一次直达下一段行首、← 一次退回上一段行尾、Shift+→ 跳过它但源码的两个换行仍被选中。
+await c.click(400, 300);
+await c.selectAll();
+await c.type("第一段。\n\n第二段。\n");
+await new Promise((r) => setTimeout(r, 800));
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 }); // Ctrl+Home
+await new Promise((r) => setTimeout(r, 300));
+await c.key("End", { code: "End", keyCode: 35 }); // 第一段行尾（"第一段。" 之后）
+await new Promise((r) => setTimeout(r, 250));
+const hEnd = await caret();
+check(
+  `横向停靠的前提：光标在第一段行尾（第 ${hEnd.line} 行第 ${hEnd.col} 列）`,
+  hEnd.line === 1 && hEnd.col === hEnd.lineText.length && hEnd.lineText === "第一段。",
+  JSON.stringify(hEnd),
+);
+const hSeps = await separatorLines();
+const hRight = await arrowRight();
+check(
+  `→ 一次直达第二段行首（第 ${hRight.line} 行第 ${hRight.col} 列），不在零高分隔行上停靠`,
+  hRight.line === 3 &&
+    hRight.col === 0 &&
+    hRight.lineText.startsWith("第二段") &&
+    !hSeps.includes(hRight.line),
+  JSON.stringify({ hRight, separators: hSeps }),
+);
+check(
+  `→ 在屏幕上跨过了段距（y ${hEnd.y?.toFixed(1) ?? "?"} → ${hRight.y?.toFixed(1) ?? "?"}px，不是停在原处）`,
+  movedVisibly(hEnd, hRight),
+  JSON.stringify({ before: hEnd.y, after: hRight.y }),
+);
+const hRightBox = await activeLineBox();
+check(
+  `活动光标行的行盒不是零高（第 ${hRightBox?.line} 行 ${hRightBox?.height}px，分隔行 ${hRightBox?.separator}）`,
+  hRightBox !== null && hRightBox.separator === false && hRightBox.height >= 18,
+  JSON.stringify(hRightBox),
+);
+const hLeft = await arrowLeft();
+check(
+  `← 一次退回第一段行尾（第 ${hLeft.line} 行第 ${hLeft.col} 列，位置 ${hLeft.head} = 出发位置 ${hEnd.head}）`,
+  hLeft.line === 1 && hLeft.head === hEnd.head,
+  JSON.stringify({ hLeft, hEnd }),
+);
+const hShift = await arrowRight(true);
+check(
+  `Shift+→ 跳过零高分隔行，但源码里的两个换行仍被选中（${JSON.stringify(hShift.selText)}）`,
+  !hShift.empty && hShift.anchor === hEnd.head && hShift.line === 3 && hShift.selText === "\n\n",
+  JSON.stringify(hShift),
+);
+// 用户自己按 Enter 建出来的空段落**不是**分隔行：→ 停在它上面（一个都不许跳）
+await c.click(400, 300);
+await c.selectAll();
+await c.type("第一段。\n\n\n第二段。\n");
+await new Promise((r) => setTimeout(r, 800));
+await c.key("Home", { code: "Home", keyCode: 36, modifiers: 2 });
+await new Promise((r) => setTimeout(r, 300));
+await c.key("End", { code: "End", keyCode: 35 });
+await new Promise((r) => setTimeout(r, 250));
+const emptyRight = await arrowRight();
+const emptyBox = await activeLineBox();
+check(
+  `→ 停在用户自己建的空段落上（第 ${emptyRight.line} 行、行文本为空），它也不是零高行（${emptyBox?.height}px）`,
+  emptyRight.line === 3 &&
+    emptyRight.col === 0 &&
+    emptyRight.lineText === "" &&
+    emptyBox !== null &&
+    emptyBox.separator === false &&
+    emptyBox.height >= 18,
+  JSON.stringify({ emptyRight, emptyBox }),
+);
+
+// ⑧ 段中 Enter（报告 2026-09-28 第 2 节，已复现）：`1 \n\n 1` 里在首个数字后、空格前按 Enter ——
+//    光标落在新建源码第 3 行（只含一个空格），旧行为把这一行当普通间隔压成 0 高。现在"结构分隔
+//    换行"与"用户刚创建、正在编辑的空段落"分开：只有第一条空白行承担段距，光标行有真实行盒。
+//    用 `&blockslow=1` 把"编译落地前"的窗口撑开（350ms）：落地前后都不许出现零高停靠行。
+await c.goto(`${URL_BLOCKS}&blockslow=1`);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.click(400, 300);
+await c.selectAll();
+await c.type("1 \n\n 1");
+await new Promise((r) => setTimeout(r, 900));
+const enterDoc = await c.evaluate(`(() => {
+  const view = window.__typstPadView;
+  view.dispatch({ selection: { anchor: 1 } }); // 首个数字后、空格前
+  view.focus();
+  return view.state.doc.toString();
+})()`);
+check("段中 Enter 的前提：文档就是 `1 \\n\\n 1`、光标在第 1 位", enterDoc === "1 \n\n 1", enterDoc);
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+await new Promise((r) => setTimeout(r, 120)); // 编译还在飞（blockslow 350ms）：此刻就要能看见新段
+const midEnter = await caret();
+const midSeps = await separatorLines();
+check(
+  `段中 Enter：光标落在新段行（第 ${midEnter.line} 行「${midEnter.lineText}」），且**这一行不是分隔行**`,
+  midEnter.line === 3 && !midSeps.includes(3) && midSeps.includes(2),
+  JSON.stringify({ midEnter, separators: midSeps }),
+);
+const midBox = await activeLineBox();
+check(
+  `段中 Enter：新段行的行盒可见（${midBox?.height}px ≥ 18，不是被压零的分隔行）`,
+  midBox !== null && midBox.separator === false && midBox.height >= 18,
+  JSON.stringify(midBox),
+);
+await c.type("X");
+await new Promise((r) => setTimeout(r, 250));
+const midTyped = await caret();
+check(
+  `段中 Enter 后输入首字仍落在同一行（第 ${midTyped.line} 行「${midTyped.lineText}」）`,
+  midTyped.line === 3 && midTyped.lineText.includes("X") && !midTyped.lineText.startsWith("X\n"),
+  JSON.stringify(midTyped),
+);
+// 收尾：撤销回原文，别把这一段留在后面的组里（Enter 与首字可能同属一次历史记录，撤销两次兜底）
+for (let i = 0; i < 3; i++) {
+  await c.key("z", { code: "KeyZ", keyCode: 90, modifiers: 2 });
+  await new Promise((r) => setTimeout(r, 200));
+  if ((await c.evaluate(`window.__typstPadView.state.doc.toString()`)) === "1 \n\n 1") break;
+}
+check(
+  "段中 Enter 之后撤销回原文",
+  (await c.evaluate(`window.__typstPadView.state.doc.toString()`)) === "1 \n\n 1",
 );
 
 // ---------------------------------------------------------------------------
