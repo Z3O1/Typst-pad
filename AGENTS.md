@@ -48,6 +48,13 @@ npm run verify:browser
 | CI、打包、发布、更新 | [CI](docs/maintainers/ci.md)、[发布](docs/maintainers/release.md)、[更新器](docs/maintainers/updater.md) |
 | 渲染取舍或新交互设计 | [渲染模型](docs/design/rendering-model.md)、[编辑设计与研究](docs/design/wysiwyg-research.md) |
 
+## Git 操作
+
+- 开始前查看当前分支和工作区状态，保留已有修改；只暂存和提交本次任务的文件，不覆盖或回滚他人的工作。
+- 大修或跨模块重构前先建立工作分支；若已在适合本次任务的工作分支上，可继续使用。普通小改动按任务需要决定是否另建分支。
+- 按任务需要提交、推送和创建 Pull Request；提交前完成与改动对应的检查。遇到冲突或检查失败时先查明原因，不通过跳过检查或改写历史掩盖问题。
+- 未经明确授权，不执行 `reset --hard`、清理他人文件、强制推送、删除远端分支或修改仓库设置。
+
 ## 外部操作与发布权限
 
 - 版本变更、CHANGELOG 新版本段、tag、创建或发布 Release，必须有用户明确的发布版本授权；普通重构和审查不包含发版。获得授权后按[发布流程](docs/maintainers/release.md)完成资产检查和发布，无需为已授权步骤重复询问。
