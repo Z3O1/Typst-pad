@@ -407,6 +407,20 @@ check(
   JSON.stringify({ preTail, postTail: tailTops(nestedPost, 3) }),
 );
 
+// ⑦ 退格合并（当前是**默认行为**，报告把"段首合并"的一致命令语义列在 P1）：行首退格把相邻两项
+//    并成一项；空项正文处退格退掉标记后的空格（`- ` → `-`），typst 把那一行并进上一项。
+//    先把这两份真实产物钉住 —— P1 改合并语义时它会红，提醒同步夹具。
+await resetDoc();
+await setCaret(8); // 第 3 项（"- 丙"）行首
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await assertState("合并·并项");
+await resetDoc();
+await setCaret(11);
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+await assertState("空续项");
+await c.key("Backspace", { code: "Backspace", keyCode: 8 });
+await assertState("合并·空项退格");
+
 // ---------------------------------------------------------------------------
 // 标记 → 正文起点：必须来自引擎（`listMarker.bodyOffsetPt`），并且跨状态稳定
 // ---------------------------------------------------------------------------
