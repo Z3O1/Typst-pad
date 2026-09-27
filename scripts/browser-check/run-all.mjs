@@ -39,7 +39,7 @@ const SUITES = [
   ["writing-blocks.mjs", 158],
   // **列表结构变化的真实状态回放**（报告 2026-09-28 第一批第 3 条）：8 个预编译状态逐字比对 +
   // 几何对账（真实 typst 产物）、单字输入不位移、新增一行不先缩、标记→正文起点稳定
-  ["writing-list-states.mjs", 90],
+  ["writing-list-states.mjs", 116],
   ["writing-blocks-visual.mjs", 114],
   ["writing-blocks-hit.mjs", 16],
   ["writing-mode-scenes.mjs", 86],

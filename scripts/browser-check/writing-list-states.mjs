@@ -105,6 +105,10 @@ const GEOMETRY = `(() => {
     exact: window.__typstPadBlocks ? window.__typstPadBlocks.exact === true : null,
     blockCount: window.__typstPadBlocks ? window.__typstPadBlocks.blocks : null,
     crops, lines, caretLine,
+    /** 带高盒（精确 + 占位）总数：多源码行块那一组要断言"不许整篇掉带高" */
+    bands: document.querySelectorAll(".cm-block-band, .cm-block-band-hold").length,
+    /** 编辑区实际显示的文本（合成期间合成串只在 DOM 里，state.doc 还没提交） */
+    contentText: content.textContent,
     scrollHeight: document.querySelector(".cm-scroller").scrollHeight,
     errors: window.__probeErrors ?? null,
   };
@@ -178,6 +182,12 @@ async function assertState(name) {
     paired.push({ ...hit, y: b.yPt, pos: b.pos });
   }
   const kinds = new Set(paired.map((p) => p.kind));
+  /**
+   * **每个块还必须"能被带高盒表达"**：带高盒是单源码行的行高模型，多源码行块只能按自然行盒
+   * （`buildBlockBandFitDecorations` 直接跳过它，见报告第 3 节风险 ①）。这种状态里相对位置必然
+   * 与真实产物差出那一块的量（实测 14.00px），所以只验"每个有输出的块都在场"。
+   */
+  const bandable = expected.every((b) => !(b.edit?.source ?? "").includes("\n"));
   const factor =
     kinds.size === 1 && kinds.has("crop") && paired[0]?.crop?.width
       ? paired[0].crop.width / fx.contentWidthPt
@@ -186,7 +196,7 @@ async function assertState(name) {
   for (const p of paired) {
     worst = Math.max(worst, Math.abs(p.top - paired[0].top - (p.y - paired[0].y) * factor));
   }
-  if (kinds.size <= 1) {
+  if (kinds.size <= 1 && bandable) {
     check(
       `[${name}] ${expected.length} 个有输出的块都在 DOM 里、相对位置与真实产物一致（比例 ${factor.toFixed(3)}，最大偏差 ${worst.toFixed(2)}px ≤ 2.5）`,
       misses.length === 0 && paired.length === expected.length && worst <= 2.5,
@@ -198,8 +208,10 @@ async function assertState(name) {
       }),
     );
   } else {
+    const why =
+      kinds.size > 1 ? "切片与可编辑行混用 ⇒ 比例不可加" : "含多源码行块 ⇒ 带高盒无法覆盖";
     check(
-      `[${name}] ${expected.length} 个有输出的块都在 DOM 里（切片与可编辑行混用 ⇒ 比例不可加，只验在场；缺 ${misses.length}）`,
+      `[${name}] ${expected.length} 个有输出的块都在 DOM 里（${why}，只验在场；缺 ${misses.length}）`,
       misses.length === 0 && paired.length === expected.length,
       JSON.stringify({ misses, kinds: [...kinds], positions: expected.map((b) => b.pos) }),
     );
@@ -420,6 +432,82 @@ await c.key("Enter", { code: "Enter", keyCode: 13 });
 await assertState("空续项");
 await c.key("Backspace", { code: "Backspace", keyCode: 8 });
 await assertState("合并·空项退格");
+
+// ⑧ 多源码行块里打字（报告第 3 节风险 ① 的实测）：光标进「列表与嵌套」那个**多源码行**的列表项，
+//    敲一个字、等真实产物落地。实测（2026-09-28，本机 1400×900）：
+//      - 其它 7 个单源码行块的带高盒**一直开着**（落地前 7 个、落地后仍有带高盒）——说明
+//        "全局按带高排"没有因为那一块拿不到带高盒而整篇掉掉（那才是真正的抖动源）；
+//      - 多源码行块本身是 3 条自然行盒（72.6px），它的真实带高是 43.95pt ⇒ 只在这一块内有偏差，
+//        量级约 14px（4/3 口径），比"整篇掉带高"（实测会把后文推走 65px 以上）小得多。
+//    所以本轮**不动**这条半套规则，只用检查把它钉住（要改必须先有比它更小的误差方案）。
+console.log("\n=== 多源码行块里打字：不许在落地时整篇掉带高");
+await c.click(400, 300);
+await c.selectAll();
+await c.type(byName.get("嵌套列表·初始").doc);
+await assertState("嵌套列表·初始"); // 落点在文档末尾（最后一块）：先验文本与真实产物
+const mlCaret = await c.evaluate(`window.__typstPadView.state.doc.line(5).to`); // "- 嵌套一" 行尾
+await setCaret(mlCaret);
+await sleep(250);
+// 光标进多源码行块之后（纯选区变化，不触发重编译 ⇒ 还是同一份真实产物）
+const mlState = await geometry();
+const mlBlockFrom = byteToPos(
+  byName.get("嵌套列表·初始").doc,
+  byName.get("嵌套列表·初始").blocks[2].start,
+);
+const mlLineBefore = mlState.lines.find((l) => l.lineFrom === mlBlockFrom);
+check(
+  `多源码行块：光标进去后其它块的带高盒仍在（${mlState.bands} 个），这一块自己是自然行盒（${mlLineBefore ? mlLineBefore.height : "?"}px，band=${mlLineBefore?.band}）`,
+  mlState.bands >= 5 &&
+    mlLineBefore !== undefined &&
+    !mlLineBefore.band &&
+    mlLineBefore.height >= 20,
+  JSON.stringify({ bands: mlState.bands, line: mlLineBefore, head: mlState.head }),
+);
+await c.type("X");
+await sleep(120);
+const mlPre = await geometry();
+check(
+  `多源码行块：打字后、编译落地前带高盒也没有掉（${mlPre.bands} 个）`,
+  mlPre.bands >= 5,
+  JSON.stringify({ bands: mlPre.bands, lines: mlPre.lines.length }),
+);
+const mlPost = await assertState("多行块·输入");
+check(
+  `多源码行块：落地后带高盒仍在（${mlPost.bands} 个），后文没有被往上缩（${tailTops(mlPre, 3)} → ${tailTops(mlPost, 3)}）`,
+  mlPost.bands >= 5 && tailTops(mlPost, 3).every((t, i) => t >= tailTops(mlPre, 3)[i] - 1),
+  JSON.stringify({ bands: mlPost.bands, pre: tailTops(mlPre, 3), post: tailTops(mlPost, 3) }),
+);
+
+// ⑨ 列表项里的中文输入法合成（报告 P1 可做的那部分）：composition 事件路径 + 提交后逐字命中
+//    真实产物。**真实候选窗 / 确认取消 / 连续组合**要真机，这里不假装验过。
+console.log("\n=== 列表项里的输入法合成（composition 路径）");
+await resetDoc();
+await setCaret(11);
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+const imeEmpty = await assertState("空续项");
+await c.send("Input.imeSetComposition", { text: "zhong", selectionStart: 5, selectionEnd: 5 });
+await sleep(250);
+const imeComposing = await geometry();
+check(
+  `合成中：合成串进了编辑区（${JSON.stringify(imeComposing.contentText.slice(-12))}）、光标行盒仍可见（${imeComposing.caretLine ? imeComposing.caretLine.height : "?"}px）`,
+  imeComposing.contentText.includes("zhong") &&
+    imeComposing.caretLine !== null &&
+    imeComposing.caretLine.height >= 8,
+  JSON.stringify({ tail: imeComposing.contentText.slice(-16), caret: imeComposing.caretLine }),
+);
+check(
+  `合成中：编辑区没有变空（${imeComposing.lines.length} 行 ≥ 合成前 ${imeEmpty.lines.length} 行）`,
+  imeComposing.lines.length >= imeEmpty.lines.length,
+  JSON.stringify({ composing: imeComposing.lines.length, before: imeEmpty.lines.length }),
+);
+await c.send("Input.insertText", { text: "中" });
+await sleep(300);
+const imeCommitted = await assertState("首字·合成");
+check(
+  `合成提交：提交字落进文档且不留拼音残留（${JSON.stringify(imeCommitted.doc)}）`,
+  !imeCommitted.doc.includes("zhong") && imeCommitted.doc.includes("中"),
+  JSON.stringify(imeCommitted.doc),
+);
 
 // ---------------------------------------------------------------------------
 // 标记 → 正文起点：必须来自引擎（`listMarker.bodyOffsetPt`），并且跨状态稳定
