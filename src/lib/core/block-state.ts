@@ -21,6 +21,7 @@
 //    的 `allow`）；沿用的块一律标 `stale`（精确命中关掉、滚到附近要补渲）。
 
 import { positionRangeToByteRange } from "./block-offsets";
+import { timeIt } from "./perf-marks";
 import { carryOverCrops, remapBlocksThroughEdit, toBlockTable } from "./block-plan";
 import type { Block } from "./block-plan";
 import type { BlocksFail, BlocksOk } from "./typst-engine";
@@ -182,10 +183,23 @@ export function remapBlocksOnEdit(
 ): BlocksPatch | null {
   if (!prev.blocks || prev.blocks.length === 0) return null;
   if (prev.doc === newDoc) return null;
-  const remap = remapBlocksThroughEdit(prev.blocks, prev.doc, newDoc);
+  const blocks = prev.blocks; // 收窄后再进闭包（`prev` 在闭包里不再被重新检查）
+  return timeIt("block-remap", () =>
+    remapBlocksOnEditInner(prev, blocks, newDoc, documentRevision),
+  );
+}
+
+/** `remapBlocksOnEdit` 的实现体（外面包一层分段打点，见 `core/perf-marks.ts`） */
+function remapBlocksOnEditInner(
+  prev: BlocksSnapshot,
+  blocks: readonly Block[],
+  newDoc: string,
+  documentRevision: number,
+): BlocksPatch | null {
+  const remap = timeIt("remap-core", () => remapBlocksThroughEdit(blocks, prev.doc, newDoc));
   return {
     // 编辑后的块表是**估算**的：图还是旧图的，标 stale 让精确命中与补渲都走保守路线
-    blocks: remap.blocks.map((b) => ({ ...b, stale: true })),
+    blocks: timeIt("remap-stale", () => remap.blocks.map((b) => ({ ...b, stale: true }))),
     doc: newDoc,
     stamp: { ...(prev.stamp ?? ZERO_STAMP), documentRevision },
     // 平移**不**等于"精确"：几何与命中缓存都还是上一次编译的

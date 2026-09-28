@@ -12,6 +12,7 @@
 import type { EditorView } from "@codemirror/view";
 import { docScanStats, resetDocScanCache } from "../editor/live-preview/doc-scan";
 import { livePreviewStats, resetLivePreviewStats } from "../editor/live-preview";
+import { perfMarkStats, resetPerfMarks, setPerfMarksEnabled } from "../core/perf-marks";
 
 /** 当前页是不是浏览器开发模式（与 browser-dev-stub 的开关是同一个查询参数） */
 export function browserDevEnabled(): boolean {
@@ -37,14 +38,19 @@ export function registerEditorView(view: EditorView): void {
   const hooks = window as unknown as {
     __typstPadScanStats?: () => unknown;
     __typstPadDecoStats?: () => unknown;
+    __typstPadPerfMarks?: () => unknown;
     __typstPadResetStats?: () => void;
   };
   hooks.__typstPadScanStats = docScanStats;
   // 装饰重建次数（报告第二批的性能基线："每次输入扫描 / 装饰重建次数"）：与上面同一套只读口径。
   hooks.__typstPadDecoStats = livePreviewStats;
+  // **按键 → 首帧的分段打点**（typora-parity 审计 P1-7）：只在开发模式打开记录，生产零开销。
+  setPerfMarksEnabled(true);
+  hooks.__typstPadPerfMarks = perfMarkStats;
   hooks.__typstPadResetStats = () => {
     resetDocScanCache();
     resetLivePreviewStats();
+    resetPerfMarks();
   };
 }
 
@@ -56,5 +62,7 @@ export function unregisterEditorView(view: EditorView): void {
   const hooks = window as unknown as Record<string, unknown>;
   delete hooks.__typstPadScanStats;
   delete hooks.__typstPadDecoStats;
+  delete hooks.__typstPadPerfMarks;
   delete hooks.__typstPadResetStats;
+  setPerfMarksEnabled(false);
 }

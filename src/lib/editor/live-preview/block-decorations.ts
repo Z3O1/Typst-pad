@@ -9,6 +9,7 @@ import type { Range } from "@codemirror/state";
 import type { EditorState } from "@codemirror/state";
 import { planBlockCovers } from "../../core/block-plan";
 import type { Block, BlockCover } from "../../core/block-plan";
+import { timeIt } from "../../core/perf-marks";
 import { decideTextBlockEditing } from "../../core/editable-subset";
 import {
   scanAllowedInlineCode,
@@ -64,16 +65,18 @@ export function buildBlockCovers(
     ...scanAllowedInlineRaw(doc, opaque),
     ...scanAllowedInlineLink(doc, opaque),
   ];
-  for (const cover of covers) {
-    if (cover.noOutput) continue;
-    const decision = decideTextBlockEditing({
-      block: cover.block,
-      source: doc.slice(cover.block.from, cover.block.to),
-      opaque,
-      allowedInline,
-    });
-    if (decision.editable) cover.revealed = true;
-  }
+  timeIt("editable-decisions", () => {
+    for (const cover of covers) {
+      if (cover.noOutput) continue;
+      const decision = decideTextBlockEditing({
+        block: cover.block,
+        source: doc.slice(cover.block.from, cover.block.to),
+        opaque,
+        allowedInline,
+      });
+      if (decision.editable) cover.revealed = true;
+    }
+  });
   return covers;
 }
 

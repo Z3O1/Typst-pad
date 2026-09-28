@@ -380,8 +380,16 @@
   // 见 docs/development/writing-rendering.md。后端没有 compile_blocks（浏览器开发桩 / 旧版本）
   // 时自动退回"只渲染公式 + 整页预览"的老路径（compile_blocks 返回 unavailable）。
   // ---------------------------------------------------------------------------
-  /** 最近一次编译产出的块切片（null = 未启用 / 后端不支持 → 编辑器保持源码显示） */
-  let writingBlocks = $state<Block[] | null>(null);
+  /**
+   * 最近一次编译产出的块切片（null = 未启用 / 后端不支持 → 编辑器保持源码显示）。
+   *
+   * **`$state.raw` 而不是 `$state`**（2026-09-28，性能）：块表只**整体替换**、从不原地改字段
+   * （每次编译 / 平移都是新数组，编辑器读的是 `cover.revealed`，不在这一份里）。用深度响应式
+   * 的话，1819 个块的每一次属性读取都要过一遍 Proxy —— 实测 100k 文档下每次按键光是把块表标
+   * `stale`（`{...b, stale: true}` 读全部字段）就要 **25.7ms**（`writing-perf.mjs` 的
+   * `remap-stale` 分段）。改成 raw 之后读取是普通属性访问，替换语义不变。
+   */
+  let writingBlocks = $state.raw<Block[] | null>(null);
   /** 块切片代次（自增即通知编辑器重整块装饰） */
   let blocksVersion = $state(0);
   /**

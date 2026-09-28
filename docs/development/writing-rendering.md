@@ -169,7 +169,14 @@ fail-closed 地要求量到的确实是"编辑后、编译落地前"（`exact` �
 
 ### 输入性能基线（2026-09-28，报告第二批）
 
-`scripts/browser-check/writing-perf.mjs`（只按需跑，基线存 `.browser-check/perf-baseline.json`）在开发桩下实测：每次输入 = **1 次全文扫描（misses 1/键）+ 3 次装饰重建（文档事务 / 选区 / 产物落地刷新）**，与文档长度成正比 —— 2k 文档输入→下一帧 p50/p95 = 8.6 / 15.5ms、20k = 24.5 / 40.3ms、**100k = 114.3 / 136.7ms 且每次按键都是一个约 138ms 的长任务**。所以"增量扫描 / 局部装饰更新"不是凭代码量的猜测，而是 100k 文档下的实测瓶颈；下一步应在这条基线上做，改完重跑同一套件对比。桩的"新鲜产物"时延（154~173ms）只含前端去抖 + 调度，**不含真实 typst 编译**。
+`scripts/browser-check/writing-perf.mjs`（只按需跑，基线存 `.browser-check/perf-baseline.json`）在开发桩下实测：每次输入 = **1 次全文扫描（misses 1/键）+ 3 次装饰重建（文档事务 / 选区 / 产物落地刷新）**，与文档长度成正比。2026-09-28 先量后改：
+
+- **改造前**：2k 文档输入→下一帧 p50/p95 = 8.6 / 15.5ms、20k = 24.5 / 40.3ms、**100k = 114.3 / 136.7ms，且每次按键都是一个约 138ms 的长任务**。分段打点（`perf-marks.ts`，`window.__typstPadPerfMarks()`）指出钱花在 `block-remap`（29.4ms/键）与 `deco-collect`（34.7ms/键，其中 `plan-covers` 21.9、`editable-decisions` 19.6）。
+- **两处根因**：① 块表用**深度响应式** `$state`，1819 个块的每次属性读取都过 Proxy —— 把块表标 `stale`（`{...b, stale: true}` 读全部字段）一项就 25.7ms/键；② `remapBlocksThroughEdit` 里 `changedSpan` 用 `str[i]` 逐字符比较（约 40 万次单字符字符串分配），`touchesLine` 又对每个块各扫一遍文档找行边界。
+- **修法**：块表改 `$state.raw`（只整体替换、从不原地改字段 —— 见 frontend.md 的状态契约）；`changedSpan` 改 `charCodeAt`；行边界改成一次 O(n) 行首索引 + 二分；另外把 `remapBlocksOnEdit` / `planBlockCovers` / `buildBlockCovers` / `collect` / 扫描未命中都接上分段打点（只在 `?browserdev=1` 记录）。
+- **改造后**：2k 8.1 / 14.1ms、20k 8.9 / 16.1ms、**100k 19.9 / 25.0ms 且没有长任务**；`block-remap` 1.32ms/键、`deco-collect` 5.6ms/键。门槛（p95 ≤ 120ms、长任务 < 100ms 等）正好挡住退回改造前。
+
+桩的"新鲜产物"时延（154~157ms）只含前端去抖 + 调度，**不含真实 typst 编译**；真实编译的时延要在 Tauri 里量。
 
 ## 前端呈现不变量
 

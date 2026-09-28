@@ -20,6 +20,7 @@ import { scanMathRanges } from "../../core/math-ranges";
 import type { MathRange } from "../../core/math-ranges";
 import { buildMathContext } from "../../core/math-context";
 import { scanMarkupDecorations } from "../../core/markup-ranges";
+import { timeIt } from "../../core/perf-marks";
 import type { MarkupDecoration } from "../../core/markup-ranges";
 import { scanParagraphGapRows } from "../../core/paragraph-breaks";
 import type { ParagraphGapRow } from "../../core/paragraph-breaks";
@@ -58,21 +59,23 @@ export function scanDocument(state: EditorState, prefix: string): DocScan {
     return cache;
   }
   misses += 1;
-  const docString = doc.toString();
-  const opaque = scanNonMarkupRegions(docString);
-  const math = scanMathRanges(docString, opaque);
-  const markup = scanMarkupDecorations(docString, { opaque, math });
-  cache = {
-    doc,
-    docString,
-    prefix,
-    context: buildMathContext(prefix, docString),
-    opaque,
-    math,
-    markup,
-    paragraphGapRows: scanParagraphGapRows(docString, opaque, math, markup, prefix),
-  };
-  return cache;
+  return timeIt("scan-miss", () => {
+    const docString = doc.toString();
+    const opaque = scanNonMarkupRegions(docString);
+    const math = scanMathRanges(docString, opaque);
+    const markup = scanMarkupDecorations(docString, { opaque, math });
+    cache = {
+      doc,
+      docString,
+      prefix,
+      context: buildMathContext(prefix, docString),
+      opaque,
+      math,
+      markup,
+      paragraphGapRows: scanParagraphGapRows(docString, opaque, math, markup, prefix),
+    };
+    return cache;
+  });
 }
 
 /** 诊断 / 验收：命中与未命中次数（"纯选区移动不重新扫描全文"就靠它断言） */

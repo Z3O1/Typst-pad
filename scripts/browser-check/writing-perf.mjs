@@ -97,11 +97,16 @@ const setCaret = (pos) =>
   );
 
 const KEYS = 30;
+/**
+ * 门槛（**量化回归守卫**，不是性能承诺）：2026-09-28 优化后实测 100k 文档 p50 19.9 / p95 25.0ms、
+ * 没有长任务；改造前是 p50 114 / p95 137ms、每次按键一个约 138ms 的长任务。这里取"正好能挡住退回
+ * 改造前"的数（p95 120ms、长任务 100ms），给机器差异留足余量。
+ */
 const BUDGET = {
-  nextFrameP95: 220,
+  nextFrameP95: 120,
   scanPerKey: 1.6,
   decoPerKey: 5,
-  longTaskMax: 800,
+  longTaskMax: 100,
   freshMs: 1500,
 };
 const results = [];
@@ -140,7 +145,9 @@ for (const chars of [2000, 20000, 100000]) {
     perf: window.__perfHarness.snapshot(),
     scan: window.__typstPadScanStats(),
     deco: window.__typstPadDecoStats(),
+    marks: window.__typstPadPerfMarks ? window.__typstPadPerfMarks() : {},
     compiles: window.__browserDevCallCounts?.compile_blocks ?? 0,
+    blocks: window.__typstPadBlocks?.blocks ?? null,
     docLength: window.__typstPadView.state.doc.length,
   })`);
   // 最后一次输入 → 新鲜产物落地（**只含前端**：去抖 + 调度 + 重排）
@@ -176,15 +183,39 @@ for (const chars of [2000, 20000, 100000]) {
     decoErrors: snap.deco.errors,
     decoPerKey: +decoPerKey.toFixed(2),
     compiles: snap.compiles - compilesBefore,
+    blocks: snap.blocks,
     freshMs,
+    // **按键 → 首帧的分段打点**（审计 P1-7）：每键的调用次数与累计毫秒
+    marks: Object.fromEntries(
+      Object.entries(snap.marks ?? {}).map(([k, v]) => [
+        k,
+        {
+          perKey: +(v.count / KEYS).toFixed(2),
+          msPerKey: +(v.totalMs / KEYS).toFixed(2),
+          maxMs: +v.maxMs.toFixed(2),
+        },
+      ]),
+    ),
   };
   results.push(row);
-  console.log("  " + JSON.stringify(row));
+  console.log("  " + JSON.stringify({ ...row, marks: undefined }));
+  for (const [name, m] of Object.entries(row.marks)) {
+    console.log(
+      `    · ${name.padEnd(18)} 每键 ${String(m.perKey).padStart(5)} 次 / ${String(m.msPerKey).padStart(7)}ms（单次最大 ${m.maxMs}ms）`,
+    );
+  }
 
   check(
     `[${doc.length}] 基线的前提：${KEYS} 次输入真的插进去了 ${row.inserted} 个字符（否则整段基线是假绿）`,
     row.inserted === KEYS,
     JSON.stringify({ before: doc.length, after: snap.docLength }),
+  );
+  const remapPerKey = row.marks["block-remap"]?.perKey ?? 0;
+  const collectPerKey = row.marks["deco-collect"]?.perKey ?? 0;
+  check(
+    `[${doc.length}] 重活次数与"每次输入一次"同量级（block-remap ${remapPerKey}/键 ≤ 2，deco-collect ${collectPerKey}/键 ≤ 4）`,
+    remapPerKey <= 2 && collectPerKey <= 4,
+    JSON.stringify(Object.fromEntries(Object.entries(row.marks).map(([k, v]) => [k, v.perKey]))),
   );
   check(
     `[${doc.length}] 每次输入最多全文重扫一次（misses/键 ${row.scanPerKey} ≤ ${BUDGET.scanPerKey}）`,

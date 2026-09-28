@@ -8,6 +8,7 @@
 import type { Text } from "@codemirror/state";
 import type { BlockCrop, BlockEditProof, CropLink, ListMarkerProof } from "./typst-engine";
 import { byteOffsetsToPositions } from "./block-offsets";
+import { timeIt } from "./perf-marks";
 
 /** 文字对应证明 / 列表标记的线格式定义在 `typst-engine`（IPC 契约同处），块层原样再导出 */
 export type { BlockEditProof, ListMarkerProof };
@@ -326,6 +327,11 @@ export interface BlockCover {
  *  - **块表过期 / 编译失败**（`found:false` 但不是 `noOutput`）→ 永远显示源码（绝不隐藏）。
  */
 export function planBlockCovers(blocks: readonly Block[] | null, doc: Text): BlockCover[] {
+  return timeIt("plan-covers", () => planBlockCoversInner(blocks, doc));
+}
+
+/** `planBlockCovers` 的实现体（外面包一层分段打点，见 `core/perf-marks.ts`） */
+function planBlockCoversInner(blocks: readonly Block[] | null, doc: Text): BlockCover[] {
   if (!blocks || blocks.length === 0) return [];
   /**
    * **块表可能已经是"上一次编译"的坐标**（编辑期间它本来就是旧的），所以这里必须先滤掉
@@ -589,10 +595,35 @@ export function remapBlocksThroughEdit(
    * 时，按正文区间看"没相交"，可那一行**整行都在这一块的格子里** —— 不放它出来，刚打的字就被
    * 那张旧切片盖住了。所以这里按**行**判：改动起点落在 [本块首行行首, 本块末行行尾] 之间就算碰到它。
    */
-  const lineStartAt = (p: number) => after.lastIndexOf("\n", Math.max(0, p - 1)) + 1;
+  /**
+   * **行边界索引**（一次 O(n) 扫出所有行首，之后二分）。
+   *
+   * 为什么不能每个块各扫一遍文档：`touchesLine` 对**每一个块**都要问"这个位置在哪一行"，
+   * 而 `lastIndexOf` / `indexOf` 都是整串扫描 —— 实测 100k 文档 / 1819 块时 `block-remap`
+   * 一次 29ms（单次最大 40ms），是每次按键最大的一笔（见 `writing-perf.mjs` 的分段打点）。
+   * 这里先扫一遍换行位置，单块查询退化成两次二分。
+   */
+  const lineStarts: number[] = [0];
+  for (let i = after.indexOf("\n"); i >= 0; i = after.indexOf("\n", i + 1)) lineStarts.push(i + 1);
+  /** 位置 → 所在行的下标（最大的 `lineStarts[i] <= p`） */
+  const lineIndexOf = (p: number): number => {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    let ans = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (lineStarts[mid] <= p) {
+        ans = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return ans;
+  };
+  const lineStartAt = (p: number) => lineStarts[lineIndexOf(Math.max(0, p))];
   const lineEndAt = (p: number) => {
-    const i = after.indexOf("\n", p);
-    return i < 0 ? after.length : i;
+    const i = lineIndexOf(Math.max(0, p));
+    // 下一行行首 - 1 = 本行那个换行的下标；最后一行到文末
+    return i + 1 < lineStarts.length ? lineStarts[i + 1] - 1 : after.length;
   };
   const touchesLine = (b: Block) => {
     const from = b.from + (b.from >= span.to ? span.delta : 0);
@@ -720,28 +751,36 @@ export function changedSpan(
   after: string,
 ): { from: number; to: number; delta: number } {
   const max = Math.min(before.length, after.length);
+  /**
+   * **用 `charCodeAt` 而不是 `str[i]`**：下标读字符串会**为每个位置造一个单字符字符串**，
+   * 而这一段是"整篇逐字符比前缀 / 后缀"（100k 文档约 40 万次比较）。中文文档的码元都在
+   * Latin-1 之外，分配的是一字节以上的字符串 —— 实测每次按键的 `block-remap` 里这一项
+   * 与 GC 一起占了主要时间（见 `writing-perf.mjs` 的分段打点）。`charCodeAt` 返回数字，零分配。
+   */
   let p = 0;
-  while (p < max && before[p] === after[p]) p++;
+  while (p < max && before.charCodeAt(p) === after.charCodeAt(p)) p++;
   // 代理对不能被切开（emoji 的一半会让位置落在字符中间）
-  if (p > 0 && isLowSurrogate(after[p]) && isHighSurrogate(after[p - 1])) p--;
+  if (p > 0 && isLowSurrogate(after.charCodeAt(p)) && isHighSurrogate(after.charCodeAt(p - 1))) {
+    p--;
+  }
   let s = 0;
-  while (s < max - p && before[before.length - 1 - s] === after[after.length - 1 - s]) {
+  while (
+    s < max - p &&
+    before.charCodeAt(before.length - 1 - s) === after.charCodeAt(after.length - 1 - s)
+  ) {
     s++;
   }
-  if (s > 0 && isLowSurrogate(before[before.length - s])) s--;
+  if (s > 0 && isLowSurrogate(before.charCodeAt(before.length - s))) s--;
   return { from: p, to: before.length - s, delta: after.length - before.length };
 }
 
-function isHighSurrogate(ch: string | undefined): boolean {
-  if (!ch) return false;
-  const c = ch.charCodeAt(0);
+/** 传**字符码**（`charCodeAt` 的结果），见 `changedSpan` 里为什么不用字符串下标 */
+function isHighSurrogate(c: number): boolean {
   return c >= 0xd800 && c <= 0xdbff;
 }
 
-function isLowSurrogate(ch: string | undefined): boolean {
-  if (!ch) return false;
-  const c = ch.charCodeAt(0);
-  return c >= 0xdc00 && c <= 0xdfff;
+function isLowSurrogate(c: number): boolean {
+  return Number.isFinite(c) && c >= 0xdc00 && c <= 0xdfff;
 }
 
 /**

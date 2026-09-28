@@ -38,6 +38,7 @@ import type { LivePreviewOptions } from "./live-preview/options";
 import { createLinkClick } from "./live-preview/link-click";
 import { createRequester } from "./live-preview/requests";
 import { mathWidgetTheme } from "./live-preview/theme";
+import { timeIt } from "../core/perf-marks";
 
 // 公共面原样再导出：外部（Editor.svelte / +page.svelte / 单测）的 import 路径不变
 export { refreshLivePreview } from "./live-preview/options";
@@ -101,6 +102,14 @@ export function livePreview(opts: LivePreviewOptions): Extension {
     state: EditorState,
   ): { deco: DecorationSet; covers: BlockCover[]; separators: ReadonlySet<number> } => {
     decoRebuilds += 1;
+    // 分段打点：这一段是"一次编辑里前端重建装饰"的总时长（内部还分 scan-miss / plan-covers /
+    // editable-decisions 等子段，见 core/perf-marks.ts 与 writing-perf.mjs）
+    return timeIt("deco-collect", () => collectInner(state));
+  };
+
+  const collectInner = (
+    state: EditorState,
+  ): { deco: DecorationSet; covers: BlockCover[]; separators: ReadonlySet<number> } => {
     try {
       if (!opts.enabled()) return { deco: Decoration.none, covers: [], separators: EMPTY_LINES };
       // 扫描结果走**文档扫描缓存**（`doc-scan.ts`）：docChanged / 选区变化 / 刷新三种事务
