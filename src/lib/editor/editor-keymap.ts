@@ -2,6 +2,7 @@
 import { keymap } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
 import { EditorSelection, Prec } from "@codemirror/state";
+import { acceptCompletion } from "@codemirror/autocomplete";
 import {
   indentLess,
   indentMore,
@@ -32,6 +33,68 @@ function deleteEmptyDollarPair(view: EditorView): boolean {
   const from = sel.head - span.before;
   const to = sel.head + span.after;
   view.dispatch({ changes: { from, to }, selection: { anchor: from } });
+  return true;
+}
+
+/** Tab 直接插入的字符 = **一个制表符**（2026-09-28 用户要求「Tab 输入一个 tab」）。 */
+const TAB_CHAR = "\t";
+
+/**
+ * 给选区触碰的每一行行首加一个 tab（用户：「选中了一些东西 → 把这些东西所在的行之前一个 tab」）。
+ *
+ * 行的口径与 CM `indentMore` 的 `changeBySelectedLine` 一致：选区**到达**的行都算，包括
+ * 选区结尾正好停在某行行首的那一行；同一行被多个选区触碰只加一次。选区锚点/头部按
+ * assoc=1 映射，落在新插入的 tab 之后 —— 与 `indentMore`（Ctrl+Tab）的选区保持同款。
+ * 这里不复用 `indentMore`：那一档插的是 `indentUnit`（4 个空格），而 Tab 语义是制表符本身。
+ */
+function indentLinesWithTab(view: EditorView): boolean {
+  const { state } = view;
+  const seen = new Set<number>();
+  const changes: { from: number; insert: string }[] = [];
+  for (const range of state.selection.ranges) {
+    for (let pos = range.from; pos <= range.to;) {
+      const line = state.doc.lineAt(pos);
+      if (!seen.has(line.from)) {
+        seen.add(line.from);
+        changes.push({ from: line.from, insert: TAB_CHAR });
+      }
+      pos = line.to + 1;
+    }
+  }
+  if (changes.length === 0) return false;
+  changes.sort((a, b) => a.from - b.from); // 多选区可能乱序，变更按位置升序交给 CM
+  const changeSet = state.changes(changes);
+  view.dispatch({
+    changes: changeSet,
+    selection: EditorSelection.create(
+      state.selection.ranges.map((range) =>
+        EditorSelection.range(changeSet.mapPos(range.anchor, 1), changeSet.mapPos(range.head, 1)),
+      ),
+      state.selection.mainIndex,
+    ),
+    scrollIntoView: true,
+    userEvent: "input.indent",
+  });
+  return true;
+}
+
+/**
+ * Tab = **补全候选开着先接受所选候选**（公式里的 `typstMathCompletions` 等都是 CM 补全面板，
+ * 用户要求「有候选时 Tab 等于输入所选候选」）；否则有选区给触碰的行前各加一个 tab，
+ * 无选区直接插入一个 tab 字符。
+ */
+function insertTabOrIndentLines(view: EditorView): boolean {
+  if (view.state.readOnly) return false;
+  if (acceptCompletion(view)) return true;
+  if (view.state.selection.ranges.some((range) => !range.empty)) {
+    return indentLinesWithTab(view);
+  }
+  view.dispatch(
+    view.state.update(view.state.replaceSelection(TAB_CHAR), {
+      scrollIntoView: true,
+      userEvent: "input",
+    }),
+  );
   return true;
 }
 
@@ -260,15 +323,23 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
   const isWriteMode = opts.isWriteMode ?? (() => false);
   return Prec.high(
     keymap.of([
-      // 缩进 / 反缩进 = **Ctrl+Tab / Ctrl+Shift+Tab**（2026-09-28 用户要求从 Tab 改到 Ctrl+Tab）。
-      // 普通 Tab 刻意**不接管**：它回到 WebView 的默认行为（移动焦点），所以这里只拦 Ctrl+Tab 这一对。
+      // **Tab / Shift+Tab**（2026-09-28 用户再次调整：普通 Tab 从「交回浏览器焦点移动」改成接管）：
+      // - 补全候选开着 → 先接受所选候选（公式里的 `typstMathCompletions` 等，见 insertTabOrIndentLines）；
+      // - 有选区 → 给选区触碰的每一行行首各加一个 tab（indentLinesWithTab）；
+      // - 无选区 → 直接插入一个 `\t`。
+      // Shift+Tab 同理反过来：给触碰的行去掉一档缩进 —— CM `indentLess` 按 indentUnit 列宽算，
+      // 一个 `\t`（tabSize=4 时恰为一档）或最多 4 个空格，两种缩进风格的行都能反缩进。
+      // `preventDefault: true` 与本文件其它自定义键位同款：命令返回 false（只读文档）时也吃掉按键。
+      { key: "Tab", run: insertTabOrIndentLines, preventDefault: true },
+      { key: "Shift-Tab", run: indentLess, preventDefault: true },
+      // 缩进 / 反缩进（按 indentUnit = 4 个空格的一档）仍是 **Ctrl+Tab / Ctrl+Shift+Tab**
+      // （2026-09-28 上午从 Tab 改到 Ctrl+Tab；同日普通 Tab 又按新需求接管，见上）。
       //
       // 为什么写 `Ctrl-` 而不是本文件其它键位用的 `Mod-`：macOS 上 Mod = Cmd，而 Cmd+Tab 是系统
       // 切换应用、根本到不了页面（Ctrl+Tab 在 Windows / macOS 两边都空着）。桌面版能收到它是因为
       // 浏览器加速键已在 Rust 侧关掉（见 src-tauri/src/lib.rs 的 DisableBrowserAccelerators）；
       // **真实浏览器里 Ctrl+Tab 是浏览器级手势、页面收不到**，所以这条只能在桌面版与浏览器验收的
       // 注入事件（CDP）里验，别指望在 Chrome 里手按。
-      // `preventDefault: true` 与本文件其它自定义键位同款：命令返回 false（只读文档）时也吃掉按键。
       { key: "Ctrl-Tab", run: indentMore, preventDefault: true },
       { key: "Ctrl-Shift-Tab", run: indentLess, preventDefault: true },
       {

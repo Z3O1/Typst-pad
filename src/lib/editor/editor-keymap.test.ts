@@ -5,7 +5,8 @@
 // （CodeMirror 的 keydown 处理挂在 contentDOM 上，事件按真实浏览器路径派发）
 // 说明：行为测试不引入 typst() 语言扩展——其 wasm 解析器在 Node 环境下对文档
 // 变更会 panic；注释符号改用 EditorState.languageData 注入，键位语义不受影响。
-// 缩进键自 2026-09-28 起是 Ctrl+Tab / Ctrl+Shift+Tab（普通 Tab 不再缩进，见 editor-keymap.ts）。
+// 缩进键：Ctrl+Tab / Ctrl+Shift+Tab 按 indentUnit（四空格）缩进；普通 Tab / Shift+Tab 自
+// 2026-09-28 起被接管 —— Tab 输入制表符（有选区给行首加 tab，有补全候选先接受候选），Shift+Tab 反缩进。
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap as keymapFacet } from "@codemirror/view";
@@ -17,6 +18,7 @@ import {
   toggleBlockComment,
   toggleComment,
 } from "@codemirror/commands";
+import { autocompletion, completionStatus, startCompletion } from "@codemirror/autocomplete";
 import { indentUnit } from "@codemirror/language";
 import { basicSetup } from "codemirror";
 import { createEditorKeymap, editorKeymap } from "./editor-keymap";
@@ -78,10 +80,11 @@ describe("editorKeymap 导出与绑定", () => {
     expect(keys).toContain("Enter");
     expect(keys).toContain("Shift-Enter");
     expect(keys).toContain("Backspace");
-    // 缩进键：Ctrl+Tab（反缩进 Ctrl+Shift+Tab）——普通 Tab 已经不接管
+    // 缩进键：Ctrl+Tab（反缩进 Ctrl+Shift+Tab）仍是四空格一档；普通 Tab / Shift+Tab 也被接管
     expect(keys).toContain("Ctrl-Tab");
     expect(keys).toContain("Ctrl-Shift-Tab");
-    expect(keys).not.toContain("Tab"); // 普通 Tab 交回浏览器默认（移动焦点）
+    expect(keys).toContain("Tab"); // 2026-09-28：Tab 不再交回浏览器焦点移动
+    expect(keys).toContain("Shift-Tab");
     expect(keys).toContain("Mod-Shift-d");
     expect(keys).toContain("Mod-d");
     expect(keys).toContain("Mod-Shift-/");
@@ -93,6 +96,10 @@ describe("editorKeymap 导出与绑定", () => {
     // 注册顺序上的第一个 Ctrl+Tab / Mod-d 才是生效的绑定（先返回 true 者胜出）
     expect(bindings.find((b) => b.key === "Ctrl-Tab")?.run).toBe(indentMore);
     expect(bindings.find((b) => b.key === "Ctrl-Shift-Tab")?.run).toBe(indentLess);
+    // Tab 绑的是本文件的包装命令（候选 → 行首缩进 → 插制表符，行为由下面的用例锁住）；
+    // Shift-Tab 与 Ctrl+Shift+Tab 同为 indentLess（两种缩进风格都退一档）
+    expect(bindings.find((b) => b.key === "Shift-Tab")?.run).toBe(indentLess);
+    expect(typeof bindings.find((b) => b.key === "Tab")?.run).toBe("function");
     expect(bindings.find((b) => b.key === "Mod-d")?.run).toBe(deleteLine);
     expect(bindings.find((b) => b.key === "Mod-Shift-d")?.run).toBe(copyLineDown);
     expect(bindings.find((b) => b.key === "Mod-Shift-/")?.run).toBe(toggleBlockComment);
@@ -169,13 +176,100 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     view.destroy();
   });
 
-  it("**普通 Tab 不再缩进**（交回浏览器默认的移动焦点），正文一字不动", () => {
-    const view = makeView("#foo\n");
-    view.dispatch({ selection: { anchor: 0 } });
+  it("**普通 Tab = 输入一个制表符**（不再交回浏览器焦点移动），光标停在 tab 之后", () => {
+    const view = makeView("abc");
+    view.dispatch({ selection: { anchor: 1 } });
     press(view, { key: "Tab", code: "Tab", keyCode: 9 });
-    press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
-    expect(view.state.doc.toString()).toBe("#foo\n");
+    expect(view.state.doc.toString()).toBe("a\tbc");
+    expect(view.state.selection.main.head).toBe(2);
     view.destroy();
+  });
+
+  it("**选中内容按 Tab：选区触碰的每行行首各加一个 tab**（选区正文保留），Shift+Tab 整组退回", () => {
+    // 单行内选区：行首加一个 tab
+    let view = makeView("aaa\nbbb\n");
+    view.dispatch({ selection: { anchor: 0, head: 2 } }); // 选中 "aa"
+    press(view, { key: "Tab", code: "Tab", keyCode: 9 });
+    expect(view.state.doc.toString()).toBe("\taaa\nbbb\n");
+    view.destroy();
+
+    // 多行选区：触碰的行都缩进（与 indentMore 同口径：选区结尾停在行首也算到达）
+    view = makeView("aaa\nbbb\nccc\n");
+    view.dispatch({ selection: { anchor: 1, head: 8 } }); // "aa\nbbb\nc"
+    press(view, { key: "Tab", code: "Tab", keyCode: 9 });
+    expect(view.state.doc.toString()).toBe("\taaa\n\tbbb\n\tccc\n");
+    // 同一选区 Shift+Tab：逐行去掉一个 tab，整组退回原样
+    press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("aaa\nbbb\nccc\n");
+    view.destroy();
+  });
+
+  it("**Shift+Tab 反缩进**：tab 与四空格（Ctrl+Tab 缩出来的）都退一档；无选区处理当前行", () => {
+    // 无选区 + 制表符缩进：indentLess 按 tabSize=4 的列宽算，一个 \t 恰为一档，整只删掉
+    let view = makeView("\tabc\n");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("abc\n");
+    view.destroy();
+
+    // 四空格缩进同样退一档
+    view = makeView("    abc\n");
+    view.dispatch({ selection: { anchor: 6 } });
+    press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("abc\n");
+    view.destroy();
+  });
+
+  it("**补全候选打开时 Tab = 接受所选候选**（公式候选即 CM 补全面板），候选关着照插 tab", async () => {
+    // 真实应用里候选来自 typst_lezer 语言数据自带的 typstCompletionSource（公式内是
+    // typstMathCompletions）。这里用 override 的同步补全源把「面板开着」钉死，不依赖语法。
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const view = new EditorView({
+      doc: "$al",
+      parent: host,
+      extensions: [
+        editorKeymap,
+        indentUnit.of(INDENT_UNIT),
+        autocompletion({
+          override: [
+            (context) => {
+              const word = context.matchBefore(/al/);
+              if (!word) return null;
+              return { from: word.from, options: [{ label: "alpha", type: "function" }] };
+            },
+          ],
+        }),
+      ],
+    });
+    // 光标要停在候选词尾（CompletionContext.matchBefore 在行首返回 null，源才给得出候选）
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    startCompletion(view);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(completionStatus(view.state)).toBe("active"); // 候选面板确实开着
+    // CM 的 acceptCompletion 带 interactionDelay（默认 75ms）防误触：面板刚打开的那一瞬不接受。
+    // 真实使用里人是看到候选后才按 Tab（远超 75ms），这里也等过这个窗口再按。
+    await new Promise((r) => setTimeout(r, 120));
+    press(view, { key: "Tab", code: "Tab", keyCode: 9 });
+    expect(view.state.doc.toString()).toBe("$alpha"); // 接受候选，而不是插入 \t
+    view.destroy();
+
+    // 候选面板关着：Tab 回到插入制表符的本职
+    const host2 = document.createElement("div");
+    document.body.appendChild(host2);
+    const view2 = new EditorView({
+      doc: "$al",
+      parent: host2,
+      extensions: [
+        editorKeymap,
+        indentUnit.of(INDENT_UNIT),
+        autocompletion({ override: [() => null] }),
+      ],
+    });
+    view2.dispatch({ selection: { anchor: view2.state.doc.length } });
+    press(view2, { key: "Tab", code: "Tab", keyCode: 9 });
+    expect(view2.state.doc.toString()).toBe("$al\t");
+    view2.destroy();
   });
 
   it("写作模式：列表里按回车续出下一项；空项回车退出列表（报告 T5）", () => {

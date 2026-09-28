@@ -2868,6 +2868,58 @@ check(
   indentBeforeUndo === "  缩进" && indentAfterUndo === indentBeforeUndo,
   `${JSON.stringify(indentBeforeUndo)} → ${JSON.stringify(indentAfterUndo)}`,
 );
+
+// ⑫ 普通 Tab = 输入一个制表符（2026-09-28 从「交回浏览器焦点移动」改回编辑器接管）
+await retype("第一行");
+await c.key("Home", { code: "Home", keyCode: 36 });
+await c.key("Tab", { code: "Tab", keyCode: 9 });
+await new Promise((r) => setTimeout(r, 500));
+check(
+  "普通 Tab 直接输入一个制表符（不再是浏览器焦点移动）",
+  (await c.evaluate(savedContent)) === "\t第一行",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ⑬ 选中内容按 Tab：触碰的每行行首各加一个 tab（选区结尾停在行首的那行也算到达，与 indentMore 同口径）。
+// 选区用套件惯例的视图句柄直接设（rawKeyDown 的 Shift 修饰位在方向键上不可靠，不靠 Shift+↓）
+await retype("甲乙丙\n丁戊己");
+await c.evaluate(
+  `document.querySelector(".cm-content").cmTile.root.view.dispatch({ selection: { anchor: 0, head: 4 } })`,
+);
+await c.key("Tab", { code: "Tab", keyCode: 9 });
+await new Promise((r) => setTimeout(r, 500));
+check(
+  "选区按 Tab = 触碰的每行行首各加一个制表符",
+  (await c.evaluate(savedContent)) === "\t甲乙丙\n\t丁戊己",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ⑭ Shift+Tab 反缩进：制表符缩进退一档
+await c.evaluate(
+  `document.querySelector(".cm-content").cmTile.root.view.dispatch({ selection: { anchor: 2 } })`,
+);
+await c.key("Tab", { code: "Tab", keyCode: 9, modifiers: 8 }); // Shift+Tab
+await new Promise((r) => setTimeout(r, 500));
+check(
+  "Shift+Tab 反缩进（制表符缩进退一档）",
+  (await c.evaluate(savedContent)) === "甲乙丙\n\t丁戊己",
+  JSON.stringify(await c.evaluate(savedContent)),
+);
+
+// ⑮ 公式里的补全候选打开时，Tab = 接受所选候选（typstMathCompletions 就是 CM 补全面板，
+// activateOnTyping 会在打字后自动弹出；Tab 不再插入制表符）。前缀用 "alph"：唯一命中 alpha
+// （"al" 会先命中字典序更靠前的 aleph，那就验不出「接受所选候选」了）
+await retype("$ alph");
+await new Promise((r) => setTimeout(r, 400)); // 等补全面板自动弹出（activateOnTypingDelay 100ms + 源查询）
+await c.key("Tab", { code: "Tab", keyCode: 9 });
+await new Promise((r) => setTimeout(r, 500));
+const tabAccept = await c.evaluate(savedContent);
+check(
+  "公式候选打开时 Tab 接受所选候选（alph → alpha），而不是插入制表符",
+  tabAccept === "$ alpha",
+  JSON.stringify(tabAccept),
+);
+
 await c.screenshot(SHOT("wysiwyg-36-auto-indent"));
 
 console.log("37) 帮助 → 关于");

@@ -225,7 +225,9 @@
       // 写作模式先把 Enter 交给 typst 的列表命令（续项 / 空项退出），它不认才沿用上一行缩进
       createEditorKeymap({ isWriteMode: () => mode === "write" }),
       // 一档缩进 = 4 个空格（用户要求「缩进应该是四格」）：Ctrl+Tab / Ctrl+Shift+Tab 与语言侧
-      // 自动缩进都走这个 facet。回车那条**不用它** —— 新行照抄上一行实际的前导空白（见 auto-indent.ts）。
+      // 自动缩进都走这个 facet。普通 Tab / Shift+Tab **不走它** —— Tab 插入制表符本身（有选区
+      // 给行首加一个 tab，有补全候选先接受所选候选），Shift+Tab 反缩进（见 editor-keymap.ts）。
+      // 回车那条也**不用它** —— 新行照抄上一行实际的前导空白（见 auto-indent.ts）。
       indentUnit.of(INDENT_UNIT),
       typst_lezer(),
       typstHeadingHighlight, // 压掉默认高亮给标题加的下划线（见 typst-highlight.ts 的根因注释）
