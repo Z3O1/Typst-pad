@@ -23,6 +23,7 @@
   import type { Block } from "../core/block-plan";
   import { squiggleRanges, offsetAt } from "../core/diagnostics-utils";
   import { livePreview, refreshLivePreview } from "./live-preview";
+  import { createPaste } from "./paste";
   import type { MathRequest } from "./live-preview";
   import { planForCommand } from "../core/write-commands";
   import type { WriteCommand } from "../core/write-commands";
@@ -93,6 +94,13 @@
     /** **切片里的链接被点**（阶段 3）：父组件交给 opener 插件打开（不移动光标、不吞点击） */
     onOpenLink?: (href: string) => void;
     /**
+     * **粘贴进来的图片**（typora-parity 审计 P0-4）：父组件负责写盘（`core/file-ops.ts` 的
+     * `savePastedImage`），返回写进源码的**相对路径**；编辑器负责在光标处插入 `#image("…")`。
+     * 抛错 = 这次粘贴失败，`onPasteError` 提示原因（页面写状态栏）。
+     */
+    onPasteImage?: (file: File) => Promise<string>;
+    onPasteError?: (message: string) => void;
+    /**
      * **输入法合成开始 / 结束**（报告 T3）：`compositionstart` / `compositionend` 时各调一次。
      *
      * 为什么不能只靠 `view.composing`：那个标志要**第一次输入之后**才为真，而"合成开始"到
@@ -129,6 +137,8 @@
     onBlocksNeeded,
     onCropClick,
     onOpenLink,
+    onPasteImage,
+    onPasteError,
     onComposition,
     wrap = false,
   }: Props = $props();
@@ -235,6 +245,16 @@
       wrapCompartment.of(wrap ? EditorView.lineWrapping : []),
       diagTheme,
       livePreview(livePreviewOptions), // 公式内联渲染（开关与缓存由父组件注入）
+      // 粘贴：图片落盘后插 `#image("…")`、Ctrl/Cmd+Shift+V 强制纯文本、只有 HTML 时抽文本。
+      // 没给 `onPasteImage`（例如单测里直接挂 Editor）时不挂这条扩展 —— 行为与从前一致。
+      ...(onPasteImage
+        ? [
+            createPaste({
+              onPasteImage,
+              onPasteError: (message) => onPasteError?.(message),
+            }),
+          ]
+        : []),
       // 汉字输入法：合成结束时把"合成期间攒下的装饰刷新"补上（见下面 $effect 的说明）。
       // 不这么做的话，合成期间那次刷新就彻底丢了 —— 公式 widget / 切片要等下一次编辑才回来。
       EditorView.domEventHandlers({

@@ -44,7 +44,14 @@
   import { createWritingCompileScheduler } from "$lib/core/writing-compile-scheduler";
   import type { CompileReason } from "$lib/core/writing-compile-scheduler";
   import type { WriteCommand } from "$lib/core/write-commands";
-  import { openTypFile, saveTypFile, readTypFile, pickFontDir, isTauri } from "$lib/core/file-ops";
+  import {
+    openTypFile,
+    saveTypFile,
+    readTypFile,
+    pickFontDir,
+    isTauri,
+    savePastedImage,
+  } from "$lib/core/file-ops";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
@@ -494,6 +501,16 @@
       console.error("[link] 打开链接失败：", e);
       statusText = truncateStatus(`打开链接失败：${e instanceof Error ? e.message : String(e)}`);
     });
+  }
+
+  /**
+   * **粘贴进来的图片**（typora-parity 审计 P0-4）：写进**文档所在目录**（`image-<时间戳>-<序号>.<ext>`），
+   * 返回相对路径给编辑器插 `#image("…")`。未保存的文档直接拒绝并提示（不猜目录、不隐式写盘）。
+   */
+  async function handlePasteImage(file: File): Promise<string> {
+    const rel = await savePastedImage(filePath, file);
+    statusText = truncateStatus(`已保存图片 ${rel}`);
+    return rel;
   }
 
   /**
@@ -2089,6 +2106,8 @@
             onBlocksNeeded={handleBlocksNeeded}
             onCropClick={handleCropClick}
             onOpenLink={handleOpenLink}
+            onPasteImage={handlePasteImage}
+            onPasteError={(message) => (statusText = truncateStatus(`粘贴图片失败：${message}`))}
             onComposition={handleComposition}
           />
         </div>

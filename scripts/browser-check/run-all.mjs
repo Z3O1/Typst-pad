@@ -36,7 +36,7 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 // 套件清单（期望项数写在这里，跑完直接对账；改套件计数时**两处一起改**）
 const SUITES = [
   ["wysiwyg.mjs", 305],
-  ["writing-blocks.mjs", 158],
+  ["writing-blocks.mjs", 165],
   // **列表结构变化的真实状态回放**（报告 2026-09-28 第一批第 3 条）：8 个预编译状态逐字比对 +
   // 几何对账（真实 typst 产物）、单字输入不位移、新增一行不先缩、标记→正文起点稳定
   ["writing-list-states.mjs", 127],

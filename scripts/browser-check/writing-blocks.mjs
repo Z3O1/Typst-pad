@@ -1953,4 +1953,129 @@ check(
 );
 await c.screenshot(SHOT("writing-blocks-shift-click"));
 
+// ---------------------------------------------------------------------------
+// 21) **粘贴管线**（typora-parity 审计 P0-4）：图片落盘后插 `#image("…")`、只有 HTML 时抽文本、
+//     Ctrl+Shift+V 强制纯文本。会话里先种子一个**文件路径** —— 图片要写进"文档所在目录"，
+//     未保存的文档按策略直接拒绝（那条也在下面验）。
+// ---------------------------------------------------------------------------
+console.log("21) 粘贴管线：图片落盘 / 纯文本兜底 / Ctrl+Shift+V");
+await c.evaluate(`localStorage.clear()`);
+await flushStateSeed(c, {
+  theme: "light",
+  content: "粘贴目标段落。\n",
+  filePath: "/browser-dev/paste-test.typ",
+  fileTitle: "paste-test",
+  dirty: true,
+});
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.click(400, 300);
+await c.waitFor(`window.__typstPadRestored === true`, { timeout: 10000 }).catch(() => {});
+await new Promise((r) => setTimeout(r, 700));
+await c.evaluate(`window.__browserDevBinaryWrites = []`);
+
+/**
+ * 在页面里造一次**真实形状的粘贴**：`DataTransfer` + `ClipboardEvent`（Chrome 支持构造）。
+ * 返回事件是否被接管、以及落盘记录（图片那条路是异步的，调用方等一会儿再读）。
+ */
+const doPaste = (payload) =>
+  c.evaluate(`(() => {
+    const content = document.querySelector(".cm-content");
+    const view = content.cmTile.root.view;
+    view.focus();
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    const dt = new DataTransfer();
+    ${payload}
+    const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+    content.dispatchEvent(ev);
+    return { prevented: ev.defaultPrevented, types: Array.from(dt.types) };
+  })()`);
+
+// ① 图片：1×1 PNG（最小合法图片）
+const png = await doPaste(`
+    const b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+    const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+    dt.items.add(new File([bytes], "clip.png", { type: "image/png" }));
+`);
+check(
+  "图片粘贴被编辑器接管（不让浏览器走默认的不可控粘贴）",
+  png.prevented === true,
+  JSON.stringify(png),
+);
+await new Promise((r) => setTimeout(r, 600));
+const imageWrites = await c.evaluate(`window.__browserDevBinaryWrites ?? []`);
+const afterImage = await c.evaluate(
+  `document.querySelector(".cm-content").cmTile.root.view.state.doc.toString()`,
+);
+const imageName = imageWrites.length > 0 ? imageWrites[0].path.split("/").pop() : null;
+check(
+  `图片写进**文档所在目录**（${JSON.stringify(imageWrites)}）`,
+  imageWrites.length === 1 &&
+    imageWrites[0].path.startsWith("/browser-dev/image-") &&
+    imageWrites[0].length > 0,
+  JSON.stringify(imageWrites),
+);
+check(
+  `源码里插入 #image("文件名") 且与写盘文件名一致（${JSON.stringify(afterImage.slice(-30))}）`,
+  imageName !== null && afterImage.includes(`#image("${imageName}")`),
+  JSON.stringify({ imageName, tail: afterImage.slice(-40) }),
+);
+
+// ② 只有 HTML（从网页复制常见形态）→ 抽成纯文本，绝不把标签塞进源码
+const htmlOnly = await doPaste(`dt.setData("text/html", "<p>甲</p><ul><li>乙</li></ul>");`);
+await new Promise((r) => setTimeout(r, 400));
+const afterHtml = await c.evaluate(
+  `document.querySelector(".cm-content").cmTile.root.view.state.doc.toString()`,
+);
+check(
+  "只有 HTML 的粘贴抽成纯文本（保住段落与列表项，不带标签）",
+  htmlOnly.prevented === true && afterHtml.includes("甲\n- 乙") && !afterHtml.includes("<p>"),
+  JSON.stringify({ prevented: htmlOnly.prevented, tail: afterHtml.slice(-20) }),
+);
+
+// ③ Ctrl+Shift+V：剪贴板同时给 HTML 与文本时只插文本
+await c.key("v", { code: "KeyV", keyCode: 86, modifiers: 2 | 8 });
+const both = await doPaste(`
+    dt.setData("text/plain", "纯文本甲");
+    dt.setData("text/html", "<p>标签甲</p>");
+`);
+await new Promise((r) => setTimeout(r, 400));
+const afterPlain = await c.evaluate(
+  `document.querySelector(".cm-content").cmTile.root.view.state.doc.toString()`,
+);
+check(
+  "Ctrl+Shift+V 强制纯文本（插 text/plain，不带 HTML 标签）",
+  both.prevented === true && afterPlain.includes("纯文本甲") && !afterPlain.includes("标签甲"),
+  JSON.stringify({ prevented: both.prevented, types: both.types, tail: afterPlain.slice(-20) }),
+);
+
+// ④ 未保存的文档：拒绝写盘并把原因写到状态栏（不猜目录、不隐式写盘）
+await c.evaluate(`localStorage.clear()`);
+await c.goto(URL_BLOCKS);
+await c.waitFor(`!!document.querySelector(".cm-content")`, { timeout: 30000 });
+await c.click(400, 300);
+await new Promise((r) => setTimeout(r, 700));
+await c.evaluate(`window.__browserDevBinaryWrites = []`);
+await doPaste(`
+    const b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+    const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+    dt.items.add(new File([bytes], "clip.png", { type: "image/png" }));
+`);
+await new Promise((r) => setTimeout(r, 600));
+const noPathWrites = await c.evaluate(`window.__browserDevBinaryWrites ?? []`);
+const statusText = await c.evaluate(
+  `document.querySelector(".status-bar, .status")?.textContent ?? document.body.innerText.slice(0, 200)`,
+);
+check(
+  "未保存的文档：拒绝写盘（没有 write_binary 调用）",
+  Array.isArray(noPathWrites) && noPathWrites.length === 0,
+  JSON.stringify(noPathWrites),
+);
+check(
+  "未保存的文档：状态栏说明原因（不是静默失败）",
+  typeof statusText === "string" && statusText.includes("先保存文档"),
+  JSON.stringify(statusText.slice(-60)),
+);
+await c.screenshot(SHOT("writing-blocks-paste"));
+
 finish(`通过 ${state.passed} 项检查；截图：.browser-check/writing-blocks-*.png`);

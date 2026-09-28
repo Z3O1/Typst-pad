@@ -567,10 +567,24 @@ async function handleCommand(
       notify(command);
       return { ok: false, error: "浏览器开发模式不提供 PDF 导出（请在桌面版验证）" };
     }
-    case "write_binary":
+    case "write_binary": {
+      // 记录二进制写盘（粘贴图片那条链路）：验收据此断言"图片真的写到了文档旁边"。
+      // 只留路径 + 字节数，不留内容（可能是几百 KB 的图片）。
+      const w = window as unknown as Record<string, unknown>;
+      const writes = Array.isArray(w.__browserDevBinaryWrites)
+        ? (w.__browserDevBinaryWrites as Array<{ path: string; length: number }>)
+        : [];
+      writes.push({
+        path: typeof a.path === "string" ? a.path : "",
+        length: Array.isArray(a.bytes) ? a.bytes.length : 0,
+      });
+      w.__browserDevBinaryWrites = writes;
+      notify(command);
+      return null;
+    }
     case "list_dir_typ":
       notify(command);
-      return command === "list_dir_typ" ? [] : null;
+      return [];
     // 字体：设置里「正文字体」下拉的选项来源 + Rust 内置默认列表
     case "list_font_families": {
       notify(command);
