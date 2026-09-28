@@ -58,9 +58,6 @@ where
 
 /// 编译文档为每页 SVG（compile_doc）：src 为主文档源码，document_path 为磁盘路径
 /// （None = 未保存，相对导入会报"需要先保存文档"）。
-/// preview_width_pt = 预览页宽（pt，可选）：给了就按它**重新排版**预览（见
-/// typst_world::preview_page_setup）——预览栏多宽、纸张就多宽，正文重排、字号不变，
-/// 于是预览永不出现横向滚动条；导出 PDF 走 export_pdf，**不受它影响**。
 /// 返回 CompileOutput：成功 { ok, pages }，失败 { ok, diagnostics }，成功且带警告时附加 warnings。
 /// 编译在 spawn_blocking 中执行（不阻塞 UI），内部互斥锁串行化。
 /// Err 仅用于编译任务本身异常终止（正常编译失败仍走 Ok(ok:false)）。
@@ -69,22 +66,35 @@ pub async fn compile_doc(
     state: tauri::State<'_, CompileState>,
     src: String,
     document_path: Option<String>,
-    preview_width_pt: Option<f64>,
     font_families: Option<Vec<String>>,
     font_dirs: Option<Vec<String>>,
 ) -> Result<crate::typst_world::CompileOutput, String> {
     let out = in_compile_channel(&state, font_families, font_dirs, move |fonts_dir, fonts| {
-        crate::typst_world::compile_with_page_width(
-            src,
-            document_path,
-            fonts_dir,
-            fonts,
-            preview_width_pt,
-        )
+        crate::typst_world::compile_with_page_width(src, document_path, fonts_dir, fonts, None)
     })
     .await
     .unwrap_or_else(|()| crate::typst_world::CompileOutput::internal_error("编译任务异常终止"));
     Ok(out)
+}
+
+/// 整页点击定位，编号必须来自该页的 compile_doc 产物。
+#[tauri::command]
+pub fn document_hit_test(
+    geometry_id: u64,
+    page: usize,
+    x_pt: f64,
+    y_pt: f64,
+) -> Option<crate::document_geometry::DocumentCaret> {
+    crate::document_geometry::hit_test(geometry_id, page, x_pt, y_pt)
+}
+
+/// 源码光标对应的页面位置。没有可映射输出时返回 None。
+#[tauri::command]
+pub fn document_cursor(
+    geometry_id: u64,
+    offset: usize,
+) -> Option<crate::document_geometry::DocumentCaret> {
+    crate::document_geometry::locate(geometry_id, offset)
 }
 
 /// 写作模式的块级编译（compile_blocks）：整篇编译一次，把每个源块在版面上的那一块切出来，

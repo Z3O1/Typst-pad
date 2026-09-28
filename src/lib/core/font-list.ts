@@ -2,7 +2,7 @@
 //
 // 从 `+page.svelte` 搬出来（原来 `refreshFontList` / `addFontDir` / `removeFontDir` 三个函数；
 // `availableFonts` / `defaultFonts` / `fontsLoading` 三个 `$state` 与草稿里的目录**没搬**，
-// 由 hooks 注入）。依赖全注入（`zoom-controller` / `math-queue` / `document-session` 同一套路），
+// 由 hooks 注入）。依赖全注入（`zoom-controller` / `document-compile-scheduler` / `document-session` 同一套路），
 // 单测里可以拿假 invoke 把两条容易写错的规则钉死：
 //
 // 1. 扫描用的目录必须先归一化（trim / 去空 / 去重）：同一个目录写两遍会让引擎扫两遍

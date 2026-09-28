@@ -1,24 +1,9 @@
-// 编译结果 → 状态栏 / 徽标 / 波浪线这一份**派生状态**（从 +page.svelte 的两条编译路径里抽出来）。
-//
-// 原来这段在 runCompile（整页预览路径）与 applyBlocksResult（块级切片路径）里各写了一遍，
-// 是字面量级重复：成功时清错误、有警告就顶掉「就绪」；失败时清警告、非定位错误单独记、
-// 状态栏写 N 处。抽出来的直接好处是这些**用户可见字符串与计数**第一次有了单测。
-//
-// 语义（两条路径必须一致，改动前先读）：
-// - 成功：`pageCount` / `charCount` 才更新；`previewStatus` 由调用方置 "ready"。
-// - 失败：**不动页数与字符数**（保留上一次成功预览），只把错误与状态栏换掉。
-// - 失败时警告清空：错误优先，避免两套提示打架（Rust 失败时本来也不返回 warnings）。
-
+// 完整编译结果转换成状态栏、徽标与源码诊断；失败保留上次成功页数。
 import { formatCompileFailMessage } from "./error-list";
 import { describeCompileWarning } from "../core/font-warnings";
 import { truncateStatus } from "./status-view";
 import type { CompileErrorLocation, Diagnostic } from "../core/typst-engine";
 
-/**
- * 两条编译路径共同的结果子集：整页 `CompileOk` / 块级 `BlocksOk` 都满足成功那一支，
- * `CompileFail` / `BlocksFail` 都满足失败那一支。
- * `BlocksUnavailable`（后端没有这个命令）**不满足** ⇒ 传不进来，只能走退回整页预览那条路。
- */
 export type CompileStatusSource =
   | { ok: true; pageCount: number; warnings?: Diagnostic[] }
   | { ok: false; error: string; errors: CompileErrorLocation[] };

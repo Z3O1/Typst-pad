@@ -1,56 +1,172 @@
 <script lang="ts">
-  // 预览栏（原来内联在 +page.svelte）。
-  //
-  // **这个组件对外提供句柄**：画布与滚动容器两个元素都在组件内部，而页面要
-  // ① 编译成功后直接把整页 SVG 写进画布（innerHTML）、② 量容器的 CSS 宽度做"按栏宽重排"、
-  // ③ 在画布上取选区（右键菜单"全选预览"）。`bind:this` 只能绑到页面自己的元素上，
-  // 所以这里用 `export function` 把两个元素交出去（页面侧见 previewPaneRef）。
-  //
-  // 骨架样式（`.pane` / `.pane-body`）与编辑栏共用，留在页面里并写成 `:global(...)`；
-  // 这里只有预览栏自己的那几条。
+  import { onMount } from "svelte";
+  import type { DocumentCaret } from "$lib/core/typst-engine";
+  import { pageCoordinates } from "$lib/core/document-interaction";
+
   let {
     hidden,
     status,
     error,
+    editable = false,
+    stale = false,
+    caret = null,
+    onPageClick,
+    onOpenLink,
+    onEditSource,
+    onCaretPosition,
+    sourceExpanded = false,
+    onCloseSource,
   }: {
-    /** 预览栏是否收起（单栏形态：写作模式，或用户手动关掉了预览栏） */
     hidden: boolean;
     status: "idle" | "ready" | "error";
-    /** 编译失败时的原始错误（面板里显示） */
     error: string;
+    editable?: boolean;
+    stale?: boolean;
+    caret?: DocumentCaret | null;
+    onPageClick?: (point: { page: number; xPt: number; yPt: number }) => void;
+    onOpenLink?: (href: string) => void;
+    onEditSource?: () => void;
+    onCaretPosition?: (position: { left: number; top: number; height: number } | null) => void;
+    sourceExpanded?: boolean;
+    onCloseSource?: () => void;
   } = $props();
-
-  let paperEl = $state<HTMLElement | undefined>(undefined);
-  let bodyEl = $state<HTMLElement | undefined>(undefined);
-
-  /** 画布元素：页面写 innerHTML / 设内联宽度 / 找里面的 `<svg>`（见 applyPreviewScale） */
+  let paperEl = $state<HTMLElement | undefined>();
+  let bodyEl = $state<HTMLElement | undefined>();
+  let canvasEl: HTMLElement;
+  let caretStyle = $state("");
+  let measureFrame = 0;
+  let pointerStart: { x: number; y: number } | null = null;
   export function paper(): HTMLElement | undefined {
     return paperEl;
   }
-
-  /** 滚动容器：页面量 `clientWidth`（换算页宽 pt）并挂 ResizeObserver */
   export function body(): HTMLElement | undefined {
     return bodyEl;
   }
+
+  function measureCaret(): void {
+    if (measureFrame) cancelAnimationFrame(measureFrame);
+    measureFrame = requestAnimationFrame(() => {
+      measureFrame = 0;
+      caretStyle = "";
+      onCaretPosition?.(null);
+      if (!caret || !editable || hidden || stale || !canvasEl || !paperEl) return;
+      const svg = paperEl.querySelectorAll<SVGSVGElement>(":scope > svg")[caret.page - 1];
+      if (!svg) return;
+      const rect = svg.getBoundingClientRect();
+      const root = canvasEl.getBoundingClientRect();
+      const box = svg.viewBox.baseVal;
+      if (box.width <= 0 || box.height <= 0 || rect.width <= 0) return;
+      const scaleX = rect.width / box.width,
+        scaleY = rect.height / box.height;
+      onCaretPosition?.({
+        left: rect.left + (caret.xPt - box.x) * scaleX,
+        top: rect.top + (caret.yPt - box.y) * scaleY,
+        height: Math.max(2, caret.heightPt * scaleY),
+      });
+      caretStyle = `left:${rect.left - root.left + (caret.xPt - box.x) * scaleX}px;top:${rect.top - root.top + (caret.yPt - box.y) * scaleY}px;height:${Math.max(2, caret.heightPt * scaleY)}px;transform:rotate(${caret.rotationDeg ?? 0}deg)`;
+    });
+  }
+  $effect(() => {
+    void caret;
+    void editable;
+    void hidden;
+    void stale;
+    void status;
+    measureCaret();
+  });
+  onMount(() => {
+    const observer = new ResizeObserver(measureCaret);
+    if (paperEl) observer.observe(paperEl);
+    return () => {
+      observer.disconnect();
+      if (measureFrame) cancelAnimationFrame(measureFrame);
+    };
+  });
+
+  function handleClick(event: MouseEvent): void {
+    const moved =
+      pointerStart &&
+      Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5;
+    pointerStart = null;
+    if (moved || event.button !== 0 || !(event.target instanceof Element) || !paperEl) return;
+    const anchor = event.target.closest("a");
+    if (anchor) {
+      const href = anchor.getAttribute("href") ?? anchor.getAttribute("xlink:href");
+      if (href && /^(https?:|mailto:)/i.test(href)) {
+        event.preventDefault();
+        onOpenLink?.(href);
+        return;
+      }
+      // Typst 的页内链接保留浏览器行为。
+      if (href?.startsWith("#")) return;
+      event.preventDefault();
+    }
+    if (!editable) return;
+    let svg = event.target.closest("svg");
+    while (svg && svg.parentElement !== paperEl) svg = svg.parentElement?.closest("svg") ?? null;
+    if (!(svg instanceof SVGSVGElement)) return;
+    const pages = [...paperEl.querySelectorAll(":scope > svg")];
+    const point = pageCoordinates(
+      { x: event.clientX, y: event.clientY },
+      svg.getBoundingClientRect(),
+      svg.viewBox.baseVal,
+    );
+    if (point) onPageClick?.({ page: pages.indexOf(svg) + 1, ...point });
+  }
 </script>
 
-<section class="pane preview-pane" class:hidden>
-  <!-- data-context-zone：右键区域判定标记（覆盖占位/错误/预览纸张全部子区域） -->
-  <div class="pane-body preview-body" data-context-zone="preview" bind:this={bodyEl}>
-    {#if status === "error"}
-      <div class="preview-error">
-        <div class="preview-error-title">编译错误</div>
+<section class="pane preview-pane" class:hidden class:document-pane={editable}>
+  <!-- 展开源码也由 Typst 整页编译；光标单独叠加在页面上。 -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+  <div
+    class="pane-body preview-body"
+    data-context-zone="preview"
+    bind:this={bodyEl}
+    tabindex={editable ? 0 : undefined}
+    onscroll={measureCaret}
+    onclick={handleClick}
+    onpointerdown={(event) => {
+      pointerStart = { x: event.clientX, y: event.clientY };
+    }}
+    onkeydown={(event) => {
+      if (editable && (event.key === "Enter" || event.key === "F2")) {
+        event.preventDefault();
+        onEditSource?.();
+      }
+    }}
+  >
+    {#if editable && sourceExpanded}<button
+        class="close-source"
+        onclick={(event) => {
+          event.stopPropagation();
+          onCloseSource?.();
+        }}>收起源码</button
+      >{/if}
+    {#if editable}<button
+        class="edit-source"
+        onclick={(event) => {
+          event.stopPropagation();
+          onEditSource?.();
+        }}>源码模式</button
+      >{/if}
+    {#if error}
+      <div class="preview-error" role="status">
+        <div class="preview-error-title">
+          编译错误{status === "ready" ? " · 显示上次成功结果" : ""}
+        </div>
         <pre class="preview-error-text">{error}</pre>
       </div>
-    {:else if status === "idle"}
-      <div class="preview-placeholder">等待编译…</div>
-    {/if}
-    <div
-      id="preview-host"
-      bind:this={paperEl}
-      class="preview-paper"
-      hidden={status !== "ready"}
-    ></div>
+    {:else if status === "idle"}<div class="preview-placeholder">等待编译…</div>{/if}
+    {#if stale && !error}<div class="preview-notice" role="status">正在更新排版…</div>{/if}
+    <div class="preview-canvas" bind:this={canvasEl}>
+      <div
+        id="preview-host"
+        bind:this={paperEl}
+        class="preview-paper"
+        hidden={status !== "ready"}
+      ></div>
+      {#if caretStyle}<div class="document-caret" style={caretStyle} aria-hidden="true"></div>{/if}
+    </div>
   </div>
 </section>
 
@@ -59,13 +175,6 @@
      搬出来的组件要自己声明 —— `.preview-error` 是 `width:100%` + 内边距 + 边框，缺了它会横向溢出。 */
   * {
     box-sizing: border-box;
-  }
-
-  /* 单栏（所见即所得）：预览栏整体不参与布局。祖先 `.panes` 在页面里（写作模式那半边），
-     所以这里必须写成 `:global(祖先) .自己的类` —— 只写 `.panes.single .preview-pane` 的话，
-     页面的作用域命中不了本组件里的元素。 */
-  :global(.panes.single) .preview-pane {
-    display: none;
   }
 
   .preview-pane.hidden {
@@ -91,6 +200,32 @@
     scrollbar-gutter: stable;
   }
 
+  .preview-canvas {
+    position: relative;
+    width: 100%;
+  }
+  .document-caret {
+    position: absolute;
+    width: 2px;
+    background: var(--accent, #4daafc);
+    pointer-events: none;
+    transform-origin: top left;
+  }
+  .edit-source,
+  .close-source {
+    align-self: flex-end;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 10px;
+    background: var(--bg-paper);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .preview-notice {
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+
   .preview-paper {
     width: 100%;
     /* 宽度默认铺满容器；applyPreviewScale 按容器宽度与页物理尺寸（pt）计算后
@@ -105,9 +240,9 @@
   /* 每页 SVG 顶层文档（compileToSvg 按页序拼接入预览容器）：铺满预览容器宽度
      （容器宽度由缩放逻辑控制）、高度按比例——等宽缩放，文本不拉伸变形。
      夜间滤镜：typst 产物永远是白纸黑字，深色主题下整页反色成"深色纸 + 浅色字"。
-     值走页面变量 --night-svg-filter（`:root` 深色 / `.app.light` = none），与写作模式的
-     切片、公式**共用同一条**，所以切换主题**不需要重新编译** —— 已编译好的 SVG 立即换色。
-     （彩色图形与嵌入图片也会被反色，这是"不重新编译"的代价，取舍见 docs/development/frontend.md。） */
+     值走页面变量 --night-svg-filter（`:root` 深色 / `.app.light` = none），
+     所以切换主题不需要重新编译。
+     （彩色图形与嵌入图片也会被反色，这是"不重新编译"的代价，取舍见 docs/development/architecture.md。） */
   .preview-paper > :global(svg) {
     display: block;
     width: 100%;

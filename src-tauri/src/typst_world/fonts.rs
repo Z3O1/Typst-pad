@@ -19,17 +19,7 @@ pub const DEFAULT_FONT_FAMILIES: &[&str] = &[
     "Microsoft YaHei",
 ];
 
-/// **写作模式的源码透镜要用的打包字体**（前端 `@font-face` 的名单；`src/lib/editor/editor-font.ts`
-/// 是它的镜像，`scripts/editor-fonts.test.mjs` 静态对齐两边）。
-///
-/// 为什么前端要拿到这几份：写作模式是"非光标块显示引擎切片 + 光标所在块展开成源码"。字号
-/// （`textPt`）与行高（`par.leading`）早就跟着文档走了，**字体是最后一条腿** —— 切片是 typst 用
-/// 这几个打包字体排出来的，而 webview 里的源码此前只能用系统字体栈（Windows 上落到宋体 + Times），
-/// 同一段文字在两种形态里字宽与断行都不一样，光标进出块时看起来像"换了一套字"（用户报过
-/// 「不要光标在哪里哪里就变大了」，那是字号；这条是同一个毛病的字体版）。
-///
-/// 这几份字体本来就随应用分发（`tauri.conf.json` 的 `bundle.resources` 把 `fonts/` 交给运行时），
-/// 所以这里**不增加安装包体积**，只是把字节交给 webview（前端没有 fs 插件，读不到资源目录）。
+/// 旧字体字节 IPC 的读取白名单；现行前端不调用它，保留资源读取边界。
 pub const EDITOR_FONT_FILES: &[&str] = &[
     "LibertinusSerif-Regular.otf",
     "LibertinusSerif-Bold.otf",

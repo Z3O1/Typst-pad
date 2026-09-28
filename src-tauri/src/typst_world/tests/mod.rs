@@ -1,14 +1,6 @@
-// typst_world 的单元测试按**关注点**分文件（原先是一个 1233 行的 `tests.rs`）。
-//
-// 这里只放公共件（`fonts_dir`）与各分册的 `mod` 声明；用例在 `tests/<关注点>.rs` 里。
-// `dump_math_fixtures`（`#[ignore]`）留在 `tests/math.rs` —— `package.json` 的 `fixtures:math`
-// 按**用例名**过滤它，名字不能改。
+// 整页编译、字体、路径与包的真实后端测试。
 use super::*;
 use std::path::PathBuf;
-
-// ⚠️ 两个 glob 会把**同名的兄弟模块**也带进作用域（`tests/` 里的 `crops`/`hit` 与被测模块的
-// 私有 `mod crops` / `mod hit` 同名；`typst_world` 侧是 `fonts`/`math`/`paths`）。今天合法，
-// 因为没人裸用这些模块名；但**别在分册里写 `crops::foo` 这种裸模块路径** —— 那会撞 E0659。
 
 /// 测试用字体目录：`src-tauri/fonts`（与打包资源同源，见 resolve_fonts_dir；cargo test 的
 /// CWD 是 src-tauri，用 CARGO_MANIFEST_DIR 定位更稳）
@@ -17,13 +9,6 @@ fn fonts_dir() -> PathBuf {
 }
 
 // 被多个分册共用的 helper（原来它们与各自的用例同在一个文件里）：
-/// 从 SVG 头部取 viewBox 的高度
-fn view_box_height(svg: &str) -> Option<f64> {
-    let start = svg.find("viewBox=\"")? + "viewBox=\"".len();
-    let end = svg[start..].find('"')? + start;
-    svg[start..end].split_whitespace().nth(3)?.parse().ok()
-}
-
 /// 从 SVG 头部取 viewBox 的宽度（pt）
 fn view_box_width(svg: &str) -> Option<f64> {
     let start = svg.find("viewBox=\"")? + "viewBox=\"".len();
@@ -37,7 +22,6 @@ fn font_count() -> usize {
 }
 
 mod fonts;
-mod math;
 mod packages;
 mod paged;
 mod paths;

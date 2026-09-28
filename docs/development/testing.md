@@ -1,6 +1,12 @@
-# 测试与验证
+# 开发与验证
 
 [返回文档索引](../README.md) · [贡献流程](../../CONTRIBUTING.md)
+
+## 开发环境
+
+前端使用 Node.js 与锁定依赖，执行 `npm ci` 安装；CI 的项目运行时为 Node 22，浏览器驱动使用全局 WebSocket，运行浏览器验收时选择具备该 API 的 Node 版本。桌面开发还需 Rust stable 和 Tauri 2 系统依赖：Windows 的 C++ Build Tools/WebView2，Linux 依赖见 `.github/workflows/ci.yml`，macOS 使用 Xcode Command Line Tools。
+
+`npm run tauri dev` 启动真实桌面应用，`npm run dev` 仅提供前端开发服务。字体校验用 `node scripts/check-fonts.mjs`。前端构建用 `npm run build`，安装包构建与签名见[发布与更新](../maintainers/release.md)。
 
 ## 按改动选择验证
 
@@ -10,11 +16,11 @@
 | 前端逻辑 | `npm run check`、相关 Vitest；提交前跑前端 CI 门禁 |
 | Rust 编译、字体、路径或 IPC | rustfmt、clippy、相关 Rust 测试；IPC 变化同时验证前端成功/失败响应 |
 | 编辑器、装饰、快捷键、布局 | 相关单测 + 对应浏览器套件 |
-| 公式、块渲染、锚点、模式切换 | 真实夹具与稳定性套件；不能只用桩或 jsdom |
+| 整页展示、源码展开、光标、模式切换 | 真实整页夹具与交互套件；不能只用桩或 jsdom |
 | Svelte 拆分、样式或布局 | 浏览器交互 + `computed-style.mjs`，关注作用域和窄窗口 |
 | 文件对话框、写盘、多窗口、设置接线、更新安装 | 相关单测/静态权限检查 + 桌面验证 |
 
-CI 门禁是类型检查、Vitest、Prettier、前端构建、rustfmt、clippy 与 Rust 测试，具体步骤以 [CI](../maintainers/ci.md) 和 workflow 为准。不要把“相关测试已通过”表述为“全部 CI 已通过”。Vitest 默认用 Node 运行纯逻辑测试，需要 DOM 或 localStorage 的文件在文件首行声明 `@vitest-environment jsdom`；新测试只在确实调用浏览器 API 时才加这条声明。
+CI 门禁是类型检查、Vitest、Prettier、前端构建、rustfmt、clippy 与 Rust 测试，具体步骤以 [CI](../maintainers/release.md) 和 workflow 为准。不要把“相关测试已通过”表述为“全部 CI 已通过”。Vitest 默认用 Node 运行纯逻辑测试，需要 DOM 或 localStorage 的文件在文件首行声明 `@vitest-environment jsdom`；新测试只在确实调用浏览器 API 时才加这条声明。
 
 ```bash
 npm run check
@@ -32,162 +38,49 @@ Prettier 的写入命令是 `npm run format`，但应只格式化本次文件以
 
 ## 浏览器验收
 
-准备可用的 Node 全局 WebSocket、Cargo、字体和 Chromium 后：
-
 ```bash
 npm run verify:browser
-# 只运行相关套件（仍会准备夹具）
-ONLY=writing-blocks-visual.mjs,writing-stability.mjs npm run verify:browser
-# 自行指定浏览器或避开已有端口
+ONLY=document-mode.mjs npm run verify:browser
 CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 ```
 
-以上环境变量语法用于 POSIX shell。运行器 `scripts/browser-check/run-all.mjs` 启动服务、连接或启动 Chromium、**只导出本轮真会跑的套件声明过的夹具**（`SUITE_FIXTURES`）、运行套件并汇总，默认 Vite 1425 / CDP 9335，避开桌面开发端口 1420。产物在 `.browser-check/`；它只清理自己启动的进程。`SKIP_DEV=1` 可复用服务；`SKIP_FIXTURES=1` 只在确认夹具与当前代码一致时使用。
+运行器启动独立服务和 Chromium，只清理自己创建的进程，避开桌面开发端口。`ONLY` 必须匹配实际套件；期望断言数量不符、夹具为空或导出失败均直接失败。产物和截图保存在 `.browser-check/`。`SKIP_DEV=1` 可复用服务；`SKIP_FIXTURES=1` 只在夹具与当前代码一致时使用。
 
-`ONLY=…` 时**按依赖准备**：只有被点名套件声明过的夹具才会导出（例如 `ONLY=writing-blocks.mjs` 不再白导公式夹具）；没有 `ONLY` 时与旧的"两类夹具都导"完全一致。改动套件的夹具依赖时要同步改 `SUITE_FIXTURES`（漏写会让那套件在 `loadFixtures` 硬失败，不会静默少测）。夹具导出失败会立即停止本轮，避免后面的浏览器套件读取旧夹具并白跑数分钟。每条命令的**墙钟耗时**都会打印在汇总里，并写进 `.browser-check/run-all-timing.json`，便于前后对比。
-
-单独运行脚本时自行准备服务、CDP 和夹具，通过 `BROWSER_CHECK_PORT` 或完整 `BROWSER_CHECK_URL` 指定页面，通过 `CDP_PORT` 指定浏览器。`run-all` 的服务端口变量是 `PORT`，不要与单套件变量混淆。
-
-
-| 套件（位于 `scripts/browser-check/`） | 证明的行为 |
+| 套件 | 证明的行为 |
 | --- | --- |
-| `wysiwyg.mjs` | 公式与标记、菜单快捷键、恢复、缩放、字体、诊断和更新 UI；不证明真实编译 |
-| `writing-blocks.mjs` | 假切片下的编辑、选择、导航（按**可见行**跨段：落点不是纯分隔行、每步光标屏幕 y 都动、目标列保留、Shift 扩选选中准确源码）、补渲、输入法、模式往返 |
-| `writing-blocks-visual.mjs` | 真实产物的复杂块裁剪几何与链接热区；正文是否保留文本、以及"敲一个字后编译落地前版面不跳"、"点列表项的项目符号后正文左缘不动"、"Enter 落在可见的新段落行上且输入/撤字/撤销都不抖"（都靠 `&blockslow=1` 撑开窗口）也要断言 |
-| `writing-blocks-hit.mjs` | 真实探针的点击到字符映射与 geometryId 校验 |
-| `writing-mode-scenes.mjs` | 标题、中文、列表、公式、表格、默认段距、**分隔行与用户空段落的分工**与文末输入等场景的真实呈现及截图；防空数组假绿 |
-| `wysiwyg-visual.mjs` | 真实公式的基线、pt 尺寸、居中、暗色与墨迹边界 |
-| `writing-stability.mjs` | 点击/键盘进入公式与复杂块、模式往返、过期命中、调度、输入法与逐帧几何 |
-| `computed-style.mjs` | 作用域 box-sizing、窄视口溢出、CSS 源序与原有 content-box 边界 |
-| `writing-pku-docs.mjs` | PKU 真实作业（`PKU_ROOT`）的逐块几何：正文/标题/列表/公式切片同一张位置表，同页相邻锚点 ≤2px、页内累计 ≤5px；编辑回放再用真实夹具钉住 Enter 的落点（可见新段落行，不是纯分隔行）与"输入两字后光标不被顶走"；夹具缺失/原文哈希不符直接失败 |
+| `document-mode.mjs` | 真实整页 SVG 逐节点一致，多页/不同纸型、图片、公式与脚本展开，独立光标、模式往返、输入、撤销/重做、错误时旧产物提示、IME 与异步作废 |
+| `source-workflows.mjs` | 输入无隐式写盘，取消保存/新建，显式保存、路径变化重编译、打开文件、会话恢复与字体配置 |
+| `computed-style.mjs` | 弹窗和窄窗口的 box-sizing、主题颜色及溢出边界 |
 
-### 验收耗时基线与提速纪律（2026-09-26）
+`npm run fixtures:pages` 调用真实原生引擎，导出包含中文、emoji、公式、表格、图片和宏输出的整页夹具与命中探针，覆盖正常、编辑和源码展开状态。测试先确认完整显示，再确认编辑交互，不以点击覆盖率决定页面如何呈现。
 
-全量 `npm run verify:browser` 曾经一半以上时间花在**重复劳动**上，而不是断言本身。当前做法与实测：
+浏览器桩只验证前端接线和静态真实产物；任意源码的动态编译、真实文件对话框、WebView 输入法、系统缩放与多个原生窗口仍需桌面验证。切片和独立公式夹具已移除。
 
-| 改动 | 依据 |
-| --- | --- |
-| `ONLY` 只导出声明过的夹具 | 一份夹具 = 一次 `cargo test`（实测 `fixtures:blocks` 4.4s、`fixtures:math` 4.5s） |
-| `goto` 一次导航（同 URL 用 `Page.reload`，不同 URL 直接 `Page.navigate`） | 以前**每次 `goto` 都先跳 `about:blank`**（2 次导航）；`wysiwyg.mjs` 有 37 次、`writing-stability` 6 次 boot 各 2 次 |
-| `boot` 用 `Storage.clearDataForOrigin` 清存档，一次导航 | 以前"先加载页面 → 清 localStorage → 再加载"= 4 次导航；`writing-stability` 6 次 boot |
-| `warmup` 加载一遍（`WARMUP_LOADS=2` 可回到两遍） | 一遍已经把 dev server 的转译缓存与浏览器的模块缓存都建好；第二遍实测 5.4s 是纯重复（`[8.2s → 4.1s]`） |
-| 命中套件把固定 `sleep(220)` 换成"等光标真的落到期望位置"（1.5s 超时） | 探针点合计 675 个 = 两分多钟空等；判据就是断言要看的那个值。`writing-blocks-hit` **72.9s → 12~45s** |
-| 命中套件对"本来就不该有切片"的夹具不再等 8s | 以前无条件 `waitFor(crop > 0)`，11 篇里一半是纯正文夹具、每篇等满 8s；改成等 `__browserDevBlocksMatched`（更确定：断言不会跑在旧表上） |
-| `createChecker` 每条断言记耗时，收尾打印最慢 10 条 | "哪一条在等"以前只能靠猜；耗时 ≥400ms 的条目直接在行尾标 `[N.Ns]` |
+## 桌面抽查
 
-点击命中套件现在只加载实际有复杂切片可点的 5 篇夹具；另外 6 篇纯正文/标题的“零切片”由 `writing-blocks-visual` 和 `writing-mode-scenes` 使用同一份真实夹具验证。命中套件的预期检查数从 34 降到 16，点击到字符的探针覆盖不变。本机单跑套件由 14.6s 降到 8.8s（各轮仍有波动）。
+在目标 WebView 上使用包含表格、图片、宏、公式和多页的本地文档，依次检查：
 
-**提速纪律**（别用这些换速度）：不跳过真实编译、不复用未经校验的旧夹具、不共享页面并行跑、不放宽任何超时或阈值。删重复场景时要确认另一套件仍覆盖其判据，并同步修改 `run-all.mjs` 的期望项数；只删准备工作时断言数量不变。
-
-**同环境前后实测**（本机 2026-09-26，`npm run verify:browser`，无 `PKU_ROOT`）：`computed-style`
-`11.7s → 3.1s`、`writing-blocks-hit` `72.9s → 12.5s`（单跑）、`writing-mode-scenes` `55.5s → 21.6s`、
-`writing-stability` `146.8s → 102.0s`、`wysiwyg-visual` `12.4s → 8.1s`、预热 `8.2s → 4.1s`。**注意两点**：
-`wysiwyg.mjs` 的旧数字（86.5s）是一次**中途崩溃**的运行（不完整），完整跑一轮要 400s 量级、是整套里
-最贵的一环；同一套件在不同轮次之间也有波动（`writing-mode-scenes` 单跑 21.6s、跟在 `wysiwyg` 后面
-曾到 55.5s），所以比较要用"同一次运行里的同一步骤"，别跨轮混用。
-
-### 浏览器验收的启动契约（`scripts/browser-check/`）
-
-- `cdp.goto` 等三件事：地址对上、`.cm-content` 挂载、以及 `window.__typstPadRestored === true`
-  （`?browserdev=1` 才有的只读标记，见 `src/lib/dev/write-test-hook.ts`）。第三条是 2026-09-26 补的：
-  子组件（编辑器）的 `onMount` 比父页面的**先**跑完，`.cm-content` 出现时主题/设置/恢复的内容可能还没
-  落到 `$state` 上 —— 那时打字会量到默认主题、并且应用随后那次 300ms 防抖写盘会把"还没恢复完"的默认值
-  写回存档（`writing-blocks` 第 6 组、`wysiwyg` 的"关掉启动自动检查更新"两条都这样红过）。
-- 测试自己种存档时用 `harness.flushStateSeed(c, state)` / `flushStateSeedJson(c, json)`：它等过应用的
-  300ms 防抖窗口再把**要种的那份**写一遍（回写"当前值"没用 —— 当前值可能已经被应用盖过了）。
-- 固定等待只在"逐帧采样 / 竞态测试"里保留；其余一律换成 `c.waitFor(条件, { timeout })`。
-
-### PKU 真实作业验收（需要本机作业原文）
-
-```bash
-PKU_ROOT="$HOME/PKU" npm run fixtures:pku-writing   # 真实后端按源文件路径编译四份作业 + 公式产物
-PKU_ROOT="$HOME/PKU" npm run verify:pku-writing     # 一条命令跑完：夹具 → 抓取实际输入结果 → 编译它们 → 逐块几何
-PKU_ROOT="$HOME/PKU" ONLY=writing-pku-docs.mjs npm run verify:browser   # 只跑几何套件（夹具要已经导好）
-```
-
-**`verify:pku-writing` 只认"本轮令牌"**（2026-09-25 验收整改）：跑之前先删掉上一轮的 `summary.json` 与
-`report-doc*.json`，并把 `PKU_RUN_ID` 传给套件；套件把它写进本轮汇总，入口再拿它核对。以前只看
-"文件在不在"，套件半路失败（导航超时、样本没匹配上）时**上一轮的绿汇总会被原样打印出来** ——
-那份"通过"根本不代表本轮。现在缺文件或令牌对不上就打印"本轮没有有效的逐块汇总"并非零退出。
-
-原文不复制进仓库；夹具、测量 JSON 与截图写在已忽略的 `.browser-check/pku-writing/`。命令日志会列出实际加载的路径、SHA-256 与样本数。`verify:browser` 没有 `PKU_ROOT` 也没在 `ONLY` 里点名时，这一套**跳过并明说**（不是悄悄报绿）。几何判据用文档**真实列宽**（文档自带 `#set page(...)` 会覆盖注入页设置），浏览器列宽被钉到同一宽度。
-
-编辑回放（P0）：Rust 为同一段落的四个状态（原始 / Enter / 输入两字 / Backspace）各导一份真实编译夹具（`replay.json`），浏览器用**真实按键**驱动并逐步断言"文本与夹具逐字相同 + 命中真实夹具（`__browserDevBlocksMatched`，绝不静默退回假切片）+ 光标统一放在锚点后再量、撤销后后续行基线回到编辑前"。加新状态时 Rust 与夹具包装层要一起加，否则该状态会命中不到几何而失败（设计如此）。
-
-**单 LF 段落的 Enter / Shift+Enter 走"抓取 → 编译 → 验收"三段**（2026-09-25 验收整改）：这两个按键的实际结果里带**编辑器的自动缩进**（实测 P0 的那一段，光标行以空格开头，回车后新行也被缩进一个空格），Rust 推算的"复用换行 / 插两个换行"两种变体**一种都对不上** —— 而桩对不上就静默退回假块，旧断言只看"文本变长 + 重新编译过"于是可以在几何全是假的情况下报绿。现在：
-
-1. `writing-pku-capture.mjs` 用真实按键把**实际产生的文本**抓进 `capture.json`（不做几何断言，抓不到就非零退出）；
-2. `npm run fixtures:pku-replay` 让 Rust 用**真实后端**把这些文本编译成 `replay.json` 的 `extras`（键 `N2`/`S2`，`PKU_REQUIRE_CAPTURE=1` 时缺了就失败）；
-3. 主套件要求这两个状态**逐字命中**夹具、且编译后 `__browserDevBlocksMatched === true`，没命中就把与每个候选的首个不同点打出来并判失败（`PKU_ROOT=… npm run verify:pku-writing` 会自动按 1→2→3 跑完）。
-
-`writing-pku-docs.mjs` 的期望检查数是 **76**（改动它就要同步 `run-all.mjs` 的 SUITES）。`PKU_REPLAY_ONLY=1` 只跑回放段（调试用）；CDP 调用有 `CDP_TIMEOUT_MS` 超时，避免浏览器崩了以后整段死等。
-
-对账锚点两边都用**首行主基线**：Rust 侧从帧里取（`anchorBaselinePt`），浏览器侧用"行盒顶端 + 半 leading + 字体 ascent"算。浏览器坐标必须走 **DOM**（扫描已渲染的 `.cm-line`、用 `posAtDOM` 精确匹配目标行、`getBoundingClientRect` 取位置，文档坐标 = 元素视口顶端 − content 顶端 − padding-top），**不要用 `lineBlockAt`/`coordsAtPos` 或 `scrollTop` 换算**：高度图在长文档里会给出偏差 200px 级的位置，滚动锚定也会让 `scrollTop` 与 DOM 不同步。夹具还导出每块的 `lineSpans`（逐行源区间 + 右缘），`PKU_BREAK=1` 用它逐断点对比"Typst 折在哪 vs 浏览器折在哪"（浏览器侧用逐字符 `coordsAtPos` 看 y 何时增大——这个 CodeMirror 版本没有 `visualLineAt`）；`PKU_MATH_WIDTH=1` 打印行内公式 widget 的渲染宽与 SVG 宽（用来区分"宽度不对"与"不可断"）。`PKU_PLACEMENT=1` 做**逐块落位自检**：同一批块「逐个滚进视口量」与「滚到首块后一次性量」各量一遍（两者应完全一致，否则说明落位受滚动状态影响），并与「前面所有块带高之和」对账、打印 DOM 行高直方图与未被压缩的空行（本轮据此定位到「贴着规则行/行间公式的空行按整行渲染」）。`PKU_DIAG=1` 会打印最大偏差块附近的逐行 DOM 坐标，`PKU_LINE_SPACING=1` 是对照实验开关（把编辑器行高换成夹具量出的 `lineSpacingPt`，尚未并入产品）。
-
-### PKU 写作模式桌面抽查清单（Tauri，需有桌面 WebView 的机器）
-
-浏览器套件用 dev 桩跑的是"同一套产物 + 同一套前端"，**不能**替代真机：真机的字体来自 `bundled_font` IPC、编译在 Rust 侧同一进程、PDF 资源从作业原目录读。所以每次改写作链路（装饰、公式、块几何、分页）都要在一台有桌面环境的机器上按下面清单抽查一次，并把结论（通过/差异/截图）记进验收报告。
-
-**本机结论（2026-09-26 更新）**：本机**能**起桌面应用，但**不能**脚本化交互 —— 两点都要记住：
-
-- **能起**：`WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 npm run tauri dev` 会打印
-  `[startup] rust phase:webview-created t:0.0` / `phase:ready t:0.1` 并继续运行；直接跑
-  `src-tauri/target/debug/typst-pad` 存活 ≥30s（由 `timeout` 杀掉，exit 124）。之前记的
-  「GTK 事件循环初始化失败 / 没有窗口」是**没有设 `WAYLAND_DISPLAY`** 时的现象，环境里其实有
-  `/run/user/1000/wayland-0`。日志里的 `dconf: Read-only file system`、`libEGL/MESA ZINK`、
-  `WebKitCache ... Failed to create hard link` 都是环境噪声（只读 runtime 目录 / 无 GPU / 缓存目录），
-  与代码无关。
-- **不能交互**：Linux 端是 WebKitGTK，**没有 CDP**；本机也没有 `WebKitWebDriver` / `tauri-driver` /
-  `xdotool`。`WEBKIT_INSPECTOR_SERVER=127.0.0.1:2999` 确实会监听，但它的远程检查器**不接受普通
-  WebSocket 连接**（`ws://…/`、`/socket/1`、`/devtools/page/1` 与 `inspector`/`webkit-inspector`
-  三种子协议全被拒），所以 `scripts/browser-check/` 那套 CDP 探针**无法**驱动真机窗口。
-  因此下面清单仍须在**能脚本化或能亲眼看**的机器上执行；本轮能给的只是"应用起得来"。
-
-**仍未在真机验证的两处引擎相关行为**（都属于 2026-09-26 的写作模式改动，且都依赖 WebKit 自己的
-inline-block / 行盒计算，Chromium 上绿不等于 WebKit 上绿）：
-① 占位带高盒用 `min-height` 而不是 `height`（`cm-block-band-hold`，见[写作渲染](writing-rendering.md)）；
-② 列表项揭示态那个行内定宽标记盒（`cm-markup-list-indent`）。
-
-下面的清单必须在有桌面 WebView 的机器上执行。
-
-准备：`npm run tauri dev`；作业原文放在 `~/PKU/26fall/...`（只读，不复制进仓库）。
-
-1. **加载与分页**：打开 `高等代数/week2-2026.9.24/1.typ`。逐页核对页面尺寸、页边距与 PDF 预览一致；`#set page(margin: 2.5cm)` 生效（不是注入页设置）。
-2. **资源**：同一篇里的 `#image("高等代数260916计算题.pdf", page: 1, ...)` 能从**原目录**加载并显示（相对路径解析根 = 文档所在目录，不是应用目录）。
-3. **切片与公式**：正文、标题、列表、行内/行间公式的呈现与浏览器套件截图一致；长行内公式在运算符处折行（`segments`），不是整块挤到下一行。
-4. **模式切换**：源码 ↔ 写作来回切两次，块表与公式不残留旧产物（无"旧图配新几何"的错位）；滚动到未渲染区域会补渲而不是停留源码。
-5. **输入回放**：在正文段末按 Enter（写两个换行）、Shift+Enter（写 `\` + 换行）、输入两个汉字、连按 Backspace、Ctrl+Z，表现与浏览器端 `writing-pku-docs.mjs` 的 13 项编辑回放一致（无不可解释的空行变化、无光标跳动）。
-6. **打开作业目录**：从侧栏打开 `~/PKU` 下的另外三篇（数分周一/周二、高代周一），确认都能编译、无诊断、页数与 PDF 预览一致。
-7. **记录**：把每步的结论与截图放进 `.browser-check/pku-writing/`，并在 `REPORT.md` 的"Tauri 抽查"一节写结论（本仓库当前的结论是"环境受限、未执行"，见报告）。
-
-## 真实夹具与覆盖边界
-
-`npm run fixtures:blocks` / `npm run fixtures:math` 从 Rust 的 ignored 探针提取真实产物。Cargo 必须在 PATH 上；过滤器未命中任何用例仍可能返回成功，因此生成器和消费者必须在空夹具/空探针时硬失败，不能跑零次断言而报告通过。公式夹具注入桩时须补 `{ ok: true, ...fixture }`。
-
-块几何验收比较相邻带、纵向位置与比例，不能只检查 widget 存在；直接可编辑正文已经不是切片，不应强求每篇/每块都有 SVG。复杂块集合必须有非零断言下界。公式验收使用多字号真实产物，核对 pt × 4/3 的 CSS 尺寸、行内基线（误差小于 1px）与墨迹范围。
-
-PKU 夹具把正文、标题、列表与公式切片放进同一张逐块位置表，用真实 Typst 的**首行锚点**对账。硬判据：同页相邻锚点 ≤2px、页内累计 ≤5px、**可编辑正文全部走带高盒**（盒高 = 带高，见[写作渲染](writing-rendering.md)），以及**可编辑正文的视觉行数与 Typst 一致**（Typst 侧 oracle = 按 Rust 侧实测行距的 0.75 倍聚类主基线，`lineCount`）。"走带高盒"接受两种类：精确产物的 `cm-block-band` 与"编辑后、编译落地前"的占位 `cm-block-band-hold`（见 `Block.layoutHold`）—— 这一段的量法都在沉降之后，正常只会见到前者。四条口径都必须写进结果、不能拿来绿：
-
-- **无输出块的假包围盒**：文档内 `#let` 宏在使用处的字形 `Span` 指回定义处，必须按 `no_output` 跳过几何匹配（见 `SourceBlock::no_output`）。
-- **浏览器侧的视觉行数按"基线"数**：文字节点的矩形顶 + 字体上升部 = 该行基线，行内公式用 widget 上的 `data-math-ascent` 落回同一条基线，容差取 Typst 行距的一半。逐字符 `coordsAtPos` 会被原子替换区间挡住（一行只有公式时量成 1 行），纵坐标固定 1px 容差会把同一条线里的公式/文字顶差（2~3px）数成折行，`盒高 ÷ line-height` 在带高盒生效后也不是行数（行高是按块反解的）。
-- **折行位置由引擎断点决定**（2026-09-25 起）：编辑器按 `BlockCrop::line_breaks` 强制换行并禁掉行内折行（见写作渲染的「折行」一节）。四份作业 210 个可编辑块的行数与 Typst **逐块相等**。别拿"引擎给了断点"当理由放宽这条判据：断点必须与 `lineCount` 自洽、且有一枚落不上就整块不折，否则会出现"行数反而更多"的假绿（实测高代周二 L207 4→6 行）。
-- **Typst 行数 oracle 的正确口径**（2026-09-25 修正；`lineCount` 与产品的 `block_lines` 同一套定义、两处**独立实现**，免得一起错还能报绿）：先按行距的 0.75 倍做**累计**聚类（与上一个行边界比，不是与前一个字形比），再**合并主基线相距 < 半个行距的相邻簇**。少了后面这一步，数分周二 L54/L72 的 1 行会被数成 2 行、L154 的 5 行数成 6 行、L48 的 4 行数成 5 行 —— 那是分式分子/分母、上下标的基线被当成了新行；改之前"浏览器量 vs oracle"只有 205/210 一致，改之后 210/210。
-- 宽度类"修法"（去掉 `.cm-line` 内边距、`text-wrap: balance`、关门公式宽度补偿）都试过并回滚：它们只会把临界行在两个方向之间搬，不能同时修好两个方向。
-- 段距类断言要量**字形盒顶**（文字 range 的矩形顶），不要量 `.cm-line` 的盒顶：带高盒生效后行的盒高是引擎给的带高（含半个段距），行盒顶之间的距离与字形距离不是一回事（`writing-mode-scenes` 的"段落间距"场景据此改口径）。
-
-动态稳定性输出在 `.browser-check/writing-stability.json`。每条测量标明 `real-static` 或 `fake`；桩不能提供真实动态重编译 `real-dynamic`，应把它列为未覆盖而非通过。当前点击/模式切换的逐帧最大锚点漂移判据为 8px；改阈值必须给出几何证据，不能靠扩大容忍度掩盖回归。行盒与文字盒的固定差异可解释稳态偏移，不能与意外滚动混为一谈。高 widget 中下部点击与无滚动余量是单独边界，详见[公式与揭示](wysiwyg.md)。
-
-浏览器开发模式的文件系统、IPC、下载与安装均为桩。真文件写盘/PDF、原生确认标题与警告图标、窗口 ACL/焦点/会话隔离、WebView 缩放和更新验签安装需桌面验证。修改设置字段后逐个点控件保存，核对页面配置、应用设置、恢复和持久化快照；单测字段清单不能证明全部接线。
+1. 文档模式与完整编译结果一致；改变窗口尺寸只缩放显示，页数与纸型不改变。
+2. 点击正文、公式、表格和宏输出定位源码；完整公式与脚本在原位置展开为源码，展开与收起都由 Typst 重新排版。
+3. 在文档模式用真实中文输入法编辑，检查候选、撤销/重做、保存与重读；源码模式往返保留修改和历史。
+4. 制造编译错误，确认完整旧产物仍显示并提示旧结果，旧结果不能提交命中。
+5. 打开两个窗口，互相编译后仍用各自编号定位；打开/新建文件立即清除旧会话产物。
+6. 抽查主题、缩放、快捷键、文件确认与更新流程。不得把浏览器桩当作这些原生能力已通过的证据。
 
 ## 断言与隔离纪律
 
-- 先在未修复行为上建立可复现的失败，再验证修复；动态竞态用可控回调或排队放行，不能靠短 sleep 碰运气。
-- 合并请求的计数断言同时给上下界，并证明输入确实改变；“重建/重编译”要观察新戳或计数，DOM 没变不能证明后台工作发生。
-- 浏览器只读观测入口由 `src/lib/dev/editor-test-hook.ts`、`write-test-hook.ts` 提供，仅在开发桩启用。不要依赖 CodeMirror 私有 DOM 属性取得 EditorView。
-- `HIT_CACHE` 是进程级共享状态。并行 Rust 用例凡读写它都先取得 `hit_cache_guard()`；只执行单个 ignored 探针不构成免锁先例。纯 `pick_hit` 与不写缓存的 `probe_blocks` 可独立测试。
-- jsdom 的默认光标位于 0，可能自动展开构造；测试隐藏时把光标放在构造外。判断源码/切片用真实文本行结构，不能只查 `textContent`，SVG 也可能有文本节点。
-- 浏览器段落间显式重设视口、模式和存储；CDP 设备模拟跨导航保留。逐帧采样有时间和帧数上限、独立 token，排除动作前的无关帧。
-- **判据不跟启动耗时较劲**：凡是"某时间戳就是刚刚"的断言，要对账"它是不是本次种／写进去的那个值"，不能写成 `now - 它 < 60s` —— 那是拿夹具的墙钟赌一次导航的耗时。2026-09-26 一次 67s 的导航把 `wysiwyg.mjs` 第 34 组的"起手"前提判红，而 67s 仍远小于历史上的 6 小时节流窗口，前提完全成立（红的是夹具）。同一次页面求值里读到的两个时间戳（如点「稍后」后的 `updateDismissedAt` 与 `now`）不受此限。
-- 不恢复只验证 `.typ` 后缀、日志透传或重复收边的低价值测试；路径安全在 Rust 验证，交互风险用对应层的行为证据覆盖。
+- 不为测试数量添加重复断言；先证明产物身份，再测对应的交互或异步契约。
+- 夹具缺失、目标节点不存在或命中范围失效应硬失败，不用静默跳过制造通过。
+- CodeMirror 视图通过 `window.__typstPadView` 开发钩子读取，不使用私有 DOM 字段。
+- 会话恢复完成后才输入；重载前等待存档防抖完成。未保存修改、打开保存与窗口隔离见[文件与安全](files-and-security.md)。
+- 沙箱无法启动子进程或监听端口时明确区分环境限制和实现失败；验证结论只覆盖实际完成的检查。
 
-失败复现、真实文档探针和 WebView 日志见[排障](debugging.md)。
+## 开发排障
+
+浏览器的 `?browserdev=1` 使用假 IPC；任意源码的真实排版需桌面后端，整页浏览器验收使用 Rust 导出的真实夹具。不要把桩不能复现理解成桌面问题不存在。只清理本次创建的进程；无界面验收使用 headless Chromium，不需要弹出桌面窗口。
+
+状态栏脚本错误来自 `window.onerror` / `unhandledrejection`。`debug.ts` 在 dev 默认记录日志，另支持 `--debug`、`?debug=1` 和 localStorage 开关；`startup-timing.ts` 与 Rust 的 debug 打点可区分窗口、前端与编译耗时。
+
+WebKit 开发白屏时核对 `vite.config.js` 的同步 wasm 初始化兼容处理与预构建排除；修改前须验证目标 WebView。WSLg 图形故障可临时用 `GDK_BACKEND=x11 GDK_GL=disable WEBKIT_DISABLE_DMABUF_RENDERER=1` 诊断，不把本机参数写成统一要求。
+
+Svelte 组件的局部 `box-sizing` 不会跨组件继承；用窄视口和计算样式确认。浏览器套件不要与 `npm run check/build` 同时运行，生成文件更新会触发预览重载。清存储前离开旧页面，防止防抖存档写回；重载后等待会话恢复，截图和诊断保存在 `.browser-check/`。`scripts/browser-check/probe.mjs` 可读取页面诊断。

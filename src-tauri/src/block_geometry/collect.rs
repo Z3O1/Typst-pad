@@ -12,18 +12,77 @@ pub struct PlacedLink {
     pub href: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PlacedItemKind {
+    Text,
+    Image,
+    Shape,
+}
+
 /// 帧里一项的几何 + 它对应的源字节区间（页面坐标，单位 pt）
 #[derive(Debug, Clone)]
 pub struct PlacedItem {
     pub page: usize,
     pub range: Range<usize>,
     pub rect: Rect,
+    pub kind: PlacedItemKind,
+    /// 字前、字后的光标顶端与方向，保留旋转/缩放后的输入轴。
+    pub caret_start: Point,
+    pub caret_end: Point,
+    pub caret_vector: Point,
     /// 文本项的**基线** y（页面坐标）；图形/图片取 rect 顶端。
     ///
     /// 为什么单列出来：墨迹顶（`rect.min.y`）在同一行里会被上标、分式、矩阵拉得很散
     /// （实测同一段的两行之间，行内最矮墨迹顶差 26pt，比行距还大），按墨迹顶数"占了几行"
     /// 会把同一行拆开、把相邻行并起来。基线才是"一行一条"的稳定信号。
     pub baseline_pt: f64,
+}
+
+impl PlacedItem {
+    pub fn new(
+        page: usize,
+        range: Range<usize>,
+        local: Rect,
+        baseline_pt: f64,
+        kind: PlacedItemKind,
+        transform: Transform,
+    ) -> Self {
+        let caret_start = local.min.transform(transform);
+        let caret_end = Point::new(local.max.x, local.min.y).transform(transform);
+        let caret_vector = Point::new(local.min.x, local.max.y).transform(transform) - caret_start;
+        Self {
+            page,
+            range,
+            rect: transformed_rect(local, transform),
+            kind,
+            caret_start,
+            caret_end,
+            caret_vector,
+            baseline_pt: Point::new(local.min.x, Abs::pt(baseline_pt))
+                .transform(transform)
+                .y
+                .to_pt(),
+        }
+    }
+}
+
+fn transformed_rect(rect: Rect, transform: Transform) -> Rect {
+    let corners = [
+        rect.min,
+        Point::new(rect.max.x, rect.min.y),
+        rect.max,
+        Point::new(rect.min.x, rect.max.y),
+    ]
+    .map(|point| point.transform(transform));
+    let mut min = corners[0];
+    let mut max = corners[0];
+    for corner in &corners[1..] {
+        min.x = min.x.min(corner.x);
+        min.y = min.y.min(corner.y);
+        max.x = max.x.max(corner.x);
+        max.y = max.y.max(corner.y);
+    }
+    Rect::new(min, max)
 }
 
 /// 一项目**typst 自己合成**的字形（`span` 为 `None`）：列表符号 `•` / `1.`、`dif` 的 "d" 这类。
@@ -95,7 +154,6 @@ pub fn collect_geometry_with_links(
             main_id,
             &page.frame,
             i + 1,
-            Point::zero(),
             Transform::identity(),
             &mut items,
             &mut links,
@@ -117,15 +175,15 @@ fn walk_frame(
     main_id: typst::syntax::FileId,
     frame: &Frame,
     page: usize,
-    offset: Point,
     ts: Transform,
     out: &mut Vec<PlacedItem>,
     links: &mut Vec<PlacedLink>,
     stats: &mut FrameStats,
 ) {
     for (pos, item) in frame.items() {
-        // 该项原点在本层坐标系里的页面坐标（ts 是"本帧内容相对页面"的变换，顶层为 identity）
-        let origin = Point::new(offset.x + pos.x, offset.y + pos.y).transform(ts);
+        // 与 typst-svg 同序：父变换 → 项平移 → 子组变换。
+        let item_ts = ts.pre_concat(Transform::translate(pos.x, pos.y));
+        let origin = Point::zero().transform(item_ts);
         match item {
             FrameItem::Text(text) => {
                 stats.text_items += 1;
@@ -137,10 +195,8 @@ fn walk_frame(
                 for glyph in &text.glyphs {
                     let advance = glyph.x_advance.at(text.size);
                     let (up, down) = glyph_ink(text, glyph.id);
-                    let rect = Rect::new(
-                        Point::new(origin.x + x, origin.y - up),
-                        Point::new(origin.x + x + advance, origin.y + down),
-                    );
+                    let local = Rect::new(Point::new(x, -up), Point::new(x + advance, down));
+                    let rect = transformed_rect(local, item_ts);
                     // 只有**主文档**的字形才算这一块的几何：别的文件（include）里写下的
                     // 区间是那个文件的坐标，混进来就是错位。
                     //
@@ -152,12 +208,14 @@ fn walk_frame(
                         // 主文档的 span 却解不出区间：不多见，也不算外源
                         Some(id) if id == main_id => {
                             if let Some(range) = glyph_range(world, text, glyph) {
-                                out.push(PlacedItem {
+                                out.push(PlacedItem::new(
                                     page,
                                     range,
-                                    rect,
-                                    baseline_pt: origin.y.to_pt(),
-                                });
+                                    local,
+                                    0.0,
+                                    PlacedItemKind::Text,
+                                    item_ts,
+                                ));
                                 stats.glyphs_mapped += 1;
                             }
                         }
@@ -193,8 +251,7 @@ fn walk_frame(
                     main_id,
                     &group.frame,
                     page,
-                    origin,
-                    group.transform,
+                    item_ts.pre_concat(group.transform),
                     out,
                     links,
                     stats,
@@ -203,19 +260,18 @@ fn walk_frame(
             FrameItem::Shape(shape, span) => {
                 stats.shapes += 1;
                 let bb = shape.bbox(true);
-                let rect = Rect::new(
-                    Point::new(origin.x + bb.min.x, origin.y + bb.min.y),
-                    Point::new(origin.x + bb.max.x, origin.y + bb.max.y),
-                );
+                let rect = transformed_rect(bb, item_ts);
                 match span.id() {
                     Some(id) if id == main_id => {
                         if let Some(range) = world.range(*span) {
-                            out.push(PlacedItem {
+                            out.push(PlacedItem::new(
                                 page,
                                 range,
-                                rect,
-                                baseline_pt: rect.min.y.to_pt(),
-                            });
+                                bb,
+                                bb.min.y.to_pt(),
+                                PlacedItemKind::Shape,
+                                item_ts,
+                            ));
                         }
                     }
                     // 别的文件画的东西：算外来墨迹（`None` = typst 合成件，不算）
@@ -225,16 +281,19 @@ fn walk_frame(
             }
             FrameItem::Image(_, size, span) => {
                 stats.images += 1;
-                let rect = Rect::new(origin, Point::new(origin.x + size.x, origin.y + size.y));
+                let local = Rect::from_pos_size(Point::zero(), *size);
+                let rect = transformed_rect(local, item_ts);
                 match span.id() {
                     Some(id) if id == main_id => {
                         if let Some(range) = world.range(*span) {
-                            out.push(PlacedItem {
+                            out.push(PlacedItem::new(
                                 page,
                                 range,
-                                rect,
-                                baseline_pt: origin.y.to_pt(),
-                            });
+                                local,
+                                0.0,
+                                PlacedItemKind::Image,
+                                item_ts,
+                            ));
                         }
                     }
                     Some(_) => stats.foreign_ink.push((page, rect)),
@@ -246,7 +305,7 @@ fn walk_frame(
                 if let Some(href) = link_href(dest) {
                     links.push(PlacedLink {
                         page,
-                        rect: Rect::from_pos_size(origin, *size),
+                        rect: transformed_rect(Rect::from_pos_size(Point::zero(), *size), item_ts),
                         href,
                     });
                 }

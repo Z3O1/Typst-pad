@@ -64,6 +64,7 @@ pub fn compile_with_page_width(
             return CompileOutput {
                 ok: false,
                 pages: Vec::new(),
+                geometry_id: None,
                 diagnostics: diags,
                 warnings: Vec::new(),
             };
@@ -77,16 +78,20 @@ pub fn compile_with_page_width(
         None => src,
     };
 
+    let source_len = src.len();
     let world = TypstWorld::new(src, document_path, fonts_dir, font_config);
     match typst::compile::<PagedDocument>(&world) {
         typst::diag::Warned {
             output: Ok(document),
             warnings,
         } => {
+            let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+            let geometry_id = crate::document_geometry::store(items, source_len, stats.foreign_ink);
             let pages = document.pages().iter().map(svg_for_page).collect();
             CompileOutput {
                 ok: true,
                 pages,
+                geometry_id: Some(geometry_id),
                 diagnostics: Vec::new(),
                 warnings: collect_diagnostics(&world, warnings, main_line_offset),
             }
@@ -97,6 +102,7 @@ pub fn compile_with_page_width(
         } => CompileOutput {
             ok: false,
             pages: Vec::new(),
+            geometry_id: None,
             diagnostics: collect_diagnostics(&world, errors, main_line_offset),
             warnings: Vec::new(),
         },

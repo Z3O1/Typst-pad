@@ -69,6 +69,18 @@ pub fn pick_hit(
     x: Abs,
     y: Abs,
 ) -> Option<usize> {
+    pick_hit_item(items, start, end, page, x, y).map(|(_, offset)| offset)
+}
+
+/// 同时返回实际命中的项，避免重复宏或背景项重新覆盖字形选择。
+pub fn pick_hit_item(
+    items: &[PlacedItem],
+    start: usize,
+    end: usize,
+    page: usize,
+    x: Abs,
+    y: Abs,
+) -> Option<(&PlacedItem, usize)> {
     if end <= start {
         return None;
     }
@@ -86,20 +98,26 @@ pub fn pick_hit(
         let take = match best {
             None => true,
             // 同距时保留先遇到的（帧遍历顺序稳定 ⇒ 结果可复现）
-            Some((_, bdy, bdx)) => dy < bdy || (dy == bdy && dx < bdx),
+            Some((previous, bdy, bdx)) => {
+                (dy, dx, item.kind, item.range.len())
+                    < (bdy, bdx, previous.kind, previous.range.len())
+            }
         };
         if take {
             best = Some((item, dy, dx));
         }
     }
     let (item, _, _) = best?;
-    let mid = (item.rect.min.x + item.rect.max.x) / 2.0;
-    let offset = if x < mid {
+    let axis = item.caret_end - item.caret_start;
+    let point = Point::new(x, y) - (item.caret_start + item.caret_vector / 2.0);
+    let projection = point.x.to_pt() * axis.x.to_pt() + point.y.to_pt() * axis.y.to_pt();
+    let length_squared = axis.x.to_pt().powi(2) + axis.y.to_pt().powi(2);
+    let offset = if projection < length_squared / 2.0 {
         item.range.start
     } else {
         item.range.end
     };
-    Some(offset.clamp(start, end))
+    Some((item, offset.clamp(start, end)))
 }
 
 /// Tauri 命令的入口：`(x_pt, y_pt)` 是**页面坐标**（与 `BlockCrop` 的 x_pt/y_pt 同一坐标系）。

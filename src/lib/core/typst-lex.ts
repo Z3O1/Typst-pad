@@ -1,7 +1,6 @@
 // Typst 源码「区域扫描」：把文档切成 markup（普通标记文本）与几种"不参与标记识别"的区域
 // （code / raw / comment / string），供所见即所得的两个消费者使用：
 //   1. math-ranges.ts    —— 只在 markup 区里找公式定界 `$`
-//   2. markup-ranges.ts  —— 只在 markup 区里找 `*粗体*`/`_斜体_`/标题/列表符号
 // 纯函数、无依赖，可单测。
 //
 // 为什么需要它：Typst 是图灵完备语言，`*`、`_`、`$` 在代码里可以是乘号、标识符字符、
@@ -329,7 +328,7 @@ function scanNonMarkupRegionsUncached(doc: string): Region[] {
 
 /**
  * 扫描全文，返回 markup 区域（`scanNonMarkupRegions` 的补集）。
- * `opaque` 可传入已算好的不可见区域：一次重建里 lexer 只跑一遍（见 live-preview.collect）。
+ * `opaque` 可传入已算好的不可见区域：源码扫描可复用已计算的区域。
  */
 export function scanMarkupRegions(doc: string, opaque?: Region[]): Region[] {
   const out: Region[] = [];

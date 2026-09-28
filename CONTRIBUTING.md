@@ -1,6 +1,6 @@
 # 贡献指南
 
-先按[开发设置](docs/development/setup.md)准备环境并启动应用；领域边界见[架构](docs/development/architecture.md)。文档与代码注释以中文为主。
+先按[开发设置](docs/development/testing.md)准备环境并启动应用；领域边界见[架构](docs/development/architecture.md)。文档与代码注释以中文为主。
 
 ## 开发流程
 

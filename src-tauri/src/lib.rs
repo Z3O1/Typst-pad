@@ -16,6 +16,7 @@ mod typst_world;
 // 阶段 0 的探针函数只有测试在用，故整体允许"未使用"告警。
 #[allow(dead_code)]
 mod block_geometry;
+mod document_geometry;
 
 mod compile_commands;
 mod dir_listing;
@@ -112,6 +113,8 @@ pub fn run() {
             dir_listing::list_dir_typ,
             get_debug_flag,
             compile_commands::compile_doc,
+            compile_commands::document_hit_test,
+            compile_commands::document_cursor,
             compile_commands::compile_blocks,
             compile_commands::block_hit_test,
             compile_commands::compile_math,
