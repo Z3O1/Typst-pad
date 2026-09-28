@@ -2,6 +2,23 @@
 
 本项目更新日志（中文）。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.7] - 2026-09-28
+
+主题是**「Tab 回到输入本位」**：同日上午把缩进挪到 `Ctrl+Tab`、普通 `Tab` 交回焦点移动之后，用户再次调整 —— 普通 `Tab` 重新由编辑器接管：补全候选打开时先接受所选候选（公式里的候选就是 CM 补全面板），有选区时给选区触碰的每行行首各加一个制表符，无选区直接插入 `\t`；`Shift+Tab` 反缩进。`Ctrl+Tab` / `Ctrl+Shift+Tab` 的四空格一档缩进保留，两条缩进路径并存。
+
+### Changed
+
+- **普通 `Tab` 重新接管**（`src/lib/editor/editor-keymap.ts` 的 `insertTabOrIndentLines`）：补全候选开着 → 先 `acceptCompletion` 接受所选候选；有选区 → 给触碰的每行行首各加一个 `\t`（行口径与 CM `indentMore` 的 `changeBySelectedLine` 一致 —— 选区结尾停在行首的那行也算到达；选区按 assoc=1 映射，落在新插入的 tab 之后）；无选区 → 直接插一个制表符。没有复用 CM 的 `insertTab`：它给选区插的是 `indentUnit`（4 个空格），而这里的语义是制表符本身。
+- **`Shift+Tab` 反缩进**绑 CM `indentLess`：制表符（tabSize=4 恰为一档）与四空格两种缩进的行都退一档；`Ctrl+Shift+Tab` 保持同一命令。
+- 取舍说明：编辑器内不再能用 `Tab` 把焦点移出（同日上午「普通 `Tab` 交回浏览器焦点移动」的取舍被本需求覆盖）。
+
+### Test / CI
+
+- 单测：`editor-keymap` 新增「普通 Tab 输入制表符」「选区缩进行首（单行 / 多行，Shift+Tab 整组退回）」「Shift+Tab 对制表符与四空格两种缩进退档」「公式候选打开时 Tab 接受所选候选」四条行为测试，绑定断言同步。
+- 浏览器验收：wysiwyg **306 → 310**（新增 ⑫ 普通 Tab / ⑬ 选区缩进 / ⑭ Shift+Tab / ⑮ 公式候选），`run-all.mjs` 的期望计数同步。新增检查的选区按套件惯例用视图句柄直接设置 —— CDP `rawKeyDown` 的 Shift 修饰位在方向键上不可靠（Shift+↓ 到不了页面，最初据此写的第一版场景因此误红）。
+- 文档同步：`docs/user/shortcuts.md`、`docs/development/frontend.md` 与 `Editor.svelte` 的缩进注释。
+- 本地门禁：`npm test` 1124 项 / 64 文件、`npm run check` 0 错、`npm run format:check` 干净、`npm run verify:browser` 全过（wysiwyg 310 项）、`npm run build` 通过、`cargo fmt --check` 干净、`cargo clippy --all-targets -- -D warnings` 干净、`cargo test` 85 项（7 ignored）、`cargo metadata --locked --no-deps` 复核 Cargo.lock 只有版本号一处改动。
+
 ## [0.10.6] - 2026-09-28
 
 主题是**「改过没有只有一条判据」**：以前"有没有未保存修改"看的是"编辑过的标志位 + 正文是不是空白"，于是打开一篇有内容的文件再全选删光会被判成**未修改**（窗口标题的未保存圆点消失，关窗、新建、重读、打开另一份文件都不再确认，改过的内容可以静默丢掉），而改了又撤销回原样却一直带着未保存标记。现在只有一条标准：正文与**基线**（上次打开／保存／新建时的内容）逐字符不同，窗口标题圆点与四处确认共用这一条判据。同批还有两处手感调整：标题栏的未保存圆点换成更小的字形，缩进快捷键从 `Tab` 改到 `Ctrl+Tab`（普通 `Tab` 回到默认的焦点移动）。
