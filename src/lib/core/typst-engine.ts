@@ -5,7 +5,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { savePdfDialog } from "./file-ops";
 import { pdfFileName } from "./pdf-export";
 import { dbg } from "./debug";
-import { TYPST_DEFAULT_TEXT_PT } from "./preview-scale";
 
 // ---------------------------------------------------------------------------
 // 接口契约（Rust 侧实现，见 T1 任务契约）：
@@ -39,6 +38,7 @@ export interface Diagnostic {
 export interface CompileOutputOk {
   ok: true;
   pages: string[];
+  geometryId?: number;
   warnings?: Diagnostic[];
 }
 
@@ -68,6 +68,7 @@ export interface CompileOk {
   ok: true;
   svg: string;
   pageCount: number;
+  geometryId?: number;
   /** 编译警告（Rust 侧携带；UI 在状态栏徽标里展示，字体族写错只有这里看得见） */
   warnings?: Diagnostic[];
 }
@@ -183,22 +184,17 @@ export function composePages(pages: string[]): string {
  * 编译 Typst 源码为 SVG 预览。失败返回错误结果对象（调用方保留上次成功预览），
  * 不抛异常；invoke/IPC 异常也收敛为错误结果（errors 为空，error 带原始消息）。
  *
- * `previewWidthPt`（可选）= 预览页宽（pt）：给了就按它**给预览重新排版**
- * （Rust 侧在编译源最前面注入 `#set page(width/height/margin)`，见
- * typst_world::preview_page_setup）——预览栏多宽、纸张就多宽，正文重排、字号不变，
- * 于是预览永不出现横向滚动条。**只影响预览**：导出 PDF 走 export_pdf，不受它影响。
+ * 页面设置只来自文档与编译前缀；显示容器的宽度不进入编译输入。
  */
 export async function compileToSvg(
   source: string,
   documentPath: string | null,
   fonts?: FontConfigArgs,
-  previewWidthPt?: number,
 ): Promise<CompileResult> {
   try {
     const out = await invoke<CompileOutput>("compile_doc", {
       src: source,
       documentPath,
-      previewWidthPt: previewWidthPt ?? null,
       ...fontArgs(fonts),
     });
     if (out.ok) {
@@ -206,6 +202,7 @@ export async function compileToSvg(
         ok: true,
         svg: composePages(out.pages),
         pageCount: out.pages.length,
+        geometryId: out.geometryId,
         warnings: out.warnings,
       };
     }
@@ -228,362 +225,6 @@ export async function compileToSvg(
   }
 }
 
-// ---------------------------------------------------------------------------
-// 写作模式的块级渲染（compile_blocks）：整篇编译一次 → 每个源块切一张 SVG
-// 契约见 src-tauri/src/block_geometry/crops.rs 的 BlockCrop / BlocksOutput。
-// ---------------------------------------------------------------------------
-
-/** Rust 侧的单块产物：偏移是**文档坐标的字节偏移**（已减掉编译前缀，见 block-offsets.ts） */
-export interface BlockCrop {
-  start: number;
-  end: number;
-  kind: string;
-  /** 是否有渲染结果（`#let` / `#show` / 纯注释行没有） */
-  found: boolean;
-  /** 内容分布在几页（单张长页为 1） */
-  pages: number;
-  /** 切片所在页（1-based）—— 点击定位要在同一页里找字形 */
-  page: number;
-  /** 裁剪带在页面上的左缘 / 上缘（pt）：切片 SVG 的坐标系原点就是带的左上角 */
-  xPt: number;
-  yPt: number;
-  widthPt: number;
-  heightPt: number;
-  bands: number;
-  /**
-   * **首行主基线相对带顶的偏移**（pt；缺省 = 这块没有文本基线，如纯图片）。
-   * 写作模式要让可编辑块按"带高"占位时，首行基线的带内偏移也要对上（见 `Block.anchorBaselinePt`）。
-   */
-  anchorBaselinePt?: number | null;
-  /**
-   * **每一行的源码终点**（相对块起点的 **UTF-8 字节**偏移，升序，不含块尾；缺省/空 = 拿不到）。
-   * 前端按引擎给的断点强制换行，段落折几行就不再看浏览器的贪心断行（见 `Block.lineBreaks`）。
-   */
-  lineBreaks?: number[];
-  /**
-   * **这一块的视觉行数**（与验收夹具同口径的基线聚类）。前端用它给断点做自洽校验：
-   * `lineBreaks.length + 1 === lineCount` 才用（不自洽说明聚类/过滤动过手脚，整块退回浏览器折行）。
-   */
-  lineCount?: number;
-  /** 切片 SVG；空串 = 没有渲染结果 */
-  svg: string;
-  /**
-   * **这一块被有意跳过渲图**（源码太大，Rust 侧 `MAX_CROP_SOURCE_BYTES`）。
-   * 前端必须与"缺切片"分开（见 `Block.skipped`）：否则 `found && svg === ""` 会被当成
-   * "这一轮没拿到图"而每 150ms 要求补渲一次。
-   */
-  skipped?: boolean;
-  /**
-   * 切片**内部**的链接热区（阶段 3"链接可点"）：坐标相对裁剪带左上角（pt，与 SVG 同坐标系）。
-   * 只有窗口内的块才有（与 svg 同步取舍）；没有链接时为空/缺省。
-   */
-  links?: CropLink[];
-  /**
-   * **文字对应证明**（任务 1）：这一块的可见内容能否严格对应回它的源码区间。
-   * 缺省 = 旧后端 / 只给几何的桩（前端退回旧的语法判据）；见 `BlockEditProof`。
-   */
-  edit?: BlockEditProof;
-  /** 列表项的渲染标记（任务 2）；缺省 = 非列表项 / 取不到引擎标记 */
-  listMarker?: ListMarkerProof;
-}
-
-/** 切片上的一个链接热区（相对裁剪带左上角，pt） */
-export interface CropLink {
-  xPt: number;
-  yPt: number;
-  widthPt: number;
-  heightPt: number;
-  href: string;
-}
-
-/**
- * **文字对应证明**（任务 1，Rust 侧 `block_geometry::BlockEditProof`）：
- * 这一块画出来的可见内容能不能严格对应回它的源码区间。
- *
- * 只有 `verdict === "verified"` 才算证明成立；`found` / SVG 存在 / 字形有 `Span` 都不构成证明。
- * **旧后端不发这个字段** ⇒ 这里是 `undefined` ⇒ 决策退回旧的语法判据（见 `editable-subset`）。
- */
-export interface BlockEditProof {
-  verdict: "verified" | "unknown";
-  /** 机器可读原因码（`ok` / `straddle` / `order` / `gap` / `foreign-ink` …） */
-  reason: string;
-  /** 编译时这一块的源码文本：前端与当前文档逐字比对（旧结果不得为新文档授权） */
-  source: string;
-}
-
-/**
- * **列表项的渲染标记**（任务 2，Rust 侧 `block_geometry::ListMarkerProof`）：
- * typst 实际画出的符号（`•` / `1.` / `a)` …）与**正文起点**相对列左缘的偏移（pt）。
- *
- * 为什么不能让前端自己算：前端的"按缩进计数"近似在 `#set enum(numbering:)`、`start:`、
- * `full:` 或复杂列表上会冒充真实结果。取不到引擎标记（如 `#set list(marker: [--])` 这种
- * 内容值指回定义处）时后端返回缺省 ⇒ 前端不开放列表项直接编辑（切片）。
- */
-export interface ListMarkerProof {
-  text: string;
-  /** 标记起点相对列左缘的偏移（pt）：`marker-align` 非默认时也不假设对齐方式 */
-  markerXPt: number;
-  /** 正文起点相对列左缘的偏移（pt） */
-  bodyOffsetPt: number;
-}
-
-interface RawBlocksOutput {
-  ok: boolean;
-  blocks?: BlockCrop[];
-  pages?: number;
-  pageWidthPt?: number;
-  /** 文档正文实际字号（pt）：源码透镜的字号基准，见 block_geometry::document_text_pt */
-  textPt?: number;
-  geometryId?: number;
-  diagnostics?: Diagnostic[];
-  warnings?: Diagnostic[];
-}
-
-export interface BlocksOk {
-  ok: true;
-  /** 判别用：与 BlocksUnavailable / BlocksFail 组成可判别联合 */
-  unavailable: false;
-  blocks: BlockCrop[];
-  pageCount: number;
-  /** 实际用于排版的页宽（pt），= 正文列宽 / (1 - 2×页边距比例) */
-  pageWidthPt: number;
-  /**
-   * **文档正文实际字号**（pt，Rust 侧按字符数投票取众数）——写作模式"源码透镜"的字号基准：
-   * 编辑器正文按它渲染，光标进出块时字号/行高才不会跳（用户：「不要光标在哪里哪里就变大了」）。
-   * 后端没给（旧版本 / 浏览器桩）时回落到 typst 默认 11pt。
-   */
-  textPt: number;
-  /**
-   * **这一轮编译写进 Rust 侧 `HIT_CACHE` 的几何编号**（0 = 没有几何）。
-   * 点切片时原样带回去（见 `hitTestBlock`）：几何是**进程级**的，多窗口下另一个窗口
-   * 编译一次就会把它换掉，编号对不上时后端拒绝命中、前端退回"光标落到块首"
-   * （PR #60 审查的第 4 条）。旧后端不给这个字段 → 0 → 不校验（老行为）。
-   */
-  geometryId: number;
-  warnings?: Diagnostic[];
-}
-
-/** 后端没有这个命令（旧版本 / 浏览器开发桩）：调用方退回整页 SVG 预览路径 */
-export interface BlocksUnavailable {
-  ok: false;
-  unavailable: true;
-}
-
-export interface BlocksFail {
-  ok: false;
-  unavailable: false;
-  error: string;
-  errors: CompileErrorLocation[];
-}
-
-export type BlocksResult = BlocksOk | BlocksUnavailable | BlocksFail;
-
-/**
- * 写作模式的块级编译：整篇编译一次，Rust 侧把每个源块在版面上的那一块（含与相邻块的
- * 半个间距）切出来单独渲成 SVG —— 编辑器据此把"非光标所在块"显示成**真实 typst 排版**。
- *
- * `docOffsetBytes` = 编译前缀的 UTF-8 字节长度（用户文档在 `src` 里的起点），
- * `contentWidthPt` = 写作模式正文列宽（pt）—— 版心宽随编辑器列宽走。
- *
- * 诊断/警告的结构与 `compileToSvg` 完全一致（同一套状态栏/波浪线逻辑）。
- * 命令不存在（浏览器开发桩、旧后端）时返回 `unavailable`，由调用方退回整页预览。
- */
-export async function compileBlocks(
-  source: string,
-  docOffsetBytes: number,
-  documentPath: string | null,
-  contentWidthPt: number,
-  fonts?: FontConfigArgs,
-  want?: { from: number; to: number } | null,
-): Promise<BlocksResult> {
-  let out: RawBlocksOutput | null;
-  try {
-    out = await invoke<RawBlocksOutput>("compile_blocks", {
-      src: source,
-      docOffset: docOffsetBytes,
-      documentPath,
-      contentWidthPt,
-      // 窗口 = 只给这一段（文档坐标字节偏移）内的块渲切片；逐块 SVG 会各自复制字形轮廓
-      // （实测约 58 字节/源字符），全渲在长文档下是每按键 10MB 级的开销。
-      // 窗口外的块由前端按"块文本相同"沿用上一轮切片（见 block-plan.carryOverCrops）。
-      wantFrom: want?.from ?? null,
-      wantTo: want?.to ?? null,
-      ...fontArgs(fonts),
-    });
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    // 桩 / 旧版本后端的"没有这个命令"是**预期**情形（浏览器开发模式、老安装包），
-    // 不是错误：交给调用方退回整页预览路径，不要显示成编译失败。
-    // **判据只认"命令不存在"**：早先这里还带一个裸 `compile_blocks`，于是参数校验失败
-    // （`invalid args ... for command compile_blocks`）、命令内 panic 之类也一并被吞成
-    // "后端不支持"，用户看不到任何提示（PR #60 审查指出）。
-    if (/not found|unknown command/i.test(message)) {
-      return { ok: false, unavailable: true };
-    }
-    return { ok: false, unavailable: false, error: message, errors: [] };
-  }
-  // 形状不对 = 后端没实现这个命令（桩返回 null / 旧安装包）。
-  // **失败结果必须有 `ok`，但不能要求 `blocks` 存在**：Rust 侧早先给 `blocks` 加了
-  // `skip_serializing_if`，编译失败时那个键整个不发，于是"真机上任何 typst 错误"都被这里
-  // 判成"后端不支持" ⇒ 退回整页预览、切片不撤、错误块不展开（PR #60 审查抓到）。
-  // 现在 Rust 侧失败也发 `blocks: []`（见 `failure_output_always_carries_blocks_key`），
-  // 这里再放宽一层：**判"后端有没有实现"只看 `ok` 这个键**，失败结果一律当编译失败处理。
-  if (!out || typeof out !== "object" || typeof out.ok !== "boolean") {
-    return { ok: false, unavailable: true };
-  }
-  if (out.ok) {
-    if (!Array.isArray(out.blocks)) {
-      return { ok: false, unavailable: true }; // 自称成功却没有块表 = 后端没实现
-    }
-    return {
-      ok: true,
-      unavailable: false,
-      blocks: out.blocks,
-      pageCount: out.pages ?? 1,
-      pageWidthPt: out.pageWidthPt ?? contentWidthPt,
-      textPt: typeof out.textPt === "number" && out.textPt > 0 ? out.textPt : TYPST_DEFAULT_TEXT_PT,
-      geometryId: typeof out.geometryId === "number" ? out.geometryId : 0,
-      warnings: out.warnings,
-    };
-  }
-  const errors = errorLocations(out.diagnostics ?? []);
-  const first = (out.diagnostics ?? [])[0];
-  dbg.log("compile-diagnostics", "blocks raw", out.diagnostics);
-  return {
-    ok: false,
-    unavailable: false,
-    error: first ? formatDiagnostic(first) : "编译失败：未生成产物",
-    errors,
-  };
-}
-
-/**
- * **点击定位**（阶段 2）：把一个页面坐标点映射回"这个块里的哪个字节偏移"。
- *
- * 几何来自 Rust 侧上一次成功编译的缓存（`block_geometry::HIT_CACHE`），不重新编译，
- * 也不占编译通道 —— 一次调用是微秒级的线性扫描。
- *
- * * `fromByte` / `toByte` = 被点那个块的**文档字节区间**（`block_hit_test` 的钳制范围）；
- * * 返回值同样是**文档字节偏移**，由调用方换算成 CodeMirror 位置（见 block-offsets.ts）。
- *
- * 失败 / 后端没有这个命令（浏览器开发桩、旧安装包）/ 还没编译过 → null，
- * 调用方退回"光标落到块首"的老行为，绝不因为定位失败而吞掉这次点击。
- */
-export async function hitTestBlock(
-  fromByte: number,
-  toByte: number,
-  page: number,
-  xPt: number,
-  yPt: number,
-  /** 上一次 `compileBlocks` 给的几何编号（0 = 没有/旧后端 → 不校验） */
-  geometryId = 0,
-): Promise<number | null> {
-  try {
-    const out = await invoke<number | null>("block_hit_test", {
-      start: fromByte,
-      end: toByte,
-      page,
-      xPt,
-      yPt,
-      geometryId: geometryId > 0 ? geometryId : null,
-    });
-    return typeof out === "number" && Number.isFinite(out) ? out : null;
-  } catch (e) {
-    dbg.log("hit-test", "block_hit_test 不可用，退回块首", e);
-    return null;
-  }
-}
-
-/**
- * 公式渲染结果（Rust 侧 compile_math 契约，serde camelCase）。
- * svg 为「贴边 + 透明背景」的紧凑 SVG；尺寸与基线单位是 pt，
- * baselinePt = 基线到盒顶的距离（编辑器据此做 vertical-align 对齐）。
- */
-export interface MathRender {
-  ok: boolean;
-  svg: string;
-  widthPt: number;
-  heightPt: number;
-  baselinePt: number;
-  error?: string;
-  /**
-   * **可断行片段**（只有长行内公式才有，见 Rust `split_inline_math`）。
-   * 前端把片段依次渲染、片段之间留可断点，浏览器就能像 Typst 一样在运算符处折行。
-   */
-  segments?: MathSegment[];
-}
-
-/** 行内公式的一个可断行片段（坐标系与 `MathRender` 一致） */
-export interface MathSegment {
-  body: string;
-  svg: string;
-  widthPt: number;
-  heightPt: number;
-  baselinePt: number;
-}
-
-/**
- * 公式渲染的**缺省**字号（pt）= 源码模式的正文字号：`.cm-content` 在源码模式是 14px，
- * 14 × 72 / 96 = **10.5pt**（与 Rust 侧 `typst_world::MATH_TEXT_PT` 同一口径，
- * SVG 的 pt 与编辑器 CSS 的 pt 1:1，所以两侧必须一起改）。
- *
- * **公式字号必须等于正文字号**，而写作模式的正文字号是**跟着文档走**的
- * （`compile_blocks` 的 `textPt` → `--write-doc-px`），所以写作模式下不能再用这个常数：
- * 父组件按当前文档字号传 `MathRequest.sizePt`（见 `live-preview` 的 `mathSizePt`）。
- * 曾经这里写死 12pt（= 写作模式正文 16px 那个年代的值），写作模式正文字号改成跟随文档
- * （默认 11pt）之后，光标所在块里的公式就比周围正文大 9%、也比同一公式在切片里的样子大
- * （PR #60 审查抓到）。
- */
-export const MATH_TEXT_PT = 10.5;
-
-/**
- * 渲染单个公式（编辑器内联渲染用）。失败收敛为 `{ ok: false, error }`，不抛异常
- * （调用方保持源码显示）；invoke/IPC 异常同样收敛。
- */
-export async function compileMath(
-  body: string,
-  display: boolean,
-  context: string,
-  documentPath: string | null,
-  sizePt: number = MATH_TEXT_PT,
-  fonts?: FontConfigArgs,
-): Promise<MathRender> {
-  try {
-    const out = await invoke<MathRender>("compile_math", {
-      body,
-      display,
-      context,
-      documentPath,
-      sizePt,
-      ...fontArgs(fonts),
-    });
-    return {
-      ok: out.ok,
-      svg: out.svg ?? "",
-      widthPt: out.widthPt ?? 0,
-      heightPt: out.heightPt ?? 0,
-      baselinePt: out.baselinePt ?? 0,
-      error: out.error,
-      // 长行内公式的可断行片段必须原样带出去：这里逐字段重建对象，漏掉就等于整条链路白做
-      segments: Array.isArray(out.segments) ? out.segments : undefined,
-    };
-  } catch (e) {
-    return {
-      ok: false,
-      svg: "",
-      widthPt: 0,
-      heightPt: 0,
-      baselinePt: 0,
-      error: e instanceof Error ? e.message : String(e),
-    };
-  }
-}
-
-/**
- * 导出 PDF：由建议文件名推导默认名 → 弹系统"另存为"对话框选定目标路径 →
- * invoke export_pdf 让 Rust 侧编译并直接落盘。取消对话框返回 cancelled，
- * 导出失败返回 error（调用方展示错误并保留预览）。
- */
 export async function compileToPdf(
   source: string,
   documentPath: string | null,
@@ -600,4 +241,55 @@ export async function compileToPdf(
   });
   if (res.ok) return { ok: true, targetPath: target };
   return { ok: false, cancelled: false, error: res.error ?? "PDF 导出失败：未生成产物" };
+}
+
+/** 编译源码的 UTF-8 字节位置与页面光标，单位 pt。 */
+export interface DocumentCaret {
+  offset: number;
+  page: number;
+  xPt: number;
+  yPt: number;
+  heightPt: number;
+  rotationDeg?: number;
+}
+
+function validCaret(value: DocumentCaret | null): DocumentCaret | null {
+  return value &&
+    Number.isInteger(value.offset) &&
+    value.offset >= 0 &&
+    Number.isInteger(value.page) &&
+    value.page > 0 &&
+    [value.xPt, value.yPt, value.heightPt].every(Number.isFinite) &&
+    value.heightPt > 0 &&
+    (value.rotationDeg === undefined || Number.isFinite(value.rotationDeg))
+    ? value
+    : null;
+}
+
+export async function hitTestDocument(
+  geometryId: number,
+  page: number,
+  xPt: number,
+  yPt: number,
+): Promise<DocumentCaret | null> {
+  try {
+    return validCaret(
+      await invoke<DocumentCaret | null>("document_hit_test", { geometryId, page, xPt, yPt }),
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function locateDocumentCursor(
+  geometryId: number,
+  offset: number,
+): Promise<DocumentCaret | null> {
+  try {
+    return validCaret(
+      await invoke<DocumentCaret | null>("document_cursor", { geometryId, offset }),
+    );
+  } catch {
+    return null;
+  }
 }

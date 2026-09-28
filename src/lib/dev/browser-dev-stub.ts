@@ -12,49 +12,10 @@
 // 明确不提供的能力：真实 Typst 编译、include/包解析、字体度量、PDF 导出落盘。
 // 这些必须回到桌面版（Windows WebView2）验证 —— 见 docs/development/testing.md。
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { byteOffsetsToPositions } from "../core/block-offsets";
-import { MATH_TEXT_PT } from "../core/typst-engine";
 import type { Diagnostic } from "../core/typst-engine";
 // 假产物生成器按职责分在 `browser-dev-stub/` 下（本文件只留：开关 + 命令路由 + 安装）：
 //   fake-layout —— 假整页 SVG（分页/折行/正文字号）
-//   fake-math   —— 假公式 SVG + 注入的真实公式产物
-//   fake-blocks —— 假块切片 + 假切片上的粗略点击定位
-import { fakeBlocks, syntheticHit, type FakeBlockRecord } from "./browser-dev-stub/fake-blocks";
-import { fakeDocumentTextPt, fakePages, warnFakeRendering } from "./browser-dev-stub/fake-layout";
-import { fakeMath, realMath } from "./browser-dev-stub/fake-math";
-
-/**
- * 假块级渲染（compile_blocks）的开关：`?browserdev=1&blocks=1` —— **只给验收脚本用**。
- *
- * 为什么默认关：块切片会把"非光标块"整块换成图片，于是写作模式下那一块里的
- * `.cm-markup-heading` / 公式 widget 等**都不再存在于 DOM**（设计如此）。既有的
- * `wysiwyg.mjs`（209 项）断言的是"标记装饰"世界，默认开着它就会整片变红、把回归信号淹掉。
- * 所以：默认关 = 走原来的公式/标记路径（既有验收的回归网原样有效），
- * 专门验块级渲染的用例走 `scripts/browser-check/writing-blocks.mjs`（带 &blocks=1）。
- */
-function blocksStubEnabled(): boolean {
-  if (typeof window === "undefined") return false;
-  return new URLSearchParams(window.location.search).has("blocks");
-}
-
-/**
- * 注入的**真实**块级切片夹具（`npm run fixtures:blocks` 产出，验收脚本用
- * `Page.addScriptToEvaluateOnNewDocument` 放进来）——命中时桩返回真实产物，
- * 于是"切片摞起来 == 原版式"这条能在浏览器里按真实几何验（见 writing-blocks-visual.mjs）。
- */
-interface BlockFixture {
-  name: string;
-  doc: string;
-  contentWidthPt: number;
-  pageWidthPt: number;
-  blocks: unknown[];
-}
-
-function injectedBlockFixtures(): BlockFixture[] | null {
-  if (typeof window === "undefined") return null;
-  const injected = (window as unknown as Record<string, unknown>).__DEV_BLOCK_FIXTURES;
-  return Array.isArray(injected) ? (injected as BlockFixture[]) : null;
-}
+import { fakePages, warnFakeRendering } from "./browser-dev-stub/fake-layout";
 
 /** 是否额外开启"假的可更新版本"（?browserdev=1&fakeupdate=1）——只给验收脚本用 */
 function isFakeUpdateEnabled(): boolean {
@@ -258,77 +219,24 @@ const FAKE_FONT_FAMILIES_DEFAULT = [
   "Microsoft YaHei",
 ];
 
-/**
- * 模拟"编译不是瞬时完成"的那段窗口（`?browserdev=1&blockslow=1`）——**只给验收脚本用**。
- *
- * 真实的 typst 编译要几十到几百毫秒（debug 构建的长文档更久），而块表是**上一次编译的产物**：
- * 这中间的"旧表 + 新文档"窗口里最容易出毛病（刚打的字被旧切片盖住、同一段文字重复显示）。
- * 桩默认瞬时返回，这些毛病在浏览器里根本复现不出来，所以给一个显式的慢编译开关。
- */
-function blockslowEnabled(): boolean {
-  if (typeof window === "undefined") return false;
-  return new URLSearchParams(window.location.search).has("blockslow");
+/** 验收用慢编译/命中，模拟旧产物与新源码并存的窗口。 */
+function compileSlowEnabled(): boolean {
+  return (
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).has("compileslow")
+  );
 }
-
-/** 假编译的耗时（ms）：只在 blockslow 打开时生效 */
 const SLOW_COMPILE_MS = 350;
 
 // ---------------------------------------------------------------------------
-// 假"点击定位"（block_hit_test 的桩）——**状态与夹具那一半**（纯几何模型在 fake-blocks.ts）
-//
-// 真实实现（src-tauri/src/block_geometry/hit.rs 的 pick_hit）在**排版引擎的帧**里找最近的字形，
-// 浏览器里没有帧，所以分两条路：
-//
-// ① **注入了真实夹具**（writing-blocks-hit.mjs / writing-blocks-visual.mjs 那种）：夹具里带着
-//    `hitProbes` —— 每个探针点 (x, y) 的答案都是 Rust 侧**真实几何**上算出来的字节偏移。
-//    这里返回离点击点最近的探针的答案。**只有探针点上的答案是真实的**，验收脚本就照探针点
-//    原样点下去（这正是"端到端验真实几何"的做法：期望值来自 Rust，链路在浏览器里跑）。
-// ② 假切片（&blocks=1 的交互验收）：按"等宽字符 + 均分行高"的粗略模型算 —— 足够验
-//    "点左边 → 靠前、点下面 → 靠后、结果钳在块内"这些**交互性质**，精度不作数。
-//    （那部分在 `browser-dev-stub/fake-blocks.ts` 的 syntheticHit，本文件只持有它的输入。）
-// ---------------------------------------------------------------------------
-
-/** 最近一次假编译的文档与块（假命中测试要用它做坐标 ↔ 字符的换算） */
-let lastFake: { doc: string; blocks: FakeBlockRecord[] } | null = null;
-
-/**
- * 假 `compile_blocks` 写下的**几何编号**（对应真 Rust 侧的 `HIT_CACHE` 编号）：
- * 每次编译自增，`block_hit_test` 带回来的编号对不上就拒绝命中 —— 多窗口 / 过期几何那条路径
- * 在浏览器里也能验（见 writing-blocks-hit.mjs）。
- */
-let stubGeometryId = 0;
-
-/** 新几何编号（模拟真后端"每次编译覆盖缓存并换一个编号"） */
-function nextStubGeometryId(): number {
-  stubGeometryId += 1;
-  return stubGeometryId;
+interface PageFixture {
+  doc: string;
+  pages: string[];
+  carets: import("../core/typst-engine").DocumentCaret[];
 }
-
-/** 真实夹具里的探针：返回 null = 夹具里没有这个块/这些点 */
-function fixtureHit(args: Record<string, unknown>): number | null {
-  const fixtures = injectedBlockFixtures();
-  if (!fixtures || !lastFake) return null;
-  const fx = fixtures.find((f) => f.doc === lastFake!.doc) as
-    (BlockFixture & { hitProbes?: { b: number; x: number; y: number; o: number }[] }) | undefined;
-  const probes = fx?.hitProbes;
-  if (!probes || probes.length === 0) return null;
-  const index = (fx!.blocks as FakeBlockRecord[]).findIndex(
-    (b) => b.start === args.start && b.end === args.end,
-  );
-  if (index < 0) return null;
-  const x = Number(args.xPt);
-  const y = Number(args.yPt);
-  let best: { o: number } | null = null;
-  let bestDist = Infinity;
-  for (const p of probes) {
-    if (p.b !== index) continue;
-    const d = (p.x - x) ** 2 + (p.y - y) ** 2;
-    if (d < bestDist) {
-      bestDist = d;
-      best = p;
-    }
-  }
-  return best ? best.o : null;
+let pageSnapshot: { id: number; fixture: PageFixture } | null = null;
+let pageGeometrySeq = 0;
+function pageFixtures(): PageFixture[] {
+  return (window as unknown as { __typstPageFixtures?: PageFixture[] }).__typstPageFixtures ?? [];
 }
 
 /**
@@ -351,10 +259,9 @@ async function handleCommand(
   const a = args ?? {};
   countCall(command);
   if (
-    blockslowEnabled() &&
-    // `block_hit_test` 也一起放慢：报告 T2 / A1 要验的是"命中还在飞的时候文档/几何变了"
-    // 这条竞态 —— 命中瞬时返回时那个窗口根本不存在，浏览器里复现不出来。
-    (command === "compile_blocks" || command === "compile_doc" || command === "block_hit_test")
+    compileSlowEnabled() &&
+    // 命中也放慢，以便验收编辑/换文档时作废在途交互。
+    (command === "compile_doc" || command === "document_hit_test")
   ) {
     await new Promise((r) => setTimeout(r, SLOW_COMPILE_MS));
   }
@@ -375,23 +282,15 @@ async function handleCommand(
           ]
         : [];
       // 记录最近一次 compile_doc 入参 + 调用次数：验收靠它断言「保存设置 → 立即重编译」
-      // 与「字体配置确实传下去了」（假 SVG 本身看不出字体），以及「预览重排的页宽传对了」
+      // 与「字体配置与文档路径确实传下去了」（假 SVG 本身看不出字体）。
       const w = window as unknown as Record<string, unknown>;
       w.__browserDevCompileCount = ((w.__browserDevCompileCount as number) ?? 0) + 1;
       w.__browserDevLastCompile = {
         src,
         fontFamilies: Array.isArray(a.fontFamilies) ? a.fontFamilies : null,
         fontDirs: Array.isArray(a.fontDirs) ? a.fontDirs : null,
-        previewWidthPt: typeof a.previewWidthPt === "number" ? a.previewWidthPt : null,
+        documentPath: typeof a.documentPath === "string" ? a.documentPath : null,
       };
-      // 预览重排：请求了页宽就让假页按它重排（页更窄 → 页数更多）。
-      // `&reflowfail=1` 模拟"文档自己写了 #set page(...)"那台机器：注入被覆盖、产物页宽
-      // 仍是 A4 —— 前端据此退回旧的等比缩放路径（见 preview-scale.isReflowApplied）。
-      const requested =
-        typeof a.previewWidthPt === "number" && a.previewWidthPt > 0 ? a.previewWidthPt : undefined;
-      const honored = new URLSearchParams(window.location.search).has("reflowfail")
-        ? undefined
-        : requested;
       // 假编译错误：文档里出现标记 `DIAG-ERROR-MARKER` 时返回一条**主源错误诊断**，
       // 专门给验收锁住"编译错误必须在编辑器里画红波浪线"这条链路。
       // **故意发 `path: null`**：那是 Rust 0.4.0~0.8.2 的真实写法，前端的判据必须容忍它
@@ -403,7 +302,7 @@ async function handleCommand(
       if (at >= 0) {
         const before = src.slice(0, at);
         const line = before.split("\n").length;
-        const column = at - (before.lastIndexOf("\n") + 1) + 1;
+        const column = [...before.slice(before.lastIndexOf("\n") + 1)].length + 1;
         return {
           ok: false,
           diagnostics: [
@@ -420,129 +319,28 @@ async function handleCommand(
         };
       }
       // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
-      return { ok: true, pages: fakePages(src, honored), warnings };
+      const fixture = pageFixtures().find((f) => f.doc === src);
+      pageSnapshot = fixture ? { id: ++pageGeometrySeq, fixture } : null;
+      const pages = fixture?.pages ?? fakePages(src);
+      w.__browserDevLastPages = pages;
+      return { ok: true, pages, geometryId: pageSnapshot?.id ?? 0, warnings };
     }
-    case "compile_blocks": {
-      if (!blocksStubEnabled()) return null; // 默认关：见 blocksStubEnabled 的说明
-      // 写作模式的块级渲染（阶段 1）：桩只做"结构正确"的假切片，见 fakeBlocks 的说明。
-      const src = typeof a.src === "string" ? a.src : "";
-      const docOffset = typeof a.docOffset === "number" ? a.docOffset : 0;
-      // 只取用户文档那一段（前缀不属于编辑器内容）——真实后端返回的块偏移也是文档坐标
-      const docStart = byteOffsetsToPositions(src, [docOffset])[0];
-      const doc = src.slice(docStart);
-      // **假编译错误**（`@err` 标记）：写作模式"编译失败时保留没被改到的切片 + 错误块退回源码"
-      // 这条链路没法用真引擎在浏览器里触发（桩的编译永远成功），所以留一个显式开关：
-      // 文档里出现 `@err` 就按"这一行有错"返回失败（见 writing-blocks.mjs 第 11 组）。
-      const errAt = doc.indexOf("@err");
-      if (errAt >= 0) {
-        lastFake = null;
-        notify(command);
-        const before = doc.slice(0, errAt);
-        const line = before.split("\n").length;
-        const column = errAt - (before.lastIndexOf("\n") + 1) + 1;
-        return {
-          ok: false,
-          // **这里故意不发 `blocks` 键** —— 与真 Rust 侧早先的形状一致（`blocks` 带
-          // `skip_serializing_if`，失败时是空数组 ⇒ 键被省略）。前端必须把这种形状读成
-          // "这次编译失败"，而不是"后端没有这个命令"（PR #60 审查抓到：桩早先自己补了
-          // `blocks: []`，于是**真机上才有的**那条路径在验收里根本走不到）。
-          // Rust 侧现在失败也发 `blocks: []`，但前端两条都得认 —— 旧安装包还在用户机器上。
-          diagnostics: [
-            {
-              message: "假编译错误（@err 标记）：验证「错误所在块必须看得见」",
-              severity: "error",
-              line,
-              column,
-              endLine: line,
-              endColumn: column + 4,
-            },
-          ],
-        };
-      }
-      // 注入了**真实产物**夹具且文档与夹具一致 → 返回真实切片（见 writing-blocks-visual.mjs）
-      const fixtures = injectedBlockFixtures();
-      if (fixtures) {
-        const hit = fixtures.find((f) => f.doc === doc);
-        if (hit) {
-          notify(command);
-          // 记下来：假命中测试要按这份产物回答（见 fixtureHit）
-          lastFake = { doc, blocks: hit.blocks as FakeBlockRecord[] };
-          // 夹具命中标记：编辑回放验收据此断言"编辑态没有静默退回假切片"（见 writing-pku-docs.mjs）
-          (window as unknown as Record<string, unknown>).__browserDevBlocksMatched = true;
-          return {
-            ok: true,
-            blocks: hit.blocks,
-            pages: 1,
-            pageWidthPt: hit.pageWidthPt,
-            textPt: fakeDocumentTextPt(doc),
-            geometryId: nextStubGeometryId(),
-          };
-        }
-      }
-      (window as unknown as Record<string, unknown>).__browserDevBlocksMatched = false;
-      const out = fakeBlocks(doc);
-      lastFake = { doc, blocks: out.blocks as FakeBlockRecord[] };
-      // 窗口化：桩也要遵守（否则验收会以为"窗口过滤"没生效）
-      const wantFrom = typeof a.wantFrom === "number" ? a.wantFrom : null;
-      const wantTo = typeof a.wantTo === "number" ? a.wantTo : null;
-      if (wantFrom !== null && wantTo !== null) {
-        for (const b of out.blocks) {
-          if (b.start >= wantTo || b.end < wantFrom) b.svg = "";
-        }
-      }
+    case "document_hit_test": {
       notify(command);
-      return { ...out, textPt: fakeDocumentTextPt(doc), geometryId: nextStubGeometryId() };
+      if (!pageSnapshot || a.geometryId !== pageSnapshot.id) return null;
+      const points = pageSnapshot.fixture.carets.filter((p) => p.page === a.page);
+      return (
+        points.sort(
+          (p, q) =>
+            Math.hypot(p.xPt - Number(a.xPt), p.yPt - Number(a.yPt)) -
+            Math.hypot(q.xPt - Number(a.xPt), q.yPt - Number(a.yPt)),
+        )[0] ?? null
+      );
     }
-    case "compile_math": {
+    case "document_cursor": {
       notify(command);
-      const body = typeof a.body === "string" ? a.body : "";
-      // 记录最近一次公式渲染入参（body/display/context）：浏览器端验收要靠它断言
-      // "文档内 #let 定义确实进了编译上下文"这类纯前端管线行为（假 SVG 看不出上下文）
-      (window as unknown as Record<string, unknown>).__browserDevLastMath = {
-        body,
-        display: a.display === true,
-        context: typeof a.context === "string" ? a.context : "",
-        // 字号也记下来：写作模式必须等于文档字号、源码模式 10.5pt（验收第 18 组锁这条，
-        // 见 PR #60 审查的第 2 条）
-        sizePt: typeof a.sizePt === "number" ? a.sizePt : null,
-      };
-      // 有注入的真实产物就用真实产物（浏览器里看到的是 typst 真排版，含真尺寸/真基线）。
-      // 注意补 `ok: true`：夹具 json 里没有该字段，缺了会被前端当成"渲染失败"而不渲染
-      // （实测踩过：页面里公式一直停在源码，看不出是夹具的问题）。
-      const sizePt = typeof a.sizePt === "number" ? a.sizePt : MATH_TEXT_PT;
-      const real = realMath(body, a.display === true, sizePt);
-      // 记一笔"真产物命中 / 退回假 SVG"：PKU 逐块几何验收据此断言"行内公式没有退回假宽度"
-      // （假 SVG 的宽度是 body 长度乘常数，会改变正文断行位置，量到的几何就不是引擎的）。
-      const mathHost = window as unknown as Record<string, unknown>;
-      const mathHits = (mathHost.__browserDevMathHits ??= { real: 0, fake: 0 }) as {
-        real: number;
-        fake: number;
-      };
-      if (real) mathHits.real++;
-      else {
-        mathHits.fake++;
-        // 记下退回假 SVG 的请求（body/display/sizePt）：PKU 验收拿它对出"哪条公式没命中夹具"，
-        // 而不是只看一个数字（差一个空格/换行就会走到这里，宽度失真、断行位置全变）。
-        const fakeList = (mathHost.__browserDevMathFake ??= []) as unknown[];
-        fakeList.push({
-          body,
-          display: a.display === true,
-          sizePt,
-        });
-      }
-      return real ? { ok: true, ...real } : fakeMath(body, a.display === true);
-    }
-    // 点击定位（阶段 2）：真实实现在 Rust 侧（帧里找最近字形），这里按上面两条路模拟
-    case "block_hit_test": {
-      if (!blocksStubEnabled()) return null;
-      notify(command);
-      // 编号校验与真 Rust 侧一致：几何是"最近一次 compile_blocks"的，编号对不上就拒绝命中
-      // （真机上这对应"另一个窗口编译过" —— 见 HIT_CACHE 的说明与 PR #60 审查的第 4 条）。
-      // 前端不带编号（null/undefined）= 不校验，保持旧行为。
-      const wantId = typeof a.geometryId === "number" ? a.geometryId : null;
-      if (wantId !== null && wantId !== stubGeometryId) return null;
-      const fromFixture = fixtureHit(a);
-      return fromFixture !== null ? fromFixture : syntheticHit(a, lastFake);
+      if (!pageSnapshot || a.geometryId !== pageSnapshot.id) return null;
+      return pageSnapshot.fixture.carets.find((p) => p.offset === a.offset) ?? null;
     }
     case "write_file": {
       const path = typeof a.path === "string" ? a.path : FAKE_PATH;
@@ -581,20 +379,6 @@ async function handleCommand(
     case "default_font_families":
       notify(command);
       return [...FAKE_FONT_FAMILIES_DEFAULT];
-    /**
-     * **打包字体**（写作模式的源码透镜要装上同一套字，见 editor-font.ts）。
-     * 真机走 Rust 的 raw IPC 读 `resources/fonts/`；浏览器开发模式没有那一步，就从 dev server
-     * 取**同一份文件**（`/__bundled-fonts/...`，见 vite.config.js 的 bundledFontsDev 插件：
-     * vite 的允许清单里没有 src-tauri，所以那里开了一个只读的小口子）。
-     * 这样验收能真断言"字体装上了、写作模式真的用上了它"，而不是只看代码路径对不对。
-     */
-    case "bundled_font": {
-      notify(command);
-      const name = typeof a.name === "string" ? a.name : "";
-      const res = await fetch(`/__bundled-fonts/${encodeURIComponent(name)}`);
-      if (!res.ok) throw new Error(`取字体失败：${name}（HTTP ${res.status}）`);
-      return await res.arrayBuffer();
-    }
     case "take_pending_files":
       return [];
     case "get_debug_flag":
@@ -631,6 +415,9 @@ async function handleCommand(
         (typeof w.__browserDevUpdaterChecks === "number" ? w.__browserDevUpdaterChecks : 0) + 1;
       return isFakeUpdateEnabled() ? FAKE_UPDATE : null;
     }
+    case "plugin:window|set_title":
+      (window as unknown as { __browserDevLastTitle?: unknown }).__browserDevLastTitle = a.value;
+      return null;
     // 界面缩放（Ctrl+滚轮）：浏览器开发模式没有 Tauri 的 webview 缩放，但**记录请求的系数**，
     // 让浏览器验收能断言"确实按一档 10% 请求了缩放"（真实缩放效果只能在桌面版看）。
     case "plugin:webview|set_webview_zoom": {
@@ -671,7 +458,19 @@ async function handleCommand(
       // 让 UI 不崩、也不产生"假成功"的错觉。
       notify(command);
       if (command === "plugin:dialog|confirm" || command === "plugin:dialog|ask") {
-        return false;
+        return (
+          (window as unknown as { __browserDevConfirm?: boolean }).__browserDevConfirm === true
+        );
+      }
+      if (command === "plugin:dialog|message") {
+        return (window as unknown as { __browserDevConfirm?: boolean }).__browserDevConfirm === true
+          ? "Ok"
+          : "Cancel";
+      }
+      if (command === "plugin:dialog|save") {
+        return (
+          (window as unknown as { __browserDevSavePath?: string }).__browserDevSavePath ?? null
+        );
       }
       // 目录选择器（设置 → 额外字体目录）：给一个假目录，让验收能走完"添加目录 → 刷新字体列表"。
       // 文件对话框仍返回 null（保持原有的"取消"语义，不影响文件打开/保存的验收）。
@@ -688,6 +487,9 @@ async function handleCommand(
         if (options.directory === true) {
           return typeof options.defaultPath === "string" ? options.defaultPath : "D:\\fake-fonts";
         }
+        return (
+          (window as unknown as { __browserDevOpenPath?: string }).__browserDevOpenPath ?? null
+        );
       }
       return null;
   }

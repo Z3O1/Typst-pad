@@ -1,6 +1,6 @@
 # 文件操作与安全边界
 
-贡献者环境见 [`setup.md`](setup.md)，编译与导出细节见 [`compiler-backend.md`](compiler-backend.md)。
+贡献者环境见 [`testing.md`](testing.md)，编译与导出细节见 [`compiler-backend.md`](compiler-backend.md)。
 
 ## 文件命令
 

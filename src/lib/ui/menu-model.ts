@@ -35,6 +35,7 @@ export type MenuTheme = "system" | "dark" | "light";
 export interface MenuModelDeps {
   viewMode: MenuViewMode;
   showPreview: boolean;
+  sourceOpen?: boolean;
   editorWrap: boolean;
   uiZoom: number;
   theme: MenuTheme;
@@ -116,8 +117,8 @@ export function buildMenuGroups(deps: MenuModelDeps): MenuModelGroup[] {
           action: deps.onToggleViewMode,
         },
         {
-          label: "显示预览栏",
-          checked: deps.showPreview,
+          label: deps.viewMode === "write" ? "展开源码" : "显示预览栏",
+          checked: deps.viewMode === "source" ? deps.showPreview : (deps.sourceOpen ?? false),
           action: deps.onTogglePreview,
         },
         {

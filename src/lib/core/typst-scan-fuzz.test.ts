@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { scanNonMarkupRegions, scanMarkupRegions } from "./typst-lex";
 import { scanMathRanges } from "./math-ranges";
-import { scanMarkupDecorations } from "./markup-ranges";
+import { sourceRevealRange } from "./document-interaction";
 
 /** mulberry32：小而确定的 PRNG（不引依赖，种子固定 → 失败可复现） */
 function prng(seed: number): () => number {
@@ -104,16 +104,10 @@ describe("随机文档鲁棒性", () => {
         expect(m.body, "公式 body 与源码一致").toBe(m.display ? inner.trim() : inner);
       }
 
-      const marks = scanMarkupDecorations(doc, { opaque, math });
-      for (const d of marks) {
-        for (const mk of d.markers) {
-          expect(mk.from, "标记 from 合法").toBeGreaterThanOrEqual(0);
-          expect(mk.to, "标记 to 合法").toBeLessThanOrEqual(doc.length);
-          expect(mk.from, "标记非空").toBeLessThan(mk.to);
-        }
-        expect(d.content.from, "正文 from < to").toBeLessThanOrEqual(d.content.to);
-        expect(d.content.to).toBeLessThanOrEqual(doc.length);
-      }
+      const range = sourceRevealRange(doc, Math.floor(doc.length / 2));
+      expect(range.from).toBeGreaterThanOrEqual(0);
+      expect(range.to).toBeLessThanOrEqual(doc.length);
+      expect(range.from).toBeLessThanOrEqual(range.to);
     }
   });
 
@@ -138,11 +132,7 @@ describe("随机文档鲁棒性", () => {
     for (const doc of pathological) {
       const opaque = scanNonMarkupRegions(doc);
       const math = scanMathRanges(doc, opaque);
-      const marks = scanMarkupDecorations(doc, { opaque, math });
       assertOrdered(math, doc.length, `math(${JSON.stringify(doc.slice(0, 12))}…)`);
-      for (const d of marks) {
-        expect(d.content.to).toBeLessThanOrEqual(doc.length);
-      }
     }
   });
 });

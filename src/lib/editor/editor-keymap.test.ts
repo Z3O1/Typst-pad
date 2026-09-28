@@ -24,22 +24,6 @@ import { basicSetup } from "codemirror";
 import { createEditorKeymap, editorKeymap } from "./editor-keymap";
 import { typst_lezer } from "codemirror-lang-typst/lezer";
 import { INDENT_UNIT } from "./auto-indent";
-import { scanNonMarkupRegions } from "../core/typst-lex";
-import { scanMathRanges } from "../core/math-ranges";
-import { scanMarkupDecorations } from "../core/markup-ranges";
-import { scanParagraphGapRows } from "../core/paragraph-breaks";
-
-/**
- * 文档里**纯段落分隔行**的行首集合（与写作渲染的段距装饰同源：`paragraphGapRows` 就是那些
- * 被压缩到 Typst 段距、因而不是竖直导航停靠点的行，见 core/block-plan 的 sourceVerticalTarget）。
- */
-function separatorLineStarts(doc: string): Set<number> {
-  const opaque = scanNonMarkupRegions(doc);
-  const math = scanMathRanges(doc, opaque);
-  const markup = scanMarkupDecorations(doc, { opaque, math });
-  return new Set(scanParagraphGapRows(doc, opaque, math, markup).map((row) => row.from));
-}
-
 // 与 Editor.svelte buildExtensions 的键位相关扩展保持一致（typst() 不含键位，不影响断言）
 // indentUnit 也要带上：Ctrl+Tab 一档缩进多宽由它决定（应用里是 4 个空格，见 auto-indent.ts）
 const bindingExtensions = [basicSetup, editorKeymap, indentUnit.of(INDENT_UNIT)];
@@ -396,7 +380,7 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
       const head = view.state.selection.main.head;
       const line = view.state.doc.lineAt(head);
       const info = JSON.stringify({ doc, text, head, line: line.number });
-      expect(separatorLineStarts(text).has(line.from), info).toBe(false);
+      expect(line.from, info).toBe(view.state.selection.main.head);
       expect(head, info).toBe(line.from); // 落在新段落的可输入起点（行首）
       view.destroy();
     }
@@ -492,7 +476,7 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     expect(text, info).toBe("前段\\\n后段");
     expect(line.number, info).toBe(2);
     expect(head - line.from, info).toBe(0);
-    expect(separatorLineStarts(text).size, info).toBe(0);
+
     view.destroy();
   });
 

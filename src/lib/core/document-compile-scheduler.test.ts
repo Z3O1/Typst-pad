@@ -1,29 +1,18 @@
-// 写作模式编译调度器（报告 T3）的单元测试：用假时钟把"合并成一次"这件事钉死。
-//
-// 这一版要防的回归：
-//  ① 在途期间来的请求**不许**另起一次编译（否则一次"改字 + 滚动 + 公式到货"就是三次）；
-//  ② 待执行永远只有**一份**（Set 合并理由，不是数组追加）；
-//  ③ 在途那次跑完必须复位（不复位就永远卡住，后续请求全丢）；
-//  ④ 公式让路只推"挂着没跑"的那次；
-//  ⑤ 合成期间不启动新编译，合成结束把攒下的排上；
-//  ⑥ 文档切换清掉挂着的那份；
-//  ⑦ **去抖是尾随的**（PR #77 复审第 1 条）：`edit` 重置计时 —— 首请求 +150ms 不许跑、
-//     末请求 +150ms 才跑；只有 `edit` 续期（滚动/重排不许无限推迟编译）；
-//  ⑧ `requestNow` 立即跑且返回"覆盖它的那一轮"跑完的 Promise（复审第 2 条的入口）。
+// 整页编译调度器的假时钟测试：单槽、去抖、合成、取消与立即请求。
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
-  createWritingCompileScheduler,
-  type WritingCompileScheduler,
-} from "./writing-compile-scheduler";
+  createDocumentCompileScheduler,
+  type DocumentCompileScheduler,
+} from "./document-compile-scheduler";
 
-describe("createWritingCompileScheduler", () => {
+describe("createDocumentCompileScheduler", () => {
   let runs: number;
   /** 手动控制"编译什么时候跑完" */
   let release: (() => void) | null;
-  let scheduler: WritingCompileScheduler;
+  let scheduler: DocumentCompileScheduler;
 
   const make = (debounceMs = 150) =>
-    createWritingCompileScheduler({
+    createDocumentCompileScheduler({
       run: () =>
         new Promise<void>((resolve) => {
           runs += 1;
@@ -56,7 +45,7 @@ describe("createWritingCompileScheduler", () => {
     vi.advanceTimersByTime(50);
     scheduler.request("edit");
     vi.advanceTimersByTime(50);
-    scheduler.request("reflow");
+    scheduler.request("context");
     expect(runs).toBe(0);
     vi.advanceTimersByTime(150);
     await settle();
@@ -79,22 +68,10 @@ describe("createWritingCompileScheduler", () => {
   it("只有 edit 续期：滚动 / 重排不许把编译无限推迟", async () => {
     scheduler.request("edit"); // t=0，定时器排到 t=150
     vi.advanceTimersByTime(100);
-    scheduler.request("blocks-needed"); // t=100，不续期
+    scheduler.request("mode"); // t=100，不续期
     vi.advanceTimersByTime(40);
-    scheduler.request("reflow"); // t=140，不续期
+    scheduler.request("context"); // t=140，不续期
     vi.advanceTimersByTime(10); // t=150：首请求那次的期限到了
-    expect(runs).toBe(1);
-    await settle();
-  });
-
-  it("公式让路之后按让路的时刻重排（edit 重置不许把 240ms 的让路掀回 150ms）", async () => {
-    scheduler.request("edit");
-    vi.advanceTimersByTime(100);
-    scheduler.holdForMath(240); // 让路到 t=340
-    scheduler.request("edit"); // 又敲字：重置，但仍要等让路到期
-    vi.advanceTimersByTime(239);
-    expect(runs).toBe(0);
-    vi.advanceTimersByTime(1);
     expect(runs).toBe(1);
     await settle();
   });
@@ -173,11 +150,11 @@ describe("createWritingCompileScheduler", () => {
     expect(runs).toBe(1);
 
     // 在途期间：三次请求（不同理由）合并成一份
-    scheduler.request("blocks-needed");
-    scheduler.request("reflow");
+    scheduler.request("mode");
+    scheduler.request("context");
     scheduler.request("edit");
     expect(scheduler.stats().pending).toBe(true);
-    expect(scheduler.stats().reasons).toEqual(["blocks-needed", "reflow", "edit"]);
+    expect(scheduler.stats().reasons).toEqual(["mode", "context", "edit"]);
     vi.advanceTimersByTime(1000);
     expect(runs).toBe(1); // 在途期间一次都没多跑
 
@@ -201,7 +178,7 @@ describe("createWritingCompileScheduler", () => {
   });
 
   it("编译抛异常也要复位（不然一次失败就把调度器卡死）", async () => {
-    const failing = createWritingCompileScheduler({
+    const failing = createDocumentCompileScheduler({
       run: async () => {
         runs += 1;
         throw new Error("编译失败");
@@ -219,24 +196,6 @@ describe("createWritingCompileScheduler", () => {
     await Promise.resolve();
     expect(runs).toBe(2);
     failing.dispose();
-  });
-
-  it("公式让路：只推挂着没跑的那次；在途时不打扰", async () => {
-    scheduler.request("edit");
-    vi.advanceTimersByTime(100); // 还差 50ms 就跑
-    scheduler.holdForMath(240);
-    vi.advanceTimersByTime(200); // 若没让路，这里早该跑了
-    expect(runs).toBe(0);
-    vi.advanceTimersByTime(50);
-    await settle();
-    expect(runs).toBe(1);
-
-    // 在途时让路：不产生任何额外调度
-    scheduler.request("edit");
-    vi.advanceTimersByTime(150);
-    scheduler.holdForMath(240);
-    await settle();
-    expect(runs).toBe(2);
   });
 
   it("合成期间不启动新编译；结束之后把攒下的排上", async () => {

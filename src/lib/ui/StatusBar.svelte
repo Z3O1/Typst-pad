@@ -93,7 +93,7 @@
     >
   {/if}
   <span class="spacer"></span>
-  <span class="mode-tag">{viewMode === "write" ? "写作" : "源码"}</span>
+  <span class="mode-tag">{viewMode === "write" ? "文档" : "源码"}</span>
   {#if uiZoom !== ZOOM_DEFAULT}
     <!-- 只在非 100% 时出现：缩放是"整界面都在变"的状态，得有个常驻的地方能看出来 -->
     <span class="mode-tag" title="Ctrl+滚轮缩放；视图 → 重置缩放">缩放 {zoomLabel(uiZoom)}</span>

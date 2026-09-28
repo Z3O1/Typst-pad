@@ -1,0 +1,63 @@
+// 整页交互只映射坐标与源码范围，不参与 Typst 排版。
+import { parser } from "codemirror-lang-typst/lezer";
+
+export function sourceRevealRange(
+  doc: string,
+  pos: number,
+): {
+  from: number;
+  to: number;
+  kind: "math" | "code" | "text";
+} {
+  const at = Math.max(0, Math.min(pos, doc.length));
+  // 复用源码编辑器的无 wasm 语法树，内容块里的文字也能展开完整的外层调用。
+  try {
+    const tree = parser.parse(doc);
+    for (const side of [-1, 1] as const) {
+      let node = tree.resolveInner(at, side);
+      while (node.parent) {
+        if (node.name === "Equation") return { from: node.from, to: node.to, kind: "math" };
+        if (node.name === "Hash" && node.nextSibling)
+          return { from: node.from, to: node.nextSibling.to, kind: "code" };
+        if (node.prevSibling?.name === "Hash")
+          return { from: node.prevSibling.from, to: node.to, kind: "code" };
+        node = node.parent;
+      }
+    }
+  } catch {
+    /* 未完成的语法仍可从当前源码行编辑。 */
+  }
+  const from = at === 0 ? 0 : doc.lastIndexOf("\n", at - 1) + 1;
+  const end = doc.indexOf("\n", at);
+  return { from, to: end < 0 ? doc.length : end, kind: "text" };
+}
+
+export function pageCoordinates(
+  point: { x: number; y: number },
+  rect: { left: number; top: number; width: number; height: number },
+  box: { x: number; y: number; width: number; height: number },
+): { xPt: number; yPt: number } | null {
+  if (
+    ![
+      point.x,
+      point.y,
+      rect.left,
+      rect.top,
+      rect.width,
+      rect.height,
+      box.x,
+      box.y,
+      box.width,
+      box.height,
+    ].every(Number.isFinite) ||
+    rect.width <= 0 ||
+    rect.height <= 0 ||
+    box.width <= 0 ||
+    box.height <= 0
+  )
+    return null;
+  return {
+    xPt: box.x + ((point.x - rect.left) * box.width) / rect.width,
+    yPt: box.y + ((point.y - rect.top) * box.height) / rect.height,
+  };
+}

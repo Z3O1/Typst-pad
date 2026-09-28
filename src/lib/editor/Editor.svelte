@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { EditorView, Decoration, hoverTooltip } from "@codemirror/view";
-  import { EditorState, Compartment, StateField } from "@codemirror/state";
-  import type { Text } from "@codemirror/state";
+  import { EditorState, Compartment, StateField, StateEffect } from "@codemirror/state";
   import { indentUnit } from "@codemirror/language";
   import type { DecorationSet } from "@codemirror/view";
   import { basicSetup } from "codemirror";
@@ -18,17 +17,11 @@
   import { planDollarInput } from "./auto-pair";
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
-  import type { CompileErrorLocation, MathRender } from "../core/typst-engine";
-  import { MATH_TEXT_PT } from "../core/typst-engine";
-  import type { Block } from "../core/block-plan";
+  import type { CompileErrorLocation } from "../core/typst-engine";
   import { squiggleRanges, offsetAt } from "../core/diagnostics-utils";
-  import { livePreview, refreshLivePreview } from "./live-preview";
-  import type { MathRequest } from "./live-preview";
   import { planForCommand } from "../core/write-commands";
   import type { WriteCommand } from "../core/write-commands";
   import { mark } from "../core/startup-timing";
-  import { WRITE_FONT_STACK, measureWriteFontMetrics } from "./editor-font";
-  import type { WriteFontMetrics } from "./editor-font";
   import { dbg } from "../core/debug";
   import { anchorEffectAt, measureAnchorYMargin } from "./scroll-anchor";
   // 浏览器验收用的测试钩子（只在 `?browserdev=1` 下真的挂到 window 上，桌面版是空操作）
@@ -36,7 +29,7 @@
 
   interface Props {
     initialDoc?: string;
-    onDocChange?: (doc: string) => void;
+    onDocChange?: (doc: string, mapPosition: (pos: number, assoc?: number) => number) => void;
     onCursor?: (line: number, col: number) => void;
     doc?: string;
     theme?: "dark" | "light";
@@ -46,59 +39,9 @@
     prefixCode?: string;
     /** 跳转目标（1-based 行列；seq 变化确保重复跳同一位置也触发 effect） */
     jumpTo?: { line: number; col: number; seq: number } | null;
-    /**
-     * 界面模式：
-     * - "write"  写作模式（仿 Typora）：整页纸张、衬线正文、无行号、公式/标记就地渲染；
-     * - "source" 源码模式：等宽代码编辑器 + 行号，显示 Typst 源码。
-     */
+    /** 文档模式源码层保留段落/列表输入语义；源码模式直接编辑 Typst 原文。 */
     mode?: "write" | "source";
-    /** 公式渲染结果查询（父组件维护缓存；key 见 math-ranges.mathCacheKey） */
-    lookupMath?: (key: string) => MathRender | undefined;
-    /** 需要渲染的公式（父组件去重 / 防抖后调 Rust 侧 compile_math） */
-    onMathRequest?: (requests: MathRequest[]) => void;
-    /** 渲染结果代次：变化时重整装饰（父组件收到新渲染结果后自增） */
-    mathVersion?: number;
-    /**
-     * 写作模式的**块级切片**（父组件每次 compile_blocks 后更新）：
-     * 含代码/raw/注释的复杂块显示成引擎自己画的那一块；普通正文与标题始终是真实文本
-     * （不建切片，见 core/editable-subset 的 decideTextBlockEditing）。
-     * null / 空 = 关闭（源码模式、后端不支持该命令时都走这条路，行为与加此功能前一致）。
-     * 见 docs/development/writing-rendering.md。
-     */
-    blocks?: Block[] | null;
-    /**
-     * **文档正文实际字号**（pt，来自 Rust 侧 compile_blocks 的 `textPt`）：写作模式的源码透镜
-     * 按它渲染（`--write-doc-px = textPt × 4/3`），于是光标进出块时字号、行高都不跳
-     * （用户：「不要光标在哪里哪里就变大了」）。缺省用 typst 默认 11pt。
-     */
-    docTextPt?: number;
-    docLetterSpacingPx?: number;
-    /** 块切片代次：变化时重整块装饰（父组件收到新编译结果后自增） */
-    blocksVersion?: number;
-    /** 视口内出现"能渲染但还没有切片"的块：父组件去抖后按新窗口重编译 */
-    onBlocksNeeded?: () => void;
-    /**
-     * **点击定位**（阶段 2）：点在某张切片上的 `(xPt, yPt)`（页面坐标，pt）→ 光标位置。
-     * 父组件负责换算（字节 ↔ 位置）与 IPC（Rust 侧 `block_hit_test`）；返回 null =
-     * 定不了位，编辑器退回"光标落到块首"。见 block-hit.ts 与 live-preview 的说明。
-     */
-    /** 返回 `"cancelled"` = 这次命中在等待期间作废（会话/文档/几何变了），整条点击必须放弃 */
-    onCropClick?: (req: {
-      page: number;
-      xPt: number;
-      yPt: number;
-      from: number;
-      to: number;
-    }) => Promise<number | null | "cancelled">;
-    /** **切片里的链接被点**（阶段 3）：父组件交给 opener 插件打开（不移动光标、不吞点击） */
-    onOpenLink?: (href: string) => void;
-    /**
-     * **输入法合成开始 / 结束**（报告 T3）：`compositionstart` / `compositionend` 时各调一次。
-     *
-     * 为什么不能只靠 `view.composing`：那个标志要**第一次输入之后**才为真，而"合成开始"到
-     * "第一次输入"之间页面已经在跑编译调度了（150ms 去抖挡不住整篇编译）。页面据此在合成期间
-     * **不启动**新的后台块编译（已经跑完的照常结束，结果由排版戳过滤）。
-     */
+    /** 合成期间暂停后台整页编译，源码镜像仍实时更新。 */
     onComposition?: (active: boolean) => void;
     /**
      * 自动换行（源码模式 Alt+Z 切换，状态与持久化由父组件持有）。
@@ -118,17 +61,6 @@
     prefixCode = "",
     jumpTo = null,
     mode = "source",
-    lookupMath,
-    onMathRequest,
-    mathVersion = 0,
-    blocks = null,
-    blocksVersion = 0,
-    docTextPt = 11,
-    /** 写作模式正文字体的 CJK 前进宽度补偿（px，通常为负；0 = 不干预，见 editor-font.ts） */
-    docLetterSpacingPx = 0,
-    onBlocksNeeded,
-    onCropClick,
-    onOpenLink,
     onComposition,
     wrap = false,
   }: Props = $props();
@@ -142,56 +74,29 @@
   // 避免 wrap 的 $effect 首跑再做一次等价重配。不在此处读 prop：顶层读 prop 会被
   // svelte-check 判为"只捕获初值"的误用告警（state_referenced_locally）。
   let appliedWrap = false;
-  /** 写作模式正文字形度量的记忆（字号变了才重量，见 livePreviewOptions.writeFontMetrics） */
-  let writeMetricsCache: { size: number; value: WriteFontMetrics | null } | null = null;
   let applyingExternal = false; // 外部 doc 同步时抑制 onDocChange，避免误标脏
   // 当前生效的编译错误与前缀代码（由 diagnostics/prefixCode prop 驱动；供波浪线与 hover 提示读取）
   let diagState: { list: CompileErrorLocation[]; prefix: string } = { list: [], prefix: "" };
 
-  /** 所见即所得扩展的实时选项：用闭包读最新 prop，避免重建扩展时丢状态 */
-  const livePreviewOptions = {
-    // 内联渲染只在写作模式开启：源码模式下要看到真正的 Typst 源码
-    enabled: () => mode === "write",
-    prefix: () => prefixCode ?? "",
-    lookup: (key: string) => lookupMath?.(key),
-    onRequest: (requests: MathRequest[]) => onMathRequest?.(requests),
-    // 公式字号 = 正文字号：写作模式跟着文档走（`--write-doc-px` 就是 `docTextPt × 4/3`）。
-    // 写死 12pt（= 正文 16px 那个年代的值）时，写作模式的公式比周围正文大 9%、
-    // 也比同一公式在切片里的样子大（PR #60 审查抓到）。
-    // 源码模式那条分支是**兜底**：内联渲染今天只在写作模式开（见 enabled），
-    // 源码模式根本不会有公式 widget；真要开，10.5pt 才是与 14px 正文对齐的值。
-    mathSizePt: () => (mode === "write" ? docTextPt : MATH_TEXT_PT),
-    dark: () => theme === "dark",
-    // 展开占位（报告 T4）需要的两个度量：行高与可视高度
-    lineHeight: () => view?.defaultLineHeight ?? 0,
-    viewportHeight: () => view?.scrollDOM.clientHeight ?? 0,
-    // 块级切片：只在写作模式交给渲染层，源码模式一律 null（要看到真正的源码）
-    blocks: () => (mode === "write" ? (blocks ?? null) : null),
-    // **块级带高盒**需要的字体度量（见 editor-font.measureWriteFontMetrics）：按字号记忆，
-    // 让可编辑正文的行盒高/首行主基线直接由引擎的带几何反解（见 block-decorations）。
-    // 量不出来（jsdom / 老后端）返回 null，那一轮就不启用带高盒。
-    writeFontMetrics: () => {
-      const size = (docTextPt * 4) / 3;
-      if (writeMetricsCache?.size !== size) {
-        writeMetricsCache = { size, value: measureWriteFontMetrics(size) };
+  const revealEffect = StateEffect.define<{ from: number; to: number } | null>();
+  const revealField = StateField.define<DecorationSet>({
+    create: () => Decoration.none,
+    update(value, tr) {
+      value = value.map(tr.changes);
+      for (const effect of tr.effects) {
+        if (!effect.is(revealEffect)) continue;
+        const range = effect.value;
+        value =
+          range && range.to > range.from
+            ? Decoration.set([
+                Decoration.mark({ class: "cm-source-reveal" }).range(range.from, range.to),
+              ])
+            : Decoration.none;
       }
-      return writeMetricsCache.value;
+      return value;
     },
-    onBlocksNeeded: () => onBlocksNeeded?.(),
-    // 点击定位（阶段 2）：父组件换算成字节偏移后问 Rust，编辑器只负责落光标
-    onCropClick: (req: { page: number; xPt: number; yPt: number; from: number; to: number }) =>
-      onCropClick?.(req) ?? Promise.resolve(null),
-    onOpenLink: (href: string) => onOpenLink?.(href),
-    // 编译错误所在的块不许被切片盖住（波浪线画在源码上，见 live-preview 的说明）。
-    // 用参数里的 doc：StateField 计算时 view 上的 state 还是旧的
-    diagnosticRanges: (doc: Text) =>
-      diagState.list.length === 0
-        ? []
-        : squiggleRanges(doc, diagState.list, diagState.prefix).map((r) => ({
-            from: r.from,
-            to: r.to,
-          })),
-  };
+    provide: (field) => EditorView.decorations.from(field),
+  });
 
   /**
    * 输入 `$` 时自动补出配对的定界符（用户要求「加入功能：自动补全 $$」，判定见 auto-pair.ts）：
@@ -200,7 +105,7 @@
    * 默认行为（不碰粘贴、不碰 IME 组字、不碰选中替换）。
    *
    * 异常兜底：任何抛错都返回 false 退回默认输入 —— 输入链路绝不能因为配对逻辑而吞掉按键
-   * （与装饰/widget 的 try/catch 是同一条纪律）。
+   * 输入扩展异常不能阻止默认输入。
    */
   const dollarAutoPair = EditorView.inputHandler.of((target, from, to, text) => {
     if (text !== "$" || from !== to) return false;
@@ -236,36 +141,28 @@
       diagnosticsCompartment.of(diagnosticsExtensions()),
       wrapCompartment.of(wrap ? EditorView.lineWrapping : []),
       diagTheme,
-      livePreview(livePreviewOptions), // 公式内联渲染（开关与缓存由父组件注入）
-      // 汉字输入法：合成结束时把"合成期间攒下的装饰刷新"补上（见下面 $effect 的说明）。
-      // 不这么做的话，合成期间那次刷新就彻底丢了 —— 公式 widget / 切片要等下一次编辑才回来。
+      revealField,
       EditorView.domEventHandlers({
         compositionstart: () => {
-          // 合成一开始就告诉页面（别等第一次输入后 `view.composing` 变真）
           onComposition?.(true);
           return false;
         },
         compositionend: () => {
-          // **先告诉页面合成结束了**（它据此把攒下的那次块编译排上）——
-          // 再补装饰刷新：两者都不许在合成中途跑（见 Props 里 onComposition 的说明）
-          onComposition?.(false);
-          if (!refreshPendingRefresh) return false;
-          refreshPendingRefresh = false;
-          // 推到微任务：让 CodeMirror 先把合成的最终文本落进 state（否则刷新看到的是半个字）
           queueMicrotask(() => {
-            if (!view) return;
-            view.dispatch({ effects: refreshLivePreview.of(null) });
+            if (view) onComposition?.(false);
           });
           return false;
         },
       }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !applyingExternal) {
-          onDocChange?.(update.state.doc.toString());
+          onDocChange?.(update.state.doc.toString(), (pos, assoc) =>
+            update.changes.mapPos(pos, assoc),
+          );
         }
         const head = update.state.selection.main.head;
         const line = update.state.doc.lineAt(head);
-        onCursor?.(line.number, head - line.from + 1);
+        if (update.selectionSet || update.docChanged) onCursor?.(line.number, head - line.from + 1);
       }),
     ];
   }
@@ -309,6 +206,7 @@
     try {
       view.dispatch({
         changes: { from: 0, to: current.length, insert: doc },
+        effects: revealEffect.of(null),
       });
     } finally {
       applyingExternal = false;
@@ -327,18 +225,11 @@
     view.focus();
   });
 
-  // 主题 / 模式切换：重配 CodeMirror 主题，并重整公式装饰
-  // （暗色要反色；写作↔源码要立刻收起/露出所有 widget，见 live-preview）
+  // 源码层主题独立于完整页面的滤镜，不重建视图。
   $effect(() => {
     if (!view) return;
-    // 两种模式都要跟着主题走：**写作模式不能只靠 CSS 上色**——CodeMirror 基础主题自带
-    // 白底黑字，若暗色下不挂 oneDark，编辑器仍是白底，而公式 widget 已被 invert 成白色
-    // → 白底白字看不见（实测踩过：深色主题下公式"消失"）。
     view.dispatch({
-      effects: [
-        themeCompartment.reconfigure(theme === "dark" ? oneDark : []),
-        refreshLivePreview.of(null),
-      ],
+      effects: [themeCompartment.reconfigure(theme === "dark" ? oneDark : [])],
     });
   });
 
@@ -465,38 +356,6 @@
   });
 
   /**
-   * 所见即所得：开关切换、渲染结果到货（mathVersion 自增）、前缀变化（缓存键变化）
-   * 时重整公式装饰。读这三个响应式值即建立依赖。
-   *
-   * 滚动锚定交给 CodeMirror 自己（它的 measure 循环里就有 anchor diff，装饰换掉 widget 导致的
-   * 高度变化会被它补偿）—— 第一版在这里又加了一层自己的锚定，结果与它叠加（见 scroll-anchor.ts
-   * 的说明）。只有"把光标钉在某个屏幕高度"（点击定位 / 翻页）才需要我们显式给滚动目标。
-   */
-  /**
-   * 合成期间攒下的刷新请求（见下面的守卫与 `compositionend` 处理器）。
-   * 用普通变量而不是 `$state`：它只在这两个地方读写，不需要触发任何响应式更新。
-   */
-  let refreshPendingRefresh = false;
-
-  $effect(() => {
-    if (!view) return;
-    void mode;
-    void mathVersion;
-    void blocksVersion; // 新的块切片到货 → 重整块装饰
-    void prefixCode; // 前缀变化 → 编译上下文与缓存键变化，重新请求与渲染
-    // **输入法合成期间不许重建装饰**（用户是中文作者，这是每天都要走的路）：
-    // 合成中的文本由 IME 持有，这一刻把公式 widget / 切片整个换掉会把候选串与合成状态一起
-    // 弄坏（表现为打着打着候选消失、字重排）。攒到 `compositionend` 再刷一次，
-    // 中间这段显示旧装饰（合成文本自己是源码形态，看得见）。
-    if (view.composing) {
-      refreshPendingRefresh = true;
-      return;
-    }
-    refreshPendingRefresh = false;
-    view.dispatch({ effects: refreshLivePreview.of(null) });
-  });
-
-  /**
    * 执行写作模式的格式命令（菜单 / 快捷键共用）：按 write-commands 的纯函数算出编辑方案，
    * 再落成一次 CodeMirror 事务。光标落在新插入的标记内部，便于继续输入。
    */
@@ -512,40 +371,21 @@
     view.focus();
   }
 
-  /**
-   * 写作模式**正文列宽**（CSS px）：CodeMirror 内容列的实际宽度。
-   *
-   * 用于给写作模式的块级渲染定版心宽（pt = px × 3/4）—— 版心宽是**编译期输入**
-   * （Rust 侧注入 `#set page(width: …)`），所以列宽变了要重新编译（见 +page.svelte 的
-   * scheduleWritingReflow）。写作模式下左右各 48px 留白挂在 `.cm-scroller` 上，
-   * 因此 contentDOM 的宽度就是文字列宽度；源码模式另有用途，不在此处区分。
-   */
-  /**
-   * 当前视口覆盖的文档范围（CodeMirror 位置）：父组件用它算块级渲染的**窗口**
-   * （只渲视口附近的块，见 compile_blocks 的 wantFrom/wantTo）。
-   * 取不到（视图未建）时返回 null，调用方退化成"整篇都渲"（短文档无所谓）。
-   */
-  export function visibleRange(): { from: number; to: number } | null {
-    if (!view) return null;
-    try {
-      const ranges = view.visibleRanges;
-      if (ranges.length === 0) return null;
-      return {
-        from: ranges[0].from,
-        to: ranges[ranges.length - 1].to,
-      };
-    } catch {
-      return null;
-    }
+  /** 展开位置只影响独立源码层，不参与整页布局。保留同一个视图和撤销历史。 */
+  export function revealAt(pos: number, range?: { from: number; to: number }): void {
+    if (!view) return;
+    const at = Math.max(0, Math.min(pos, view.state.doc.length));
+    view.requestMeasure();
+    view.dispatch({
+      selection: { anchor: at },
+      effects: [revealEffect.of(range ?? null), EditorView.scrollIntoView(at, { y: "center" })],
+    });
+    view.focus();
   }
 
-  export function contentWidthPx(): number {
-    if (!view) return 0;
-    try {
-      return view.contentDOM.clientWidth;
-    } catch {
-      return 0;
-    }
+  export function focus(): void {
+    view?.requestMeasure();
+    view?.focus();
   }
 
   /**
@@ -645,287 +485,20 @@
   });
 </script>
 
-<!-- style:--write-doc-px = 文档正文字号（pt → px，1pt = 4/3px）：写作模式的正文与行高按它渲染，
-     与引擎切片完全一致，光标进出块时字号不跳（见样式里 .editor-host.write 的说明）。
-     style:--write-font-stack = 写作模式的字体栈（与 typst 默认族顺序一致）：字号/行高/字体
-     三条腿齐了，源码形态与切片形态才是同一套排版（见 editor-font.ts） -->
-<div
-  class="editor-host"
-  class:write={mode === "write"}
-  style:--write-doc-px={`${(docTextPt * 4) / 3}px`}
-  style:--write-letter-spacing={`${docLetterSpacingPx}px`}
-  style:--write-font-stack={WRITE_FONT_STACK}
-  bind:this={host}
-></div>
+<div class="editor-host" bind:this={host}></div>
 
 <style>
   .editor-host {
     height: 100%;
   }
-
   .editor-host :global(.cm-editor) {
     height: 100%;
     font-size: 14px;
   }
-
-  /* ---------- 写作模式（仿 Typora）：衬线正文 + 无行号 + 宽行距 ---------- */
-  /*
-   * 写作模式的正文字号 = **文档实际字号**（Rust 侧 compile_blocks 的 `textPt`，前端换算成 px
-   * 挂在 `--write-doc-px` 上），行高 = typst 的 leading（`par.leading` 默认 0.65em → 1.65）。
-   *
-   * 为什么必须这样：写作模式是"复杂块显示引擎切片 + 可编辑正文是真实文本"，两者字号不一致时
-   * 光标一进某一块，那一块的字和行高就会**变大**（用户：「不要光标在哪里哪里就变大了」）。
-   * 实测旧行为：编辑区固定 16px、行高 1.9，而切片是 typst 默认 11pt（14.67px）、行高 1.65
-   * → 光标一进去，字大 9%、行盒高 26%。现在字体与行高都跟着文档走：
-   * 默认文档 14.67px / 1.65，`#set text(size: 12pt)` 的文档 16px / 1.65。
-   * 兜底 14.6667px = typst 默认 11pt（旧后端没给 textPt 时，与切片仍然对得上）。
-   */
-  .editor-host.write :global(.cm-editor) {
-    font-size: var(--write-doc-px, 14.6667px);
-  }
-
-  /*
-   * 字体必须落在 .cm-content 上：CodeMirror 的基础主题给 .cm-content 自己钉了
-   * `font-family: monospace`，只改 .cm-editor 是**不生效**的（实测：写作模式正文仍是等宽）。
-   * 字体与预览/PDF 输出一致（思源宋体），所见即所得才对得上。
-   */
-  .editor-host.write :global(.cm-content) {
-    /* 字体栈由 editor-font.ts 的 WRITE_FONT_STACK 提供（拉丁 Libertinus → 中文思源宋体 → 系统宋体）；
-       打包字体装上之前/装不上时，那两族名自然落空、退回后面的系统族，行为与从前一致。 */
-    font-family: var(
-      --write-font-stack,
-      "Noto Serif CJK SC",
-      "Songti SC",
-      "Source Han Serif SC",
-      Georgia,
-      serif
-    );
-  }
-
-  /* 写作模式下编辑器底色/文字跟随主题变量（暗色时与纸张底色一致，不漏白底） */
-  .editor-host.write :global(.cm-editor),
-  .editor-host.write :global(.cm-scroller),
-  .editor-host.write :global(.cm-gutters) {
-    background-color: var(--bg-paper, inherit);
-  }
-
-  /* 行内原始文本 / 代码块在写作模式下仍是等宽（那是代码，不该用衬线） */
-  .editor-host.write :global(.cm-markup-raw),
-  .editor-host.write :global(.cm-raw-block-pre) {
-    font-family: Consolas, "Courier New", monospace;
-  }
-
-  /* 行号槽 / 折叠箭头：Typora 没有，写作模式下整条隐藏 */
-  .editor-host.write :global(.cm-gutters) {
-    display: none;
-  }
-
-  /* 当前行高亮（代码编辑器的味道）在写作模式下不要 */
-  .editor-host.write :global(.cm-activeLine) {
-    background: transparent;
-  }
-
-  /* 纸张内留白：左右各 48px（Typora 式阅读边距）**必须留在 .cm-content 之外**。
-     CodeMirror 画整行选区的底色时会把 .cm-content 的左右内边距一起铺满 →
-     选个全选就比文字列两边各凸出 48px（用户反馈「两边不应该凸出来」）。
-     放到 .cm-scroller 上：内容盒 == 文字列，高亮自然对齐文字。 */
-  .editor-host.write :global(.cm-scroller) {
-    padding-left: 48px;
-    padding-right: 48px;
-    /* 行尾溢出（见 .cm-write-engine-break-line）不许变成横向滚动条：写作模式永远不需要横向滚动，
-       而"溢出 → 出滚动条 → 版心变 → 重编译"正是这里要避免的反馈环。溢出量是几个像素，
-       落在上面那 48px 纸张留白里，不会被裁掉。 */
-    overflow-x: hidden;
-    /* 滚动条槽位常驻：写作模式的**版心宽是编译期输入**（Rust 侧按列宽注入 #set page），
-       如果滚动条出现/消失会让列宽来回变，就形成"重编译 → 内容高度变 → 滚动条变 → 再重编译"
-       的反馈环（预览区当年就是这么闪的，见 docs/development/frontend.md 的布局反馈环说明）。 */
+  .editor-host :global(.cm-scroller) {
     scrollbar-gutter: stable;
   }
-  .editor-host.write :global(.cm-content) {
-    /* 只留竖直方向：顶部呼吸感 + 底部留白（末行不贴底边） */
-    padding: 40px 0 160px;
-    /* typst 的 `par.leading` 默认 0.65em ⇒ 行高 1.65em（与切片里的行距一致，见上） */
-    line-height: 1.65;
-    /* 字体度量跟引擎对齐：浏览器量到的 CJK advance 比 1em 宽约 2.3%，用负 letter-spacing
-       补回来，临界行才不会比 Typst 早折一行（见 editor-font.ts 的 measureWriteLetterSpacing）；
-       geometricPrecision 关掉字形 advance 的取整/优化，断行更接近引擎。 */
-    letter-spacing: var(--write-letter-spacing, normal);
-    text-rendering: geometricPrecision;
-    caret-color: var(--typora-caret, currentColor);
-  }
-
-  /* 标题：字号梯度**必须跟 typst 一致**（`typst-library/src/model/heading.rs` 的 ShowSet：
-     level 1 = 1.4em、level 2 = 1.2em、level 3 及以下 = 1.0em，只加粗、不再变大），
-     行高用 typst 的 leading（1.65em，见上）—— 这样光标进标题块时，那一行的高度与切片对得上。
-     以前这里是仿 Typora 的 1.8 / 1.5 / 1.25 / 1.08em：块级渲染落地后就成了 bug，
-     光标一进标题块那一行就比切片大 36%~40%（用户报「在标题所在块，标题就会变的很大」）。
-     上下留白也用 typst 的块间距（heading.rs 的 above / below，单位是**正文字号**的 em，
-     而 padding 正好挂在字号 = 正文的行上，所以直接写数值即可）：
-     level 1 → above 1.8em / below 0.75em；level 2 及以下 → above 1.44em / below 0.75em。 */
-  /*
-   * 标题行**不加上下 padding**（实测取舍，别再加回去）：切片是"按 y 序把页面切成的带"，
-   * 标题周围的空白**已经分散在相邻块的带里**（带在相邻墨迹的中点处切），所以源码形态不需要
-   * 再补一份 —— 补了反而跳：
-   *   padding 0        → 光标进标题块，页面高度 +3px
-   *   0.6em / 0.2em    → +19px（旧值）
-   *   typst 的 1.8em / 0.75em → +40px
-   * 三种都实测过（`.browser-check/probe-pagejump.mjs` 那套量法，600px 视口 + 真实夹具）。
-   */
-
-  .editor-host.write :global(.cm-markup-heading-1) {
-    font-size: 1.4em;
-    line-height: 1.65;
-    font-weight: 700;
-  }
-
-  .editor-host.write :global(.cm-markup-heading-2) {
-    font-size: 1.2em;
-    line-height: 1.65;
-    font-weight: 700;
-  }
-
-  .editor-host.write :global(.cm-markup-heading-3) {
-    font-size: 1em;
-    line-height: 1.65;
-    font-weight: 600;
-  }
-
-  .editor-host.write :global(.cm-markup-heading-4),
-  .editor-host.write :global(.cm-markup-heading-5),
-  .editor-host.write :global(.cm-markup-heading-6) {
-    font-size: 1em;
-    line-height: 1.65;
-    font-weight: 600;
-  }
-
-  /* **块级带高盒**（见 block-decorations 的 buildBlockBandFitDecorations）：
-     可编辑正文所在的那一条源码行直接占**引擎给的带高**，行高由"首行主基线在带内的偏移"反解，
-     于是块的盒顶/盒底与带顶/带底重合、首行基线也钉在 `anchorBaselinePt` 上。
-     没有这一条时正文块按自然行盒（字号 × 1.65）排，与带高差 3~10px、首行基线偏移也不一致 ——
-     相邻锚点越界与页内累计偏差全部长在这条缝里（四份真实作业实测）。
-     注：这一轮的空白源码行高度由装饰压到 0（段距已经含在带高里，见 markup-decorations）。 */
-  .editor-host.write :global(.cm-line.cm-block-band) {
-    box-sizing: border-box;
-    height: var(--write-band-h, auto);
-    line-height: var(--write-band-lh, inherit);
-  }
-
-  /* **占位带高盒**（编辑已发生、编译还没落地）：与上面同源，只是**只能长不能缩**。
-     为什么不用同一个类：精确块的盒高就是引擎给的带高，而占位块的内容可能已经多了一行
-     （回车 / 粘贴），钉死高度会让新行溢出盒子压到下一块上。内容没变时两者逐像素一致（版面不动），
-     内容变多时立刻长出来（一次符合内容变化的位移），编译落地后再校正回精确带高。
-     见 block-decorations 的 `layoutHold` 与 core/block-plan 的 `Block.layoutHold`。 */
-  .editor-host.write :global(.cm-line.cm-block-band-hold) {
-    box-sizing: border-box;
-    min-height: var(--write-band-h, auto);
-    height: auto;
-    line-height: var(--write-band-lh, inherit);
-  }
-
-  /* 带高盒里标题的 span **必须**跟着行的行高走：标题 span 自带 1.4em/1.2em 的字号，
-     它自己的 `line-height: 1.65`（相对更大字号）会把行盒的上升部顶得比 strut 还高，
-     基线于是被压低 5~7px —— 带高盒刚对上的位置又丢了。改成 inherit 后标题的相对偏移只剩
-     字号差带来的 `(上升部 − 下降部) / 2`（h1 约 2.6px、h2 约 1.3px），有界且不随块变。 */
-  .editor-host.write :global(.cm-block-band .cm-markup-heading-1),
-  .editor-host.write :global(.cm-block-band .cm-markup-heading-2),
-  .editor-host.write :global(.cm-block-band .cm-markup-heading-3),
-  .editor-host.write :global(.cm-block-band .cm-markup-heading-4),
-  .editor-host.write :global(.cm-block-band .cm-markup-heading-5),
-  .editor-host.write :global(.cm-block-band .cm-markup-heading-6),
-  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-1),
-  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-2),
-  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-3),
-  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-4),
-  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-5),
-  .editor-host.write :global(.cm-block-band-hold .cm-markup-heading-6) {
-    line-height: inherit;
-  }
-
-  /* **引擎给的折行断点**（见 block-decorations 的 buildEngineBreakDecorations）：
-     给断点前那个字符套一层行内 span，由 `::after` 吐一个换行符强制断行 —— 段落折几行由 Typst
-     的断点决定，不再是浏览器的贪心折行（两者的差异见 docs/development/writing-rendering.md）。
-     必须是行内 mark（不是 widget）：widget 会让 CodeMirror 拆逻辑行，带高盒会跟着丢。
-     `white-space: pre` 让 `\A` 真的当换行而不是空白折叠掉。 */
-  .editor-host.write :global(.cm-write-engine-break)::after {
-    content: "\A";
-    white-space: pre;
-    /* 行尾压缩（见下）不许把下一行的行首往左带 */
-    letter-spacing: 0;
-  }
-
-  /* **行尾压缩**：Typst 每一行能装下的字比 Chromium 多一个左右（Typst 会在行尾压缩 CJK 标点、
-     还会把行尾空白挂出去），所以只禁折还不够 —— 实测高代周二 L268 那一行自然宽 499.8px 装不进
-     495px 的列、高代周一 L63 的引擎行 603.1px 只余 1.6px，"差一点点"时浏览器仍会在断点前面
-     自己折一次（那一块就多一行）。给**断点前那个字**一份负字距 = 把这一行的可用宽度放宽 1em：
-     它后面已经没有别的字了，视觉上零影响（实测各行左缘完全不变），也不需要精确复刻 Typst 的
-     压缩规则。 */
-  .editor-host.write :global(.cm-write-engine-break) {
-    letter-spacing: -1em;
-  }
-
-  /* **这一行只在我们给的断点处折**（见 buildEngineBreakDecorations 的说明）：Typst 每行能装下的
-     字比 Chromium 多一个左右，不禁折的话浏览器会在断点前面先折，每满一行就多折一行。
-     代价是满行的行尾溢出正文列几个像素 —— 那是 Typst"标点悬挂"的观感，右侧 48px 纸张留白接住。 */
-  .editor-host.write :global(.cm-line.cm-write-engine-break-line) {
-    white-space: pre;
-  }
-
-  /* 列表符号/序号：替换出来的字符与正文同色、不与正文基线错位 */
-  .editor-host.write :global(.cm-markup-replacement) {
-    color: var(--fg-dim);
-  }
-  /* 列表标记用伪元素画（见 ListMarkerWidget 的说明）：标记是装饰，不进文本层 ——
-     inline-block 里的文本节点会多出一条与正文不同的基线，把一行的列表项数成两行。 */
-  .editor-host.write :global(.cm-markup-list-marker)::before {
-    content: attr(data-marker);
-  }
-
-  /* **揭示态的列表标记**（见 markup-decorations 的 listMarkerBoxStyle）：光标/选区触到标记时
-     源码 `- ` 原样露出（仍然可编辑，不是 replace），但套一个与 widget **同一个盒子模型**的定宽
-     行内盒 —— 宽度 = 引擎给的正文起点，于是正文左缘在"点击前后"完全一致；不套这一层时源码按自然
-     字宽画，圆点项正文左移 4.5px、序号项 9.4px（实测），点过的那一项会和同级其它项对不齐。
-     负字距补偿与 widget 同口径：那是给正文的（见 .cm-content 的 letter-spacing），标记不参与。 */
-  .editor-host.write :global(.cm-markup-list-indent) {
-    display: inline-block;
-    box-sizing: border-box;
-    width: var(--write-list-w, auto);
-    padding-left: var(--write-list-pad, 0px);
-    text-align: left;
-    white-space: pre;
-    letter-spacing: 0;
-  }
-
-  /* 行内代码与公式 widget 的字号跟随正文 */
-  .editor-host.write :global(.cm-math-widget),
-  .editor-host.write :global(.cm-math-block) {
-    font-size: 1em;
-  }
-
-  /* 行内公式 widget 的**前进宽度微调**：widget 宽 = 独立紧致盒宽（含侧边距/斜体修正），引擎在段落里
-     给它的行内 advance 略小（实测"公式前后字形间距 66.31pt vs 紧致盒宽 66.30pt"里含了两侧的间距）。
-     负 margin-right 只收紧后面的文本、不拉伸公式本身。PKU 实测：−0.5px 无变化、−1~−1.5px 让数分周二
-     行数不一致 6→5、最大累计 63→42px，而 ≤−2px 开始伤害上周高代；默认取 −1px，可用变量调。 */
-  .editor-host.write :global(.cm-math-widget) {
-    margin-right: var(--write-math-squeeze, -1px);
-  }
-
-  /* 长行内公式的**可断行片段**：每个片段是独立的 inline-block，片段之间的 <wbr> 给浏览器
-     一个断点，于是折行位置与 Typst 的"运算符处折行"一致（见 widgets.ts 的 MathWidget）。 */
-  .editor-host.write :global(.cm-math-widget.cm-math-split) {
-    display: inline;
-  }
-  .editor-host.write :global(.cm-math-seg) {
-    display: inline-block;
-  }
-
-  .editor-host :global(.cm-editor.cm-focused) {
-    outline: none;
-  }
-
-  /* 行号使用等宽 console 字体，保证与代码列对齐 */
-  .editor-host :global(.cm-gutters),
-  .editor-host :global(.cm-lineNumbers),
-  .editor-host :global(.cm-gutterElement) {
-    font-family: Consolas, "Courier New", monospace;
+  .editor-host :global(.cm-source-reveal) {
+    background: var(--accent-muted, #4488bb22);
   }
 </style>
