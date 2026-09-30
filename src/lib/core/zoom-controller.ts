@@ -26,7 +26,6 @@ import {
   createWheelAccumulator,
   resetWheelAccumulator,
   shouldRebaselineZoom,
-  wheelPendingNotice,
   zoomApplied,
   zoomFromWidths,
   zoomIn,
@@ -69,7 +68,7 @@ export interface ZoomController {
   onResize(): void;
   /**
    * Ctrl+滚轮：换算 + 累加余量。返回 true 表示够一档、已经请求改档（页面早就 preventDefault 了）；
-   * false 表示位移不足一档（状态栏已提示"攒到 N%"，档位不动）。
+   * false 表示位移不足一档，档位不动。
    */
   wheel(deltaY: number, deltaX: number, deltaMode: number): boolean;
   /** `Ctrl+Shift+=` / `-`、菜单 放大/缩小：±1 格（键盘调档没有半格，先丢掉滚轮余量） */
@@ -257,15 +256,7 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
         observed === null ? "读不到" : observed.toFixed(3)
       }，量了 ${measurements} 次；布局宽度 ${Math.round(baseline100)}→${Math.round(currentWidth)}）`,
     );
-    hooks.setStatus(
-      zoomUnobservedNotice(target, observed, {
-        measurements,
-        widths: { baseline: baseline100, current: currentWidth },
-        dpr: hooks.devicePixelRatio(),
-        dprFactor: observedDpr,
-        wheelEvents,
-      }),
-    );
+    hooks.setStatus(zoomUnobservedNotice(target, observed));
   }
 
   return {
@@ -289,12 +280,7 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
       // 是完全不同的两个成因，前者说明事件在到达页面之前就被吃掉了。
       wheelEvents += 1;
       const steps = accumulateWheelSteps(wheelAcc, deltaY, deltaX, deltaMode);
-      if (steps === 0) {
-        // 不足一档：不动档位，但把"攒了多少"说出来 —— 否则"位移太小"和"事件没到页面"
-        // 在用户眼里完全一样（都是滚了没反应），而那两件事的修法完全不同（见 zoom.ts）。
-        hooks.setStatus(wheelPendingNotice(wheelAcc));
-        return false;
-      }
+      if (steps === 0) return false;
       const level = hooks.getLevel();
       hooks.requestLevel(steps > 0 ? zoomIn(level, steps) : zoomOut(level, -steps));
       return true;

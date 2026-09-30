@@ -130,18 +130,6 @@ export function accumulateWheelSteps(
   return whole;
 }
 
-/**
- * 位移不足一档时的状态栏文案（见 `accumulateWheelSteps`）。
- *
- * 为什么值得写出来：不写的话，"位移太小、正在攒"与"事件压根没到页面"在用户眼里**一模一样**
- * （都是"滚了没反应、状态栏不动"）—— 而这两件事的修法完全不同。把攒了多少如实说出来，
- * 一张截图就能分清（正常滚轮走不到这里：一次 100px 就是一档，会直接换成"缩放 N%"）。
- */
-export function wheelPendingNotice(acc: WheelStepAccumulator): string {
-  const pct = Math.min(99, Math.round(Math.abs(acc.remainder) * 100));
-  return `滚轮这一格不足一档（攒到 ${pct}%），再滚一下就动`;
-}
-
 /** 放大 N 档（菜单项用） */
 export function zoomIn(current: number | null | undefined, times = 1): number {
   return clampZoom(clampZoom(current) + times * ZOOM_STEP);
@@ -206,70 +194,10 @@ export const ZOOM_VERIFY_WAITS_MS = [0, 250, 700] as const;
 /** 一次 setZoom 之后等一帧 + 这段余量再读布局宽度（引擎要重排完才量得准） */
 export const ZOOM_MEASURE_SETTLE_MS = 80;
 
-/**
- * 复核判定"引擎没接受"时的状态栏文案。
- *
- * **把实测数据一起写出来**（2026-09-14 加）：这个现象只在用户那台真机上出现，而我拿不到它的
- * 任何运行时数据（release 版没有 devtools、dbg 只写 console）——用户截图里的状态栏是我们唯一
- * 能读到的通道。所以文案里带上"量了几次 / 布局宽度变了没有 / dpr"，一张截图就能判断是
- * 「引擎把档位丢了」（宽度变过又回来）还是「引擎压根没动」（宽度一模一样，dpr 也不动）。
- */
-/** 「未生效」文案要带的实测数据（都是给"下一次截图"用的，见上方注解） */
-export interface ZoomRejectDetail {
-  /** 复核量了几次读数 */
-  measurements: number;
-  /** 100% 基准宽度与当时的布局宽度 */
-  widths: { baseline: number; current: number };
-  /** 当时的 devicePixelRatio */
-  dpr?: number;
-  /**
-   * 用 dpr 反推的引擎档位（第二条独立判据，只作交叉验证）。
-   * 宽度判据说 1.00、它说 1.50 → 是我们自己量歪了；两条都说 1.00 → 引擎真没动。
-   */
-  dprFactor?: number | null;
-  /**
-   * 本会话页面收到过多少次「带 Ctrl 的滚轮事件」（2026-09-16 加，纯诊断）。
-   * **0 次 = 事件压根没到页面**（在到达页面之前就被吃掉了：引擎自己那套缩放控件开着、
-   * 鼠标驱动或系统手势先接走）——那种情况怎么改 `setZoom` 都没用；**有次数 = 事件到了，
-   * 是 `setZoom` 没生效**。用户反复反馈「缩放调整失败」而我看不到他的机器，这一条让一张截图
-   * 就能分清这两类成因。交叉验证靠键盘通道（`Ctrl+Shift+=/-`，不经过任何手势）：
-   * 键盘能推、滚轮不能 ⇒ 问题在手势路径；两者都不能 ⇒ 问题在 setZoom 本身。
-   */
-  wheelEvents?: number;
-}
-
-export function zoomUnobservedNotice(
-  target: number,
-  observed: number | null,
-  detail0: ZoomRejectDetail,
-): string {
-  const detail = [`量了 ${detail0.measurements} 次`];
-  const base = Math.round(detail0.widths.baseline);
-  const now = Math.round(detail0.widths.current);
-  detail.push(base === now ? `布局宽度没变（${now}px）` : `布局宽度 ${base}→${now}px`);
-  const dpr = detail0.dpr;
-  if (typeof dpr === "number" && Number.isFinite(dpr) && dpr > 0) {
-    detail.push(`dpr ${dpr.toFixed(2)}`);
-  }
-  const dprFactor = detail0.dprFactor;
-  if (typeof dprFactor === "number" && Number.isFinite(dprFactor) && dprFactor > 0) {
-    detail.push(`dpr 判据给 ${zoomLabel(dprFactor)}`);
-  }
-  const wheelEvents = detail0.wheelEvents;
-  if (typeof wheelEvents === "number" && Number.isFinite(wheelEvents) && wheelEvents >= 0) {
-    // 0 次要明说"没收到"：那是另一个成因（事件被引擎吃掉），跟 setZoom 没生效不是一回事。
-    // 补一句"若只用过键盘/菜单则正常"——键盘通道（Ctrl+Shift+=/-）本来就不产生滚轮事件，
-    // 少了这句会把"用户按快捷键"读成"滚轮事件被吃掉"（一次真实的误判就在这句上）。
-    detail.push(
-      wheelEvents === 0
-        ? "本会话没收到 Ctrl+滚轮（只用过键盘/菜单时属正常）"
-        : `收到 Ctrl+滚轮 ${wheelEvents} 次`,
-    );
-  }
-  // 措辞是"没观察到"而不是"引擎限制了"：我们没法区分"引擎没接受"与"我们这两条判据读不出来"
-  // （用户那台机器就是后者），而且**这条提示不再改变任何状态**（用户要求缩放只由他改）。
-  const saw = observed === null || !Number.isFinite(observed) ? "读不到" : zoomLabel(observed);
-  return `已按你的操作设到 ${zoomLabel(target)}（引擎侧没观察到变化：量到 ${saw}；${detail.join("；")}）`;
+/** 复核没观察到缩放时，只给用户留可行动的简短状态；测量细节记在调试日志。 */
+export function zoomUnobservedNotice(target: number, observed: number | null): string {
+  const saw = observed === null || !Number.isFinite(observed) ? "未知" : zoomLabel(observed);
+  return `缩放可能未生效（目标 ${zoomLabel(target)}，当前 ${saw}）`;
 }
 
 // ---------------------------------------------------------------------------

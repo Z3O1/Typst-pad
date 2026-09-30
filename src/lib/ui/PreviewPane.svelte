@@ -135,20 +135,24 @@
       }
     }}
   >
-    {#if editable && sourceExpanded}<button
-        class="close-source"
-        onclick={(event) => {
-          event.stopPropagation();
-          onCloseSource?.();
-        }}>收起源码</button
-      >{/if}
-    {#if editable}<button
-        class="edit-source"
-        onclick={(event) => {
-          event.stopPropagation();
-          onEditSource?.();
-        }}>源码模式</button
-      >{/if}
+    {#if editable}
+      <div class="preview-actions">
+        {#if sourceExpanded}<button
+            class="close-source"
+            onclick={(event) => {
+              event.stopPropagation();
+              onCloseSource?.();
+            }}>收起源码</button
+          >{/if}
+        <button
+          class="edit-source"
+          onclick={(event) => {
+            event.stopPropagation();
+            onEditSource?.();
+          }}>源码模式</button
+        >
+      </div>
+    {/if}
     {#if error}
       <div class="preview-error" role="status">
         <div class="preview-error-title">
@@ -211,15 +215,26 @@
     pointer-events: none;
     transform-origin: top left;
   }
+  .preview-actions {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    align-self: stretch;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 8px;
+    pointer-events: none;
+  }
   .edit-source,
   .close-source {
-    align-self: flex-end;
     border: 1px solid var(--border);
     border-radius: 4px;
     padding: 4px 10px;
     background: var(--bg-paper);
     color: var(--fg);
     cursor: pointer;
+    pointer-events: auto;
   }
   .preview-notice {
     color: var(--fg-dim);
@@ -228,8 +243,8 @@
 
   .preview-paper {
     width: 100%;
-    /* 宽度默认铺满容器；applyPreviewScale 按容器宽度与页物理尺寸（pt）计算后
-       以内联样式覆盖为画布显示宽度（字号恒定等宽缩放），测量失败时回退本规则 */
+    /* applyPreviewScale 按容器宽度、页面 pt 尺寸和用户缩放计算内联宽度。
+       测量失败时回退为铺满容器。 */
     /* 居中用**自身的 auto 外边距**，不用容器上的 align-items: center：
        界面缩放放大后画布会比栏宽宽，此时 auto 外边距退化为 0（负剩余空间）→ 页面左对齐、
        横向滚动条能真正滚到左缘；若靠容器居中，溢出的左半部分会被顶到滚动区之外，

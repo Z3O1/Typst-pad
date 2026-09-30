@@ -320,11 +320,11 @@ describe("红线③：新复核一开始，旧复核立刻作废", () => {
 });
 
 describe("滚轮余量与键盘调档", () => {
-  it("40px 一格不足一档：不动档位，说明攒了多少", () => {
+  it("40px 一格不足一档：不动档位，不显示内部累计细节", () => {
     const h = harness();
     expect(h.c.wheel(-40, 0, 0)).toBe(false);
     expect(h.calls.levels).toEqual([]);
-    expect(h.calls.status[0]).toContain("攒到 40%");
+    expect(h.calls.status).toEqual([]);
   });
 
   it("再滚一格凑够一档：请求 +10%（滚轮向上 = 放大）", () => {

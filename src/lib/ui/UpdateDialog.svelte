@@ -36,9 +36,7 @@
              交给 update-notes.ts 渲染成受控子集的安全 HTML，别再退回 <pre> 显示原文 -->
         <div class="update-notes">{@html renderUpdateNotes(flow.notes)}</div>
       {/if}
-      <p class="modal-text update-hint">
-        下载并安装后应用会自动重启；安装包有签名校验，来源不对会被拒绝。
-      </p>
+      <p class="modal-text update-hint">安装后应用会自动重启。</p>
       <div class="modal-actions">
         <button class="modal-btn primary" onclick={onInstall}>下载并安装</button>
         <button class="modal-btn" onclick={onDismiss}>稍后</button>
@@ -54,10 +52,8 @@
       </div>
     {:else if flow.kind === "installing"}
       <h3 class="modal-title">更新已就绪</h3>
-      <p class="modal-text">
-        应用即将退出并安装 v{flow.version}，安装完成后会自动重新打开。
-      </p>
-      <p class="modal-text update-hint">有未保存的修改请先返回保存（安装期间窗口会关闭）。</p>
+      <p class="modal-text">正在安装 v{flow.version}，完成后将重新打开。</p>
+      <p class="modal-text update-hint">请先保存未保存的修改。</p>
       <div class="modal-actions">
         <!-- Windows 上安装器会自己把应用拉起来；留个关闭按钮是为了非 Windows
              （安装完不退出的平台）不会被一个没有按钮的弹窗卡住 -->

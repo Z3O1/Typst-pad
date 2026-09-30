@@ -40,8 +40,12 @@ async function hitAt(sourcePart, fixture = original) {
     (p) => p.offset >= offset && p.offset < offset + Buffer.byteLength(sourcePart),
   );
   if (!caret) throw new Error(`缺少命中探针：${sourcePart}`);
+  await c.evaluate(
+    `(() => {const p=${JSON.stringify(caret)},b=document.querySelector('.preview-body'),s=document.querySelectorAll('#preview-host>svg')[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal,br=b.getBoundingClientRect(),y=r.top+(p.yPt+p.heightPt/2)*r.height/v.height;b.scrollTop+=y-(br.top+br.height/2);return true})()`,
+  );
+  await sleep(50);
   const point = await c.evaluate(
-    `(() => {const p=${JSON.stringify(caret)};const s=document.querySelectorAll('#preview-host>svg')[p.page-1];s.scrollIntoView({block:'center'});const r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return {x:r.left+p.xPt*r.width/v.width+.5,y:r.top+(p.yPt+p.heightPt/2)*r.height/v.height}})()`,
+    `(() => {const p=${JSON.stringify(caret)},s=document.querySelectorAll('#preview-host>svg')[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return {x:r.left+p.xPt*r.width/v.width+.5,y:r.top+(p.yPt+p.heightPt/2)*r.height/v.height}})()`,
   );
   await c.click(point.x, point.y);
   return caret;
@@ -146,6 +150,9 @@ check(
   (await doc()) === original.doc && (await compiledPagesMatch(original)),
 );
 const beforeResize = await count();
+const widePageWidth = await c.evaluate(
+  "document.querySelector('#preview-host>svg').getBoundingClientRect().width",
+);
 await c.send("Emulation.setDeviceMetricsOverride", {
   width: 760,
   height: 640,
@@ -157,6 +164,10 @@ check(
   "窄窗口只缩放且不重新编译",
   (await compiledPagesMatch(original)) && (await count()) === beforeResize,
 );
+const narrowPageWidth = await c.evaluate(
+  "document.querySelector('#preview-host>svg').getBoundingClientRect().width",
+);
+check("窗口变窄后页面继续缩小", narrowPageWidth < widePageWidth * 0.8);
 check(
   "页面等比缩放且没有横向溢出",
   await c.evaluate(
@@ -169,6 +180,18 @@ await c.send("Emulation.setDeviceMetricsOverride", {
   deviceScaleFactor: 1,
   mobile: false,
 });
+await sleep(100);
+const pageAt100 = await c.evaluate(
+  "document.querySelector('#preview-host>svg').getBoundingClientRect().width",
+);
+await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
+await sleep(100);
+const pageAt110 = await c.evaluate(
+  "document.querySelector('#preview-host>svg').getBoundingClientRect().width",
+);
+check("用户缩放继续影响页面内容", pageAt110 > pageAt100 * 1.05);
+await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
+await sleep(100);
 const beforeFailure = await c.evaluate("document.querySelector('#preview-host').innerHTML");
 await replace("DIAG-ERROR-MARKER");
 check(
