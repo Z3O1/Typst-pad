@@ -55,14 +55,13 @@
 <div class="modal-overlay-static">
   <div class="modal settings-modal">
     <h3 class="modal-title">设置</h3>
-    <p class="modal-text">编译/导出时自动在代码前插入前缀代码（可配置页面、字体等全局项）。</p>
     <label class="settings-row">
       <input type="checkbox" bind:checked={restoreSession} />
-      <span>启动时恢复上次内容（未保存的修改不会丢）</span>
+      <span>启动时恢复上次内容</span>
     </label>
     <label class="settings-row">
       <input type="checkbox" bind:checked={autoCheckUpdates} />
-      <span>启动时自动检查更新（发现新版本会先询问，不会自己下载）</span>
+      <span>自动检查更新</span>
     </label>
     <label class="settings-row">
       <input type="checkbox" bind:checked={prefixEnabled} />
@@ -77,19 +76,14 @@
     <label class="settings-row settings-row-font">
       <span>正文字体（中文）</span>
       <select class="settings-select" bind:value={chineseFont}>
-        <option value={FONT_CHOICE_DEFAULT}>默认（思源宋体，缺字回退系统宋体）</option>
+        <option value={FONT_CHOICE_DEFAULT}>默认</option>
         {#each availableFonts as font (font)}
           <option value={font}>{font}</option>
         {/each}
       </select>
     </label>
-    <p class="settings-hint">
-      只认字体文件里的英文族名；用「额外字体目录」加入自己的字体后，这里会多出对应选项。
-    </p>
     <div class="settings-block">
-      <div class="settings-block-title">
-        额外字体目录（放进这里的字体立即可用，等同于 typst CLI 的 --font-path）
-      </div>
+      <div class="settings-block-title">额外字体目录</div>
       {#each fontDirs as dir (dir)}
         <div class="settings-dir">
           <span class="settings-dir-path" title={dir}>{dir}</span>
@@ -102,8 +96,6 @@
         >
         {#if fontsLoading}
           <span class="settings-hint">正在读取字体…</span>
-        {:else if availableFonts.length > 0}
-          <span class="settings-hint">可用字体族 {availableFonts.length} 个</span>
         {/if}
       </div>
     </div>

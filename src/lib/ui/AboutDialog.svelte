@@ -27,17 +27,8 @@
   <div class="modal about-modal">
     <h3 class="modal-title">Typst-pad</h3>
     <p class="modal-text">版本 {version || "…"}</p>
-    <p class="modal-text">
-      仿 Typora 的 Typst 桌面编辑器：<strong>写作模式</strong>（默认）整页纸张，公式与标记就地排版，
-      光标 / 选区进入即展开源码；<strong>源代码模式</strong>（Ctrl+E）双栏对照，源码 + 整页预览。
-    </p>
-    <p class="modal-text">
-      排版由<strong>内置的 typst 引擎</strong>在本机完成：不联网，文档不出本机。
-    </p>
-    <p class="modal-text about-note">
-      MIT License © 2026 Z3O1 · 内置字体 Noto Serif CJK / Libertinus / New Computer Modern / DejaVu
-      Sans Mono 遵循各自的开源许可
-    </p>
+    <p class="modal-text">Typst 本地桌面编辑器</p>
+    <p class="modal-text about-note">MIT License © 2026 Z3O1</p>
     <div class="modal-actions">
       <span
         class="modal-close"

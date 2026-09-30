@@ -356,20 +356,20 @@
     const input = currentInput();
     const seq = ++interactionSeq;
     if (input !== renderedInput || documentGeometryId === 0) {
-      statusText = "等待当前文档编译完成后定位；可从源码模式继续编辑";
+      statusText = previewError ? "请先修正编译错误" : "正在编译";
       return;
     }
     const hit = await hitTestDocument(documentGeometryId, req.page, req.xPt, req.yPt);
     if (seq !== interactionSeq || input !== currentInput() || input !== renderedInput) return;
     if (!hit) {
-      statusText = "此处没有可定位的主文档源码";
+      statusText = "无法定位此处源码";
       return;
     }
     const prefix = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
     const renderedPos = byteOffsetsToPositions(renderedProjection.source, [hit.offset])[0];
     const sourcePos = renderedProjection.renderedToSource(renderedPos);
     if (sourcePos < prefix.length) {
-      statusText = "此处来自编译前缀，请在设置中编辑";
+      statusText = "请在设置中编辑前缀代码";
       return;
     }
     const pos = Math.min(doc.length, sourcePos - prefix.length);
@@ -623,7 +623,7 @@
   function setUiZoom(next: number) {
     const target = clampZoom(next);
     if (target === uiZoom) {
-      statusText = `缩放已是 ${zoomLabel(target)}（到边界了）`;
+      statusText = `缩放已是 ${zoomLabel(target)}`;
       return;
     }
     uiZoom = target; // $effect 把它交给 webview（见下方 zoom.apply 的 effect）
@@ -672,8 +672,9 @@
     zoom.wheel(e.deltaY, e.deltaX, e.deltaMode);
   }
 
-  // 缩放变化（含启动恢复后的首次赋值）→ 交给 webview；失败不影响其它逻辑
+  // 缩放变化同时更新预览画布与 webview；ResizeObserver 会在引擎完成缩放后再校正一次。
   $effect(() => {
+    applyPreviewScale();
     void zoom.apply(uiZoom);
   });
 

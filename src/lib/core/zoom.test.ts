@@ -10,7 +10,6 @@ import {
   accumulateWheelSteps,
   createWheelAccumulator,
   resetWheelAccumulator,
-  wheelPendingNotice,
   shouldRebaselineZoom,
   wheelZoomSteps,
   zoomIn,
@@ -137,14 +136,6 @@ describe("accumulateWheelSteps（不足一档的位移要攒起来）", () => {
     expect(acc.remainder).toBe(0);
   });
 
-  it("位移不足一档时把「攒了多少」说出来（否则与「事件没到页面」没法区分）", () => {
-    const acc = createWheelAccumulator();
-    accumulateWheelSteps(acc, -40);
-    expect(wheelPendingNotice(acc)).toContain("攒到 40%");
-    accumulateWheelSteps(acc, -40); // 走掉一档后余量翻成 -0.2
-    expect(wheelPendingNotice(acc)).toContain("攒到 20%");
-  });
-
   it("**回归**：在 250% 上限处，40px 的滚轮两格就能缩回 240%（用户报的「到上限就不行」）", () => {
     const acc = createWheelAccumulator();
     let z: number = ZOOM_MAX;
@@ -217,89 +208,10 @@ describe("zoomApplied（引擎接受的档位是不是请求值）", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// 「未生效」文案：必须能被用户截图读出成因（量了几次 / 宽度变没变 / dpr）
-// ---------------------------------------------------------------------------
-describe("zoomUnobservedNotice（状态栏文案：只说明「没观察到」，不改任何状态）", () => {
-  it("宽度没变 → 明说没变（=引擎压根没动），带上次数与 dpr", () => {
-    const s = zoomUnobservedNotice(1.5, 1, {
-      measurements: 4,
-      widths: { baseline: 1379, current: 1379.4 },
-      dpr: 1.5,
-    });
-    expect(s).toContain("已按你的操作设到 150%");
-    expect(s).toContain("引擎侧没观察到变化");
-    expect(s).toContain("量了 4 次");
-    expect(s).toContain("布局宽度没变（1379px）");
-    expect(s).toContain("dpr 1.50");
-  });
-
-  it("宽度变了 → 写出前后值（=引擎动过又回去）", () => {
-    const s = zoomUnobservedNotice(1.5, 1, {
-      measurements: 3,
-      widths: { baseline: 1379, current: 919 },
-      dpr: 1.5,
-    });
-    expect(s).toContain("布局宽度 1379→919px");
-  });
-
-  it("带上 dpr 判据的交叉验证（宽度说 1.00、dpr 说 1.50 → 我们自己量歪了）", () => {
-    const s = zoomUnobservedNotice(1.5, 1, {
-      measurements: 4,
-      widths: { baseline: 1379, current: 1379 },
-      dpr: 1.5,
-      dprFactor: 1.5,
-    });
-    expect(s).toContain("布局宽度没变（1379px）");
-    expect(s).toContain("dpr 判据给 150%");
-  });
-
-  it("dpr 判据也读不到时就不写那一段", () => {
-    const s = zoomUnobservedNotice(1.5, 1, {
-      measurements: 2,
-      widths: { baseline: 1379, current: 1379 },
-      dprFactor: Number.NaN,
-    });
-    expect(s).not.toContain("dpr 判据");
-  });
-
-  it("dpr 读不到时不写这一段（别写 NaN）", () => {
-    const s = zoomUnobservedNotice(2.2, 2.1, {
-      measurements: 1,
-      widths: { baseline: 1200, current: 545 },
-      dpr: Number.NaN,
-    });
-    expect(s).toContain("已按你的操作设到 220%");
-    expect(s).not.toContain("dpr");
-  });
-
-  it("滚轮事件次数为 0 → 明说「本会话没收到 Ctrl+滚轮」（事件没到页面，另一个成因）", () => {
-    const s = zoomUnobservedNotice(1.5, 1, {
-      measurements: 4,
-      widths: { baseline: 1379, current: 1379 },
-      wheelEvents: 0,
-    });
-    expect(s).toContain("本会话没收到 Ctrl+滚轮");
-    // 只用键盘/菜单时本来就没有滚轮事件，别让这句话把人误导向"事件被吃掉"
-    expect(s).toContain("只用过键盘/菜单时属正常");
-  });
-
-  it("滚轮事件有次数 → 写出次数（事件到了，是 setZoom 没生效）", () => {
-    const s = zoomUnobservedNotice(1.5, 1, {
-      measurements: 4,
-      widths: { baseline: 1379, current: 1379 },
-      wheelEvents: 7,
-    });
-    expect(s).toContain("收到 Ctrl+滚轮 7 次");
-  });
-
-  it("没给滚轮次数（旧调用方）→ 那段不写，文案其余部分不变", () => {
-    const s = zoomUnobservedNotice(1.5, 1, {
-      measurements: 4,
-      widths: { baseline: 1379, current: 1379 },
-    });
-    expect(s).not.toContain("滚轮");
-    expect(s).toContain("量了 4 次");
+describe("zoomUnobservedNotice", () => {
+  it("只显示目标和当前档位", () => {
+    expect(zoomUnobservedNotice(1.5, 1)).toBe("缩放可能未生效（目标 150%，当前 100%）");
+    expect(zoomUnobservedNotice(1.5, null)).toBe("缩放可能未生效（目标 150%，当前 未知）");
   });
 });
 
