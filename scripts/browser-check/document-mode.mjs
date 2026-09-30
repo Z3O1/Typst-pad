@@ -209,7 +209,10 @@ await hitAt("x^2");
 await sleep(100);
 check(
   "旧产物禁用源码命中",
-  (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === hitsBefore,
+  (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === hitsBefore &&
+    (await c.evaluate(
+      "document.querySelector('.status-text').textContent.includes('请先修正编译错误')",
+    )),
 );
 await replace(original.doc);
 check(

@@ -356,7 +356,7 @@
     const input = currentInput();
     const seq = ++interactionSeq;
     if (input !== renderedInput || documentGeometryId === 0) {
-      statusText = "正在编译";
+      statusText = previewError ? "请先修正编译错误" : "正在编译";
       return;
     }
     const hit = await hitTestDocument(documentGeometryId, req.page, req.xPt, req.yPt);
