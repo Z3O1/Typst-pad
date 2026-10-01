@@ -1,22 +1,23 @@
 // 整页模式复用源码编辑器和文件流程：取消不写盘、显式保存、打开同步镜像与会话恢复。
 import { connect, DEV_URL } from "./cdp.mjs";
-import { boot, createChecker, finish, sleep, flushStateSeed } from "./harness.mjs";
+import {
+  boot,
+  createChecker,
+  finish,
+  sleep,
+  flushStateSeed,
+  compileSettled,
+  COMPILE_IDLE,
+} from "./harness.mjs";
 const { check, state } = createChecker();
 const c = await connect();
 await boot(c, DEV_URL);
-async function button(selector) {
-  const r = await c.evaluate(
-    `(() => {const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`,
-  );
-  await c.click(r.x, r.y);
-}
 const doc = () => c.evaluate("window.__typstPadView.state.doc.toString()");
 const text = "保存正文含中文🙂\n\n$x + y$";
-await button(".edit-source");
+// 从文档模式进源码模式：右上角「源码模式」按钮已随"文档模式只有文档"删除，只剩键盘 Ctrl+E
+await c.key("e", { keyCode: 69, modifiers: 2 });
 await c.type(text);
-await c.waitFor(
-  `window.__browserDevLastCompile?.src === ${JSON.stringify(text)} && !document.querySelector('.preview-notice')`,
-);
+await c.waitFor(compileSettled(text));
 check("输入和整页编译不隐式写盘", await c.evaluate("!window.__browserDevWrites?.length"));
 await c.key("s", { keyCode: 83, modifiers: 2 });
 await sleep(100);
@@ -30,7 +31,7 @@ check(
 await c.evaluate("window.__browserDevSavePath='/fake/saved.typ'");
 await c.key("s", { keyCode: 83, modifiers: 2 });
 await c.waitFor(
-  "window.__browserDevLastCompile?.documentPath === '/fake/saved.typ' && !document.querySelector('.preview-notice')",
+  `window.__browserDevLastCompile?.documentPath === '/fake/saved.typ' && ${COMPILE_IDLE}`,
 );
 check(
   "保存写入当前源码并更新排版路径",
@@ -40,9 +41,7 @@ check(
 );
 check(
   "保存后排版输入回到当前状态",
-  await c.evaluate(
-    "!document.querySelector('.preview-notice') && !window.__browserDevLastTitle.includes(' •')",
-  ),
+  await c.evaluate(`${COMPILE_IDLE} && !window.__browserDevLastTitle.includes(' •')`),
 );
 const savedCount = await c.evaluate("window.__browserDevCallCounts.compile_doc");
 await c.key("s", { keyCode: 83, modifiers: 2 });
@@ -69,7 +68,7 @@ check("取消新建保留源码编辑镜像", (await doc()) === "修改后仍保
 await c.evaluate("window.__browserDevConfirm=true;window.__browserDevOpenPath='/fake/saved.typ'");
 await c.key("o", { keyCode: 79, modifiers: 2 });
 await c.waitFor(
-  `window.__typstPadView.state.doc.toString() === ${JSON.stringify(text)} && !document.querySelector('.preview-notice')`,
+  `window.__typstPadView.state.doc.toString() === ${JSON.stringify(text)} && ${COMPILE_IDLE}`,
 );
 await c.key("e", { keyCode: 69, modifiers: 2 });
 check(
@@ -89,9 +88,7 @@ await flushStateSeed(c, {
   autoCheckUpdates: false,
 });
 await c.goto(DEV_URL);
-await c.waitFor(
-  `window.__browserDevLastCompile?.src === ${JSON.stringify(text)} && !document.querySelector('.preview-notice')`,
-);
+await c.waitFor(compileSettled(text));
 check(
   "恢复会话用完整源码编译并保持未保存状态",
   (await doc()) === text &&

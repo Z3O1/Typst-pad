@@ -1659,14 +1659,11 @@
         bind:this={previewPaneRef}
         hidden={viewMode === "source" && !showPreview}
         status={previewStatus}
-        error={previewError}
         editable={viewMode === "write"}
         caret={viewMode === "write" ? documentCaret : null}
         stale={previewStatus === "ready" && renderedInput !== currentInput()}
         onPageClick={handlePageClick}
         onOpenLink={handleOpenLink}
-        sourceExpanded={sourceRange !== null}
-        onCloseSource={closeSource}
         onCaretPosition={(position) => {
           if (position) inputPosition = position;
         }}

@@ -6,7 +6,6 @@
   let {
     hidden,
     status,
-    error,
     editable = false,
     stale = false,
     caret = null,
@@ -14,12 +13,9 @@
     onOpenLink,
     onEditSource,
     onCaretPosition,
-    sourceExpanded = false,
-    onCloseSource,
   }: {
     hidden: boolean;
     status: "idle" | "ready" | "error";
-    error: string;
     editable?: boolean;
     stale?: boolean;
     caret?: DocumentCaret | null;
@@ -27,8 +23,6 @@
     onOpenLink?: (href: string) => void;
     onEditSource?: () => void;
     onCaretPosition?: (position: { left: number; top: number; height: number } | null) => void;
-    sourceExpanded?: boolean;
-    onCloseSource?: () => void;
   } = $props();
   let paperEl = $state<HTMLElement | undefined>();
   let bodyEl = $state<HTMLElement | undefined>();
@@ -135,33 +129,8 @@
       }
     }}
   >
-    {#if editable}
-      <div class="preview-actions">
-        {#if sourceExpanded}<button
-            class="close-source"
-            onclick={(event) => {
-              event.stopPropagation();
-              onCloseSource?.();
-            }}>收起源码</button
-          >{/if}
-        <button
-          class="edit-source"
-          onclick={(event) => {
-            event.stopPropagation();
-            onEditSource?.();
-          }}>源码模式</button
-        >
-      </div>
-    {/if}
-    {#if error}
-      <div class="preview-error" role="status">
-        <div class="preview-error-title">
-          编译错误{status === "ready" ? " · 显示上次成功结果" : ""}
-        </div>
-        <pre class="preview-error-text">{error}</pre>
-      </div>
-    {:else if status === "idle"}<div class="preview-placeholder">等待编译…</div>{/if}
-    {#if stale && !error}<div class="preview-notice" role="status">正在更新排版…</div>{/if}
+    <!-- 文档模式只有文档本体：预览区不画占位、更新提示、编译错误框和右上角按钮；
+         失败与进度只在状态栏与错误徽标里体现（见 docs/development/writing-rendering.md）。 -->
     <div class="preview-canvas" bind:this={canvasEl}>
       <div
         id="preview-host"
@@ -176,7 +145,8 @@
 
 <style>
   /* 页面那条 `* { box-sizing: border-box }` 因 Svelte 作用域命中不了子组件（见 07 分册），
-     搬出来的组件要自己声明 —— `.preview-error` 是 `width:100%` + 内边距 + 边框，缺了它会横向溢出。 */
+     搬出来的组件要自己声明 —— `.preview-pane` / `.preview-paper` 都是 `width:100%`，缺了这条
+     内边距与边框会叠到宽度之外（横向溢出），计算样式守卫也按 border-box 断言。 */
   * {
     box-sizing: border-box;
   }
@@ -188,8 +158,7 @@
   .preview-body {
     display: flex;
     flex-direction: column;
-    /* 交叉轴（水平）居中只作用于"装得下"的元素（错误框/占位符）；
-       画布自己用 margin-inline: auto，溢出时退化成左对齐（见 .preview-paper） */
+    /* 画布自己用 margin-inline: auto 居中，溢出时退化成左对齐（见 .preview-paper） */
     align-items: center;
     background: var(--bg-pane);
     overflow: auto;
@@ -215,32 +184,6 @@
     pointer-events: none;
     transform-origin: top left;
   }
-  .preview-actions {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    align-self: stretch;
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 8px;
-    pointer-events: none;
-  }
-  .edit-source,
-  .close-source {
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 4px 10px;
-    background: var(--bg-paper);
-    color: var(--fg);
-    cursor: pointer;
-    pointer-events: auto;
-  }
-  .preview-notice {
-    color: var(--fg-dim);
-    font-size: 12px;
-  }
-
   .preview-paper {
     width: 100%;
     /* applyPreviewScale 按容器宽度、页面 pt 尺寸和用户缩放计算内联宽度。
@@ -269,34 +212,5 @@
   .preview-paper > :global(.page-separator) {
     height: 1px;
     background: var(--border);
-  }
-
-  .preview-placeholder {
-    color: var(--fg-dim);
-    font-size: 13px;
-    padding: 40px 0;
-  }
-
-  .preview-error {
-    width: 100%;
-    max-width: 820px;
-    background: #3c1f1f;
-    border: 1px solid #7a3a3a;
-    border-radius: 6px;
-    padding: 12px 16px;
-  }
-
-  .preview-error-title {
-    color: #ff8a8a;
-    font-weight: 600;
-    margin-bottom: 6px;
-  }
-
-  .preview-error-text {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: #ffc9c9;
-    font-size: 12px;
   }
 </style>

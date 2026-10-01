@@ -11,10 +11,9 @@
 //
 // 前置与运行：`npm run verify:browser`（或手动起 dev server + CDP 后 `node scripts/browser-check/computed-style.mjs`）。
 //
-// 无法在此覆盖的两处（诚实记录，别当成"已覆盖"）：`.preview-error` 与 `.error-popover`
-// 需要"编译失败"才会出现，而 `?browserdev=1` 的假编译没有开关能造出编译失败
-// （`.preview-error` 只在导出 PDF 失败时可达）。它们在 PR #62 里同样受影响，改动这两处时
-// 要按 `docs/development/testing.md` 的口径手工量。
+// 无法在此覆盖的一处（诚实记录，别当成"已覆盖"）：`.error-popover`（错误/警告徽标浮层）
+// 只在点开徽标后出现，本套件不点它；改动它时按 `docs/development/testing.md` 的口径手工量。
+// （原先这里还列了 `.preview-error` —— 预览区的编译错误框已随"文档模式只有文档"删除，不存在了。）
 
 import { connect, DEV_URL } from "./cdp.mjs";
 import { boot, createChecker, finish, sleep } from "./harness.mjs";

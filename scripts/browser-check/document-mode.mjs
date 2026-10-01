@@ -1,6 +1,15 @@
 // 正常态与原地展开态均消费真实 Typst 整页产物；输入与保存仍使用原文档。
 import { connect, DEV_URL } from "./cdp.mjs";
-import { boot, loadFixtures, createChecker, finish, sleep, shotPath } from "./harness.mjs";
+import {
+  boot,
+  loadFixtures,
+  createChecker,
+  finish,
+  sleep,
+  shotPath,
+  compileSettled,
+  COMPILE_IDLE,
+} from "./harness.mjs";
 const fixtures = loadFixtures("page-fixtures.json", { hint: "先跑 npm run fixtures:pages" });
 const [original, edited, mathExpanded, mathEdited, tableExpanded, imageExpanded] = fixtures;
 const { check, state } = createChecker();
@@ -15,17 +24,7 @@ await c.send("Emulation.setDeviceMetricsOverride", {
 const doc = () => c.evaluate("window.__typstPadView.state.doc.toString()");
 const count = () => c.evaluate("window.__browserDevCallCounts?.compile_doc ?? 0");
 const inDocumentMode = () => c.evaluate("!!document.querySelector('.document-pane')");
-const settled = async (fixture) =>
-  c.waitFor(
-    `window.__browserDevLastCompile?.src === ${JSON.stringify(fixture.doc)} && !document.querySelector('.preview-notice')`,
-    { timeout: 8000 },
-  );
-async function button(selector) {
-  const r = await c.evaluate(
-    `(() => {const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`,
-  );
-  await c.click(r.x, r.y);
-}
+const settled = async (fixture) => c.waitFor(compileSettled(fixture.doc), { timeout: 8000 });
 async function replace(source) {
   if (await inDocumentMode()) await c.key("e", { keyCode: 69, modifiers: 2 });
   await c.selectAll();
@@ -129,12 +128,12 @@ await replace(original.doc);
 await hitAt("甲");
 await settled(tableExpanded);
 check("表格输出原地展开完整脚本", await compiledPagesMatch(tableExpanded));
-await button(".close-source");
+await c.key("Escape", { keyCode: 27 }); // 收起源码：只留 Esc，右上角按钮已随"文档模式只有文档"删除
 await settled(original);
 await hitAt("#image(");
 await settled(imageExpanded);
 check("图片调用起点展开完整脚本", await compiledPagesMatch(imageExpanded));
-await button(".close-source");
+await c.key("Escape", { keyCode: 27 });
 await settled(original);
 await c.evaluate("window.__savedView=window.__typstPadView;true");
 await c.key("e", { keyCode: 69, modifiers: 2 });
@@ -199,9 +198,11 @@ check(
   (await c.evaluate("document.querySelector('#preview-host').innerHTML")) === beforeFailure,
 );
 check(
-  "失败明确标记旧产物",
+  "失败只在状态栏报错（预览区不再画错误框）",
   await c.evaluate(
-    "document.querySelector('.preview-error').textContent.includes('显示上次成功结果')",
+    `document.querySelector('.status-text').textContent.includes('编译错误') &&
+     document.querySelectorAll('.error-count')[0].textContent !== '0' &&
+     !document.querySelector('.preview-error, .preview-notice, .preview-placeholder')`,
   ),
 );
 const hitsBefore = await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0");
@@ -216,9 +217,9 @@ check(
 );
 await replace(original.doc);
 check(
-  "修复后恢复当前产物",
+  "修复后错误清零且恢复当前产物",
   (await compiledPagesMatch(original)) &&
-    (await c.evaluate("!document.querySelector('.preview-error')")),
+    (await c.evaluate("document.querySelectorAll('.error-count')[0].textContent === '0'")),
 );
 const imeBefore = await count();
 await c.evaluate(
@@ -241,10 +242,14 @@ await c.evaluate(
   "window.__typstPadView.dispatch({changes:{from:0,insert:'新'},selection:{anchor:1}})",
 );
 await sleep(500);
+// 旧的判据是 `!document.querySelector('.close-source')`（右上角按钮不存在）—— 按钮删除后
+// 它会**永真**，等于这道门禁失效。改为等调度器排空后查实际编译输入：
+// 迟到命中若错误地展开旧源码，会立刻发起一次带 raw 围栏的整页编译。
+await c.waitFor(COMPILE_IDLE, { timeout: 8000 });
 check(
   "迟到命中不能展开旧源码",
   await c.evaluate(
-    "window.__typstPadView.state.selection.main.head===1 && !document.querySelector('.close-source')",
+    "window.__typstPadView.state.selection.main.head===1 && !window.__browserDevLastCompile.src.includes('`')",
   ),
 );
 await replace(original.doc);

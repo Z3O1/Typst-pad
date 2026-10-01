@@ -5,6 +5,26 @@ import { DEV_URL } from "./cdp.mjs";
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * **编译稳定判据**（`c.waitFor` 的条件片段）。
+ *
+ * 以前这里等的是 `!document.querySelector('.preview-notice')`（"正在更新排版…"消失），
+ * 但 2026-09-30 起文档模式的预览区只画文档本体，占位/更新提示/错误框/右上角按钮全部删除
+ * （见 docs/development/writing-rendering.md），DOM 上再也没有"还没渲染完"的痕迹。
+ * 替代判据直接读整页编译调度器（`src/lib/dev/write-test-hook.ts` 的只读钩子）：
+ * 没有在途、没有待办，等于"最后一次请求已经跑完并把结果落到了页面上"（在途标志在
+ * `pump` 的 finally 里复位，复位时结果已经应用）。
+ *
+ * 比原来的 DOM 判据更靠得住：旧的"提示消失"在编译失败时也为真（失败不更新产物但会
+ * 撤掉提示），所以那时它并不能说明"产物对得上"—— 现在两者都要求。
+ */
+export const COMPILE_IDLE =
+  "(() => {const s=window.__typstPadScheduleStats?.();return !!s && !s.inFlight && !s.pending})()";
+
+/** `waitFor` 用的完整条件：最后一次整页编译入参就是这个文档，且调度器已空 */
+export const compileSettled = (src) =>
+  `window.__browserDevLastCompile?.src === ${JSON.stringify(src)} && ${COMPILE_IDLE}`;
+
+/**
  * 截图路径：写到仓库内（`.browser-check/`，见 `.gitignore`）。
  * 沙箱只允许写工作区，而 Chrome 需要 Windows 路径 —— 故用 CDP 取 base64 后由 Node 落盘。
  */
