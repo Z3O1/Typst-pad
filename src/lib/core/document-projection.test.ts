@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { projectDocument, sourceDiagnostics } from "./document-projection";
+import { projectDocument, projectDocumentRanges, sourceDiagnostics } from "./document-projection";
 
 describe("Typst 原地源码展开", () => {
   it("展开完整表达式；中英文、emoji 与后文的位置可往返映射", () => {
@@ -11,6 +11,20 @@ describe("Typst 原地源码展开", () => {
     for (let pos = 0; pos <= doc.length; pos++)
       expect(projection.renderedToSource(projection.sourceToRendered(pos))).toBe(pos);
     expect(projectDocument(doc, null).source).toBe(doc);
+  });
+  it("相邻错误合并围栏，多区间后的诊断和光标仍映射回原文", () => {
+    const doc = "#a()#b()\n中文🙂 #missing()";
+    const projection = projectDocumentRanges(doc, [
+      { from: 0, to: 4, preserveDeclaration: false },
+      { from: 4, to: 8, preserveDeclaration: false },
+    ]);
+    expect(projection.source).toBe("` #a()#b() `\n中文🙂 #missing()");
+    const [error] = sourceDiagnostics(projection, [
+      { message: "error", severity: "error" as const, line: 2, column: 7 },
+    ]);
+    expect(error.column).toBe(8);
+    for (let pos = 0; pos <= doc.length; pos++)
+      expect(projection.renderedToSource(projection.sourceToRendered(pos))).toBe(pos);
   });
   it("多行及嵌套反引号选用不会提前闭合的围栏", () => {
     const doc = "#block[\n```typ\n#let x = 1\n```\n]";

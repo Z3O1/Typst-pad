@@ -1,9 +1,13 @@
 // 整页交互只映射坐标与源码范围，不参与 Typst 排版。
 import { parser } from "codemirror-lang-typst/lezer";
 
+// 诊断起止点和光标移动复用同一快照；只保留一份树，编辑或换文件自动替换。
+let parsed: { doc: string; tree: ReturnType<typeof parser.parse> } | null = null;
+
 export function sourceRevealRange(
   doc: string,
   pos: number,
+  outermost = false,
 ): {
   from: number;
   to: number;
@@ -12,18 +16,27 @@ export function sourceRevealRange(
   const at = Math.max(0, Math.min(pos, doc.length));
   // 复用源码编辑器的无 wasm 语法树，内容块里的文字也能展开完整的外层调用。
   try {
-    const tree = parser.parse(doc);
+    if (!parsed || parsed.doc !== doc) parsed = { doc, tree: parser.parse(doc) };
+    const tree = parsed.tree;
+    let candidate: ReturnType<typeof sourceRevealRange> | null = null;
     for (const side of [-1, 1] as const) {
       let node = tree.resolveInner(at, side);
       while (node.parent) {
-        if (node.name === "Equation") return { from: node.from, to: node.to, kind: "math" };
+        let range: ReturnType<typeof sourceRevealRange> | null = null;
+        if (node.name === "Equation") range = { from: node.from, to: node.to, kind: "math" };
         if (node.name === "Hash" && node.nextSibling)
-          return { from: node.from, to: node.nextSibling.to, kind: "code" };
+          range = { from: node.from, to: node.nextSibling.to, kind: "code" };
         if (node.prevSibling?.name === "Hash")
-          return { from: node.prevSibling.from, to: node.to, kind: "code" };
+          range = { from: node.prevSibling.from, to: node.to, kind: "code" };
+        if (range) {
+          if (!outermost) return range;
+          if (!candidate || (range.from <= candidate.from && range.to >= candidate.to))
+            candidate = range;
+        }
         node = node.parent;
       }
     }
+    if (candidate) return candidate;
   } catch {
     /* 未完成的语法仍可从当前源码行编辑。 */
   }
