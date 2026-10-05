@@ -232,6 +232,12 @@ interface PageFixture {
   doc: string;
   pages: string[];
   carets: import("../core/typst-engine").DocumentCaret[];
+  whitespaceHits?: {
+    page: number;
+    xPt: number;
+    yPt: number;
+    caret: import("../core/typst-engine").DocumentCaret | null;
+  }[];
 }
 let pageSnapshot: { id: number; fixture: PageFixture } | null = null;
 let pageGeometrySeq = 0;
@@ -328,6 +334,14 @@ async function handleCommand(
     case "document_hit_test": {
       notify(command);
       if (!pageSnapshot || a.geometryId !== pageSnapshot.id) return null;
+      // 空白点击消费 Rust 导出的真实命中结果，不用最近探针模拟行尾偏移。
+      const whitespaceHit = pageSnapshot.fixture.whitespaceHits?.find(
+        (p) =>
+          p.page === a.page &&
+          Math.abs(p.xPt - Number(a.xPt)) < 0.25 &&
+          Math.abs(p.yPt - Number(a.yPt)) < 0.25,
+      );
+      if (whitespaceHit) return whitespaceHit.caret;
       const points = pageSnapshot.fixture.carets.filter((p) => p.page === a.page);
       return (
         points.sort(

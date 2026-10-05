@@ -32,6 +32,32 @@ export function sourceRevealRange(
   return { from, to: end < 0 ? doc.length : end, kind: "text" };
 }
 
+// 纸张外侧和页间空白也能选中最近页；先比较纵向距离，再比较横向距离。
+// 保留页外坐标，让后端按真实排版定位到行首/尾，而不是猜测源码偏移。
+export function nearestPageCoordinates(
+  point: { x: number; y: number },
+  pages: {
+    rect: { left: number; top: number; width: number; height: number };
+    box: { x: number; y: number; width: number; height: number };
+  }[],
+): { page: number; xPt: number; yPt: number } | null {
+  let best: { page: number; xPt: number; yPt: number } | null = null;
+  let bestDy = Infinity;
+  let bestDx = Infinity;
+  pages.forEach(({ rect, box }, index) => {
+    const coords = pageCoordinates(point, rect, box);
+    if (!coords) return;
+    const dy = Math.max(rect.top - point.y, point.y - rect.top - rect.height, 0);
+    const dx = Math.max(rect.left - point.x, point.x - rect.left - rect.width, 0);
+    if (dy < bestDy || (dy === bestDy && dx < bestDx)) {
+      best = { page: index + 1, ...coords };
+      bestDy = dy;
+      bestDx = dx;
+    }
+  });
+  return best;
+}
+
 export function pageCoordinates(
   point: { x: number; y: number },
   rect: { left: number; top: number; width: number; height: number },

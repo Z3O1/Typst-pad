@@ -76,6 +76,50 @@ check(
     "!(window.__browserDevCallCounts.compile_math || window.__browserDevCallCounts.compile_blocks)",
   ),
 );
+async function whitespacePoint(probe) {
+  await c.evaluate(
+    `(() => {const p=${JSON.stringify(probe)},b=document.querySelector('.preview-body'),s=document.querySelectorAll('#preview-host>svg')[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal,br=b.getBoundingClientRect();b.scrollTop+=r.top+(p.yPt-v.y)*r.height/v.height-(br.top+br.height/2);return true})()`,
+  );
+  await sleep(50);
+  return c.evaluate(
+    `(() => {const p=${JSON.stringify(probe)},s=document.querySelectorAll('#preview-host>svg')[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return {x:r.left+(p.xPt-v.x)*r.width/v.width,y:r.top+(p.yPt-v.y)*r.height/v.height}})()`,
+  );
+}
+const whitespaceBefore = await count();
+for (const [index, label] of [
+  [0, "纸张外侧空白"],
+  [1, "页内上方空白"],
+  [5, "第二页下方空白"],
+]) {
+  const probe = original.whitespaceHits[index];
+  if (!probe?.caret) throw new Error(`缺少真实空白命中探针：${label}`);
+  const point = await whitespacePoint(probe);
+  if (index === 0)
+    await c.evaluate(
+      `window.__whitespaceTargetOutsideSvg=!document.elementFromPoint(${point.x},${point.y})?.closest('svg');true`,
+    );
+  await c.click(point.x, point.y);
+  await c.waitFor(
+    `new TextEncoder().encode(window.__typstPadView.state.doc.sliceString(0,window.__typstPadView.state.selection.main.head)).length===${probe.caret.offset} && !!document.querySelector('.document-caret')`,
+  );
+  check(
+    `${label}按原生几何定位光标且不修改源码`,
+    (await doc()) === original.doc &&
+      (index !== 0 || (await c.evaluate("window.__whitespaceTargetOutsideSvg"))),
+  );
+}
+check(
+  "空白点击不重新编译或写盘",
+  (await count()) === whitespaceBefore && (await c.evaluate("!window.__browserDevWrites?.length")),
+);
+const dragPoint = await whitespacePoint(original.whitespaceHits[0]);
+const hitsBeforeDrag = await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0");
+await c.drag(dragPoint.x, dragPoint.y, dragPoint.x, dragPoint.y + 20);
+await sleep(100);
+check(
+  "拖动空白不触发光标命中",
+  (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === hitsBeforeDrag,
+);
 const beforeCompile = await count();
 const mathCaret = await hitAt("x^2");
 await settled(mathExpanded);

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { DocumentCaret } from "$lib/core/typst-engine";
-  import { pageCoordinates } from "$lib/core/document-interaction";
+  import { nearestPageCoordinates } from "$lib/core/document-interaction";
 
   let {
     hidden,
@@ -96,16 +96,14 @@
       event.preventDefault();
     }
     if (!editable) return;
-    let svg = event.target.closest("svg");
-    while (svg && svg.parentElement !== paperEl) svg = svg.parentElement?.closest("svg") ?? null;
-    if (!(svg instanceof SVGSVGElement)) return;
-    const pages = [...paperEl.querySelectorAll(":scope > svg")];
-    const point = pageCoordinates(
+    const point = nearestPageCoordinates(
       { x: event.clientX, y: event.clientY },
-      svg.getBoundingClientRect(),
-      svg.viewBox.baseVal,
+      [...paperEl.querySelectorAll<SVGSVGElement>(":scope > svg")].map((svg) => ({
+        rect: svg.getBoundingClientRect(),
+        box: svg.viewBox.baseVal,
+      })),
     );
-    if (point) onPageClick?.({ page: pages.indexOf(svg) + 1, ...point });
+    if (point) onPageClick?.(point);
   }
 </script>
 

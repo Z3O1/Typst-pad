@@ -120,6 +120,69 @@ fn document_mode_preserves_all_pages_and_geometry() {
     assert!(fail.geometry_id.is_none());
 }
 
+#[test]
+fn document_whitespace_uses_real_line_edges_and_stays_on_the_clicked_page() {
+    let source =
+        "#set page(width: 240pt, height: 240pt, margin: 40pt)\n甲乙\n\n丙丁\n#pagebreak()\n戊己";
+    let out = compile(
+        source.to_string(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+    );
+    assert!(out.ok, "{:?}", out.diagnostics);
+    let id = out.geometry_id.unwrap();
+    for (page, first, last) in [(1, "甲乙", "丙丁"), (2, "戊己", "戊己")] {
+        let first_offset = source.find(first).unwrap();
+        let last_offset = source.find(last).unwrap() + last.len();
+        for x in [-100.0, 500.0] {
+            assert_eq!(
+                crate::document_geometry::hit_test(id, page, x, -100.0)
+                    .unwrap()
+                    .offset,
+                first_offset
+            );
+            assert_eq!(
+                crate::document_geometry::hit_test(id, page, x, 500.0)
+                    .unwrap()
+                    .offset,
+                last_offset
+            );
+        }
+        let caret = crate::document_geometry::locate(id, first_offset).unwrap();
+        let y = caret.y_pt + caret.height_pt / 2.0;
+        let left = crate::document_geometry::hit_test(id, page, -100.0, y).unwrap();
+        let right = crate::document_geometry::hit_test(id, page, 500.0, y).unwrap();
+        assert_eq!(left.offset, first_offset);
+        assert_eq!(right.offset, first_offset + first.len());
+        assert_eq!(right.page, page);
+    }
+}
+
+#[test]
+fn document_whitespace_page_edges_include_raised_and_lowered_inline_text() {
+    for body in ["甲#super[乙]丙", "甲#sub[乙]丙"] {
+        let source = format!("#set page(width: 240pt, height: 240pt, margin: 40pt)\n{body}");
+        let out = compile(source.clone(), None, &fonts_dir(), &FontConfig::default());
+        assert!(out.ok, "{:?}", out.diagnostics);
+        let id = out.geometry_id.unwrap();
+        assert_eq!(
+            crate::document_geometry::hit_test(id, 1, 500.0, 0.0)
+                .unwrap()
+                .offset,
+            source.find("甲").unwrap(),
+            "上方空白必须落到整行行首：{body}"
+        );
+        assert_eq!(
+            crate::document_geometry::hit_test(id, 1, 0.0, 500.0)
+                .unwrap()
+                .offset,
+            source.find("丙").unwrap() + "丙".len(),
+            "下方空白必须落到整行行尾：{body}"
+        );
+    }
+}
+
 // 独立沿帧树逐层变换真实字形内的点，不借用生产几何计算。
 fn visible_text_points(
     world: &dyn World,
@@ -258,15 +321,33 @@ fn dump_page_fixtures() {
         let document = typst::compile::<PagedDocument>(&world)
             .output
             .expect("整页夹具必须编译成功");
-        let (items, _) = crate::block_geometry::collect_geometry(&world, &document);
+        let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
         let carets: Vec<crate::document_geometry::DocumentCaret> = items
             .iter()
             .map(|item| crate::document_geometry::caret_for_item(item, item.range.start))
             .collect();
+        let id = crate::document_geometry::store(items, src.len(), stats.foreign_ink);
+        let whitespace_hits: Vec<_> = document
+            .pages()
+            .iter()
+            .enumerate()
+            .flat_map(|(index, page)| {
+                let width = page.frame.width().to_pt();
+                let height = page.frame.height().to_pt();
+                [(width + 12.0, 1.0), (width / 2.0, 1.0), (1.0, height - 1.0)]
+                    .into_iter()
+                    .map(move |(x, y)| {
+                        serde_json::json!({
+                            "page": index + 1, "xPt": x, "yPt": y,
+                            "caret": crate::document_geometry::hit_test(id, index + 1, x, y)
+                        })
+                    })
+            })
+            .collect();
         let pages: Vec<String> = document.pages().iter().map(svg_for_page).collect();
         println!(
             "PAGEFIXTURE:{}",
-            serde_json::json!({ "doc": src, "pages": pages, "carets": carets })
+            serde_json::json!({ "doc": src, "pages": pages, "carets": carets, "whitespaceHits": whitespace_hits })
         );
     }
 }

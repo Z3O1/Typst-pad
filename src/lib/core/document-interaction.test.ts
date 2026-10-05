@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pageCoordinates, sourceRevealRange } from "./document-interaction";
+import { nearestPageCoordinates, pageCoordinates, sourceRevealRange } from "./document-interaction";
 
 describe("整页交互", () => {
   it("缩放与滚动后的页面坐标沿用原始 viewBox", () => {
@@ -17,6 +17,51 @@ describe("整页交互", () => {
         { x: 0, y: 0, width: 5, height: 5 },
       ),
     ).toBeNull();
+  });
+  it("纸张外侧空白保留页外坐标，按垂直距离选择不同纸型的页面", () => {
+    const pages = [
+      {
+        rect: { left: 100, top: -100, width: 180, height: 200 },
+        box: { x: 0, y: 0, width: 360, height: 400 },
+      },
+      {
+        rect: { left: 100, top: 110, width: 240, height: 150 },
+        box: { x: 5, y: 10, width: 480, height: 300 },
+      },
+    ];
+    expect(nearestPageCoordinates({ x: 350, y: 0 }, pages)).toEqual({
+      page: 1,
+      xPt: 500,
+      yPt: 200,
+    });
+    expect(nearestPageCoordinates({ x: 50, y: 150 }, pages)).toEqual({
+      page: 2,
+      xPt: -95,
+      yPt: 90,
+    });
+    expect(nearestPageCoordinates({ x: 200, y: 104 }, pages)?.page).toBe(1);
+    expect(nearestPageCoordinates({ x: 200, y: 106 }, pages)?.page).toBe(2);
+    expect(nearestPageCoordinates({ x: 200, y: -200 }, pages)).toEqual({
+      page: 1,
+      xPt: 200,
+      yPt: -200,
+    });
+    expect(nearestPageCoordinates({ x: 200, y: 300 }, pages)).toEqual({
+      page: 2,
+      xPt: 205,
+      yPt: 390,
+    });
+  });
+  it("空产物、隐藏页面和非法坐标不生成点击位置，页号不因跳过无效页而变化", () => {
+    const hidden = {
+      rect: { left: 0, top: 0, width: 0, height: 0 },
+      box: { x: 0, y: 0, width: 100, height: 200 },
+    };
+    const visible = { ...hidden, rect: { left: 0, top: 0, width: 100, height: 200 } };
+    expect(nearestPageCoordinates({ x: 5, y: 10 }, [])).toBeNull();
+    expect(nearestPageCoordinates({ x: 5, y: 10 }, [hidden])).toBeNull();
+    expect(nearestPageCoordinates({ x: NaN, y: 10 }, [visible])).toBeNull();
+    expect(nearestPageCoordinates({ x: 5, y: 10 }, [hidden, visible])?.page).toBe(2);
   });
   it("公式末尾和多行脚本内容展开完整源码", () => {
     const math = "正文 $x^2 + y$";
