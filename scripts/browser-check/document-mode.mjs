@@ -11,7 +11,8 @@ import {
   COMPILE_IDLE,
 } from "./harness.mjs";
 const fixtures = loadFixtures("page-fixtures.json", { hint: "先跑 npm run fixtures:pages" });
-const [original, edited, mathExpanded, mathEdited, tableExpanded, imageExpanded] = fixtures;
+const [original, edited, mathExpanded, mathEdited, tableExpanded, imageExpanded, errorRecovered] =
+  fixtures;
 const { check, state } = createChecker();
 const c = await connect();
 await boot(c, DEV_URL, { pageFixtures: fixtures });
@@ -25,12 +26,12 @@ const doc = () => c.evaluate("window.__typstPadView.state.doc.toString()");
 const count = () => c.evaluate("window.__browserDevCallCounts?.compile_doc ?? 0");
 const inDocumentMode = () => c.evaluate("!!document.querySelector('.document-pane')");
 const settled = async (fixture) => c.waitFor(compileSettled(fixture.doc), { timeout: 8000 });
-async function replace(source) {
+async function replace(source, renderedSource = source) {
   if (await inDocumentMode()) await c.key("e", { keyCode: 69, modifiers: 2 });
   await c.selectAll();
   await c.type(source);
   await c.key("e", { keyCode: 69, modifiers: 2 });
-  await settled({ doc: source });
+  await settled({ doc: renderedSource });
 }
 async function hitAt(sourcePart, fixture = original) {
   const at = fixture.doc.indexOf(sourcePart),
@@ -191,10 +192,63 @@ const pageAt110 = await c.evaluate(
 check("用户缩放继续影响页面内容", pageAt110 > pageAt100 * 1.05);
 await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
 await sleep(100);
-const beforeFailure = await c.evaluate("document.querySelector('#preview-host').innerHTML");
-await replace("DIAG-ERROR-MARKER");
+await replace(errorRecovered.brokenDoc, errorRecovered.doc);
 check(
-  "编译失败保留上次完整结果",
+  "错误区域显示源码，其余页面与真实恢复产物逐节点一致",
+  await compiledPagesMatch(errorRecovered),
+);
+check(
+  "错误回退不修改原文，且继续显示诊断",
+  (await doc()) === errorRecovered.brokenDoc &&
+    (await c.evaluate("document.querySelectorAll('.error-count')[0].textContent !== '0'")),
+);
+const recoveredCaret = await hitAt("unknown", errorRecovered);
+await settled(errorRecovered);
+check(
+  "错误源码可以命中原文档位置，点击不清除诊断",
+  await c.evaluate(
+    `document.querySelectorAll('.error-count')[0].textContent !== '0' && window.__typstPadView.state.selection.main.head === ${errorRecovered.brokenDoc.indexOf("unknown") + Buffer.from(errorRecovered.doc).subarray(0, recoveredCaret.offset).toString().length - errorRecovered.doc.indexOf("unknown")}`,
+  ),
+);
+await c.evaluate(
+  `(() => {const v=window.__typstPadView,doc=v.state.doc.toString(),at=doc.indexOf('unknown');v.dispatch({changes:{from:at,to:at+7,insert:'x^2 + y'}})})()`,
+);
+await settled(original);
+check(
+  "原位修复错误后清除诊断，保存源码不含临时围栏",
+  (await doc()) === original.doc &&
+    (await compiledPagesMatch(original)) &&
+    (await c.evaluate("document.querySelectorAll('.error-count')[0].textContent === '0'")),
+);
+await c.key("Escape", { keyCode: 27 });
+await settled(original);
+check("修复后收起恢复正常完整排版", await compiledPagesMatch(original));
+await c.key("z", { keyCode: 90, modifiers: 2 });
+await settled(errorRecovered);
+check(
+  "撤销修复重新显示错误源码",
+  (await doc()) === errorRecovered.brokenDoc && (await compiledPagesMatch(errorRecovered)),
+);
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await settled({ doc: errorRecovered.brokenDoc });
+check(
+  "源码模式仍编译原文并保留错误",
+  !(await inDocumentMode()) &&
+    (await c.evaluate("document.querySelectorAll('.error-count')[0].textContent !== '0'")),
+);
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await settled(errorRecovered);
+check("返回文档模式重新启用错误区域回退", await compiledPagesMatch(errorRecovered));
+await c.key("y", { keyCode: 89, modifiers: 2 });
+await settled(original);
+check(
+  "重做修复自动恢复正常排版",
+  (await doc()) === original.doc && (await compiledPagesMatch(original)),
+);
+const beforeFailure = await c.evaluate("document.querySelector('#preview-host').innerHTML");
+await replace("DIAG-EXTERNAL-ERROR-MARKER");
+check(
+  "外部文件错误无法局部回退时保留上次完整结果",
   (await c.evaluate("document.querySelector('#preview-host').innerHTML")) === beforeFailure,
 );
 check(
