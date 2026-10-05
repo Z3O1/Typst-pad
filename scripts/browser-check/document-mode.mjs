@@ -202,6 +202,7 @@ check(
   (await doc()) === errorRecovered.brokenDoc &&
     (await c.evaluate("document.querySelectorAll('.error-count')[0].textContent !== '0'")),
 );
+const beforeErrorClick = await count();
 const recoveredCaret = await hitAt("unknown", errorRecovered);
 await settled(errorRecovered);
 check(
@@ -210,19 +211,33 @@ check(
     `document.querySelectorAll('.error-count')[0].textContent !== '0' && window.__typstPadView.state.selection.main.head === ${errorRecovered.brokenDoc.indexOf("unknown") + Buffer.from(errorRecovered.doc).subarray(0, recoveredCaret.offset).toString().length - errorRecovered.doc.indexOf("unknown")}`,
   ),
 );
+check("点击已经显示的错误源码不重复编译", (await count()) === beforeErrorClick);
 await c.evaluate(
   `(() => {const v=window.__typstPadView,doc=v.state.doc.toString(),at=doc.indexOf('unknown');v.dispatch({changes:{from:at,to:at+7,insert:'x^2 + y'}})})()`,
 );
-await settled(original);
+await settled(mathExpanded);
 check(
-  "原位修复错误后清除诊断，保存源码不含临时围栏",
+  "修复后清除诊断但保留正在编辑的源码，原文不含临时围栏",
   (await doc()) === original.doc &&
-    (await compiledPagesMatch(original)) &&
+    (await compiledPagesMatch(mathExpanded)) &&
     (await c.evaluate("document.querySelectorAll('.error-count')[0].textContent === '0'")),
 );
+await c.evaluate(
+  `(() => {const v=window.__typstPadView,at=v.state.doc.toString().indexOf('x^2 + y');v.dispatch({changes:{from:at,to:at+7,insert:'unknown'}})})()`,
+);
+await settled(errorRecovered);
+check(
+  "保留源码继续输入仍诊断原文，不把新错误隐藏在 raw 中",
+  (await compiledPagesMatch(errorRecovered)) &&
+    (await c.evaluate("document.querySelectorAll('.error-count')[0].textContent !== '0'")),
+);
+await c.evaluate(
+  `(() => {const v=window.__typstPadView,at=v.state.doc.toString().indexOf('unknown');v.dispatch({changes:{from:at,to:at+7,insert:'x^2 + y'}})})()`,
+);
+await settled(mathExpanded);
 await c.key("Escape", { keyCode: 27 });
 await settled(original);
-check("修复后收起恢复正常完整排版", await compiledPagesMatch(original));
+check("Esc 收起修好的错误源码并恢复正常完整排版", await compiledPagesMatch(original));
 await c.key("z", { keyCode: 90, modifiers: 2 });
 await settled(errorRecovered);
 check(
@@ -245,6 +260,17 @@ check(
   "重做修复自动恢复正常排版",
   (await doc()) === original.doc && (await compiledPagesMatch(original)),
 );
+await replace(errorRecovered.brokenDoc, errorRecovered.doc);
+await hitAt("unknown", errorRecovered);
+await c.evaluate(
+  `(() => {const v=window.__typstPadView,at=v.state.doc.toString().indexOf('unknown');v.dispatch({changes:{from:at,to:at+7,insert:'x^2 + y'}})})()`,
+);
+await settled(mathExpanded);
+await c.evaluate(
+  "window.__typstPadView.dispatch({selection:{anchor:window.__typstPadView.state.doc.toString().indexOf('正文含')}})",
+);
+await settled(original);
+check("光标移出修好的错误区域自动收起源码", await compiledPagesMatch(original));
 const beforeFailure = await c.evaluate("document.querySelector('#preview-host').innerHTML");
 await replace("DIAG-EXTERNAL-ERROR-MARKER");
 check(

@@ -1,4 +1,5 @@
 // 只修复本轮排版输入，绝不改写编辑器文档。每轮重新诊断，修复后自动退出回退。
+import { Text } from "@codemirror/state";
 import { sourceRevealRange } from "./document-interaction";
 import {
   mergeProjectionRanges,
@@ -15,22 +16,23 @@ export interface DocumentCompileResult {
   projection: DocumentProjection;
   failure: CompileFail | null;
   errorRanges: SourceRange[];
+  editingRange: SourceRange | null;
+  deferred?: boolean;
 }
 
 // sourceDiagnostics 已把主文档列换成 UTF-16，不能再次按 Unicode 字符换算。
-function position(source: string, line: number, col: number): number | null {
-  const lines = source.split("\n");
-  if (line < 1 || line > lines.length || col < 1) return null;
-  return (
-    lines.slice(0, line - 1).reduce((sum, text) => sum + text.length + 1, 0) +
-    Math.min(col - 1, lines[line - 1].length)
-  );
+function position(source: Text, line: number, col: number): number | null {
+  if (line < 1 || line > source.lines || col < 1) return null;
+  const row = source.line(line);
+  return row.from + Math.min(col - 1, row.length);
 }
 
 export async function compileDocumentWithFallback(options: {
   source: string;
   prefixLength: number;
   reveal: SourceRange | null;
+  // 已经点击编辑的错误区域：修复后仍排版为源码，直到退出该区域。
+  editing?: SourceRange | null;
   recover: boolean;
   compile: (source: string) => Promise<CompileResult>;
   isCurrent: () => boolean;
@@ -38,15 +40,57 @@ export async function compileDocumentWithFallback(options: {
   canRetry?: () => boolean;
 }): Promise<DocumentCompileResult> {
   const { source, prefixLength, reveal, recover, compile, isCurrent } = options;
+  const editing =
+    recover && options.editing && options.editing.to > options.editing.from
+      ? options.editing
+      : null;
+  // 整段正文回退不再执行其内容，避免修好后复制一遍正常输出再显示整段源码。
+  const editingProjection: ProjectionRange | null = editing
+    ? {
+        ...editing,
+        preserveDeclaration: editing.from !== prefixLength || editing.to !== source.length,
+      }
+    : null;
   let ranges: ProjectionRange[] = reveal ? [reveal] : [];
   let errorRanges: ProjectionRange[] = [];
   let failure: CompileFail | null = null;
+  let sourceText: Text | null = null;
   for (let attempt = 0; ; attempt++) {
     const projection = projectDocumentRanges(source, ranges);
     const result = await compile(projection.source);
     if (result.ok) {
       if (result.warnings) result.warnings = sourceDiagnostics(projection, result.warnings);
-      return { result, projection, failure, errorRanges };
+      if (editing && editingProjection) {
+        const expanded = projectDocumentRanges(source, [...ranges, editingProjection]);
+        if (expanded.source !== projection.source) {
+          if (isCurrent() && options.canRetry && !options.canRetry())
+            return {
+              result,
+              projection,
+              failure,
+              errorRanges,
+              editingRange: editing,
+              deferred: true,
+            };
+          if (isCurrent()) {
+            const visible = await compile(expanded.source);
+            if (visible.ok) {
+              if (visible.warnings)
+                visible.warnings = sourceDiagnostics(expanded, visible.warnings);
+              return {
+                result: visible,
+                projection: expanded,
+                failure,
+                errorRanges,
+                editingRange: editing,
+              };
+            }
+          }
+          // 原文已有效；手动保留源码若不可排版，不制造投影专属的错误诊断。
+          return { result, projection, failure, errorRanges, editingRange: null };
+        }
+      }
+      return { result, projection, failure, errorRanges, editingRange: editing };
     }
     result.errors = sourceDiagnostics(projection, result.errors);
     const first = result.errors[0];
@@ -58,16 +102,17 @@ export async function compileDocumentWithFallback(options: {
           failure.errors.push(error);
       }
     }
-    const stop = () => ({ result, projection, failure, errorRanges });
+    const stop = () => ({ result, projection, failure, errorRanges, editingRange: editing });
     if (!recover || !isCurrent() || !result.errors.length) return stop();
     const additions: ProjectionRange[] = [];
+    const doc = source.slice(prefixLength);
     for (const error of result.errors) {
       // 前缀在设置中编辑，导入文件不属于编辑器；不猜测它们在正文里的位置。
       if (error.path) continue;
-      const from = position(source, error.line, error.col);
-      const to = position(source, error.endLine, error.endCol);
+      sourceText ??= Text.of(source.split("\n"));
+      const from = position(sourceText, error.line, error.col);
+      const to = position(sourceText, error.endLine, error.endCol);
       if (from === null || to === null || from < prefixLength) continue;
-      const doc = source.slice(prefixLength);
       const start = sourceRevealRange(doc, from - prefixLength, true);
       const end = sourceRevealRange(doc, Math.max(from, to - 1) - prefixLength, true);
       const range = {
@@ -100,6 +145,10 @@ export async function compileDocumentWithFallback(options: {
         return stop();
       errorRanges = [{ from: prefixLength, to: source.length, preserveDeclaration: false }];
     } else errorRanges = next;
-    ranges = mergeProjectionRanges([...(reveal ? [reveal] : []), ...errorRanges]);
+    ranges = mergeProjectionRanges([
+      ...(reveal ? [reveal] : []),
+      ...(editingProjection ? [editingProjection] : []),
+      ...errorRanges,
+    ]);
   }
 }

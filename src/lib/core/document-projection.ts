@@ -1,4 +1,5 @@
 // 源码展开仅改变本轮排版输入；保存、撤销和编辑器始终持有原文档。
+import { Text } from "@codemirror/state";
 import type { CompileErrorLocation, Diagnostic } from "./typst-engine";
 export interface SourceRange {
   from: number;
@@ -92,24 +93,37 @@ export function projectDocumentRanges(
   };
 }
 
-function mapLocation(projection: DocumentProjection, line: number, col: number) {
-  const lines = projection.source.split("\n");
-  // Typst 列按 Unicode 字符计数，CodeMirror 位置按 UTF-16；emoji 不能当成一个码元。
-  const columnOffset = [...(lines[line - 1] ?? "")].slice(0, col - 1).join("").length;
-  const pos =
-    lines.slice(0, line - 1).reduce((sum, text) => sum + text.length + 1, 0) + columnOffset;
-  const original = projection.original.slice(0, projection.renderedToSource(pos));
-  return { line: original.split("\n").length, col: original.length - original.lastIndexOf("\n") };
+function createDiagnosticMapper(projection: DocumentProjection) {
+  // 每批诊断只索引两份文本一次，避免每个起止点重新扫描整篇文档。
+  const rendered = Text.of(projection.source.split("\n"));
+  const original = Text.of(projection.original.split("\n"));
+  return (line: number, col: number) => {
+    const row = rendered.line(Math.max(1, Math.min(line, rendered.lines)));
+    let columnOffset = 0;
+    let column = 1;
+    // Typst 列按 Unicode 字符计数，CodeMirror 位置按 UTF-16。
+    for (const char of row.text) {
+      if (column++ >= col) break;
+      columnOffset += char.length;
+    }
+    const pos = Math.max(
+      0,
+      Math.min(original.length, projection.renderedToSource(row.from + columnOffset)),
+    );
+    const sourceLine = original.lineAt(pos);
+    return { line: sourceLine.number, col: pos - sourceLine.from + 1 };
+  };
 }
 export function sourceDiagnostics<T extends Diagnostic | CompileErrorLocation>(
   projection: DocumentProjection,
   diagnostics: T[],
 ): T[] {
+  let mapLocation: ReturnType<typeof createDiagnosticMapper> | null = null;
   return diagnostics.map((item) => {
     if (item.path) return item;
-    const start = mapLocation(projection, item.line, "column" in item ? item.column : item.col);
+    mapLocation ??= createDiagnosticMapper(projection);
+    const start = mapLocation(item.line, "column" in item ? item.column : item.col);
     const end = mapLocation(
-      projection,
       item.endLine ?? item.line,
       "column" in item ? (item.endColumn ?? item.column) : item.endCol,
     );

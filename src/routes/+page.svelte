@@ -328,6 +328,7 @@
   let sourceOpen = $state(false);
   let sourceRange = $state<SourceRange | null>(null);
   let documentErrorRanges: SourceRange[] = [];
+  let errorEditRange: SourceRange | null = null;
   let renderedProjection: DocumentProjection = projectDocument("", null);
   let inputPosition = $state<{ left: number; top: number; height: number } | null>(null);
   let documentCaret = $state<DocumentCaret | null>(null);
@@ -374,29 +375,38 @@
       return;
     }
     const pos = Math.min(doc.length, sourcePos - prefix.length);
-    const errorRange = documentErrorRanges.find((range) => pos >= range.from && pos <= range.to);
+    const previousEdit = errorEditRange;
+    const errorRange =
+      previousEdit && pos >= previousEdit.from && pos <= previousEdit.to
+        ? previousEdit
+        : documentErrorRanges.find((range) => pos >= range.from && pos <= range.to);
     const range =
       sourceRange && pos >= sourceRange.from && pos <= sourceRange.to
         ? sourceRange
         : (errorRange ?? sourceRevealRange(doc, pos));
-    // 自动回退不变成手动展开，否则 raw 会遮住真实错误，修复后也无法自动收起。
+    // 错误区的编辑锁独立于手动展开，仍先诊断原文，不用 raw 遮住真实错误。
     const nextRange =
       errorRange || ("kind" in range && range.kind === "text")
         ? null
         : { from: range.from, to: range.to };
-    const changed = JSON.stringify(nextRange) !== JSON.stringify(sourceRange);
+    const changed =
+      JSON.stringify(nextRange) !== JSON.stringify(sourceRange) ||
+      (previousEdit !== null && previousEdit !== errorRange);
+    errorEditRange = errorRange ?? null;
     sourceOpen = true;
     sourceRange = nextRange;
     documentCaret = changed ? null : hit;
     await tick();
     editorRef?.revealAt(pos, sourceRange ?? errorRange);
-    if (changed) void compileNow("mode");
+    if (changed || (previousEdit !== errorEditRange && writeScheduler.stats().inFlight))
+      void compileNow("mode");
   }
 
   function closeSource(): void {
-    const expanded = sourceRange !== null;
+    const expanded = sourceRange !== null || errorEditRange !== null;
     sourceOpen = false;
     sourceRange = null;
+    errorEditRange = null;
     interactionSeq++;
     previewPaneRef?.body()?.focus();
     if (expanded) void compileNow("mode");
@@ -689,11 +699,13 @@
     interactionSeq++;
     const needsCompile =
       sourceRange !== null ||
+      errorEditRange !== null ||
       documentErrorRanges.length > 0 ||
       errorCount > 0 ||
       previewError !== "" ||
       writeScheduler.stats().inFlight;
     sourceRange = null;
+    errorEditRange = null;
     viewMode = viewMode === "write" ? "source" : "write";
     if (needsCompile) {
       documentGeometryId = 0;
@@ -731,14 +743,22 @@
           .reduce((sum, text) => sum + text.length + 1, 0) +
         col -
         1;
-      const range = sourceRevealRange(doc, pos);
-      const inErrorSource = documentErrorRanges.some(
-        (range) => pos >= range.from && pos <= range.to,
-      );
-      if (!inErrorSource && range.kind !== "text" && range.to > range.from) {
-        sourceRange = { from: range.from, to: range.to };
-        void compileNow("mode");
+      let recompile = false;
+      if (errorEditRange && (pos < errorEditRange.from || pos > errorEditRange.to)) {
+        errorEditRange = null;
+        recompile = true;
       }
+      const inErrorSource =
+        errorEditRange !== null ||
+        documentErrorRanges.some((range) => pos >= range.from && pos <= range.to);
+      if (!inErrorSource) {
+        const range = sourceRevealRange(doc, pos);
+        if (range.kind !== "text" && range.to > range.from) {
+          sourceRange = { from: range.from, to: range.to };
+          recompile = true;
+        }
+      }
+      if (recompile) void compileNow("mode");
     }
     void updateDocumentCaret(line, col);
   }
@@ -746,6 +766,11 @@
   function handleDocChange(newDoc: string, mapPosition: (pos: number, assoc?: number) => number) {
     if (sourceRange)
       sourceRange = { from: mapPosition(sourceRange.from, -1), to: mapPosition(sourceRange.to, 1) };
+    if (errorEditRange)
+      errorEditRange = {
+        from: mapPosition(errorEditRange.from, -1),
+        to: mapPosition(errorEditRange.to, 1),
+      };
     documentErrorRanges = documentErrorRanges.map((range) => ({
       from: mapPosition(range.from, -1),
       to: mapPosition(range.to, 1),
@@ -1004,6 +1029,7 @@
     sourceRange = null;
     renderedProjection = projectDocument("", null);
     documentErrorRanges = [];
+    errorEditRange = null;
     previewStatus = "idle";
     previewError = "";
     pageCount = 0;
@@ -1201,30 +1227,40 @@
     const mode = viewMode;
     const path = filePath;
     const fonts = fontArgs();
-    const isCurrent = () => mySeq === compileSeq && input === currentInput() && mode === viewMode;
-    const { result, projection, failure, errorRanges } = await compileDocumentWithFallback({
-      source,
-      prefixLength,
-      reveal:
-        mode === "write" && sourceRange
-          ? { from: prefixLength + sourceRange.from, to: prefixLength + sourceRange.to }
-          : null,
-      recover: mode === "write",
-      compile: (src) => compileToSvg(src, path, fonts),
-      isCurrent,
-      canRetry: () => {
-        if (!writeScheduler.stats().composing) return true;
-        // 留下一份需求，合成结束后再从最终原文重新诊断与恢复。
-        scheduleCompile();
-        return false;
-      },
-    });
+    const editing = errorEditRange;
+    const isCurrent = () =>
+      mySeq === compileSeq &&
+      input === currentInput() &&
+      mode === viewMode &&
+      editing === errorEditRange;
+    const { result, projection, failure, errorRanges, editingRange, deferred } =
+      await compileDocumentWithFallback({
+        source,
+        prefixLength,
+        reveal:
+          mode === "write" && sourceRange
+            ? { from: prefixLength + sourceRange.from, to: prefixLength + sourceRange.to }
+            : null,
+        editing:
+          mode === "write" && editing
+            ? { from: prefixLength + editing.from, to: prefixLength + editing.to }
+            : null,
+        recover: mode === "write",
+        compile: (src) => compileToSvg(src, path, fonts),
+        isCurrent,
+        canRetry: () => {
+          if (!writeScheduler.stats().composing) return true;
+          // 留下一份需求，合成结束后再从最终原文重新诊断与恢复。
+          scheduleCompile();
+          return false;
+        },
+      });
     if (mySeq === 1) {
       mark("first-compile-result");
       reportStartup();
     }
     // 文本、会话、字体和前缀在等待期间变化时，迟到的成功与失败均不能落地。
-    if (!isCurrent()) return;
+    if (!isCurrent() || deferred) return;
     if (result.ok) {
       const paper = previewPaneRef?.paper();
       if (!paper) return;
@@ -1237,6 +1273,7 @@
         from: range.from - prefixLength,
         to: range.to - prefixLength,
       }));
+      if (!editingRange) errorEditRange = null;
       previewError = failure?.error ?? "";
       applyCompileStatus(result, doc.length);
       if (failure) applyCompileStatus(failure, doc.length);

@@ -176,6 +176,84 @@ describe("文档模式编译错误源码回退", () => {
     expect(resumed.result.ok).toBe(true);
   });
 
+  it("正在编辑的错误修好后保留源码，但仍先诊断原文；退出编辑锁才收起", async () => {
+    const source = "正文 $x^2$ 后文";
+    const editing = { from: source.indexOf("$"), to: source.lastIndexOf("$") + 1 };
+    const compile = vi.fn().mockResolvedValue(ok);
+    const retained = await compileDocumentWithFallback({ ...options(source), editing, compile });
+    expect(compile.mock.calls.map(([src]) => src)).toEqual([source, "正文 ` $x^2$ ` 后文"]);
+    expect(retained.failure).toBeNull();
+    expect(retained.editingRange).toEqual(editing);
+    const closed = await compileDocumentWithFallback({ ...options(source), compile });
+    expect(closed.projection.source).toBe(source);
+    expect(closed.editingRange).toBeNull();
+  });
+
+  it("错误编辑锁不屏蔽诊断；修好的声明展开仍保留作用域", async () => {
+    const source = "#let x = unknown\n#x";
+    const editing = { from: 0, to: source.indexOf("\n") };
+    const compile = vi
+      .fn()
+      .mockResolvedValueOnce(fail(source, ["unknown"]))
+      .mockResolvedValueOnce(ok);
+    const output = await compileDocumentWithFallback({ ...options(source), editing, compile });
+    expect(output.failure?.errors).toHaveLength(1);
+    expect(output.projection.source).toBe("` #let x = unknown `\n#x");
+    const fixed = "#let x = 1\n#x";
+    const fixedEditing = { from: 0, to: fixed.indexOf("\n") };
+    const fixedCompile = vi.fn().mockResolvedValue(ok);
+    const repaired = await compileDocumentWithFallback({
+      ...options(fixed),
+      editing: fixedEditing,
+      compile: fixedCompile,
+    });
+    expect(repaired.projection.source).toBe("#let x = 1\n` #let x = 1 `\n#x");
+    expect(repaired.failure).toBeNull();
+  });
+
+  it("整段正文的编辑锁修好后不复制正常输出或重新执行整段声明", async () => {
+    const source = "#set text(size: 12pt)\n正常正文";
+    const editing = { from: 0, to: source.length };
+    const compile = vi.fn().mockResolvedValue(ok);
+    const output = await compileDocumentWithFallback({ ...options(source), editing, compile });
+    expect(output.projection.source).toBe("```typ\n" + source + "\n```");
+    expect(output.editingRange).toEqual(editing);
+  });
+
+  it("保留源码本身不能排版时，仍使用有效原文且不展示投影专属错误", async () => {
+    const source = "#let x = 1\n#x";
+    const editing = { from: 0, to: source.indexOf("\n") };
+    const expanded = projectDocumentRanges(source, [editing]).source;
+    const compile = vi
+      .fn()
+      .mockResolvedValueOnce(ok)
+      .mockResolvedValueOnce(fail(expanded, ["x"]));
+    const output = await compileDocumentWithFallback({ ...options(source), editing, compile });
+    expect(output.result.ok).toBe(true);
+    expect(output.projection.source).toBe(source);
+    expect(output.failure).toBeNull();
+    expect(output.editingRange).toBeNull();
+  });
+
+  it("过期结果和输入法暂停不启动修复后保留源码的额外编译", async () => {
+    const source = "$x$";
+    const editing = { from: 0, to: source.length };
+    for (const gate of [{ isCurrent: () => false }, { canRetry: () => false }]) {
+      const compile = vi.fn().mockResolvedValue(ok);
+      const result = await compileDocumentWithFallback({
+        ...options(source),
+        editing,
+        compile,
+        ...gate,
+      });
+      expect(compile).toHaveBeenCalledTimes(1);
+      if ("canRetry" in gate) {
+        expect(result.deferred).toBe(true);
+        expect(result.editingRange).toEqual(editing);
+      }
+    }
+  });
+
   it("修复后的请求从原文重新编译，不保留回退区域", async () => {
     const compile = vi.fn().mockResolvedValue(ok);
     const output = await compileDocumentWithFallback({ ...options("正文 $x^2$"), compile });
