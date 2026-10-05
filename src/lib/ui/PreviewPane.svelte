@@ -29,7 +29,7 @@
   let canvasEl: HTMLElement;
   let caretStyle = $state("");
   let measureFrame = 0;
-  let pointerStart: { x: number; y: number } | null = null;
+  let pointerStart: { id: number; x: number; y: number; moved: boolean } | null = null;
   export function paper(): HTMLElement | undefined {
     return paperEl;
   }
@@ -80,7 +80,8 @@
   function handleClick(event: MouseEvent): void {
     const moved =
       pointerStart &&
-      Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5;
+      (pointerStart.moved ||
+        Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5);
     pointerStart = null;
     if (moved || event.button !== 0 || !(event.target instanceof Element) || !paperEl) return;
     const anchor = event.target.closest("a");
@@ -118,7 +119,22 @@
     onscroll={measureCaret}
     onclick={handleClick}
     onpointerdown={(event) => {
-      pointerStart = { x: event.clientX, y: event.clientY };
+      pointerStart =
+        event.isPrimary && event.button === 0
+          ? { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }
+          : null;
+    }}
+    onpointermove={(event) => {
+      if (pointerStart?.id === event.pointerId)
+        pointerStart.moved ||=
+          Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5;
+    }}
+    onpointerleave={(event) => {
+      // 触屏抬指后也会发送 leave（buttons=0），不能把正常轻触算成拖动。
+      if (pointerStart?.id === event.pointerId && event.buttons !== 0) pointerStart.moved = true;
+    }}
+    onpointercancel={() => {
+      pointerStart = null;
     }}
     onkeydown={(event) => {
       if (editable && (event.key === "Enter" || event.key === "F2")) {

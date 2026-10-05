@@ -183,6 +183,78 @@ fn document_whitespace_page_edges_include_raised_and_lowered_inline_text() {
     }
 }
 
+#[test]
+fn document_side_whitespace_stays_at_the_line_end_with_mixed_font_sizes() {
+    let source = "#set page(width: 240pt, height: 240pt, margin: 40pt)\n#text(size: 30pt)[甲]乙";
+    let out = compile(
+        source.to_string(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+    );
+    assert!(out.ok, "{:?}", out.diagnostics);
+    let id = out.geometry_id.unwrap();
+    let big = crate::document_geometry::locate(id, source.find("甲").unwrap()).unwrap();
+    let last = source.find("乙").unwrap() + "乙".len();
+    for y in [big.y_pt + 1.0, big.y_pt + big.height_pt / 2.0] {
+        let hit = crate::document_geometry::hit_test(id, 1, 500.0, y).unwrap();
+        assert_eq!(hit.offset, last, "同行的小字不能因墨迹较低而被略过");
+        assert_eq!(hit.is_whitespace, Some(true));
+    }
+}
+
+#[test]
+fn document_whitespace_over_text_background_does_not_hit_the_macro_definition() {
+    let source = "#set page(width: 240pt, height: 240pt, margin: 40pt)\n#let banner(body) = block(fill: red, inset: 8pt, body)\n#banner[甲乙]";
+    let out = compile(
+        source.to_string(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+    );
+    assert!(out.ok, "{:?}", out.diagnostics);
+    let id = out.geometry_id.unwrap();
+    let last = source.find("乙").unwrap();
+    let caret = crate::document_geometry::locate(id, last + "乙".len()).unwrap();
+    let hit = crate::document_geometry::hit_test(
+        id,
+        1,
+        caret.x_pt + 4.0,
+        caret.y_pt + caret.height_pt / 2.0,
+    )
+    .unwrap();
+    assert_eq!(hit.offset, last + "乙".len());
+    assert_eq!(hit.is_whitespace, Some(true));
+    assert_eq!(
+        crate::document_geometry::hit_test(id, 1, 500.0, 0.0)
+            .unwrap()
+            .offset,
+        source.find("甲").unwrap(),
+        "文字背景不能把页首空白定位到宏定义"
+    );
+    assert_eq!(
+        crate::document_geometry::hit_test(id, 1, 0.0, 500.0)
+            .unwrap()
+            .offset,
+        last + "乙".len(),
+        "文字背景不能把页尾空白定位到宏定义"
+    );
+    let rect = compile(
+        "#set page(margin: 40pt)\n#rect(width: 30pt, height: 30pt, fill: red)".to_string(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+    );
+    assert!(rect.ok, "{:?}", rect.diagnostics);
+    let direct =
+        crate::document_geometry::hit_test(rect.geometry_id.unwrap(), 1, 50.0, 50.0).unwrap();
+    assert_eq!(
+        direct.is_whitespace,
+        Some(false),
+        "独立图形仍可直接点击展开"
+    );
+}
+
 // 独立沿帧树逐层变换真实字形内的点，不借用生产几何计算。
 fn visible_text_points(
     world: &dyn World,
@@ -316,6 +388,10 @@ fn dump_page_fixtures() {
         edited.replace("$x^2 + y$", "` $x^2 + y$ `"),
         original.replace(table, &format!("` {table} `")),
         original.replace(image, &format!("` {image} `")),
+        original.replace(
+            "第二页使用不同纸型，仍由 Typst 完整呈现。",
+            "第二页使用不同纸型，仍由 Typst 完整呈现。续",
+        ),
     ] {
         let world = TypstWorld::new(src.clone(), None, &fonts_dir(), &FontConfig::default());
         let document = typst::compile::<PagedDocument>(&world)
@@ -326,8 +402,18 @@ fn dump_page_fixtures() {
             .iter()
             .map(|item| crate::document_geometry::caret_for_item(item, item.range.start))
             .collect();
+        let macro_side = src.find("这是宏输出").and_then(|start| {
+            let end = start + src[start..].find(']')?;
+            let last = start + src[start..end].char_indices().last()?.0;
+            let item = items.iter().find(|item| item.range.start == last)?;
+            Some((
+                item.page,
+                item.rect.max.x.to_pt() + 8.0,
+                (item.rect.min.y.to_pt() + item.rect.max.y.to_pt()) / 2.0,
+            ))
+        });
         let id = crate::document_geometry::store(items, src.len(), stats.foreign_ink);
-        let whitespace_hits: Vec<_> = document
+        let mut whitespace_hits: Vec<_> = document
             .pages()
             .iter()
             .enumerate()
@@ -344,6 +430,13 @@ fn dump_page_fixtures() {
                     })
             })
             .collect();
+        if let Some((page, x, y)) = macro_side {
+            let caret = crate::document_geometry::hit_test(id, page, x, y).unwrap();
+            assert_eq!(caret.is_whitespace, Some(true));
+            whitespace_hits.push(serde_json::json!({
+                "name": "macro-side", "page": page, "xPt": x, "yPt": y, "caret": caret
+            }));
+        }
         let pages: Vec<String> = document.pages().iter().map(svg_for_page).collect();
         println!(
             "PAGEFIXTURE:{}",

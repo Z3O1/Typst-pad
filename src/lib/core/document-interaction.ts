@@ -1,5 +1,19 @@
 // 整页交互只映射坐标与源码范围，不参与 Typst 排版。
 import { parser } from "codemirror-lang-typst/lezer";
+import type { SourceRange } from "./document-projection";
+
+/** 空白只移动插入点；已展开的源码内继续编辑，不因点到字间空白而收起。 */
+export function clickSourceRange(
+  doc: string,
+  pos: number,
+  current: SourceRange | null,
+  isWhitespace: boolean,
+): SourceRange | null {
+  if (current && pos >= current.from && pos <= current.to) return current;
+  if (isWhitespace) return null;
+  const range = sourceRevealRange(doc, pos);
+  return range.kind === "text" ? null : { from: range.from, to: range.to };
+}
 
 export function sourceRevealRange(
   doc: string,

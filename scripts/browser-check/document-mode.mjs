@@ -11,7 +11,8 @@ import {
   COMPILE_IDLE,
 } from "./harness.mjs";
 const fixtures = loadFixtures("page-fixtures.json", { hint: "先跑 npm run fixtures:pages" });
-const [original, edited, mathExpanded, mathEdited, tableExpanded, imageExpanded] = fixtures;
+const [original, edited, mathExpanded, mathEdited, tableExpanded, imageExpanded, whitespaceEdited] =
+  fixtures;
 const { check, state } = createChecker();
 const c = await connect();
 await boot(c, DEV_URL, { pageFixtures: fixtures });
@@ -119,6 +120,84 @@ await sleep(100);
 check(
   "拖动空白不触发光标命中",
   (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === hitsBeforeDrag,
+);
+async function moveOutAndBack(distance) {
+  const base = { x: dragPoint.x, y: dragPoint.y, button: "left", clickCount: 1 };
+  await c.send("Input.dispatchMouseEvent", { ...base, type: "mousePressed", buttons: 1 });
+  await c.send("Input.dispatchMouseEvent", {
+    ...base,
+    y: base.y + distance,
+    type: "mouseMoved",
+    buttons: 1,
+  });
+  await c.send("Input.dispatchMouseEvent", { ...base, type: "mouseMoved", buttons: 1 });
+  await c.send("Input.dispatchMouseEvent", { ...base, type: "mouseReleased", buttons: 0 });
+  await sleep(100);
+}
+await moveOutAndBack(20);
+check(
+  "拖动后回到起点仍不触发命中",
+  (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === hitsBeforeDrag,
+);
+await moveOutAndBack(2);
+check(
+  "轻微手抖仍视为正常点击",
+  (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === hitsBeforeDrag + 1,
+);
+const macroProbe = original.whitespaceHits.find((probe) => probe.name === "macro-side");
+if (!macroProbe?.caret?.isWhitespace) throw new Error("缺少宏输出旁的真实空白探针");
+const macroPoint = await whitespacePoint(macroProbe);
+const beforeMacroWhitespace = await count();
+await c.click(macroPoint.x, macroPoint.y);
+await c.waitFor(
+  `new TextEncoder().encode(window.__typstPadView.state.doc.sliceString(0,window.__typstPadView.state.selection.main.head)).length===${macroProbe.caret.offset} && window.__typstPadView.hasFocus`,
+);
+check(
+  "宏输出旁空白只移动光标，不触发源码展开或重新排版",
+  (await count()) === beforeMacroWhitespace &&
+    (await compiledPagesMatch(original)) &&
+    (await doc()) === original.doc,
+);
+const scrollBeforeRepeat = await c.evaluate("document.querySelector('.preview-body').scrollTop");
+await c.click(macroPoint.x, macroPoint.y);
+await c.waitFor("window.__typstPadView.hasFocus");
+check(
+  "重复空白点击保留输入焦点且不跳滚动位置",
+  Math.abs(
+    (await c.evaluate("document.querySelector('.preview-body').scrollTop")) - scrollBeforeRepeat,
+  ) < 1 && (await count()) === beforeMacroWhitespace,
+);
+const hitsBeforeTouch = await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0");
+await c.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+await c.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [macroPoint] });
+await c.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+await c.waitFor(
+  `window.__browserDevCallCounts.document_hit_test===${hitsBeforeTouch + 1} && window.__typstPadView.hasFocus`,
+);
+await c.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+check(
+  "触屏轻触不会被抬指后的 leave 误判为拖动",
+  (await count()) === beforeMacroWhitespace && (await doc()) === original.doc,
+);
+const inputProbe = original.whitespaceHits[5];
+const inputPoint = await whitespacePoint(inputProbe);
+await c.click(inputPoint.x, inputPoint.y);
+await c.waitFor(
+  `new TextEncoder().encode(window.__typstPadView.state.doc.sliceString(0,window.__typstPadView.state.selection.main.head)).length===${inputProbe.caret.offset} && window.__typstPadView.hasFocus`,
+);
+await c.type("续");
+await settled(whitespaceEdited);
+check(
+  "空白定位后可直接输入，仍通过唯一源码由 Typst 排版",
+  (await doc()) === whitespaceEdited.doc && (await compiledPagesMatch(whitespaceEdited)),
+);
+await c.key("z", { keyCode: 90, modifiers: 2 });
+await settled(original);
+check(
+  "空白定位后的输入可撤销且没有隐式写盘",
+  (await doc()) === original.doc &&
+    (await compiledPagesMatch(original)) &&
+    (await c.evaluate("!window.__browserDevWrites?.length")),
 );
 const beforeCompile = await count();
 const mathCaret = await hitAt("x^2");

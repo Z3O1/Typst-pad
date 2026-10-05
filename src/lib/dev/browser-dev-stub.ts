@@ -335,11 +335,12 @@ async function handleCommand(
       notify(command);
       if (!pageSnapshot || a.geometryId !== pageSnapshot.id) return null;
       // 空白点击消费 Rust 导出的真实命中结果，不用最近探针模拟行尾偏移。
+      // MouseEvent 的 CSS 像素坐标会取整，给夹具匹配留 1pt 容差。
       const whitespaceHit = pageSnapshot.fixture.whitespaceHits?.find(
         (p) =>
           p.page === a.page &&
-          Math.abs(p.xPt - Number(a.xPt)) < 0.25 &&
-          Math.abs(p.yPt - Number(a.yPt)) < 0.25,
+          Math.abs(p.xPt - Number(a.xPt)) < 1 &&
+          Math.abs(p.yPt - Number(a.yPt)) < 1,
       );
       if (whitespaceHit) return whitespaceHit.caret;
       const points = pageSnapshot.fixture.carets.filter((p) => p.page === a.page);

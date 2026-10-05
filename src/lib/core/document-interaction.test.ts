@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { nearestPageCoordinates, pageCoordinates, sourceRevealRange } from "./document-interaction";
+import {
+  clickSourceRange,
+  nearestPageCoordinates,
+  pageCoordinates,
+  sourceRevealRange,
+} from "./document-interaction";
 
 describe("整页交互", () => {
   it("缩放与滚动后的页面坐标沿用原始 viewBox", () => {
@@ -62,6 +67,25 @@ describe("整页交互", () => {
     expect(nearestPageCoordinates({ x: 5, y: 10 }, [hidden])).toBeNull();
     expect(nearestPageCoordinates({ x: NaN, y: 10 }, [visible])).toBeNull();
     expect(nearestPageCoordinates({ x: 5, y: 10 }, [hidden, visible])?.page).toBe(2);
+  });
+  it("空白落点只移动光标，不因邻近公式或脚本而展开；直接命中仍展开", () => {
+    for (const doc of ["正文 $x + y$", "正文 #text[宏输出]"]) {
+      const pos = doc.length;
+      expect(clickSourceRange(doc, pos, null, true)).toBeNull();
+      expect(clickSourceRange(doc, pos, null, false)).toEqual({
+        from: 3,
+        to: doc.length,
+      });
+    }
+    expect(clickSourceRange("普通正文", 2, null, false)).toBeNull();
+  });
+  it("已展开的源码内点击空白保留展开，离开其范围才收起", () => {
+    const doc = "正文 $x + y$ 后文";
+    const current = { from: 3, to: 10 };
+    for (const pos of [current.from, 6, current.to]) {
+      expect(clickSourceRange(doc, pos, current, true)).toBe(current);
+    }
+    expect(clickSourceRange(doc, doc.length, current, true)).toBeNull();
   });
   it("公式末尾和多行脚本内容展开完整源码", () => {
     const math = "正文 $x^2 + y$";

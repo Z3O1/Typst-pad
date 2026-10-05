@@ -11,7 +11,7 @@
   } from "$lib/core/typst-engine";
   import type { CompileErrorLocation, Diagnostic, DocumentCaret } from "$lib/core/typst-engine";
   import { byteOffsetsToPositions, positionsToByteOffsets } from "$lib/core/block-offsets";
-  import { sourceRevealRange } from "$lib/core/document-interaction";
+  import { clickSourceRange, sourceRevealRange } from "$lib/core/document-interaction";
   import {
     projectDocument,
     sourceDiagnostics,
@@ -331,6 +331,7 @@
   let inputPosition = $state<{ left: number; top: number; height: number } | null>(null);
   let documentCaret = $state<DocumentCaret | null>(null);
   let interactionSeq = 0;
+  let positioningFromPage = false;
 
   function currentInput(): string {
     return JSON.stringify([
@@ -373,18 +374,20 @@
       return;
     }
     const pos = Math.min(doc.length, sourcePos - prefix.length);
-    const range =
-      sourceRange && pos >= sourceRange.from && pos <= sourceRange.to
-        ? sourceRange
-        : sourceRevealRange(doc, pos);
-    const nextRange =
-      "kind" in range && range.kind === "text" ? null : { from: range.from, to: range.to };
+    const nextRange = clickSourceRange(doc, pos, sourceRange, hit.isWhitespace === true);
     const changed = JSON.stringify(nextRange) !== JSON.stringify(sourceRange);
     sourceOpen = true;
     sourceRange = nextRange;
     documentCaret = changed ? null : hit;
+    const clickedInput = currentInput();
     await tick();
-    editorRef?.revealAt(pos, sourceRange ?? undefined);
+    if (seq !== interactionSeq || clickedInput !== currentInput()) return;
+    positioningFromPage = true;
+    try {
+      editorRef?.revealAt(pos, sourceRange ?? undefined);
+    } finally {
+      positioningFromPage = false;
+    }
     if (changed) void compileNow("mode");
   }
 
@@ -709,7 +712,7 @@
   function handleCursor(line: number, col: number) {
     cursorLine = line;
     cursorCol = col;
-    if (viewMode === "write" && sourceOpen && !sourceRange) {
+    if (viewMode === "write" && sourceOpen && !sourceRange && !positioningFromPage) {
       const pos =
         doc
           .split("\n")
