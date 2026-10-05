@@ -6,7 +6,7 @@
 
 前端在 `src/routes/+page.svelte` 管理编译调度与结果应用：两种模式都调用 `compile_doc`，并将当前文档源码、文档路径和字体设置传入 Tauri 命令。未保存文档的路径为 `null`。Rust 命令位于 `src-tauri/src/compile_commands.rs`，排版引擎位于 `src-tauri/src/typst_world/`。
 
-编译在 `spawn_blocking` 中执行，并由 `CompileState` 的互斥锁串行化，避免 Typst 编译任务并行使用该状态。前端用编译序号和会话/文档/上下文指纹忽略过期结果。文档模式编译失败时，前端把主文档的出错表达式临时投影为源码并重试整页编译，保留结构化错误诊断；源码模式或无法恢复的错误保留最后一次成功的预览。诊断映射回用户文档行列并形成编辑器标记，警告则在状态栏呈现。错误回退只改变预览输入，不修改原文或 PDF 导出输入，详见[文档模式](writing-rendering.md)。
+编译在 `spawn_blocking` 中执行，并由 `CompileState` 的互斥锁串行化，避免 Typst 编译任务并行使用该状态。前端用编译序号和会话/文档/上下文指纹忽略过期结果。编译失败时保留最后一次成功的预览；结构化诊断映射回用户文档行列并形成编辑器标记，警告则在状态栏呈现。
 
 `compile_doc` 返回 `CompileOutput { ok, pages, geometryId, diagnostics, warnings }`；正常的排版错误以 `ok: false` 返回，`Err` 留给任务异常终止。成功产物携带整页命中编号，失败产物不携带编号。诊断行列从 1 开始，结束位置为独占边界；Rust 序列化省略主文档的 `path`，前端仍把桥接桩或旧 IPC 形状里的 `null` / 空字符串归一为“主文档”，以兼容无路径诊断。前端位置换算由 `src/lib/core/diagnostics-utils.ts` 负责；产品编译不注入随容器变化的页面设置。
 

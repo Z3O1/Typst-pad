@@ -232,8 +232,6 @@ interface PageFixture {
   doc: string;
   pages: string[];
   carets: import("../core/typst-engine").DocumentCaret[];
-  brokenDoc?: string | null;
-  diagnostics?: Diagnostic[] | null;
 }
 let pageSnapshot: { id: number; fixture: PageFixture } | null = null;
 let pageGeometrySeq = 0;
@@ -293,17 +291,13 @@ async function handleCommand(
         fontDirs: Array.isArray(a.fontDirs) ? a.fontDirs : null,
         documentPath: typeof a.documentPath === "string" ? a.documentPath : null,
       };
-      // 恢复夹具的失败诊断与成功 SVG 都来自原生编译，桩不模拟错误范围或排版。
-      const brokenFixture = pageFixtures().find((fixture) => fixture.brokenDoc === src);
-      if (brokenFixture) return { ok: false, diagnostics: brokenFixture.diagnostics };
       // 假编译错误：文档里出现标记 `DIAG-ERROR-MARKER` 时返回一条**主源错误诊断**，
       // 专门给验收锁住"编译错误必须在编辑器里画红波浪线"这条链路。
       // **故意发 `path: null`**：那是 Rust 0.4.0~0.8.2 的真实写法，前端的判据必须容忍它
       // （曾经只认 undefined/""，于是桌面版从 0.4.0 起一条波浪线都不画 —— 桩过去干脆不发
       // path 字段，所以浏览器验收一直抓不到，2026-09-18 才查出来）。Rust 侧现在改成
       // "主源不带 path 键"，那条由 typst_world/tests.rs 的序列化单测锁。
-      const external = src.includes("DIAG-EXTERNAL-ERROR-MARKER");
-      const marker = external ? "DIAG-EXTERNAL-ERROR-MARKER" : "DIAG-ERROR-MARKER";
+      const marker = "DIAG-ERROR-MARKER";
       const at = src.indexOf(marker);
       if (at >= 0) {
         const before = src.slice(0, at);
@@ -319,7 +313,7 @@ async function handleCommand(
               column,
               endLine: line,
               endColumn: column + marker.length,
-              path: external ? "broken.typ" : null,
+              path: null,
             },
           ],
         };

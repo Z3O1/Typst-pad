@@ -11,83 +11,42 @@ export interface DocumentProjection {
   renderedToSource(pos: number): number;
 }
 
-export interface ProjectionRange extends SourceRange {
-  // 错误声明不能再次执行；正常的手动展开仍保留作用域与副作用。
-  preserveDeclaration?: boolean;
-}
-
 export function projectDocument(source: string, range: SourceRange | null): DocumentProjection {
-  return projectDocumentRanges(source, range ? [range] : []);
-}
-
-export function mergeProjectionRanges(ranges: ProjectionRange[]): ProjectionRange[] {
-  const merged: ProjectionRange[] = [];
-  for (const range of [...ranges].sort((a, b) => a.from - b.from)) {
-    if (range.to <= range.from) continue;
-    const previous = merged.at(-1);
-    // 相邻 raw 的结束/开始围栏会拼成一串反引号，必须合为一个区间。
-    if (previous && range.from <= previous.to) {
-      previous.to = Math.max(previous.to, range.to);
-      if (range.preserveDeclaration === false) previous.preserveDeclaration = false;
-    } else merged.push({ ...range });
+  if (!range || range.to <= range.from) {
+    return {
+      source,
+      original: source,
+      sourceToRendered: (pos) => pos,
+      renderedToSource: (pos) => pos,
+    };
   }
-  return merged;
-}
-
-export function projectDocumentRanges(
-  source: string,
-  ranges: ProjectionRange[],
-): DocumentProjection {
-  const normalized = mergeProjectionRanges(
-    ranges.map((range) => ({
-      ...range,
-      from: Math.max(0, Math.min(range.from, source.length)),
-      to: Math.max(0, Math.min(range.to, source.length)),
-    })),
-  );
-  let offset = 0;
-  let previousEnd = 0;
-  let rendered = "";
-  const segments = normalized.map(({ from, to, preserveDeclaration }) => {
-    const text = source.slice(from, to);
-    const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
-    const block = text.includes("\n") || longest >= 2;
-    const fence = "`".repeat(Math.max(block ? 3 : 1, longest + 1));
-    const declaration =
-      preserveDeclaration !== false && /^#(?:let|set|show)\b/.test(text) ? `${text}\n` : "";
-    const head = declaration + (block ? `${fence}typ\n` : `${fence} `);
-    const tail = block ? `\n${fence}` : ` ${fence}`;
-    const start = from + offset;
-    const textStart = start + head.length;
-    const textEnd = textStart + text.length;
-    const added = head.length + tail.length;
-    rendered += source.slice(previousEnd, from) + head + text + tail;
-    previousEnd = to;
-    offset += added;
-    return { from, to, start, textStart, textEnd, end: to + offset, added };
-  });
+  const from = Math.max(0, Math.min(range.from, source.length));
+  const to = Math.max(from, Math.min(range.to, source.length));
+  const text = source.slice(from, to);
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
+  const block = text.includes("\n") || longest >= 2;
+  const fence = "`".repeat(Math.max(block ? 3 : 1, longest + 1));
+  // 声明保留作用域与副作用，避免展开宏定义后让后续调用失效。
+  const declaration = /^#(?:let|set|show)\b/.test(text) ? `${text}\n` : "";
+  const head = declaration + (block ? `${fence}typ\n` : `${fence} `);
+  const tail = block ? `\n${fence}` : ` ${fence}`;
+  const renderedStart = from + head.length;
+  const renderedEnd = renderedStart + text.length;
+  const added = head.length + tail.length;
   return {
-    source: rendered + source.slice(previousEnd),
+    source: source.slice(0, from) + head + text + tail + source.slice(to),
     original: source,
     sourceToRendered(pos) {
-      let delta = 0;
-      for (const segment of segments) {
-        if (pos < segment.from) break;
-        if (pos <= segment.to) return segment.textStart + pos - segment.from;
-        delta += segment.added;
-      }
-      return pos + delta;
+      if (pos < from) return pos;
+      if (pos <= to) return renderedStart + pos - from;
+      return pos + added;
     },
     renderedToSource(pos) {
-      let delta = 0;
-      for (const segment of segments) {
-        if (pos < segment.start) break;
-        if (pos < segment.textStart) return segment.from;
-        if (pos <= segment.textEnd) return segment.from + pos - segment.textStart;
-        if (pos < segment.end) return segment.to;
-        delta += segment.added;
-      }
-      return pos - delta;
+      if (pos < from) return pos;
+      if (pos < renderedStart) return from;
+      if (pos <= renderedEnd) return from + pos - renderedStart;
+      if (pos < to + added) return to;
+      return pos - added;
     },
   };
 }
