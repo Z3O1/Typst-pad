@@ -34,6 +34,8 @@ export async function compileDocumentWithFallback(options: {
   recover: boolean;
   compile: (source: string) => Promise<CompileResult>;
   isCurrent: () => boolean;
+  // 在途编译允许结束，但后续恢复轮次必须尊重调度器的输入法暂停。
+  canRetry?: () => boolean;
 }): Promise<DocumentCompileResult> {
   const { source, prefixLength, reveal, recover, compile, isCurrent } = options;
   let ranges: ProjectionRange[] = reveal ? [reveal] : [];
@@ -85,6 +87,7 @@ export async function compileDocumentWithFallback(options: {
       );
     }
     if (!additions.some((range) => range.to > range.from)) return stop();
+    if (options.canRetry && !options.canRetry()) return stop();
     const next = mergeProjectionRanges([...errorRanges, ...additions]);
     // 残缺语法可能没有完整表达式边界；局部替换仍失败时安全退回整段正文。
     // 有限重试避免错误声明造成大量级联调用，使编译调度长期被占用。

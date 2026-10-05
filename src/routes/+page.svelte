@@ -1212,6 +1212,12 @@
       recover: mode === "write",
       compile: (src) => compileToSvg(src, path, fonts),
       isCurrent,
+      canRetry: () => {
+        if (!writeScheduler.stats().composing) return true;
+        // 留下一份需求，合成结束后再从最终原文重新诊断与恢复。
+        scheduleCompile();
+        return false;
+      },
     });
     if (mySeq === 1) {
       mark("first-compile-result");

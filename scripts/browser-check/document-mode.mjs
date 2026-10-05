@@ -291,6 +291,29 @@ await c.waitFor(`window.__browserDevCallCounts.compile_doc>${imeBefore}`);
 check("合成结束合并编译", (await count()) === imeBefore + 1);
 await boot(c, `${DEV_URL}&compileslow=1`, { pageFixtures: fixtures });
 await replace(original.doc);
+const recoveryImeBefore = await count();
+await c.evaluate(
+  `window.__typstPadView.dispatch({changes:{from:0,to:window.__typstPadView.state.doc.length,insert:${JSON.stringify(errorRecovered.brokenDoc)}}})`,
+);
+await c.waitFor("window.__typstPadScheduleStats?.().inFlight === true");
+await c.evaluate(
+  "document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}))",
+);
+await c.waitFor(
+  "(() => {const s=window.__typstPadScheduleStats?.();return s?.composing && !s.inFlight})()",
+);
+check(
+  "在途失败遇到输入法合成时不启动恢复重试",
+  (await count()) === recoveryImeBefore + 1 &&
+    (await c.evaluate("window.__typstPadScheduleStats?.().pending === true")),
+);
+await c.evaluate(
+  "document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))",
+);
+await settled(errorRecovered);
+check("合成结束重新诊断并恢复错误源码", await compiledPagesMatch(errorRecovered));
+await boot(c, `${DEV_URL}&compileslow=1`, { pageFixtures: fixtures });
+await replace(original.doc);
 await hitAt("x^2");
 await c.evaluate(
   "window.__typstPadView.dispatch({changes:{from:0,insert:'新'},selection:{anchor:1}})",

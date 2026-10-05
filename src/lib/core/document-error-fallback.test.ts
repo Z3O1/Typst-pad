@@ -158,6 +158,24 @@ describe("文档模式编译错误源码回退", () => {
     expect(compile).toHaveBeenCalledTimes(1);
   });
 
+  it("输入法合成期间暂停恢复重试，合成结束后可以重新恢复", async () => {
+    const source = "#missing()";
+    let composing = true;
+    const compile = vi
+      .fn()
+      .mockImplementation(async (src: string) => (src === source ? fail(source, ["missing"]) : ok));
+    const canRetry = vi.fn(() => !composing);
+    const request = { ...options(source), compile, canRetry };
+    const deferred = await compileDocumentWithFallback(request);
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(deferred.result.ok).toBe(false);
+    expect(canRetry).toHaveBeenCalledTimes(1);
+    composing = false;
+    const resumed = await compileDocumentWithFallback(request);
+    expect(compile).toHaveBeenCalledTimes(3);
+    expect(resumed.result.ok).toBe(true);
+  });
+
   it("修复后的请求从原文重新编译，不保留回退区域", async () => {
     const compile = vi.fn().mockResolvedValue(ok);
     const output = await compileDocumentWithFallback({ ...options("正文 $x^2$"), compile });
