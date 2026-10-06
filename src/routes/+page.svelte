@@ -11,7 +11,7 @@
   } from "$lib/core/typst-engine";
   import type { CompileErrorLocation, Diagnostic, DocumentCaret } from "$lib/core/typst-engine";
   import { byteOffsetsToPositions, positionsToByteOffsets } from "$lib/core/block-offsets";
-  import { sourceRevealRange } from "$lib/core/document-interaction";
+  import { clickSourceRange, sourceRevealRange } from "$lib/core/document-interaction";
   import { compileDocumentWithFallback } from "$lib/core/document-error-fallback";
   import {
     projectDocument,
@@ -333,6 +333,7 @@
   let inputPosition = $state<{ left: number; top: number; height: number } | null>(null);
   let documentCaret = $state<DocumentCaret | null>(null);
   let interactionSeq = 0;
+  let positioningFromPage = false;
 
   function currentInput(): string {
     return JSON.stringify([
@@ -380,15 +381,10 @@
       previousEdit && pos >= previousEdit.from && pos <= previousEdit.to
         ? previousEdit
         : documentErrorRanges.find((range) => pos >= range.from && pos <= range.to);
-    const range =
-      sourceRange && pos >= sourceRange.from && pos <= sourceRange.to
-        ? sourceRange
-        : (errorRange ?? sourceRevealRange(doc, pos));
-    // 错误区的编辑锁独立于手动展开，仍先诊断原文，不用 raw 遮住真实错误。
-    const nextRange =
-      errorRange || ("kind" in range && range.kind === "text")
-        ? null
-        : { from: range.from, to: range.to };
+    // 错误区的编辑锁独立于手动展开；空白落点只移动光标，不展开邻近公式或脚本。
+    const nextRange = errorRange
+      ? null
+      : clickSourceRange(doc, pos, sourceRange, hit.isWhitespace === true);
     const changed =
       JSON.stringify(nextRange) !== JSON.stringify(sourceRange) ||
       (previousEdit !== null && previousEdit !== errorRange);
@@ -396,8 +392,15 @@
     sourceOpen = true;
     sourceRange = nextRange;
     documentCaret = changed ? null : hit;
+    const clickedInput = currentInput();
     await tick();
-    editorRef?.revealAt(pos, sourceRange ?? errorRange);
+    if (seq !== interactionSeq || clickedInput !== currentInput()) return;
+    positioningFromPage = true;
+    try {
+      editorRef?.revealAt(pos, sourceRange ?? errorRange);
+    } finally {
+      positioningFromPage = false;
+    }
     if (changed || (previousEdit !== errorEditRange && writeScheduler.stats().inFlight))
       void compileNow("mode");
   }
@@ -735,7 +738,7 @@
   function handleCursor(line: number, col: number) {
     cursorLine = line;
     cursorCol = col;
-    if (viewMode === "write" && sourceOpen && !sourceRange) {
+    if (viewMode === "write" && sourceOpen && !sourceRange && !positioningFromPage) {
       const pos =
         doc
           .split("\n")

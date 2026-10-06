@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use serde::Serialize;
 use typst::layout::{Abs, Rect};
 
-use crate::block_geometry::{pick_hit_item, PlacedItem};
+use crate::block_geometry::{pick_hit_item, PlacedItem, PlacedItemKind};
 
 struct Snapshot {
     id: u64,
@@ -29,6 +29,9 @@ pub struct DocumentCaret {
     pub y_pt: f64,
     pub height_pt: f64,
     pub rotation_deg: f64,
+    // 只有点击命中携带此标记；源码光标查询不带点击意图。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_whitespace: Option<bool>,
 }
 
 pub fn store(items: Vec<PlacedItem>, source_len: usize, foreign_ink: Vec<(usize, Rect)>) -> u64 {
@@ -61,7 +64,44 @@ pub(crate) fn caret_for_item(item: &PlacedItem, offset: usize) -> DocumentCaret 
         rotation_deg: (-item.caret_vector.x.to_pt())
             .atan2(item.caret_vector.y.to_pt())
             .to_degrees(),
+        is_whitespace: None,
     }
+}
+
+fn hit_for_item(item: &PlacedItem, offset: usize, is_whitespace: bool) -> DocumentCaret {
+    let mut caret = caret_for_item(item, offset);
+    caret.is_whitespace = Some(is_whitespace);
+    caret
+}
+
+fn text_in_rect(snapshot: &Snapshot, page: usize, rect: Rect) -> impl Iterator<Item = &PlacedItem> {
+    snapshot.items.iter().filter(move |candidate| {
+        candidate.page == page
+            && candidate.kind == PlacedItemKind::Text
+            && candidate.range.start < snapshot.source_len
+            && candidate.range.end > 0
+            && candidate.rect.min.x >= rect.min.x
+            && candidate.rect.max.x <= rect.max.x
+            && candidate.rect.min.y >= rect.min.y
+            && candidate.rect.max.y <= rect.max.y
+    })
+}
+
+fn axis_gap(min: Abs, max: Abs, value: Abs) -> f64 {
+    (min - value).max(value - max).max(Abs::zero()).to_pt()
+}
+
+fn horizontal_text(item: &PlacedItem) -> bool {
+    item.kind == PlacedItemKind::Text
+        && (item.caret_end.y - item.caret_start.y).to_pt().abs() < 0.001
+        && item.caret_vector.x.to_pt().abs() < 0.001
+}
+
+fn same_text_row(a: &PlacedItem, b: &PlacedItem) -> bool {
+    horizontal_text(a)
+        && horizontal_text(b)
+        && ((a.baseline_pt - b.baseline_pt).abs() < 0.5
+            || (a.rect.min.y < b.rect.max.y && a.rect.max.y > b.rect.min.y))
 }
 
 pub fn hit_test(id: u64, page: usize, x_pt: f64, y_pt: f64) -> Option<DocumentCaret> {
@@ -78,8 +118,103 @@ pub fn hit_test(id: u64, page: usize, x_pt: f64, y_pt: f64) -> Option<DocumentCa
     }) {
         return None;
     }
-    let (item, offset) = pick_hit_item(&snapshot.items, 0, snapshot.source_len, page, x, y)?;
-    Some(caret_for_item(item, offset))
+    let (mut item, mut offset) =
+        pick_hit_item(&snapshot.items, 0, snapshot.source_len, page, x, y)?;
+    // 带填充的文字块在字外仍能命中背景 Shape；应按它包围的正文定位，
+    // 不能把背景空白误当作点击宏定义。独立图形/图片仍保留直接命中行为。
+    if item.kind == PlacedItemKind::Shape {
+        let background = item.rect;
+        let text = text_in_rect(snapshot, page, background).min_by(|a, b| {
+            axis_gap(a.rect.min.y, a.rect.max.y, y)
+                .total_cmp(&axis_gap(b.rect.min.y, b.rect.max.y, y))
+                .then_with(|| {
+                    axis_gap(a.rect.min.x, a.rect.max.x, x).total_cmp(&axis_gap(
+                        b.rect.min.x,
+                        b.rect.max.x,
+                        x,
+                    ))
+                })
+                .then_with(|| a.range.len().cmp(&b.range.len()))
+        });
+        if let Some(text) = text {
+            (item, offset) = pick_hit_item(
+                std::slice::from_ref(text),
+                0,
+                snapshot.source_len,
+                page,
+                x,
+                y,
+            )?;
+        }
+    }
+    if x >= item.rect.min.x && x <= item.rect.max.x && y >= item.rect.min.y && y <= item.rect.max.y
+    {
+        return Some(hit_for_item(item, offset, false));
+    }
+    // 空白先选行，再在该行选横向位置，避免行侧点击被高字/上标吸走。
+    // 页首/尾空白仍落到首/尾行边界，不生成空格，也不借用另一页的输出。
+    let candidates = || {
+        snapshot.items.iter().filter(|item| {
+            item.page == page && item.range.start < snapshot.source_len && item.range.end > 0
+        })
+    };
+    let edge = if y >= item.rect.min.y && y <= item.rect.max.y {
+        None
+    } else {
+        let top =
+            candidates().min_by(|a, b| a.rect.min.y.to_pt().total_cmp(&b.rect.min.y.to_pt()))?;
+        let bottom =
+            candidates().max_by(|a, b| a.rect.max.y.to_pt().total_cmp(&b.rect.max.y.to_pt()))?;
+        if y < top.rect.min.y {
+            Some((top, false))
+        } else if y > bottom.rect.max.y {
+            Some((bottom, true))
+        } else {
+            None
+        }
+    };
+    let (seed, at_end) = edge.map_or((item, None), |(seed, end)| (seed, Some(end)));
+    // 页首尾也忽略正文背景的声明 span，保持光标落在实际显示的内容里。
+    let seed = if seed.kind == PlacedItemKind::Shape && at_end.is_some() {
+        text_in_rect(snapshot, page, seed.rect)
+            .min_by(|a, b| {
+                if at_end == Some(true) {
+                    b.rect.max.y.to_pt().total_cmp(&a.rect.max.y.to_pt())
+                } else {
+                    a.rect.min.y.to_pt().total_cmp(&b.rect.min.y.to_pt())
+                }
+            })
+            .unwrap_or(seed)
+    } else {
+        seed
+    };
+    let horizontal_gap = |item: &PlacedItem| axis_gap(item.rect.min.x, item.rect.max.x, x);
+    item = candidates()
+        .filter(|candidate| std::ptr::eq(*candidate, seed) || same_text_row(seed, candidate))
+        .min_by(|a, b| {
+            match at_end {
+                Some(true) => b.rect.max.x.to_pt().total_cmp(&a.rect.max.x.to_pt()),
+                Some(false) => a.rect.min.x.to_pt().total_cmp(&b.rect.min.x.to_pt()),
+                None => horizontal_gap(a).total_cmp(&horizontal_gap(b)),
+            }
+            .then_with(|| a.range.len().cmp(&b.range.len()))
+        })?;
+    offset = match at_end {
+        Some(true) => item.range.end.min(snapshot.source_len),
+        Some(false) => item.range.start,
+        None => {
+            pick_hit_item(
+                std::slice::from_ref(item),
+                0,
+                snapshot.source_len,
+                page,
+                x,
+                y,
+            )?
+            .1
+        }
+    };
+    Some(hit_for_item(item, offset, true))
 }
 
 pub fn locate(id: u64, offset: usize) -> Option<DocumentCaret> {
@@ -121,6 +256,92 @@ mod tests {
             typst::layout::Transform::identity(),
         )
     }
+    #[test]
+    fn whitespace_hits_line_edges_and_page_visual_edges_without_changing_source() {
+        let make = |from, to, x, y| {
+            PlacedItem::new(
+                1,
+                from..to,
+                Rect::new(
+                    Point::new(Abs::pt(x), Abs::pt(y)),
+                    Point::new(Abs::pt(x + 10.0), Abs::pt(y + 12.0)),
+                ),
+                y + 10.0,
+                crate::block_geometry::PlacedItemKind::Text,
+                typst::layout::Transform::identity(),
+            )
+        };
+        // 打乱收集顺序，视觉首尾不能依赖源码顺序或点击的横坐标。
+        let id = store(
+            vec![
+                make(6, 9, 30.0, 60.0),
+                make(3, 6, 30.0, 30.0),
+                make(9, 12, 40.0, 60.0),
+                make(0, 3, 20.0, 30.0),
+            ],
+            12,
+            vec![],
+        );
+        for (x, y, offset) in [
+            (0.0, 35.0, 0),    // 左侧空白 → 此行行首
+            (200.0, 35.0, 6),  // 右侧空白 → 此行行尾（不是文档尾）
+            (0.0, 65.0, 6),    // 第二行行首
+            (200.0, 65.0, 12), // 第二行行尾
+            (200.0, 0.0, 0),   // 上方空白 → 首字符之前
+            (0.0, 200.0, 12),  // 下方空白 → 末字符之后
+            (200.0, 45.0, 6),  // 行间空白靠近上一行
+            (0.0, 55.0, 6),    // 行间空白靠近下一行
+        ] {
+            let hit = hit_test(id, 1, x, y).unwrap();
+            assert_eq!(hit.offset, offset, "({x}, {y})");
+            assert_eq!(hit.page, 1);
+            assert_eq!(hit.height_pt, 12.0);
+        }
+        assert!(hit_test(id, 2, 20.0, 30.0).is_none());
+        let empty = store(vec![], 0, vec![]);
+        assert!(hit_test(empty, 1, 200.0, 200.0).is_none());
+        assert!(locate(empty, 0).is_none());
+    }
+
+    #[test]
+    fn side_whitespace_chooses_horizontal_position_within_a_mixed_height_line() {
+        let make = |from, to, x, top, bottom| {
+            PlacedItem::new(
+                1,
+                from..to,
+                Rect::new(
+                    Point::new(Abs::pt(x), Abs::pt(top)),
+                    Point::new(Abs::pt(x + 10.0), Abs::pt(bottom)),
+                ),
+                45.0,
+                crate::block_geometry::PlacedItemKind::Text,
+                typst::layout::Transform::identity(),
+            )
+        };
+        let id = store(
+            vec![make(0, 3, 20.0, 30.0, 50.0), make(3, 6, 30.0, 39.0, 42.0)],
+            6,
+            vec![],
+        );
+        for y in [31.0, 40.0, 49.0] {
+            let left = hit_test(id, 1, 0.0, y).unwrap();
+            let right = hit_test(id, 1, 200.0, y).unwrap();
+            assert_eq!(left.offset, 0);
+            assert_eq!(right.offset, 6, "行尾不能被高字吸走：{y}");
+            assert_eq!(right.is_whitespace, Some(true));
+        }
+        let direct = hit_test(id, 1, 31.0, 40.0).unwrap();
+        assert_eq!(direct.offset, 3);
+        assert_eq!(direct.is_whitespace, Some(false));
+        assert_eq!(locate(id, 3).unwrap().is_whitespace, None);
+        let serialized = serde_json::to_value(hit_test(id, 1, 200.0, 31.0).unwrap()).unwrap();
+        assert_eq!(serialized["isWhitespace"], true);
+        assert!(serde_json::to_value(locate(id, 3).unwrap())
+            .unwrap()
+            .get("isWhitespace")
+            .is_none());
+    }
+
     #[test]
     fn full_page_hit_and_cursor_keep_compilation_identity() {
         let first = store(vec![item(2, 3, 6)], 9, vec![]);

@@ -306,6 +306,10 @@ describe("整页交互 IPC", () => {
     });
     expect(await locateDocumentCursor(42, 3)).toEqual(caret);
     expect(invoke).toHaveBeenLastCalledWith("document_cursor", { geometryId: 42, offset: 3 });
+    vi.mocked(invoke).mockResolvedValue({ ...caret, isWhitespace: true });
+    expect(await hitTestDocument(42, 2, 0, 20)).toEqual({ ...caret, isWhitespace: true });
+    vi.mocked(invoke).mockResolvedValue({ ...caret, isWhitespace: "true" });
+    expect(await hitTestDocument(42, 2, 0, 20)).toBeNull();
     vi.mocked(invoke).mockResolvedValue({ ...caret, offset: -1 });
     expect(await locateDocumentCursor(42, 3)).toBeNull();
     vi.mocked(invoke).mockRejectedValue(new Error("missing command"));

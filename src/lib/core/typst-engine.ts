@@ -251,6 +251,8 @@ export interface DocumentCaret {
   yPt: number;
   heightPt: number;
   rotationDeg?: number;
+  /** 仅点击命中携带；空白落点不自动展开邻近表达式。 */
+  isWhitespace?: boolean;
 }
 
 function validCaret(value: DocumentCaret | null): DocumentCaret | null {
@@ -261,7 +263,8 @@ function validCaret(value: DocumentCaret | null): DocumentCaret | null {
     value.page > 0 &&
     [value.xPt, value.yPt, value.heightPt].every(Number.isFinite) &&
     value.heightPt > 0 &&
-    (value.rotationDeg === undefined || Number.isFinite(value.rotationDeg))
+    (value.rotationDeg === undefined || Number.isFinite(value.rotationDeg)) &&
+    (value.isWhitespace === undefined || typeof value.isWhitespace === "boolean")
     ? value
     : null;
 }
