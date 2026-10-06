@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { parser } from "codemirror-lang-typst/lezer";
 import {
   clickSourceRange,
   nearestPageCoordinates,
@@ -86,6 +87,23 @@ describe("整页交互", () => {
       expect(clickSourceRange(doc, pos, current, true)).toBe(current);
     }
     expect(clickSourceRange(doc, doc.length, current, true)).toBeNull();
+  });
+  it("同一文档的诊断与光标移动共用一次解析，编辑后不复用旧树", () => {
+    const doc = "缓存测试 #block[中文🙂 #missing()] 后文 $x$";
+    const parse = vi.spyOn(parser, "parse");
+    try {
+      for (let i = 0; i < 100; i++) {
+        const range = sourceRevealRange(doc, doc.indexOf("missing"), true);
+        expect(doc.slice(range.from, range.to)).toBe("#block[中文🙂 #missing()]");
+      }
+      expect(parse).toHaveBeenCalledTimes(1);
+      const edited = "前缀 " + doc;
+      const range = sourceRevealRange(edited, edited.indexOf("missing"), true);
+      expect(range.from).toBe(doc.indexOf("#block") + 3);
+      expect(parse).toHaveBeenCalledTimes(2);
+    } finally {
+      parse.mockRestore();
+    }
   });
   it("公式末尾和多行脚本内容展开完整源码", () => {
     const math = "正文 $x^2 + y$";

@@ -371,6 +371,37 @@ fn raw_source_expansion_keeps_character_spans_and_full_pages() {
     }
 }
 
+#[test]
+fn document_error_source_projections_compile() {
+    for (broken, projected) in [
+        ("前文 $unknown$ 后文", "前文 ` $unknown$ ` 后文"),
+        (
+            "前文 #block[内容 #missing()] 后文",
+            "前文 ` #block[内容 #missing()] ` 后文",
+        ),
+        (
+            "#let x = unknown\n正文 #x",
+            "` #let x = unknown `\n正文 ` #x `",
+        ),
+        ("正文 $ x^", "` 正文 $ x^ `"),
+        ("```typ\n", "````typ\n```typ\n\n````"),
+        (
+            "#table(\n columns: missing,\n [甲],\n)\n正文",
+            "```typ\n#table(\n columns: missing,\n [甲],\n)\n```\n正文",
+        ),
+    ] {
+        let failure = compile(broken.into(), None, &fonts_dir(), &FontConfig::default());
+        assert!(!failure.ok, "原文必须确实出错：{broken}");
+        let recovered = compile(projected.into(), None, &fonts_dir(), &FontConfig::default());
+        assert!(
+            recovered.ok,
+            "源码回退必须可排版：{:?}",
+            recovered.diagnostics
+        );
+        assert!(recovered.geometry_id.is_some(), "回退源码仍需可交互");
+    }
+}
+
 /// 浏览器只消费原生整页 SVG 和命中探针，不伪造 Typst 的正文、公式、表格与图片。
 #[test]
 #[ignore]
@@ -381,6 +412,11 @@ fn dump_page_fixtures() {
     let image_start = original.find("#image(").unwrap();
     let image_end = original[image_start..].find("\n\n").unwrap() + image_start;
     let image = &original[image_start..image_end];
+    let broken = original.replace("$x^2 + y$", "$unknown$");
+    let recovery_diagnostics =
+        compile(broken.clone(), None, &fonts_dir(), &FontConfig::default()).diagnostics;
+    assert!(!recovery_diagnostics.is_empty());
+    let recovered = broken.replace("$unknown$", "` $unknown$ `");
     for src in [
         original.clone(),
         edited.clone(),
@@ -392,6 +428,7 @@ fn dump_page_fixtures() {
             "第二页使用不同纸型，仍由 Typst 完整呈现。",
             "第二页使用不同纸型，仍由 Typst 完整呈现。续",
         ),
+        recovered.clone(),
     ] {
         let world = TypstWorld::new(src.clone(), None, &fonts_dir(), &FontConfig::default());
         let document = typst::compile::<PagedDocument>(&world)
@@ -440,7 +477,11 @@ fn dump_page_fixtures() {
         let pages: Vec<String> = document.pages().iter().map(svg_for_page).collect();
         println!(
             "PAGEFIXTURE:{}",
-            serde_json::json!({ "doc": src, "pages": pages, "carets": carets, "whitespaceHits": whitespace_hits })
+            serde_json::json!({ "doc": src, "pages": pages, "carets": carets,
+                "whitespaceHits": whitespace_hits,
+                "brokenDoc": if src == recovered { Some(&broken) } else { None },
+                "diagnostics": if src == recovered { Some(&recovery_diagnostics) } else { None },
+            })
         );
     }
 }

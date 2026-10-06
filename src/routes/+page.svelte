@@ -12,9 +12,9 @@
   import type { CompileErrorLocation, Diagnostic, DocumentCaret } from "$lib/core/typst-engine";
   import { byteOffsetsToPositions, positionsToByteOffsets } from "$lib/core/block-offsets";
   import { clickSourceRange, sourceRevealRange } from "$lib/core/document-interaction";
+  import { compileDocumentWithFallback } from "$lib/core/document-error-fallback";
   import {
     projectDocument,
-    sourceDiagnostics,
     type SourceRange,
     type DocumentProjection,
   } from "$lib/core/document-projection";
@@ -327,6 +327,8 @@
   let documentGeometryId = $state(0);
   let sourceOpen = $state(false);
   let sourceRange = $state<SourceRange | null>(null);
+  let documentErrorRanges: SourceRange[] = [];
+  let errorEditRange: SourceRange | null = null;
   let renderedProjection: DocumentProjection = projectDocument("", null);
   let inputPosition = $state<{ left: number; top: number; height: number } | null>(null);
   let documentCaret = $state<DocumentCaret | null>(null);
@@ -374,8 +376,19 @@
       return;
     }
     const pos = Math.min(doc.length, sourcePos - prefix.length);
-    const nextRange = clickSourceRange(doc, pos, sourceRange, hit.isWhitespace === true);
-    const changed = JSON.stringify(nextRange) !== JSON.stringify(sourceRange);
+    const previousEdit = errorEditRange;
+    const errorRange =
+      previousEdit && pos >= previousEdit.from && pos <= previousEdit.to
+        ? previousEdit
+        : documentErrorRanges.find((range) => pos >= range.from && pos <= range.to);
+    // 错误区的编辑锁独立于手动展开；空白落点只移动光标，不展开邻近公式或脚本。
+    const nextRange = errorRange
+      ? null
+      : clickSourceRange(doc, pos, sourceRange, hit.isWhitespace === true);
+    const changed =
+      JSON.stringify(nextRange) !== JSON.stringify(sourceRange) ||
+      (previousEdit !== null && previousEdit !== errorRange);
+    errorEditRange = errorRange ?? null;
     sourceOpen = true;
     sourceRange = nextRange;
     documentCaret = changed ? null : hit;
@@ -384,17 +397,19 @@
     if (seq !== interactionSeq || clickedInput !== currentInput()) return;
     positioningFromPage = true;
     try {
-      editorRef?.revealAt(pos, sourceRange ?? undefined);
+      editorRef?.revealAt(pos, sourceRange ?? errorRange);
     } finally {
       positioningFromPage = false;
     }
-    if (changed) void compileNow("mode");
+    if (changed || (previousEdit !== errorEditRange && writeScheduler.stats().inFlight))
+      void compileNow("mode");
   }
 
   function closeSource(): void {
-    const expanded = sourceRange !== null;
+    const expanded = sourceRange !== null || errorEditRange !== null;
     sourceOpen = false;
     sourceRange = null;
+    errorEditRange = null;
     interactionSeq++;
     previewPaneRef?.body()?.focus();
     if (expanded) void compileNow("mode");
@@ -685,10 +700,21 @@
   function toggleViewMode() {
     editorRef?.captureCaretAnchor();
     interactionSeq++;
-    const expanded = sourceRange !== null;
+    const needsCompile =
+      sourceRange !== null ||
+      errorEditRange !== null ||
+      documentErrorRanges.length > 0 ||
+      errorCount > 0 ||
+      previewError !== "" ||
+      writeScheduler.stats().inFlight;
     sourceRange = null;
+    errorEditRange = null;
     viewMode = viewMode === "write" ? "source" : "write";
-    if (expanded) void compileNow("mode");
+    if (needsCompile) {
+      documentGeometryId = 0;
+      documentCaret = null;
+      void compileNow("mode");
+    }
     showPreview = viewMode === "source";
     sourceOpen = false;
     schedulePersist();
@@ -720,11 +746,22 @@
           .reduce((sum, text) => sum + text.length + 1, 0) +
         col -
         1;
-      const range = sourceRevealRange(doc, pos);
-      if (range.kind !== "text" && range.to > range.from) {
-        sourceRange = { from: range.from, to: range.to };
-        void compileNow("mode");
+      let recompile = false;
+      if (errorEditRange && (pos < errorEditRange.from || pos > errorEditRange.to)) {
+        errorEditRange = null;
+        recompile = true;
       }
+      const inErrorSource =
+        errorEditRange !== null ||
+        documentErrorRanges.some((range) => pos >= range.from && pos <= range.to);
+      if (!inErrorSource) {
+        const range = sourceRevealRange(doc, pos);
+        if (range.kind !== "text" && range.to > range.from) {
+          sourceRange = { from: range.from, to: range.to };
+          recompile = true;
+        }
+      }
+      if (recompile) void compileNow("mode");
     }
     void updateDocumentCaret(line, col);
   }
@@ -732,6 +769,15 @@
   function handleDocChange(newDoc: string, mapPosition: (pos: number, assoc?: number) => number) {
     if (sourceRange)
       sourceRange = { from: mapPosition(sourceRange.from, -1), to: mapPosition(sourceRange.to, 1) };
+    if (errorEditRange)
+      errorEditRange = {
+        from: mapPosition(errorEditRange.from, -1),
+        to: mapPosition(errorEditRange.to, 1),
+      };
+    documentErrorRanges = documentErrorRanges.map((range) => ({
+      from: mapPosition(range.from, -1),
+      to: mapPosition(range.to, 1),
+    }));
     doc = newDoc;
     editorDoc = newDoc; // 镜像同步（见 editorDoc 声明处）：陈旧镜像 = 切模式/重挂载时丢内容
     // 脏标记不用手动置位：`dirty` 由 doc 与 baseline 现算（见其声明处），改回原样/删光都自然跟上
@@ -985,6 +1031,8 @@
     sourceOpen = false;
     sourceRange = null;
     renderedProjection = projectDocument("", null);
+    documentErrorRanges = [];
+    errorEditRange = null;
     previewStatus = "idle";
     previewError = "";
     pageCount = 0;
@@ -1179,26 +1227,43 @@
     const input = currentInput();
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
     const prefixLength = source.length - doc.length;
-    const projection = projectDocument(
-      source,
-      viewMode === "write" && sourceRange
-        ? { from: prefixLength + sourceRange.from, to: prefixLength + sourceRange.to }
-        : null,
-    );
-    const result = await compileToSvg(projection.source, filePath, fontArgs());
-    if (result.ok && result.warnings)
-      result.warnings = sourceDiagnostics(projection, result.warnings);
-    if (!result.ok) {
-      result.errors = sourceDiagnostics(projection, result.errors);
-      const first = result.errors[0];
-      if (first) result.error = `${first.message} (行 ${first.line}, 列 ${first.col})`;
-    }
+    const mode = viewMode;
+    const path = filePath;
+    const fonts = fontArgs();
+    const editing = errorEditRange;
+    const isCurrent = () =>
+      mySeq === compileSeq &&
+      input === currentInput() &&
+      mode === viewMode &&
+      editing === errorEditRange;
+    const { result, projection, failure, errorRanges, editingRange, deferred } =
+      await compileDocumentWithFallback({
+        source,
+        prefixLength,
+        reveal:
+          mode === "write" && sourceRange
+            ? { from: prefixLength + sourceRange.from, to: prefixLength + sourceRange.to }
+            : null,
+        editing:
+          mode === "write" && editing
+            ? { from: prefixLength + editing.from, to: prefixLength + editing.to }
+            : null,
+        recover: mode === "write",
+        compile: (src) => compileToSvg(src, path, fonts),
+        isCurrent,
+        canRetry: () => {
+          if (!writeScheduler.stats().composing) return true;
+          // 留下一份需求，合成结束后再从最终原文重新诊断与恢复。
+          scheduleCompile();
+          return false;
+        },
+      });
     if (mySeq === 1) {
       mark("first-compile-result");
       reportStartup();
     }
     // 文本、会话、字体和前缀在等待期间变化时，迟到的成功与失败均不能落地。
-    if (mySeq !== compileSeq || input !== currentInput()) return;
+    if (!isCurrent() || deferred) return;
     if (result.ok) {
       const paper = previewPaneRef?.paper();
       if (!paper) return;
@@ -1207,17 +1272,24 @@
       documentCaret = null;
       renderedInput = input;
       renderedProjection = projection;
-      previewError = "";
+      documentErrorRanges = errorRanges.map((range) => ({
+        from: range.from - prefixLength,
+        to: range.to - prefixLength,
+      }));
+      if (!editingRange) errorEditRange = null;
+      previewError = failure?.error ?? "";
       applyCompileStatus(result, doc.length);
+      if (failure) applyCompileStatus(failure, doc.length);
       await tick();
       applyPreviewScale();
       void updateDocumentCaret(cursorLine, cursorCol);
     } else {
       documentGeometryId = 0;
       documentCaret = null;
-      applyCompileStatus(result, doc.length);
-      previewError = result.error;
-      // 已有产物保持完整显示，命中由输入戳禁用；首编译失败仍可展开源码修复。
+      documentErrorRanges = [];
+      applyCompileStatus(failure ?? result, doc.length);
+      previewError = (failure ?? result).error;
+      // 前缀、外部文件或不可定位的错误无法局部回退，保留旧产物并禁用命中。
       if (previewStatus !== "ready") previewStatus = "error";
     }
   }
