@@ -475,6 +475,8 @@
   // ---------------------------------------------------------------------------
   /** 启动时自动检查更新（设置弹窗开关，默认开）。只影响自动检查，菜单里的手动检查始终可用 */
   let autoCheckUpdates = $state(SETTINGS_DEFAULTS.autoCheckUpdates);
+  /** Tab 一档插几个空格（0 = 制表符；设置弹窗里改，保存后下一次 Tab 生效） */
+  let tabSpaces = $state(SETTINGS_DEFAULTS.tabSpaces);
 
   // 更新流程状态机：类型与语义见 update-utils.ts 的 UpdateFlow（刻意做成单个可判别联合，
   // 而不是若干布尔量——理由写在那边的注释里）
@@ -623,6 +625,7 @@
           dirty,
           restoreSession,
           autoCheckUpdates,
+          tabSpaces,
           lastUpdateCheckAt,
           updateDismissedAt,
           uiZoom,
@@ -1141,6 +1144,7 @@
       fontDirs,
       restoreSession,
       autoCheckUpdates,
+      tabSpaces,
     };
   }
 
@@ -1156,6 +1160,7 @@
     prefixCode = next.prefixCode;
     restoreSession = next.restoreSession;
     autoCheckUpdates = next.autoCheckUpdates;
+    tabSpaces = next.tabSpaces;
     chineseFont = next.chineseFont;
     fontDirs = next.fontDirs;
   }
@@ -1739,6 +1744,7 @@
             onDocChange={handleDocChange}
             mode={viewMode}
             wrap={viewMode === "source" ? editorWrap : false}
+            {tabSpaces}
             onComposition={handleComposition}
           />
         </div>
@@ -1808,6 +1814,7 @@
         bind:prefixCode={settingsDraft.prefixCode}
         bind:chineseFont={settingsDraft.chineseFont}
         bind:fontDirs={settingsDraft.fontDirs}
+        bind:tabSpaces={settingsDraft.tabSpaces}
         {availableFonts}
         {fontsLoading}
         onAddFontDir={() => void fontList.addDir()}

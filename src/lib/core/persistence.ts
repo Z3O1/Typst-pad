@@ -67,6 +67,8 @@ export interface PersistedState {
   chineseFont: string;
   /** 额外字体目录（对齐 typst CLI 的 --font-path）：与打包字体、系统字体一起注册进 FontBook */
   fontDirs: string[];
+  /** Tab 键一档插几个空格（0 = 制表符）；默认 2，越界值由 app-settings.normalizeSettings 收敛 */
+  tabSpaces: number;
 }
 
 /** 读取持久化状态；不存在或损坏时返回空对象 */
@@ -104,6 +106,10 @@ export function loadState(): Partial<PersistedState> {
     // 字体设置（旧存档没有）：正文字体默认空串 = 用内置默认列表；字体目录默认空
     if (typeof state.chineseFont !== "string") state.chineseFont = "";
     if (!Array.isArray(state.fontDirs)) state.fontDirs = [];
+    // Tab 空格数（0.12 后的存档才有）：默认 2；只认有限数字，越界值交给恢复时的 normalizeSettings 收敛
+    if (typeof state.tabSpaces !== "number" || !Number.isFinite(state.tabSpaces)) {
+      state.tabSpaces = 2;
+    }
     return state;
   } catch {
     return {};

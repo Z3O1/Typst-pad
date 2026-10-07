@@ -106,5 +106,32 @@ check(
   ),
 );
 check("恢复不隐式写盘", await c.evaluate("!window.__browserDevWrites?.length"));
+
+// Tab 档宽设置（0.12）：存档 → 恢复 → Editor prop → 键位 getter 的完整链路。
+// 上面的种子没写 tabSpaces ⇒ 恢复出默认 2；先切到源码模式（编辑器可见可聚焦）再按 Tab。
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await c.evaluate(
+  "window.__typstPadView.dispatch({selection:{anchor:0}}); window.__typstPadView.focus(); true",
+);
+await c.key("Tab", { code: "Tab", keyCode: 9 });
+check("存档缺 tabSpaces 时 Tab 插默认一档（2 空格）", (await doc()).startsWith("  "));
+
+// tabSpaces=0（制表符，旧行为）：种进存档 → 重载恢复 → 同样位置按 Tab 应得 \t
+await flushStateSeed(c, {
+  content: text,
+  filePath: "/fake/saved.typ",
+  fileTitle: "saved.typ",
+  dirty: true,
+  viewMode: "source",
+  restoreSession: true,
+  tabSpaces: 0,
+});
+await c.goto(DEV_URL);
+await c.waitFor(compileSettled(text));
+await c.evaluate(
+  "window.__typstPadView.dispatch({selection:{anchor:0}}); window.__typstPadView.focus(); true",
+);
+await c.key("Tab", { code: "Tab", keyCode: 9 });
+check("tabSpaces=0 恢复后 Tab 插一个制表符", (await doc()).startsWith("\t"));
 await c.close();
 finish(`通过 ${state.passed} 项检查；源码与文件流程`);

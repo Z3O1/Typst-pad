@@ -33,8 +33,8 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 const SUITES = [
   ["document-mode.mjs", 64],
   ["document-performance.mjs", 6],
-  ["computed-style.mjs", 17],
-  ["source-workflows.mjs", 12],
+  ["computed-style.mjs", 18],
+  ["source-workflows.mjs", 14],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
 

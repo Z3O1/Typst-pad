@@ -75,6 +75,7 @@ export function planRestore(
     fontDirs: [...(saved.fontDirs ?? defaults.fontDirs)],
     restoreSession: saved.restoreSession ?? defaults.restoreSession,
     autoCheckUpdates: saved.autoCheckUpdates ?? defaults.autoCheckUpdates,
+    tabSpaces: saved.tabSpaces ?? defaults.tabSpaces,
   });
 
   // 旧的 livePreview 布尔 → 模式（0.6.0 前的存档；`loadState` 也会补，这里是兜底）
