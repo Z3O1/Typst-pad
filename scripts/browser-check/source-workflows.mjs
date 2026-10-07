@@ -107,7 +107,7 @@ check(
 );
 check("恢复不隐式写盘", await c.evaluate("!window.__browserDevWrites?.length"));
 
-// Tab 档宽设置（0.12）：存档 → 恢复 → Editor prop → 键位 getter 的完整链路。
+// Tab 档宽设置：存档 → 恢复 → Editor prop → 键位 getter 的完整链路。
 // 上面的种子没写 tabSpaces ⇒ 恢复出默认 2；先切到源码模式（编辑器可见可聚焦）再按 Tab。
 await c.key("e", { keyCode: 69, modifiers: 2 });
 await c.evaluate(

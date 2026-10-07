@@ -15,6 +15,7 @@ import { scanMathRanges } from "../core/math-ranges";
 /** 行间公式脚手架：`$` + 两个空格 + `$`（光标落在中间第 2 个字符位，敲字即 `$ x $`） */
 const DISPLAY_SCAFFOLD = "$  $";
 const DISPLAY_SCAFFOLD_CARET = 2;
+
 /** 行内公式配对：`$$`，光标落在中间 */
 const INLINE_PAIR = "$$";
 const INLINE_PAIR_CARET = 1;
@@ -48,7 +49,7 @@ function nextDollarOnLine(doc: string, pos: number): number {
   return k < end && doc[k] === "$" ? k : -1;
 }
 
-/** 光标是否落在已有公式**内部**（`$a + |b$`）——那里的 `$` 是“闭合公式”，不该再补一对 */
+/** 光标是否落在已有公式**内部**（`$a + |b$`）——那里的 `$` 是"闭合公式"，不该再补一对 */
 function insideMath(
   doc: string,
   pos: number,

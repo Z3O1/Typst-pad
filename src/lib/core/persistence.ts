@@ -106,7 +106,7 @@ export function loadState(): Partial<PersistedState> {
     // 字体设置（旧存档没有）：正文字体默认空串 = 用内置默认列表；字体目录默认空
     if (typeof state.chineseFont !== "string") state.chineseFont = "";
     if (!Array.isArray(state.fontDirs)) state.fontDirs = [];
-    // Tab 空格数（0.12 后的存档才有）：默认 2；只认有限数字，越界值交给恢复时的 normalizeSettings 收敛
+    // Tab 空格数（新档位字段）：默认 2；只认有限数字，越界值交给恢复时的 normalizeSettings 收敛
     if (typeof state.tabSpaces !== "number" || !Number.isFinite(state.tabSpaces)) {
       state.tabSpaces = 2;
     }
