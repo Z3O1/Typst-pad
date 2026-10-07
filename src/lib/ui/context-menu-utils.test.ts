@@ -111,6 +111,17 @@ describe("previewSelectionHasContent 预览选区判定", () => {
     ).toBe(false);
   });
 
+  it("Shadow DOM 页内的选区仍属于预览，其他宿主内的选区不算", () => {
+    const page = document.createElement("div");
+    const root = page.attachShadow({ mode: "open" });
+    root.innerHTML = "<svg><text>hello</text></svg>";
+    host.append(page);
+    const sel = { isCollapsed: false, anchorNode: root.querySelector("text") };
+    expect(previewSelectionHasContent(sel, host)).toBe(true);
+    expect(previewSelectionHasContent(sel, document.createElement("div"))).toBe(false);
+    page.remove();
+  });
+
   it("null 选区 / null 容器 → false", () => {
     expect(previewSelectionHasContent(null, host)).toBe(false);
     expect(previewSelectionHasContent({ isCollapsed: false, anchorNode: host }, null)).toBe(false);

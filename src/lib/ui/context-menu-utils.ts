@@ -54,7 +54,13 @@ export function previewSelectionHasContent(
 ): boolean {
   if (!sel || sel.isCollapsed) return false;
   if (!sel.anchorNode || !host) return false;
-  return host.contains(sel.anchorNode);
+  let node: Node = sel.anchorNode;
+  while (!host.contains(node)) {
+    const root = node.getRootNode();
+    if (!(root instanceof ShadowRoot)) return false;
+    node = root.host;
+  }
+  return true;
 }
 
 /**

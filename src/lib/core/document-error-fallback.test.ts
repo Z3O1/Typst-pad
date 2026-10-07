@@ -3,7 +3,7 @@ import { compileDocumentWithFallback } from "./document-error-fallback";
 import { projectDocumentRanges } from "./document-projection";
 import type { CompileErrorLocation, CompileResult } from "./typst-engine";
 
-const ok: CompileResult = { ok: true, svg: "<svg/>", pageCount: 1, geometryId: 42 };
+const ok: CompileResult = { ok: true, pages: ["<svg/>"], pageCount: 1, geometryId: 42 };
 function fail(source: string, parts: string[], path?: string): CompileResult {
   return {
     ok: false,

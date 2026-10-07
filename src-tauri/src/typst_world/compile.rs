@@ -1,4 +1,4 @@
-// 编译入口：预览页宽重排（`preview_page_setup`）与整篇编译（SVG 输出）。
+// 整篇编译（完整 SVG + 同轮几何）；可选页宽注入仅保留给原生探针。
 use super::*;
 
 /// A4 尺寸（pt）：预览重排按它的比例缩放页宽/页高/边距
@@ -34,7 +34,7 @@ fn preview_page_setup(width_pt: f64) -> Option<String> {
 /// 编译文档为每页 SVG（pages 按页序，含 <svg> 标签）。
 /// 失败时返回诊断列表；成功但带警告时 warnings 附加返回。
 ///
-/// **仅单测使用**：生产路径一律带预览页宽，这个包装只是让单测省掉一个 `None` 实参；
+/// **仅单测使用**：这个包装让单测省掉一个 `None` 实参；生产命令走增量入口，保留文档页设置。
 /// 加 `#[cfg(test)]` 是为了不留一个生产侧永远不调用的 `pub fn`。
 #[cfg(test)]
 pub fn compile(
@@ -49,7 +49,8 @@ pub fn compile(
 /// 同上，但可以指定**预览页宽**（pt）：`Some(w)` 时在编译源最前面注入一行
 /// [`preview_page_setup`]，让预览按预览栏宽度重新排版（见那里的说明）。
 /// 主源诊断的行号会**减回**注入的那一行，所以前端的位置映射逻辑完全不用改；
-/// include 文件（path 非空）的诊断行号不动。
+/// include 文件（path 非空）的诊断行号不动。仅供测试与原生探针使用。
+#[cfg(test)]
 pub fn compile_with_page_width(
     src: String,
     document_path: Option<String>,
@@ -57,6 +58,37 @@ pub fn compile_with_page_width(
     font_config: &FontConfig,
     preview_width_pt: Option<f64>,
 ) -> CompileOutput {
+    compile_with_renderer(
+        src,
+        document_path,
+        fonts_dir,
+        font_config,
+        preview_width_pt,
+        |pages| (pages.iter().map(svg_for_page).collect(), Vec::new()),
+    )
+}
+
+/// 命令层的增量输出：known_pages 仅声明前端仍持有的对应页，不依赖服务器历史产物。
+pub fn compile_incremental(
+    src: String,
+    document_path: Option<String>,
+    fonts_dir: &Path,
+    font_config: &FontConfig,
+    known_pages: Option<Vec<String>>,
+) -> CompileOutput<Option<String>> {
+    compile_with_renderer(src, document_path, fonts_dir, font_config, None, |pages| {
+        super::svg_cache::incremental_pages(pages, known_pages.as_deref())
+    })
+}
+
+fn compile_with_renderer<P>(
+    src: String,
+    document_path: Option<String>,
+    fonts_dir: &Path,
+    font_config: &FontConfig,
+    preview_width_pt: Option<f64>,
+    render: impl FnOnce(&[Page]) -> (Vec<P>, Vec<String>),
+) -> CompileOutput<P> {
     // 未保存文档时预检相对 include，给出明确诊断（编译阶段只会得到笼统的 file not found）。
     // **在注入页设置之前做**：这些诊断的行号直接来自用户文档，不该被注入的行影响。
     if document_path.is_none() {
@@ -64,6 +96,7 @@ pub fn compile_with_page_width(
             return CompileOutput {
                 ok: false,
                 pages: Vec::new(),
+                page_keys: Vec::new(),
                 geometry_id: None,
                 diagnostics: diags,
                 warnings: Vec::new(),
@@ -87,10 +120,11 @@ pub fn compile_with_page_width(
         } => {
             let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
             let geometry_id = crate::document_geometry::store(items, source_len, stats.foreign_ink);
-            let pages = document.pages().iter().map(svg_for_page).collect();
+            let (pages, page_keys) = render(document.pages());
             CompileOutput {
                 ok: true,
                 pages,
+                page_keys,
                 geometry_id: Some(geometry_id),
                 diagnostics: Vec::new(),
                 warnings: collect_diagnostics(&world, warnings, main_line_offset),
@@ -102,6 +136,7 @@ pub fn compile_with_page_width(
         } => CompileOutput {
             ok: false,
             pages: Vec::new(),
+            page_keys: Vec::new(),
             geometry_id: None,
             diagnostics: collect_diagnostics(&world, errors, main_line_offset),
             warnings: Vec::new(),
@@ -111,5 +146,5 @@ pub fn compile_with_page_width(
 
 /// 单页 SVG 导出
 pub(crate) fn svg_for_page(page: &Page) -> String {
-    typst_svg::svg(page, &SvgOptions::default())
+    super::svg_cache::cached_svg(page)
 }

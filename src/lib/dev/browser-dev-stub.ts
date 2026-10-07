@@ -298,6 +298,7 @@ async function handleCommand(
         fontFamilies: Array.isArray(a.fontFamilies) ? a.fontFamilies : null,
         fontDirs: Array.isArray(a.fontDirs) ? a.fontDirs : null,
         documentPath: typeof a.documentPath === "string" ? a.documentPath : null,
+        knownPages: Array.isArray(a.knownPages) ? a.knownPages : null,
       };
       // 恢复夹具的失败诊断与成功 SVG 都来自原生编译，桩不模拟错误范围或排版。
       const brokenFixture = pageFixtures().find((fixture) => fixture.brokenDoc === src);
@@ -335,7 +336,23 @@ async function handleCommand(
       pageSnapshot = fixture ? { id: ++pageGeometrySeq, fixture } : null;
       const pages = fixture?.pages ?? fakePages(src);
       w.__browserDevLastPages = pages;
-      return { ok: true, pages, geometryId: pageSnapshot?.id ?? 0, warnings };
+      // 仅验证前端差量协议；产品指纹来自 Rust Page，这里的静态夹具使用 WebCrypto。
+      const pageKeys = await Promise.all(
+        pages.map(async (page) => {
+          const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(page));
+          return (
+            "stub:" +
+            [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("")
+          );
+        }),
+      );
+      const known = Array.isArray(a.knownPages) ? a.knownPages : [];
+      const output = pages.map((page, index) => (known[index] === pageKeys[index] ? null : page));
+      w.__browserDevLastPagePayload = {
+        sent: output.filter((page) => page !== null).length,
+        reused: output.filter((page) => page === null).length,
+      };
+      return { ok: true, pages: output, pageKeys, geometryId: pageSnapshot?.id ?? 0, warnings };
     }
     case "document_hit_test": {
       notify(command);

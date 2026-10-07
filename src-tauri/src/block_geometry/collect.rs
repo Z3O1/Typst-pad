@@ -1,5 +1,58 @@
 // 版面几何收集：帧遍历（字形 `Span` → 源字节区间）+ 块几何（`BlockGeom`）。
 use super::*;
+use std::collections::HashMap;
+use typst::syntax::{LinkedNode, Span};
+
+// 只属于这一轮 World/Source 的缓存；跨修订复用 Span 会映射到错误源码。
+#[derive(Default)]
+struct SpanRanges {
+    spans: HashMap<Span, Option<Range<usize>>>,
+    ink: HashMap<(u128, u16), (Abs, Abs)>,
+    #[cfg(test)]
+    uncached: bool,
+}
+
+impl SpanRanges {
+    fn for_world(world: &dyn World) -> Self {
+        let mut ranges = Self::default();
+        if let Ok(source) = world.source(world.main()) {
+            fn index(node: LinkedNode<'_>, ranges: &mut SpanRanges) {
+                if node.span().id().is_some() {
+                    ranges.spans.insert(node.span(), Some(node.range()));
+                }
+                for child in node.children() {
+                    index(child, ranges);
+                }
+            }
+            // Source::range 每次从语法树查找。一次遍历建立相同的节点区间，消除
+            // 长文档上大量不同 Span 首次查询的二次增长；未知 Span 仍走 World。
+            index(LinkedNode::new(source.root()), &mut ranges);
+        }
+        ranges
+    }
+
+    fn ink(&mut self, text: &typst::text::TextItem, font_size: u128, id: u16) -> (Abs, Abs) {
+        #[cfg(test)]
+        if self.uncached {
+            return glyph_ink(text, id);
+        }
+        *self
+            .ink
+            .entry((font_size, id))
+            .or_insert_with(|| glyph_ink(text, id))
+    }
+
+    fn get(&mut self, world: &dyn World, span: Span) -> Option<Range<usize>> {
+        #[cfg(test)]
+        if self.uncached {
+            return world.range(span);
+        }
+        self.spans
+            .entry(span)
+            .or_insert_with(|| world.range(span))
+            .clone()
+    }
+}
 
 /// 版面上的一个**链接**（页面坐标，单位 pt）：typst 的 `#link("https://…")[文字]` 会画成
 /// `FrameItem::Link(目标, 尺寸)` —— 它**不带源位置**（`Span`），但带目标地址与方框，
@@ -67,6 +120,16 @@ impl PlacedItem {
 }
 
 fn transformed_rect(rect: Rect, transform: Transform) -> Rect {
+    if transform.kx == typst::layout::Ratio::zero() && transform.ky == typst::layout::Ratio::zero()
+    {
+        // 平移/轴对齐缩放只需两个角；负缩放同样保留 min/max 规范化。
+        let a = rect.min.transform(transform);
+        let b = rect.max.transform(transform);
+        return Rect::new(
+            Point::new(a.x.min(b.x), a.y.min(b.y)),
+            Point::new(a.x.max(b.x), a.y.max(b.y)),
+        );
+    }
     let corners = [
         rect.min,
         Point::new(rect.max.x, rect.min.y),
@@ -144,6 +207,14 @@ pub fn collect_geometry_with_links(
     world: &dyn World,
     document: &PagedDocument,
 ) -> ((Vec<PlacedItem>, FrameStats), Vec<PlacedLink>) {
+    collect_with_lookups(world, document, SpanRanges::for_world(world))
+}
+
+fn collect_with_lookups(
+    world: &dyn World,
+    document: &PagedDocument,
+    mut ranges: SpanRanges,
+) -> ((Vec<PlacedItem>, FrameStats), Vec<PlacedLink>) {
     let mut items = Vec::new();
     let mut links = Vec::new();
     let mut stats = FrameStats::default();
@@ -158,6 +229,7 @@ pub fn collect_geometry_with_links(
             &mut items,
             &mut links,
             &mut stats,
+            &mut ranges,
         );
     }
     ((items, stats), links)
@@ -179,6 +251,7 @@ fn walk_frame(
     out: &mut Vec<PlacedItem>,
     links: &mut Vec<PlacedLink>,
     stats: &mut FrameStats,
+    ranges: &mut SpanRanges,
 ) {
     for (pos, item) in frame.items() {
         // 与 typst-svg 同序：父变换 → 项平移 → 子组变换。
@@ -192,11 +265,11 @@ fn walk_frame(
                 let key = (text.size.to_pt() * 100.0).round().max(0.0) as u32;
                 *stats.size_weights.entry(key).or_insert(0) += text.text.chars().count().max(1);
                 let mut x = Abs::zero();
+                let font_size = typst::utils::hash128(&(&text.font, text.size));
                 for glyph in &text.glyphs {
                     let advance = glyph.x_advance.at(text.size);
-                    let (up, down) = glyph_ink(text, glyph.id);
+                    let (up, down) = ranges.ink(text, font_size, glyph.id);
                     let local = Rect::new(Point::new(x, -up), Point::new(x + advance, down));
-                    let rect = transformed_rect(local, item_ts);
                     // 只有**主文档**的字形才算这一块的几何：别的文件（include）里写下的
                     // 区间是那个文件的坐标，混进来就是错位。
                     //
@@ -207,7 +280,7 @@ fn walk_frame(
                     match glyph.span.0.id() {
                         // 主文档的 span 却解不出区间：不多见，也不算外源
                         Some(id) if id == main_id => {
-                            if let Some(range) = glyph_range(world, text, glyph) {
+                            if let Some(range) = glyph_range(world, text, glyph, ranges) {
                                 out.push(PlacedItem::new(
                                     page,
                                     range,
@@ -219,14 +292,16 @@ fn walk_frame(
                                 stats.glyphs_mapped += 1;
                             }
                         }
-                        Some(_) => stats.foreign_ink.push((page, rect)),
+                        Some(_) => stats
+                            .foreign_ink
+                            .push((page, transformed_rect(local, item_ts))),
                         None => {
                             // typst 合成的字形：列表符号要用它的可见文字，别的只是占位
                             if let Some(visible) = text.text.get(glyph.range()) {
                                 if !visible.is_empty() {
                                     stats.detached_ink.push(DetachedInk {
                                         page,
-                                        rect,
+                                        rect: transformed_rect(local, item_ts),
                                         baseline_pt: origin.y.to_pt(),
                                         text: visible.to_string(),
                                     });
@@ -255,6 +330,7 @@ fn walk_frame(
                     out,
                     links,
                     stats,
+                    ranges,
                 );
             }
             FrameItem::Shape(shape, span) => {
@@ -263,7 +339,7 @@ fn walk_frame(
                 let rect = transformed_rect(bb, item_ts);
                 match span.id() {
                     Some(id) if id == main_id => {
-                        if let Some(range) = world.range(*span) {
+                        if let Some(range) = ranges.get(world, *span) {
                             out.push(PlacedItem::new(
                                 page,
                                 range,
@@ -285,7 +361,7 @@ fn walk_frame(
                 let rect = transformed_rect(local, item_ts);
                 match span.id() {
                     Some(id) if id == main_id => {
-                        if let Some(range) = world.range(*span) {
+                        if let Some(range) = ranges.get(world, *span) {
                             out.push(PlacedItem::new(
                                 page,
                                 range,
@@ -341,8 +417,9 @@ fn glyph_range(
     world: &dyn World,
     text: &typst::text::TextItem,
     glyph: &typst::text::Glyph,
+    ranges: &mut SpanRanges,
 ) -> Option<Range<usize>> {
-    let base = world.range(glyph.span.0)?;
+    let base = ranges.get(world, glyph.span.0)?;
     let start = (base.start + usize::from(glyph.span.1)).min(base.end);
     // 取不到这一段的字符串时用"这个字符的 UTF-8 长度"兜底，**不是写死 1**：
     // 写死 1 会把 CJK（3 字节）/ emoji（4 字节）切在半截上，落点就会落在字符中间
@@ -664,4 +741,72 @@ pub fn geometry_for_range(items: &[PlacedItem], range: Range<usize>) -> Option<B
         bands: ys.len(),
         items: hit.len(),
     })
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    #[test]
+    fn axis_aligned_bounds_match_four_corner_reference_including_mirrors() {
+        use typst::layout::Ratio;
+        let rect = Rect::new(
+            Point::new(Abs::pt(-3.5), Abs::pt(2.75)),
+            Point::new(Abs::pt(8.25), Abs::pt(19.5)),
+        );
+        for sx in [-2.0, -0.25, 0.0, 0.5, 1.0, 3.0] {
+            for sy in [-2.0, 0.0, 0.5, 1.0] {
+                for (kx, ky) in [(0.0, 0.0), (0.7, 0.0), (0.0, -0.5), (0.7, -0.5)] {
+                    let ts = Transform {
+                        sx: Ratio::new(sx),
+                        sy: Ratio::new(sy),
+                        kx: Ratio::new(kx),
+                        ky: Ratio::new(ky),
+                        tx: Abs::pt(20.5),
+                        ty: Abs::pt(-15.75),
+                    };
+                    let points = [
+                        rect.min,
+                        Point::new(rect.max.x, rect.min.y),
+                        rect.max,
+                        Point::new(rect.min.x, rect.max.y),
+                    ]
+                    .map(|p| p.transform(ts));
+                    let mut min = points[0];
+                    let mut max = points[0];
+                    for p in &points[1..] {
+                        min.x = min.x.min(p.x);
+                        min.y = min.y.min(p.y);
+                        max.x = max.x.max(p.x);
+                        max.y = max.y.max(p.y);
+                    }
+                    assert_eq!(transformed_rect(rect, ts), Rect::new(min, max));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_geometry_matches_world_ranges_and_font_metrics_across_revisions() {
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        for body in ["中文 office 😀 é", "改后的中文 office 😀 é"] {
+            let src = format!("#set page(width: 300pt, height: 400pt)\n{body} $x^2 + y$\n\n- 列表\n\n#block(fill: yellow, inset: 5pt)[小字 #text(size: 8pt)[重复]]\n#rotate(20deg)[旋转]\n#scale(x: 120%)[缩放]\n#link(\"https://typst.app\")[链接]\n#pagebreak()\n#table(columns: 2, [甲], [乙])");
+            let world = TypstWorld::new(src, None, &fonts, &FontConfig::default());
+            let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+            let lookup = SpanRanges::for_world(&world);
+            for (&span, range) in &lookup.spans {
+                assert_eq!(*range, world.range(span), "Span 索引必须与 World 相同");
+            }
+            let cached = collect_with_lookups(&world, &document, lookup);
+            let original = collect_with_lookups(
+                &world,
+                &document,
+                SpanRanges {
+                    uncached: true,
+                    ..SpanRanges::default()
+                },
+            );
+            assert_eq!(format!("{cached:?}"), format!("{original:?}"));
+        }
+    }
 }
