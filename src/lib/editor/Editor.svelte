@@ -219,9 +219,15 @@
     dbg.log("editor", `外部文档替换 ${current.length} → ${doc.length} 字符`);
   });
 
-  // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见
+  // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见。
+  // **按 seq 幂等**：`jumpTo` 是对象 prop，父组件每次输入重渲染都会让这个 effect 重跑
+  // （实测：点一次错误、输入一个字符 → effect 多跑 2 次，光标被反复拉回错误行）。
+  // seq 只在点击时递增（见 +page 的 jumpSeq），同一次点击只跳一次 —— 与 appliedWrap/appliedMode 同款守卫。
+  let appliedJumpSeq = -1;
   $effect(() => {
     if (!view || !jumpTo) return;
+    if (appliedJumpSeq === jumpTo.seq) return;
+    appliedJumpSeq = jumpTo.seq;
     const pos = offsetAt(view.state.doc, jumpTo.line, jumpTo.col);
     view.dispatch({
       selection: { anchor: pos },

@@ -145,5 +145,29 @@ await c.evaluate(
 );
 await c.key("Enter", { code: "Enter", keyCode: 13 });
 check("光标不在脚手架中间 → 不接管（行首回车仍是普通换行）", (await doc()).startsWith("\n$\n"));
+
+// 点击错误条目后输入：jumpTo 的 $effect 必须按 seq 幂等（回归：曾因对象 prop 每次重渲染
+// 都被判"已变化"，输入一个字符就把光标反复拉回错误行）。
+// DIAG-ERROR-MARKER 是桩内建的主源造错标记（行 1 列 1，无需页面夹具）。
+await c.selectAll();
+await c.type("DIAG-ERROR-MARKER");
+const ERR_READY =
+  "!!document.querySelector('.error-badge') && (document.querySelectorAll('.error-count')[0]?.textContent ?? '0') !== '0'";
+await c.waitFor(ERR_READY, { timeout: 8000 });
+await sleep(300);
+await c.evaluate("document.querySelector('.error-badge').click()");
+await c.waitFor("!!document.querySelector('.error-item')", { timeout: 5000 });
+await c.evaluate("document.querySelector('.error-item').click()");
+await sleep(350); // 等 jump effect 落地
+const afterJump = await c.evaluate("window.__typstPadView.state.selection.main.head");
+check("点击错误条目跳到诊断位置（行1列1）", afterJump === 0, `head=${afterJump}`);
+await c.type("Z");
+await sleep(650); // 等编译落地（验证光标没有被拉回）
+const afterType = await c.evaluate("window.__typstPadView.state.selection.main.head");
+check(
+  "点击错误后输入一个字符，光标跟随输入前进（不被拉回错误行）",
+  afterType === afterJump + 1,
+  `head=${afterJump} → ${afterType}`,
+);
 await c.close();
 finish(`通过 ${state.passed} 项检查；源码与文件流程`);
