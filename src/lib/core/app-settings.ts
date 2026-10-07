@@ -22,6 +22,8 @@ export interface AppSettings {
   fontDirs: string[];
   restoreSession: boolean;
   autoCheckUpdates: boolean;
+  /** Tab 键一档插几个空格（0 = 插制表符，保留 2026-09-28 的旧行为）；范围 0~8，见 normalizeTabSpaces */
+  tabSpaces: number;
 }
 
 /**
@@ -36,7 +38,14 @@ export function defaultSettings(): AppSettings {
     fontDirs: [],
     restoreSession: true,
     autoCheckUpdates: true,
+    tabSpaces: 2,
   };
+}
+
+/** Tab 一档空格数的合法域：整数 0~8；0 = 制表符。越界收敛到边界，非数字回落默认 2 */
+export function normalizeTabSpaces(value: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return defaultSettings().tabSpaces;
+  return Math.min(8, Math.max(0, Math.round(value)));
 }
 
 /** 草稿 = 生效配置的**副本**（`fontDirs` 必须是新数组，见文件头第 1 条） */
@@ -65,9 +74,17 @@ export function diffSettings(current: AppSettings, draft: AppSettings): Settings
   };
 }
 
-/** 归一化：字体目录 trim / 去空 / 去重（`normalizeFontDirs`），其余字段原样 */
+/**
+ * 归一化：字体目录 trim / 去空 / 去重（`normalizeFontDirs`）、Tab 空格数收敛到 0~8，其余字段原样。
+ * 草稿来自设置弹窗的数字输入（可手输越界/留空），存档可能有旧值或脏数据，
+ * 保存（`diffSettings.applied`）与启动恢复（`planRestore`）都走这里 —— 生效值永远合法。
+ */
 export function normalizeSettings(settings: AppSettings): AppSettings {
-  return { ...settings, fontDirs: normalizeFontDirs(settings.fontDirs) };
+  return {
+    ...settings,
+    fontDirs: normalizeFontDirs(settings.fontDirs),
+    tabSpaces: normalizeTabSpaces(settings.tabSpaces),
+  };
 }
 
 /** 追加一个字体目录（系统目录选择器选回来的）：归一化顺手去掉重复项 */

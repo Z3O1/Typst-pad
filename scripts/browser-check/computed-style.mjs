@@ -125,6 +125,12 @@ check(
     `Array.from(document.querySelectorAll(".settings-modal *")).every((el) => { const r = el.getBoundingClientRect(); return r.right <= innerWidth + 0.5; })`,
   ),
 );
+check(
+  "设置弹窗有 Tab 档宽输入（清存储后默认 2，合法域 0~8）",
+  await c.evaluate(
+    `(() => { const i = document.querySelector(".settings-tab-input"); return !!i && i.value === "2" && i.min === "0" && i.max === "8"; })()`,
+  ),
+);
 
 await c.key("Escape", { code: "Escape", keyCode: 27 });
 await sleep(300);

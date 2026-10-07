@@ -7,6 +7,7 @@ import {
   defaultSettings,
   diffSettings,
   normalizeSettings,
+  normalizeTabSpaces,
   SETTINGS_SAVED_STATUS,
   statusAfterSettingsSave,
   withoutFontDir,
@@ -19,7 +20,7 @@ const settings = (patch: Partial<AppSettings> = {}): AppSettings => ({
 });
 
 describe("defaultSettings", () => {
-  it("默认值：前缀关、字体走默认、恢复会话与自动检查都开", () => {
+  it("默认值：前缀关、字体走默认、恢复会话与自动检查都开、Tab 一档 2 空格", () => {
     expect(defaultSettings()).toEqual({
       prefixEnabled: false,
       prefixCode: "",
@@ -27,6 +28,7 @@ describe("defaultSettings", () => {
       fontDirs: [],
       restoreSession: true,
       autoCheckUpdates: true,
+      tabSpaces: 2,
     });
   });
 
@@ -42,6 +44,7 @@ describe("defaultSettings", () => {
       "prefixCode",
       "prefixEnabled",
       "restoreSession",
+      "tabSpaces",
     ]);
   });
 });
@@ -111,18 +114,22 @@ describe("diffSettings", () => {
 
   // 两个 `toBe(false)` 是"守将来"的：这两个开关今天根本不参与 diff 计算，真正要断的是
   // `applied` 把它们透传下去（改了要能生效，只是不必重编译）。
-  it("会话恢复 / 自动检查这两个开关**不算**字体或前缀改动（不触发重编译）", () => {
+  it("会话恢复 / 自动检查 / Tab 档宽这几个开关**不算**字体或前缀改动（不触发重编译）", () => {
     const base = settings();
-    const diff = diffSettings(base, settings({ restoreSession: false, autoCheckUpdates: false }));
+    const diff = diffSettings(
+      base,
+      settings({ restoreSession: false, autoCheckUpdates: false, tabSpaces: 4 }),
+    );
     expect(diff.fontsChanged).toBe(false);
     expect(diff.prefixChanged).toBe(false);
     expect(diff.applied.restoreSession).toBe(false);
     expect(diff.applied.autoCheckUpdates).toBe(false);
+    expect(diff.applied.tabSpaces).toBe(4);
   });
 });
 
 describe("normalizeSettings / 目录增删", () => {
-  it("normalizeSettings 只动 fontDirs（trim、去空、去重），其余字段原样", () => {
+  it("normalizeSettings 动 fontDirs（trim、去空、去重）与 tabSpaces（收敛 0~8），其余字段原样", () => {
     const draft = settings({
       fontDirs: [" a ", "a", "", "b"],
       prefixEnabled: true,
@@ -130,10 +137,24 @@ describe("normalizeSettings / 目录增删", () => {
       chineseFont: "SimSun",
       restoreSession: false,
       autoCheckUpdates: false,
+      tabSpaces: 4,
     });
     const normalized = normalizeSettings(draft);
     expect(normalized.fontDirs).toEqual(["a", "b"]);
+    expect(normalized.tabSpaces).toBe(4);
     expect({ ...normalized, fontDirs: [] }).toEqual({ ...draft, fontDirs: [] });
+  });
+
+  it("normalizeTabSpaces：越界收敛到 0~8 并取整，非数字回落默认 2（弹窗手输/存档脏数据都拦）", () => {
+    expect(normalizeTabSpaces(0)).toBe(0); // 0 = 制表符，合法值不能被改成 2
+    expect(normalizeTabSpaces(2)).toBe(2);
+    expect(normalizeTabSpaces(8)).toBe(8);
+    expect(normalizeTabSpaces(-1)).toBe(0);
+    expect(normalizeTabSpaces(12)).toBe(8);
+    expect(normalizeTabSpaces(3.6)).toBe(4);
+    expect(normalizeTabSpaces(Number.NaN)).toBe(2);
+    expect(normalizeTabSpaces(Infinity)).toBe(2);
+    expect(normalizeTabSpaces(undefined as unknown as number)).toBe(2);
   });
 
   it("appendFontDir：追加并归一化；重复目录不会变成两条", () => {

@@ -6,7 +6,8 @@
 // 说明：行为测试不引入 typst() 语言扩展——其 wasm 解析器在 Node 环境下对文档
 // 变更会 panic；注释符号改用 EditorState.languageData 注入，键位语义不受影响。
 // 缩进键：Ctrl+Tab / Ctrl+Shift+Tab 按 indentUnit（四空格）缩进；普通 Tab / Shift+Tab 自
-// 2026-09-28 起被接管 —— Tab 输入制表符（有选区给行首加 tab，有补全候选先接受候选），Shift+Tab 反缩进。
+// 2026-09-28 起被接管，2026-10-07 档宽改为设置项 tabSpaces（默认 2 空格，0 = 制表符）：
+// Tab 有选区给行首加一档、无选区插一档、有补全候选先接受候选；Shift+Tab 对称退一档。
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap as keymapFacet } from "@codemirror/view";
@@ -80,10 +81,13 @@ describe("editorKeymap 导出与绑定", () => {
     // 注册顺序上的第一个 Ctrl+Tab / Mod-d 才是生效的绑定（先返回 true 者胜出）
     expect(bindings.find((b) => b.key === "Ctrl-Tab")?.run).toBe(indentMore);
     expect(bindings.find((b) => b.key === "Ctrl-Shift-Tab")?.run).toBe(indentLess);
-    // Tab 绑的是本文件的包装命令（候选 → 行首缩进 → 插制表符，行为由下面的用例锁住）；
-    // Shift-Tab 与 Ctrl+Shift+Tab 同为 indentLess（两种缩进风格都退一档）
-    expect(bindings.find((b) => b.key === "Shift-Tab")?.run).toBe(indentLess);
+    // Tab 绑的是本文件的包装命令（候选 → 行首缩进 → 插一档，行为由下面的用例锁住）；
+    // Shift-Tab 也是本文件的对称退档命令（dedentTabUnit，按 tabSpaces 退）；
+    // Ctrl+Shift-Tab 仍是 indentLess（与 Ctrl+Tab 的 indentUnit 四空格配对）
+    expect(bindings.find((b) => b.key === "Shift-Tab")?.run).not.toBe(indentLess);
+    expect(bindings.find((b) => b.key === "Ctrl-Shift-Tab")?.run).toBe(indentLess);
     expect(typeof bindings.find((b) => b.key === "Tab")?.run).toBe("function");
+    expect(typeof bindings.find((b) => b.key === "Shift-Tab")?.run).toBe("function");
     expect(bindings.find((b) => b.key === "Mod-d")?.run).toBe(deleteLine);
     expect(bindings.find((b) => b.key === "Mod-Shift-d")?.run).toBe(copyLineDown);
     expect(bindings.find((b) => b.key === "Mod-Shift-/")?.run).toBe(toggleBlockComment);
@@ -160,51 +164,90 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     view.destroy();
   });
 
-  it("**普通 Tab = 输入一个制表符**（不再交回浏览器焦点移动），光标停在 tab 之后", () => {
+  it("**普通 Tab = 插入一档空格**（默认 2，tabSpaces 设置），光标停在一档之后", () => {
     const view = makeView("abc");
     view.dispatch({ selection: { anchor: 1 } });
     press(view, { key: "Tab", code: "Tab", keyCode: 9 });
-    expect(view.state.doc.toString()).toBe("a\tbc");
-    expect(view.state.selection.main.head).toBe(2);
+    expect(view.state.doc.toString()).toBe("a  bc");
+    expect(view.state.selection.main.head).toBe(3);
     view.destroy();
   });
 
-  it("**选中内容按 Tab：选区触碰的每行行首各加一个 tab**（选区正文保留），Shift+Tab 整组退回", () => {
-    // 单行内选区：行首加一个 tab
+  it("tabSpaces=0 时 Tab 插一个制表符（旧行为）；tabSpaces=4 插四个空格", () => {
+    // tabSpaces 由键位的 getter 现取现算（同 isWriteMode）：用两个实例模拟两份设置
+    const makeTabView = (tabSpaces: () => number) => {
+      const host = document.createElement("div");
+      document.body.appendChild(host);
+      const view = new EditorView({
+        doc: "abc",
+        parent: host,
+        extensions: [basicSetup, createEditorKeymap({ tabSpaces }), indentUnit.of(INDENT_UNIT)],
+      });
+      view.dispatch({ selection: { anchor: 1 } });
+      return view;
+    };
+
+    const tabView = makeTabView(() => 0);
+    press(tabView, { key: "Tab", code: "Tab", keyCode: 9 });
+    expect(tabView.state.doc.toString()).toBe("a\tbc");
+    tabView.destroy();
+
+    const spaceView = makeTabView(() => 4);
+    press(spaceView, { key: "Tab", code: "Tab", keyCode: 9 });
+    expect(spaceView.state.doc.toString()).toBe("a    bc");
+    spaceView.destroy();
+  });
+
+  it("**选中内容按 Tab：选区触碰的每行行首各加一档**（默认 2 空格，选区正文保留），Shift+Tab 整组退回", () => {
+    // 单行内选区：行首加一档
     let view = makeView("aaa\nbbb\n");
     view.dispatch({ selection: { anchor: 0, head: 2 } }); // 选中 "aa"
     press(view, { key: "Tab", code: "Tab", keyCode: 9 });
-    expect(view.state.doc.toString()).toBe("\taaa\nbbb\n");
+    expect(view.state.doc.toString()).toBe("  aaa\nbbb\n");
     view.destroy();
 
     // 多行选区：触碰的行都缩进（与 indentMore 同口径：选区结尾停在行首也算到达）
     view = makeView("aaa\nbbb\nccc\n");
     view.dispatch({ selection: { anchor: 1, head: 8 } }); // "aa\nbbb\nc"
     press(view, { key: "Tab", code: "Tab", keyCode: 9 });
-    expect(view.state.doc.toString()).toBe("\taaa\n\tbbb\n\tccc\n");
-    // 同一选区 Shift+Tab：逐行去掉一个 tab，整组退回原样
+    expect(view.state.doc.toString()).toBe("  aaa\n  bbb\n  ccc\n");
+    // 同一选区 Shift+Tab：逐行去掉一档，整组退回原样
     press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
     expect(view.state.doc.toString()).toBe("aaa\nbbb\nccc\n");
     view.destroy();
   });
 
-  it("**Shift+Tab 反缩进**：tab 与四空格（Ctrl+Tab 缩出来的）都退一档；无选区处理当前行", () => {
-    // 无选区 + 制表符缩进：indentLess 按 tabSize=4 的列宽算，一个 \t 恰为一档，整只删掉
-    let view = makeView("\tabc\n");
+  it("**Shift+Tab 按 tabSpaces 退一档**：不够一档删到行首尽头，制表符整只删，无缩进行跳过", () => {
+    // 默认一档 2 空格：4 空格（两次 Tab）退一次剩 2，不是 indentLess 的一次吃 4
+    let view = makeView("    abc\n");
+    view.dispatch({ selection: { anchor: 6 } });
+    press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("  abc\n");
+    view.destroy();
+
+    // 只有 1 个空格：删到行首尽头，不删正文
+    view = makeView(" abc\n");
+    view.dispatch({ selection: { anchor: 3 } });
+    press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("abc\n");
+    view.destroy();
+
+    // 行首制表符：整只删（半個制表符没有意义）
+    view = makeView("\tabc\n");
     view.dispatch({ selection: { anchor: 2 } });
     press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
     expect(view.state.doc.toString()).toBe("abc\n");
     view.destroy();
 
-    // 四空格缩进同样退一档
-    view = makeView("    abc\n");
-    view.dispatch({ selection: { anchor: 6 } });
+    // 无缩进行：吃掉按键、不改文档（也不交回浏览器焦点移动）
+    view = makeView("abc\n");
+    view.dispatch({ selection: { anchor: 1 } });
     press(view, { key: "Tab", code: "Tab", keyCode: 9, shiftKey: true });
     expect(view.state.doc.toString()).toBe("abc\n");
     view.destroy();
   });
 
-  it("**补全候选打开时 Tab = 接受所选候选**（公式候选即 CM 补全面板），候选关着照插 tab", async () => {
+  it("**补全候选打开时 Tab = 接受所选候选**（公式候选即 CM 补全面板），候选关着照插一档", async () => {
     // 真实应用里候选来自 typst_lezer 语言数据自带的 typstCompletionSource（公式内是
     // typstMathCompletions）。这里用 override 的同步补全源把「面板开着」钉死，不依赖语法。
     const host = document.createElement("div");
@@ -252,7 +295,7 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     });
     view2.dispatch({ selection: { anchor: view2.state.doc.length } });
     press(view2, { key: "Tab", code: "Tab", keyCode: 9 });
-    expect(view2.state.doc.toString()).toBe("$al\t");
+    expect(view2.state.doc.toString()).toBe("$al  "); // 默认 tabSpaces=2
     view2.destroy();
   });
 
@@ -330,6 +373,54 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     view.dispatch({ selection: { anchor: view.state.doc.length } });
     press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
     expect(view.state.doc.toString()).toBe("  缩进\n  ");
+    view.destroy();
+  });
+
+  it("**空脚手架 `$  $` 中间按 Enter → 展开三行**（中行一档 = 默认 2 空格，光标落档后）", () => {
+    // 源码模式（editorKeymap 默认 tabSpaces=2）
+    let view = makeView("$  $");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("$\n  \n$");
+    expect(view.state.selection.main.head).toBe(4); // 中行 2 个空格之后
+    view.destroy();
+
+    // 写作模式同样接管（展开在列表命令之前，模式无关）
+    view = makeWriteView("$  $");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("$\n  \n$");
+    view.destroy();
+
+    // 展开后接着打字：直接写进公式里
+    view = makeView("$  $");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    view.dispatch(view.state.update(view.state.replaceSelection("x^2"), { userEvent: "input" }));
+    expect(view.state.doc.toString()).toBe("$\n  x^2\n$");
+    view.destroy();
+  });
+
+  it("脚手架展开不接管：光标不在中间 / 行内有内容 / Shift+Enter", () => {
+    // 光标在行首（不在两个 $ 之间）→ 普通换行（源码模式：换行继承前导空白，此处无）
+    let view = makeView("$  $");
+    view.dispatch({ selection: { anchor: 0 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("\n$  $");
+    view.destroy();
+
+    // 有内容的公式 `$ x $` → 不接管，走原有链路（公式内 = 单个换行，非段落语义）
+    view = makeWriteView("$ x $");
+    view.dispatch({ selection: { anchor: 3 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("$ x\n $");
+    view.destroy();
+
+    // Shift+Enter 不展开（它是 Typst 显式换行的语义）
+    view = makeWriteView("$  $");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("$ \\\n $");
     view.destroy();
   });
 

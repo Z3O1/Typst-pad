@@ -50,8 +50,8 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 | --- | --- |
 | `document-mode.mjs` | 真实整页 SVG 逐节点一致，多页/不同纸型、图片、公式与脚本展开，未变页面节点复用、增量 IPC 完整还原与会话基准清空、Shadow DOM 外链，独立光标、模式往返、输入、撤销/重做、错误区域源码回退、原位修复与撤销/重做、不可恢复错误保留旧产物、IME 与异步作废 |
 | `document-performance.mjs` | 重复真实 SVG 组成 100 页 DOM 隔离探针：完整节点、引用作用域、单页更新复用、离屏尺寸与末页命中；直接 SVG 与 Shadow DOM 首屏像素一致，输出初始化及更新耗时，不设固定时间阈值 |
-| `source-workflows.mjs` | 输入无隐式写盘，取消保存/新建，显式保存、路径变化重编译、打开文件、会话恢复与字体配置 |
-| `computed-style.mjs` | 弹窗和窄窗口的 box-sizing、主题颜色及溢出边界 |
+| `source-workflows.mjs` | 输入无隐式写盘，取消保存/新建，显式保存、路径变化重编译、打开文件、会话恢复与字体配置、Tab 档宽（tabSpaces）设置恢复后按键生效、空行 `$` 脚手架与其 Enter 展开 |
+| `computed-style.mjs` | 弹窗和窄窗口的 box-sizing、主题颜色及溢出边界；设置弹窗含 Tab 档宽输入 |
 
 `npm run fixtures:pages` 调用真实原生引擎，导出包含中文、emoji、公式、表格、图片和宏输出的整页夹具与命中探针，覆盖正常、编辑和源码展开状态。测试先确认完整显示，再确认编辑交互，不以点击覆盖率决定页面如何呈现。
 

@@ -13,11 +13,12 @@ import {
 } from "@codemirror/commands";
 import type { Command } from "@codemirror/view";
 import { insertNewTypstListItem, insertTypstListContinuation } from "codemirror-lang-typst/lezer";
-import { emptyPairBackspace } from "./auto-pair";
+import { emptyPairBackspace, planScaffoldExpand } from "./auto-pair";
 import { indentForNewLine, isBlankLine } from "./auto-indent";
 import { scanMathRanges } from "../core/math-ranges";
 import { scanNonMarkupRegions } from "../core/typst-lex";
 import type { Region } from "../core/typst-lex";
+import { defaultSettings } from "../core/app-settings";
 
 /**
  * 退格时把补出来的空配对整对删掉（`$|$` 与 `$  |  $` 都一次删干净）。
@@ -36,18 +37,28 @@ function deleteEmptyDollarPair(view: EditorView): boolean {
   return true;
 }
 
-/** Tab 直接插入的字符 = **一个制表符**（2026-09-28 用户要求「Tab 输入一个 tab」）。 */
+/** Tab 直接插入的字符 = 一个制表符（tabSpaces=0 时的回退；默认 2 空格，见 tabUnit） */
 const TAB_CHAR = "\t";
 
 /**
- * 给选区触碰的每一行行首加一个 tab（用户：「选中了一些东西 → 把这些东西所在的行之前一个 tab」）。
+ * Tab 一档插的字符 = **设置里的空格数**（`tabSpaces`，0 = 制表符，2026-10-07 起可配置；
+ * 默认 2 空格，旧行为「插一个 \t」= 把设置调成 0）。
+ * 每次按键现取现算：设置保存后下一次 Tab 就生效，键位扩展不用重建（同 isWriteMode）。
+ */
+function tabUnit(tabSpaces: number): string {
+  return tabSpaces === 0 ? TAB_CHAR : " ".repeat(tabSpaces);
+}
+
+/**
+ * 给选区触碰的每一行行首加**一档**（用户：「选中了一些东西 → 把这些东西所在的行之前一个 tab」；
+ * 一档 = 设置里的 tabSpaces，0 = 制表符，见 tabUnit）。
  *
  * 行的口径与 CM `indentMore` 的 `changeBySelectedLine` 一致：选区**到达**的行都算，包括
  * 选区结尾正好停在某行行首的那一行；同一行被多个选区触碰只加一次。选区锚点/头部按
- * assoc=1 映射，落在新插入的 tab 之后 —— 与 `indentMore`（Ctrl+Tab）的选区保持同款。
- * 这里不复用 `indentMore`：那一档插的是 `indentUnit`（4 个空格），而 Tab 语义是制表符本身。
+ * assoc=1 映射，落在新插入的一档之后 —— 与 `indentMore`（Ctrl+Tab）的选区保持同款。
+ * 这里不复用 `indentMore`：那一档插的是 `indentUnit`（4 个空格），而 Tab 语义由 tabSpaces 定。
  */
-function indentLinesWithTab(view: EditorView): boolean {
+function indentLinesWithTab(view: EditorView, unit: string): boolean {
   const { state } = view;
   const seen = new Set<number>();
   const changes: { from: number; insert: string }[] = [];
@@ -56,7 +67,7 @@ function indentLinesWithTab(view: EditorView): boolean {
       const line = state.doc.lineAt(pos);
       if (!seen.has(line.from)) {
         seen.add(line.from);
-        changes.push({ from: line.from, insert: TAB_CHAR });
+        changes.push({ from: line.from, insert: unit });
       }
       pos = line.to + 1;
     }
@@ -80,21 +91,71 @@ function indentLinesWithTab(view: EditorView): boolean {
 
 /**
  * Tab = **补全候选开着先接受所选候选**（公式里的 `typstMathCompletions` 等都是 CM 补全面板，
- * 用户要求「有候选时 Tab 等于输入所选候选」）；否则有选区给触碰的行前各加一个 tab，
- * 无选区直接插入一个 tab 字符。
+ * 用户要求「有候选时 Tab 等于输入所选候选」）；否则有选区给触碰的行前各加一档，
+ * 无选区直接插入一档（tabSpaces 个空格，0 = 一个制表符）。
  */
-function insertTabOrIndentLines(view: EditorView): boolean {
+function insertTabOrIndentLines(view: EditorView, unit: string): boolean {
   if (view.state.readOnly) return false;
   if (acceptCompletion(view)) return true;
   if (view.state.selection.ranges.some((range) => !range.empty)) {
-    return indentLinesWithTab(view);
+    return indentLinesWithTab(view, unit);
   }
   view.dispatch(
-    view.state.update(view.state.replaceSelection(TAB_CHAR), {
+    view.state.update(view.state.replaceSelection(unit), {
       scrollIntoView: true,
       userEvent: "input",
     }),
   );
+  return true;
+}
+
+/**
+ * Shift+Tab = Tab 的**逆操作**（2026-10-07 随 tabSpaces 设置引入，与 Tab 对称，行口径同
+ * indentLinesWithTab）：行首是制表符就删那一个制表符；否则删一档空格（tabSpaces 个，
+ * 不够就删到行首空白尽头）；没有行首缩进的行原样跳过。
+ *
+ * 为什么不再直接绑 CM `indentLess`：它按 `indentUnit`（4 列）退，与 Tab 插入的档宽不一致 ——
+ * tabSpaces=2 时连按两次 Tab 缩进到第二层，一次 indentLess 会吃掉两层（实测 4 列全删）。
+ * `Ctrl+Shift+Tab` 仍保留 `indentLess`：它与 `Ctrl+Tab`（indentUnit 四空格）配对，语义没变。
+ * tabSpaces=0（制表符模式）时空格行按 4 列退 —— 与旧行为（indentLess 按 tabSize=4）一致。
+ */
+function dedentTabUnit(view: EditorView, tabSpaces: number): boolean {
+  if (view.state.readOnly) return false;
+  const unit = tabSpaces > 0 ? tabSpaces : 4;
+  const { state } = view;
+  const seen = new Set<number>();
+  const changes: { from: number; to: number }[] = [];
+  for (const range of state.selection.ranges) {
+    for (let pos = range.from; pos <= range.to;) {
+      const line = state.doc.lineAt(pos);
+      if (!seen.has(line.from)) {
+        seen.add(line.from);
+        const lead = /^[ \t]*/.exec(line.text)?.[0] ?? "";
+        if (!lead) {
+          pos = line.to + 1;
+          continue; // 行首无缩进：没东西可退
+        }
+        // 行首制表符 = 一整档（无论 tabSpaces 取多少，删半个制表符没有意义）；否则退一档空格
+        const removeLen = lead.startsWith("\t") ? 1 : Math.min(unit, lead.length);
+        changes.push({ from: line.from, to: line.from + removeLen });
+      }
+      pos = line.to + 1;
+    }
+  }
+  if (changes.length === 0) return true; // 全是无缩进行：吃掉按键但不发空事务
+  changes.sort((a, b) => a.from - b.from);
+  const changeSet = state.changes(changes);
+  view.dispatch({
+    changes: changeSet,
+    selection: EditorSelection.create(
+      state.selection.ranges.map((range) =>
+        EditorSelection.range(changeSet.mapPos(range.anchor, 1), changeSet.mapPos(range.head, 1)),
+      ),
+      state.selection.mainIndex,
+    ),
+    scrollIntoView: true,
+    userEvent: "delete.dedent",
+  });
   return true;
 }
 
@@ -287,6 +348,11 @@ export interface EditorKeymapOptions {
    * 才落回普通 Typst 换行处理；**不重写第二份列表 Enter 状态机**。
    */
   isWriteMode?: () => boolean;
+  /**
+   * Tab 一档插几个空格（0 = 制表符）。缺省 = 默认值 2（见 app-settings.defaultSettings）。
+   * 用 getter 而不是定值：设置保存后不重建键位扩展，下一次 Tab 就生效（同 isWriteMode）。
+   */
+  tabSpaces?: () => number;
 }
 
 /**
@@ -316,22 +382,62 @@ function listAwareEnter(
   };
 }
 
+/**
+ * 光标在**独占一行的空行间脚手架** `$  $` 内部时，Enter 把它展开成三行：
+ * `$` / 一档 / `$`（一档 = `tabUnit(tabSpaces)`，与 Tab 键的档宽联动；
+ * 设置 0 时就是制表符）。光标落中行一档之后，接着打字就写在公式里。
+ *
+ * 与 `auto-pair.planScaffoldExpand`（判定）配套，这里是落事务的那一半；
+ * 不匹配（选区非空、多光标、非脚手架行）返回 false 交回常规 Enter 链路
+ * （列表命令 → 段落/续行换行），模式无关、两套模式都能展开。
+ */
+function expandMathScaffold(view: EditorView, tabSpaces: number): boolean {
+  if (view.state.readOnly) return false;
+  const { state } = view;
+  if (state.selection.ranges.length !== 1 || !state.selection.main.empty) return false;
+  const plan = planScaffoldExpand(
+    state.doc.toString(),
+    state.selection.main.head,
+    state.lineBreak,
+    tabUnit(tabSpaces),
+  );
+  if (!plan) return false;
+  view.dispatch({
+    changes: { from: plan.from, to: plan.to, insert: plan.insert },
+    selection: { anchor: plan.caret },
+    scrollIntoView: true,
+    userEvent: "input",
+  });
+  return true;
+}
+
 // CM6 中同一按键的多条绑定按注册顺序执行、先返回 true 者胜出，因此把自定义键位放在
 // basicSetup 之后无法覆盖其默认绑定（例如 Mod-d 会被 searchKeymap 的"选中下一处"
 // 在空选区时抢先返回 true）。用 Prec.high 提升优先级，保证自定义快捷键先被检查。
 export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
   const isWriteMode = opts.isWriteMode ?? (() => false);
+  // 未传 getter 时（源码模式的 editorKeymap 导出、单测直建）回落 app-settings 的唯一默认源
+  const tabSpaces = opts.tabSpaces ?? (() => defaultSettings().tabSpaces);
+  // Enter 的完整链路：空脚手架展开（新，最优先）→ 列表命令 → 段落/续行换行。
+  // 展开不匹配时必须交回原链路，所以包成一层而不是拆开 listAwareEnter。
+  const enterWithScaffold = (view: EditorView): boolean =>
+    expandMathScaffold(view, tabSpaces()) ||
+    listAwareEnter(isWriteMode, insertNewTypstListItem, false)(view);
   return Prec.high(
     keymap.of([
-      // **Tab / Shift+Tab**（2026-09-28 用户再次调整：普通 Tab 从「交回浏览器焦点移动」改成接管）：
+      // **Tab / Shift+Tab**（2026-09-28 接管普通 Tab；2026-10-07 档宽改为设置项 tabSpaces）：
       // - 补全候选开着 → 先接受所选候选（公式里的 `typstMathCompletions` 等，见 insertTabOrIndentLines）；
-      // - 有选区 → 给选区触碰的每一行行首各加一个 tab（indentLinesWithTab）；
-      // - 无选区 → 直接插入一个 `\t`。
-      // Shift+Tab 同理反过来：给触碰的行去掉一档缩进 —— CM `indentLess` 按 indentUnit 列宽算，
-      // 一个 `\t`（tabSize=4 时恰为一档）或最多 4 个空格，两种缩进风格的行都能反缩进。
+      // - 有选区 → 给选区触碰的每一行行首各加一档（indentLinesWithTab；一档 = tabSpaces 个空格，0 = 制表符）；
+      // - 无选区 → 直接插入一档（tabUnit）。
+      // Shift+Tab 是 Tab 的逆操作（dedentTabUnit：删行首一档），按 tabSpaces 而非 indentUnit 退，
+      // 保证按几下 Tab 就能按几下 Shift+Tab 原路退回。
       // `preventDefault: true` 与本文件其它自定义键位同款：命令返回 false（只读文档）时也吃掉按键。
-      { key: "Tab", run: insertTabOrIndentLines, preventDefault: true },
-      { key: "Shift-Tab", run: indentLess, preventDefault: true },
+      {
+        key: "Tab",
+        run: (v) => insertTabOrIndentLines(v, tabUnit(tabSpaces())),
+        preventDefault: true,
+      },
+      { key: "Shift-Tab", run: (v) => dedentTabUnit(v, tabSpaces()), preventDefault: true },
       // 缩进 / 反缩进（按 indentUnit = 4 个空格的一档）仍是 **Ctrl+Tab / Ctrl+Shift+Tab**
       // （2026-09-28 上午从 Tab 改到 Ctrl+Tab；同日普通 Tab 又按新需求接管，见上）。
       //
@@ -344,7 +450,7 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
       { key: "Ctrl-Shift-Tab", run: indentLess, preventDefault: true },
       {
         key: "Enter",
-        run: listAwareEnter(isWriteMode, insertNewTypstListItem, false),
+        run: enterWithScaffold,
         preventDefault: true,
       },
       {

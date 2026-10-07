@@ -1,6 +1,6 @@
 // auto-pair 单元测试：输入 `$` 时的自动配对决策与空配对的整对退格（纯逻辑，无 DOM）。
 import { describe, it, expect } from "vitest";
-import { emptyPairBackspace, planDollarInput } from "./auto-pair";
+import { emptyPairBackspace, planDollarInput, planScaffoldExpand } from "./auto-pair";
 
 /** 便于阅读：把决策压成一行短标签 */
 const plan = (doc: string, pos: number) => {
@@ -133,5 +133,49 @@ describe("emptyPairBackspace（空配对整对退格）", () => {
     expect(emptyPairBackspace("", 0)).toBeNull();
     expect(emptyPairBackspace("$", 1)).toBeNull();
     expect(emptyPairBackspace("abc", 99)).toBeNull();
+  });
+});
+
+describe("planScaffoldExpand（空脚手架 Enter 展开）", () => {
+  /** 压成一行短标签：范围 + 插入文本 + 光标（绝对） */
+  const expand = (doc: string, pos: number, unit = "  ") => {
+    const p = planScaffoldExpand(doc, pos, "\n", unit);
+    if (!p) return "none";
+    return `${p.from}..${p.to} ${JSON.stringify(p.insert)}@${p.caret}`;
+  };
+
+  it("独占一行的空脚手架、光标在两个 $ 之间 → 展开为三行，光标落中行一档之后", () => {
+    expect(expand("$  $", 1)).toBe('0..4 "$\\n  \\n$"@4');
+    expect(expand("$  $", 2)).toBe('0..4 "$\\n  \\n$"@4');
+    expect(expand("$  $", 3)).toBe('0..4 "$\\n  \\n$"@4');
+    // 行首有缩进：只换脚手架本身，缩进不动（from 跳过前导空白）
+    expect(expand("  $  $", 5)).toBe('2..6 "$\\n  \\n$"@6');
+    // 单位可传制表符（tabSpaces=0）
+    expect(expand("$  $", 2, "\t")).toBe('0..4 "$\\n\\t\\n$"@3');
+    // 换行符跟随编辑器（CRLF 场景）
+    const crlf = planScaffoldExpand("$  $", 2, "\r\n", "  ");
+    expect(crlf).toEqual({ from: 0, to: 4, insert: "$\r\n  \r\n$", caret: 5 });
+  });
+
+  it("光标不在两个 $ 之间（行首/行尾/越界）→ 不接管", () => {
+    expect(expand("$  $", 0)).toBe("none");
+    expect(expand("$  $", 4)).toBe("none");
+    expect(expand("$  $", -1)).toBe("none");
+    expect(expand("$  $", 99)).toBe("none");
+  });
+
+  it("整行 trim 后不是 `$  $` → 不接管（有内容/单空格/同行有别的字）", () => {
+    expect(expand("$ x $", 3)).toBe("none"); // 有内容
+    expect(expand("$ $", 2)).toBe("none"); // 单空格不是脚手架
+    expect(expand("前 $  $ 后", 5)).toBe("none"); // 同行有别的内容
+    expect(expand("$  $x", 3)).toBe("none"); // 行尾紧跟别的字
+    expect(expand("", 0)).toBe("none");
+    expect(expand("abc", 1)).toBe("none");
+  });
+
+  it("raw / 代码 / 注释里的 `$  $` → 不接管（那里不是公式）", () => {
+    expect(expand("```\n$  $\n```", 7)).toBe("none");
+    expect(expand("// $  $", 5)).toBe("none");
+    expect(expand('#let s = "$  $"', 11)).toBe("none");
   });
 });

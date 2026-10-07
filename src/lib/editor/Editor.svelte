@@ -18,6 +18,7 @@
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation } from "../core/typst-engine";
+  import { defaultSettings } from "../core/app-settings";
   import { squiggleRanges, offsetAt } from "../core/diagnostics-utils";
   import { planForCommand } from "../core/write-commands";
   import type { WriteCommand } from "../core/write-commands";
@@ -49,6 +50,8 @@
      * 长行折行显示、不再需要横向滚动。
      */
     wrap?: boolean;
+    /** Tab 一档插几个空格（0 = 制表符）；来自设置，改动后不重建键位、下一次 Tab 生效 */
+    tabSpaces?: number;
   }
 
   let {
@@ -63,6 +66,7 @@
     mode = "source",
     onComposition,
     wrap = false,
+    tabSpaces = defaultSettings().tabSpaces,
   }: Props = $props();
 
   let host: HTMLElement;
@@ -127,11 +131,12 @@
     return [
       basicSetup,
       // 自定义编辑快捷键（Prec.high，优先于 basicSetup 默认键位）。**模式感知**：
-      // 写作模式先把 Enter 交给 typst 的列表命令（续项 / 空项退出），它不认才沿用上一行缩进
-      createEditorKeymap({ isWriteMode: () => mode === "write" }),
-      // 一档缩进 = 4 个空格（用户要求「缩进应该是四格」）：Ctrl+Tab / Ctrl+Shift+Tab 与语言侧
-      // 自动缩进都走这个 facet。普通 Tab / Shift+Tab **不走它** —— Tab 插入制表符本身（有选区
-      // 给行首加一个 tab，有补全候选先接受所选候选），Shift+Tab 反缩进（见 editor-keymap.ts）。
+      // 写作模式先把 Enter 交给 typst 的列表命令（续项 / 空项退出），它不认才沿用上一行缩进；
+      // tabSpaces 用 getter 传，设置改了不重建键位、下一次 Tab 生效（见 editor-keymap.ts）
+      createEditorKeymap({ isWriteMode: () => mode === "write", tabSpaces: () => tabSpaces }),
+      // 一档缩进 = 4 个空格（用户要求「缩进应该是四格」）：**Ctrl+Tab / Ctrl+Shift+Tab** 与语言侧
+      // 自动缩进走这个 facet。普通 Tab / Shift+Tab **不走它** —— 档宽由设置 tabSpaces 决定
+      //（有选区给行首加一档，有补全候选先接受所选候选，Shift+Tab 对称退一档，见 editor-keymap.ts）。
       // 回车那条也**不用它** —— 新行照抄上一行实际的前导空白（见 auto-indent.ts）。
       indentUnit.of(INDENT_UNIT),
       typst_lezer(),
@@ -214,9 +219,15 @@
     dbg.log("editor", `外部文档替换 ${current.length} → ${doc.length} 字符`);
   });
 
-  // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见
+  // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见。
+  // **按 seq 幂等**：`jumpTo` 是对象 prop，父组件每次输入重渲染都会让这个 effect 重跑
+  // （实测：点一次错误、输入一个字符 → effect 多跑 2 次，光标被反复拉回错误行）。
+  // seq 只在点击时递增（见 +page 的 jumpSeq），同一次点击只跳一次 —— 与 appliedWrap/appliedMode 同款守卫。
+  let appliedJumpSeq = -1;
   $effect(() => {
     if (!view || !jumpTo) return;
+    if (appliedJumpSeq === jumpTo.seq) return;
+    appliedJumpSeq = jumpTo.seq;
     const pos = offsetAt(view.state.doc, jumpTo.line, jumpTo.col);
     view.dispatch({
       selection: { anchor: pos },
