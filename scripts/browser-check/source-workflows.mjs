@@ -50,14 +50,17 @@ check(
   "同路径保存不重新排版",
   (await c.evaluate("window.__browserDevCallCounts.compile_doc")) === savedCount,
 );
-const savedPages = await c.evaluate("document.querySelector('#preview-host').innerHTML");
+const savedPages = await c.evaluate(
+  "[...document.querySelectorAll('#preview-host>.document-page')].map(host=>host.shadowRoot.innerHTML).join('')",
+);
 await c.key("p", { keyCode: 80, modifiers: 2 });
 await c.waitFor("window.__browserDevCallCounts.export_pdf === 1");
 await sleep(50);
 check(
   "PDF 导出失败仍保留完整页面",
-  (await c.evaluate("document.querySelector('#preview-host').innerHTML")) === savedPages &&
-    (await c.evaluate("!document.querySelector('#preview-host').hidden")),
+  (await c.evaluate(
+    "[...document.querySelectorAll('#preview-host>.document-page')].map(host=>host.shadowRoot.innerHTML).join('')",
+  )) === savedPages && (await c.evaluate("!document.querySelector('#preview-host').hidden")),
 );
 await c.selectAll();
 await c.type("修改后仍保留");

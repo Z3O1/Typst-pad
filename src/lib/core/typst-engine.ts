@@ -34,10 +34,11 @@ export interface Diagnostic {
   path?: string | null;
 }
 
-/** compile_doc 成功产物：pages 为每页 SVG 字符串（按页序） */
+/** compile_doc 按页序返回 SVG；null 引用已持有的同位置 pageKeys，旧桩可返回全量页。 */
 export interface CompileOutputOk {
   ok: true;
-  pages: string[];
+  pages: (string | null)[];
+  pageKeys?: string[];
   geometryId?: number;
   warnings?: Diagnostic[];
 }
@@ -66,7 +67,9 @@ export interface CompileErrorLocation {
 
 export interface CompileOk {
   ok: true;
-  svg: string;
+  /** 上层始终消费完整页面，不暴露 IPC 差量。 */
+  pages: string[];
+  pageKeys?: string[];
   pageCount: number;
   geometryId?: number;
   /** 编译警告（Rust 侧携带；UI 在状态栏徽标里展示，字体族写错只有这里看得见） */
@@ -173,14 +176,6 @@ export function formatDiagnostic(d: Diagnostic): string {
 }
 
 /**
- * 每页 SVG 字符串 → 预览容器 HTML：按页序拼接，页间插入分隔线。
- * 页数与旧实现一致由页数直接得出（旧实现基于单文档内 typst-page 元素统计）。
- */
-export function composePages(pages: string[]): string {
-  return pages.join('<div class="page-separator"></div>');
-}
-
-/**
  * 编译 Typst 源码为 SVG 预览。失败返回错误结果对象（调用方保留上次成功预览），
  * 不抛异常；invoke/IPC 异常也收敛为错误结果（errors 为空，error 带原始消息）。
  *
@@ -190,17 +185,38 @@ export async function compileToSvg(
   source: string,
   documentPath: string | null,
   fonts?: FontConfigArgs,
+  previous?: CompileOk | null,
 ): Promise<CompileResult> {
   try {
     const out = await invoke<CompileOutput>("compile_doc", {
       src: source,
       documentPath,
+      knownPages: previous?.pageKeys ?? null,
       ...fontArgs(fonts),
     });
     if (out.ok) {
+      if (
+        out.pageKeys &&
+        (out.pageKeys.length !== out.pages.length ||
+          out.pageKeys.some((key) => typeof key !== "string"))
+      )
+        throw new Error("编译产物的页面指纹不完整");
+      const pages = out.pages.map((page, index) => {
+        if (typeof page === "string") return page;
+        const key = out.pageKeys?.[index];
+        if (
+          page === null &&
+          key &&
+          previous?.pageKeys?.[index] === key &&
+          typeof previous.pages[index] === "string"
+        )
+          return previous.pages[index];
+        throw new Error("编译产物的增量页面缺少对应基准");
+      });
       return {
         ok: true,
-        svg: composePages(out.pages),
+        pages,
+        pageKeys: out.pageKeys,
         pageCount: out.pages.length,
         geometryId: out.geometryId,
         warnings: out.warnings,

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { DocumentCaret } from "$lib/core/typst-engine";
-  import { nearestPageCoordinates } from "$lib/core/document-interaction";
+  import { createDocumentPages } from "./document-pages";
 
   let {
     hidden,
@@ -30,6 +30,19 @@
   let caretStyle = $state("");
   let measureFrame = 0;
   let pointerStart: { id: number; x: number; y: number; moved: boolean } | null = null;
+  let pages: ReturnType<typeof createDocumentPages> | undefined;
+  export function updatePages(sources: string[]): void {
+    if (!paperEl) return;
+    pages ??= createDocumentPages(paperEl);
+    pages.update(sources);
+    measureCaret();
+  }
+  export function clearPages(): void {
+    pages?.clear();
+  }
+  export function pageWidthPt(): number {
+    return pages?.widthPt() ?? 0;
+  }
   export function paper(): HTMLElement | undefined {
     return paperEl;
   }
@@ -41,15 +54,18 @@
     if (measureFrame) cancelAnimationFrame(measureFrame);
     measureFrame = requestAnimationFrame(() => {
       measureFrame = 0;
-      caretStyle = "";
-      onCaretPosition?.(null);
-      if (!caret || !editable || hidden || stale || !canvasEl || !paperEl) return;
-      const svg = paperEl.querySelectorAll<SVGSVGElement>(":scope > svg")[caret.page - 1];
-      if (!svg) return;
-      const rect = svg.getBoundingClientRect();
+      const hideCaret = () => {
+        if (!caretStyle) return;
+        caretStyle = "";
+        onCaretPosition?.(null);
+      };
+      if (!caret || !editable || hidden || stale || !canvasEl || !paperEl) return hideCaret();
+      const page = pages?.page(caret.page);
+      if (!page) return hideCaret();
+      const rect = page.host.getBoundingClientRect();
       const root = canvasEl.getBoundingClientRect();
-      const box = svg.viewBox.baseVal;
-      if (box.width <= 0 || box.height <= 0 || rect.width <= 0) return;
+      const box = page.box;
+      if (box.width <= 0 || box.height <= 0 || rect.width <= 0) return hideCaret();
       const scaleX = rect.width / box.width,
         scaleY = rect.height / box.height;
       onCaretPosition?.({
@@ -84,7 +100,9 @@
         Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5);
     pointerStart = null;
     if (moved || event.button !== 0 || !(event.target instanceof Element) || !paperEl) return;
-    const anchor = event.target.closest("a");
+    const anchor = event
+      .composedPath()
+      .find((node): node is Element => node instanceof Element && node.localName === "a");
     if (anchor) {
       const href = anchor.getAttribute("href") ?? anchor.getAttribute("xlink:href");
       if (href && /^(https?:|mailto:)/i.test(href)) {
@@ -97,13 +115,7 @@
       event.preventDefault();
     }
     if (!editable) return;
-    const point = nearestPageCoordinates(
-      { x: event.clientX, y: event.clientY },
-      [...paperEl.querySelectorAll<SVGSVGElement>(":scope > svg")].map((svg) => ({
-        rect: svg.getBoundingClientRect(),
-        box: svg.viewBox.baseVal,
-      })),
-    );
+    const point = pages?.nearest({ x: event.clientX, y: event.clientY });
     if (point) onPageClick?.(point);
   }
 </script>
@@ -209,20 +221,15 @@
     margin-inline: auto;
   }
 
-  /* 每页 SVG 顶层文档（compileToSvg 按页序拼接入预览容器）：铺满预览容器宽度
-     （容器宽度由缩放逻辑控制）、高度按比例——等宽缩放，文本不拉伸变形。
-     夜间滤镜：typst 产物永远是白纸黑字，深色主题下整页反色成"深色纸 + 浅色字"。
-     值走页面变量 --night-svg-filter（`:root` 深色 / `.app.light` = none），
-     所以切换主题不需要重新编译。
-     （彩色图形与嵌入图片也会被反色，这是"不重新编译"的代价，取舍见 docs/development/architecture.md。） */
-  .preview-paper > :global(svg) {
-    display: block;
-    width: 100%;
-    height: auto;
+  /* Shadow DOM 隔离每页 SVG 的 ID 引用，产物不改写；共同缩放只改变宿主宽度。
+     离屏页跳过绘制但保留真实纸型占位，全部产物与几何仍完整存在。
+     不支持 content-visibility 的 WebView 自动退化为全页绘制。 */
+  .preview-paper > :global(.document-page) {
+    position: relative;
+    margin-inline: auto;
+    content-visibility: auto;
     filter: var(--night-svg-filter, none);
   }
-
-  /* 页间分隔线（typst-engine composePages 注入的 <div class="page-separator">），随主题自适应 */
   .preview-paper > :global(.page-separator) {
     height: 1px;
     background: var(--border);

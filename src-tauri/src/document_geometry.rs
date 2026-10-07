@@ -1,5 +1,5 @@
 // 整页编译的交互几何。只读取已排版帧，不切片、不改变页面设置。
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -12,7 +12,20 @@ struct Snapshot {
     id: u64,
     source_len: usize,
     items: Vec<PlacedItem>,
+    // 同一页通常连续；不连续的探针也保留原顺序，用包围区间并由命中规则过滤。
+    pages: HashMap<usize, std::ops::Range<usize>>,
+    source_order: Vec<usize>,
+    max_end: Vec<usize>,
+    end_order: Vec<usize>,
     foreign_ink: Vec<(usize, Rect)>,
+}
+
+impl Snapshot {
+    fn page_items(&self, page: usize) -> &[PlacedItem] {
+        self.pages
+            .get(&page)
+            .map_or(&[], |range| &self.items[range.clone()])
+    }
 }
 
 // 按产物编号缓存，多个窗口不会覆盖彼此的最近产物；淘汰时拒绝交互而不是借用别人的几何。
@@ -20,7 +33,7 @@ static SNAPSHOTS: Mutex<VecDeque<Snapshot>> = Mutex::new(VecDeque::new());
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_SNAPSHOTS: usize = 16;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentCaret {
     pub offset: usize,
@@ -36,13 +49,38 @@ pub struct DocumentCaret {
 
 pub fn store(items: Vec<PlacedItem>, source_len: usize, foreign_ink: Vec<(usize, Rect)>) -> u64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let mut cache = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
-    cache.push_back(Snapshot {
+    let mut pages: HashMap<usize, std::ops::Range<usize>> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        pages
+            .entry(item.page)
+            .and_modify(|range| range.end = index + 1)
+            .or_insert(index..index + 1);
+    }
+    let mut source_order: Vec<_> = (0..items.len()).collect();
+    source_order.sort_by_key(|&i| items[i].range.start);
+    let mut end = 0;
+    let max_end = source_order
+        .iter()
+        .map(|&i| {
+            end = end.max(items[i].range.end);
+            end
+        })
+        .collect();
+    let mut end_order: Vec<_> = (0..items.len()).collect();
+    end_order.sort_by_key(|&i| items[i].range.end);
+    // 建索引不持全局缓存锁，避免阻塞其他窗口的命中。
+    let snapshot = Snapshot {
         id,
         source_len,
         items,
+        pages,
+        source_order,
+        max_end,
+        end_order,
         foreign_ink,
-    });
+    };
+    let mut cache = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
+    cache.push_back(snapshot);
     while cache.len() > MAX_SNAPSHOTS {
         cache.pop_front();
     }
@@ -75,7 +113,7 @@ fn hit_for_item(item: &PlacedItem, offset: usize, is_whitespace: bool) -> Docume
 }
 
 fn text_in_rect(snapshot: &Snapshot, page: usize, rect: Rect) -> impl Iterator<Item = &PlacedItem> {
-    snapshot.items.iter().filter(move |candidate| {
+    snapshot.page_items(page).iter().filter(move |candidate| {
         candidate.page == page
             && candidate.kind == PlacedItemKind::Text
             && candidate.range.start < snapshot.source_len
@@ -118,8 +156,14 @@ pub fn hit_test(id: u64, page: usize, x_pt: f64, y_pt: f64) -> Option<DocumentCa
     }) {
         return None;
     }
-    let (mut item, mut offset) =
-        pick_hit_item(&snapshot.items, 0, snapshot.source_len, page, x, y)?;
+    let (mut item, mut offset) = pick_hit_item(
+        snapshot.page_items(page),
+        0,
+        snapshot.source_len,
+        page,
+        x,
+        y,
+    )?;
     // 带填充的文字块在字外仍能命中背景 Shape；应按它包围的正文定位，
     // 不能把背景空白误当作点击宏定义。独立图形/图片仍保留直接命中行为。
     if item.kind == PlacedItemKind::Shape {
@@ -154,7 +198,7 @@ pub fn hit_test(id: u64, page: usize, x_pt: f64, y_pt: f64) -> Option<DocumentCa
     // 空白先选行，再在该行选横向位置，避免行侧点击被高字/上标吸走。
     // 页首/尾空白仍落到首/尾行边界，不生成空格，也不借用另一页的输出。
     let candidates = || {
-        snapshot.items.iter().filter(|item| {
+        snapshot.page_items(page).iter().filter(|item| {
             item.page == page && item.range.start < snapshot.source_len && item.range.end > 0
         })
     };
@@ -220,23 +264,42 @@ pub fn hit_test(id: u64, page: usize, x_pt: f64, y_pt: f64) -> Option<DocumentCa
 pub fn locate(id: u64, offset: usize) -> Option<DocumentCaret> {
     let cache = SNAPSHOTS.lock().ok()?;
     let snapshot = cache.iter().find(|s| s.id == id)?;
+    locate_in_snapshot(snapshot, offset)
+}
+
+fn locate_in_snapshot(snapshot: &Snapshot, offset: usize) -> Option<DocumentCaret> {
     if offset > snapshot.source_len {
         return None;
     }
-    let item = snapshot
-        .items
+    let upper = snapshot
+        .source_order
+        .partition_point(|&i| snapshot.items[i].range.start <= offset);
+    let lower = snapshot.max_end[..upper].partition_point(|&end| end <= offset);
+    let index = snapshot.source_order[lower..upper]
         .iter()
-        .filter(|item| offset >= item.range.start && offset < item.range.end)
-        .min_by_key(|item| (item.kind, item.range.len()))
+        .copied()
+        .filter(|&i| offset < snapshot.items[i].range.end)
+        // 保留原来同类同范围时的帧遍历优先序。
+        .min_by_key(|&i| (snapshot.items[i].kind, snapshot.items[i].range.len(), i))
         .or_else(|| {
-            snapshot
-                .items
+            let lower = snapshot
+                .end_order
+                .partition_point(|&i| snapshot.items[i].range.end < offset);
+            let upper = snapshot
+                .end_order
+                .partition_point(|&i| snapshot.items[i].range.end <= offset);
+            snapshot.end_order[lower..upper]
                 .iter()
-                .rev()
-                .filter(|item| offset == item.range.end)
-                .min_by_key(|item| (item.kind, item.range.len()))
+                .copied()
+                .min_by_key(|&i| {
+                    (
+                        snapshot.items[i].kind,
+                        snapshot.items[i].range.len(),
+                        std::cmp::Reverse(i),
+                    )
+                })
         })?;
-    Some(caret_for_item(item, offset))
+    Some(caret_for_item(&snapshot.items[index], offset))
 }
 
 #[cfg(test)]
@@ -256,6 +319,58 @@ mod tests {
             typst::layout::Transform::identity(),
         )
     }
+    #[test]
+    fn source_index_preserves_linear_lookup_and_duplicate_output_priority() {
+        let mut items = Vec::new();
+        for i in (0..80).rev() {
+            let mut placed = item(i % 3 + 1, i * 3, i * 3 + 6);
+            if i % 7 == 0 {
+                placed.kind = PlacedItemKind::Shape;
+                placed.range = 0..240;
+            }
+            items.push(placed.clone());
+            items.push(placed);
+        }
+        items.push(item(4, 240, 240)); // 无长度区间只能参与 end 回退。
+        let id = store(items, 240, vec![]);
+        let cache = SNAPSHOTS.lock().unwrap();
+        let snapshot = cache.iter().find(|s| s.id == id).unwrap();
+        for offset in 0..=241 {
+            let original = (offset <= snapshot.source_len)
+                .then(|| {
+                    snapshot
+                        .items
+                        .iter()
+                        .filter(|item| offset >= item.range.start && offset < item.range.end)
+                        .min_by_key(|item| (item.kind, item.range.len()))
+                        .or_else(|| {
+                            snapshot
+                                .items
+                                .iter()
+                                .rev()
+                                .filter(|item| offset == item.range.end)
+                                .min_by_key(|item| (item.kind, item.range.len()))
+                        })
+                        .map(|item| caret_for_item(item, offset))
+                })
+                .flatten();
+            assert_eq!(
+                locate_in_snapshot(snapshot, offset),
+                original,
+                "offset={offset}"
+            );
+        }
+        for page in 1..=4 {
+            let indexed: Vec<_> = snapshot
+                .page_items(page)
+                .iter()
+                .filter(|i| i.page == page)
+                .collect();
+            let original: Vec<_> = snapshot.items.iter().filter(|i| i.page == page).collect();
+            assert_eq!(format!("{indexed:?}"), format!("{original:?}"));
+        }
+    }
+
     #[test]
     fn whitespace_hits_line_edges_and_page_visual_edges_without_changing_source() {
         let make = |from, to, x, y| {

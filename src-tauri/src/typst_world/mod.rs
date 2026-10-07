@@ -20,7 +20,8 @@
 //!   "需要先保存文档" 的明确诊断（包导入不依赖文档位置，无需保存）。
 //!
 //! 接口契约（前端按此消费，serde rename_all = "camelCase"，多词字段为 camelCase 键名）：
-//! - compile_doc -> CompileOutput { ok, pages, diagnostics, warnings }
+//! - compile_doc -> CompileOutput { ok, pages, pageKeys, geometryId, diagnostics, warnings }
+//!   （pages 按页序为完整 SVG 或已持有同位置指纹的 null 引用）
 //! - export_pdf  -> PdfResult { ok, error }
 //! - Diagnostic  -> { message, severity, line, column, endLine, endColumn, path }
 //!   （行列均为 1-based，CodeMirror 波浪线直接消费）
@@ -28,7 +29,8 @@
 //! 本目录（契约见 `docs/development/compiler-backend.md`）：
 //!   * `world.rs`       `World` 实现（主文档 / 相对 include / 包解析）+ 输出与诊断类型
 //!   * `fonts.rs`       字体加载、逐 face 注册、进程内缓存、默认族注入
-//!   * `compile.rs`     预览页宽重排（`preview_page_setup`）+ 整篇编译（`compile_doc`）
+//!   * `compile.rs`     整篇编译与增量页输出 + 探针的可选页宽注入
+//!   * `svg_cache.rs`   页面指纹、增量传输清单与有界 SVG 缓存
 //!   * `math.rs`        公式级渲染：贴边透明单页 SVG + 基线探针 + 墨迹撑画布
 //!   * `pdf.rs`         PDF 导出
 //!   * `diagnostics.rs` 诊断转换（span → 1-based 行列）
@@ -60,6 +62,7 @@ mod fonts;
 mod math;
 mod paths;
 mod pdf;
+mod svg_cache;
 mod world;
 
 pub use compile::*;

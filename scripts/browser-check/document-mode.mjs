@@ -23,7 +23,11 @@ const [
 ] = fixtures;
 const { check, state } = createChecker();
 const c = await connect();
+const pageQuery =
+  "window.__pageSvgs=()=>[...document.querySelectorAll('#preview-host>.document-page')].map(host=>host.shadowRoot.querySelector('svg'));true";
+await c.send("Page.addScriptToEvaluateOnNewDocument", { source: pageQuery });
 await boot(c, DEV_URL, { pageFixtures: fixtures });
+await c.evaluate(pageQuery);
 await c.send("Emulation.setDeviceMetricsOverride", {
   width: 1200,
   height: 900,
@@ -49,18 +53,18 @@ async function hitAt(sourcePart, fixture = original) {
   );
   if (!caret) throw new Error(`缺少命中探针：${sourcePart}`);
   await c.evaluate(
-    `(() => {const p=${JSON.stringify(caret)},b=document.querySelector('.preview-body'),s=document.querySelectorAll('#preview-host>svg')[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal,br=b.getBoundingClientRect(),y=r.top+(p.yPt+p.heightPt/2)*r.height/v.height;b.scrollTop+=y-(br.top+br.height/2);return true})()`,
+    `(() => {const p=${JSON.stringify(caret)},b=document.querySelector('.preview-body'),s=window.__pageSvgs()[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal,br=b.getBoundingClientRect(),y=r.top+(p.yPt+p.heightPt/2)*r.height/v.height;b.scrollTop+=y-(br.top+br.height/2);return true})()`,
   );
   await sleep(50);
   const point = await c.evaluate(
-    `(() => {const p=${JSON.stringify(caret)},s=document.querySelectorAll('#preview-host>svg')[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return {x:r.left+p.xPt*r.width/v.width+.5,y:r.top+(p.yPt+p.heightPt/2)*r.height/v.height}})()`,
+    `(() => {const p=${JSON.stringify(caret)},s=window.__pageSvgs()[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return {x:r.left+p.xPt*r.width/v.width+.5,y:r.top+(p.yPt+p.heightPt/2)*r.height/v.height}})()`,
   );
   await c.click(point.x, point.y);
   return caret;
 }
 async function compiledPagesMatch(fixture) {
   return c.evaluate(
-    `(() => {const expected=${JSON.stringify(fixture.pages)};const actual=[...document.querySelectorAll('#preview-host>svg')];return actual.length===expected.length && actual.every((svg,i)=>{const host=document.createElement('div');host.innerHTML=expected[i];const copy=svg.cloneNode(true);copy.removeAttribute('style');return copy.isEqualNode(host.firstElementChild)})})()`,
+    `(() => {const expected=${JSON.stringify(fixture.pages)};const actual=window.__pageSvgs();return actual.length===expected.length && actual.every((svg,i)=>{const host=document.createElement('div');host.innerHTML=expected[i];return svg.isEqualNode(host.firstElementChild)})})()`,
   );
 }
 check("默认文档模式以完整页面为主体", await inDocumentMode());
@@ -68,11 +72,12 @@ await replace(original.doc);
 check("每页 SVG 与原生编译结果逐节点一致", await compiledPagesMatch(original));
 check(
   "两页与不同纸型保留",
-  await c.evaluate(
-    "[...document.querySelectorAll('#preview-host>svg')].map(s=>s.viewBox.baseVal.width).join(',')==='360,480'",
-  ),
+  await c.evaluate("window.__pageSvgs().map(s=>s.viewBox.baseVal.width).join(',')==='360,480'"),
 );
-check("图片保留在完整页面中", await c.evaluate("!!document.querySelector('#preview-host image')"));
+check(
+  "图片保留在完整页面中",
+  await c.evaluate("window.__pageSvgs().some(s=>!!s.querySelector('image'))"),
+);
 check(
   "没有公式 widget、切片或模拟断行",
   await c.evaluate(
@@ -87,11 +92,11 @@ check(
 );
 async function whitespacePoint(probe) {
   await c.evaluate(
-    `(() => {const p=${JSON.stringify(probe)},b=document.querySelector('.preview-body'),s=document.querySelectorAll('#preview-host>svg')[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal,br=b.getBoundingClientRect();b.scrollTop+=r.top+(p.yPt-v.y)*r.height/v.height-(br.top+br.height/2);return true})()`,
+    `(() => {const p=${JSON.stringify(probe)},b=document.querySelector('.preview-body'),s=window.__pageSvgs()[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal,br=b.getBoundingClientRect();b.scrollTop+=r.top+(p.yPt-v.y)*r.height/v.height-(br.top+br.height/2);return true})()`,
   );
   await sleep(50);
   return c.evaluate(
-    `(() => {const p=${JSON.stringify(probe)},s=document.querySelectorAll('#preview-host>svg')[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return {x:r.left+(p.xPt-v.x)*r.width/v.width,y:r.top+(p.yPt-v.y)*r.height/v.height}})()`,
+    `(() => {const p=${JSON.stringify(probe)},s=window.__pageSvgs()[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return {x:r.left+(p.xPt-v.x)*r.width/v.width,y:r.top+(p.yPt-v.y)*r.height/v.height}})()`,
   );
 }
 const whitespaceBefore = await count();
@@ -105,7 +110,7 @@ for (const [index, label] of [
   const point = await whitespacePoint(probe);
   if (index === 0)
     await c.evaluate(
-      `window.__whitespaceTargetOutsideSvg=!document.elementFromPoint(${point.x},${point.y})?.closest('svg');true`,
+      `(() => {let target=document.elementFromPoint(${point.x},${point.y});if(target?.shadowRoot)target=target.shadowRoot.elementFromPoint(${point.x},${point.y});window.__whitespaceTargetOutsideSvg=!target?.closest('svg');return true})()`,
     );
   await c.click(point.x, point.y);
   await c.waitFor(
@@ -208,10 +213,24 @@ check(
     (await c.evaluate("!window.__browserDevWrites?.length")),
 );
 const beforeCompile = await count();
+await c.evaluate("window.__unchangedPage=window.__pageSvgs()[1];true");
 const mathCaret = await hitAt("x^2");
 await settled(mathExpanded);
 check("展开公式调用整页编译", (await count()) === beforeCompile + 1);
 check("展开态与真实 Typst 完整产物一致", await compiledPagesMatch(mathExpanded));
+check(
+  "单页变化保留未变页面的 SVG 节点与独立引用作用域",
+  original.pages[1] === mathExpanded.pages[1] &&
+    (await c.evaluate(
+      "window.__unchangedPage===window.__pageSvgs()[1] && window.__pageSvgs()[0].getRootNode()!==window.__pageSvgs()[1].getRootNode()",
+    )),
+);
+check(
+  "增量 IPC 只传变化页，前端仍展示完整原生产物",
+  await c.evaluate(
+    "window.__browserDevLastPagePayload.sent===1 && window.__browserDevLastPagePayload.reused===1 && window.__browserDevLastCompile.knownPages?.length===2",
+  ),
+);
 check("展开没有修改原文档", (await doc()) === original.doc);
 check(
   "点击公式定位到原文档 UTF-8 位置",
@@ -228,7 +247,7 @@ check(
 check(
   "光标保留在独立交互层",
   await c.evaluate(
-    "!!document.querySelector('.preview-canvas>.document-caret') && !document.querySelector('#preview-host .document-caret')",
+    "!!document.querySelector('.preview-canvas>.document-caret') && !window.__pageSvgs().some(s=>s.querySelector('.document-caret'))",
   ),
 );
 const textFrom = original.doc.indexOf("正文含中文");
@@ -266,6 +285,13 @@ await settled(imageExpanded);
 check("图片调用起点展开完整脚本", await compiledPagesMatch(imageExpanded));
 await c.key("Escape", { keyCode: 27 });
 await settled(original);
+const beforeLinkHits = await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0");
+await hitAt("页面链接");
+check(
+  "Shadow DOM 页内外链仍打开系统浏览器，不提交源码命中",
+  (await c.evaluate("window.__browserDevOpenUrls?.includes('https://typst.app')")) &&
+    (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === beforeLinkHits,
+);
 await c.evaluate("window.__savedView=window.__typstPadView;true");
 await c.key("e", { keyCode: 69, modifiers: 2 });
 check(
@@ -280,9 +306,7 @@ check(
   (await doc()) === original.doc && (await compiledPagesMatch(original)),
 );
 const beforeResize = await count();
-const widePageWidth = await c.evaluate(
-  "document.querySelector('#preview-host>svg').getBoundingClientRect().width",
-);
+const widePageWidth = await c.evaluate("window.__pageSvgs()[0].getBoundingClientRect().width");
 await c.send("Emulation.setDeviceMetricsOverride", {
   width: 760,
   height: 640,
@@ -294,14 +318,12 @@ check(
   "窄窗口只缩放且不重新编译",
   (await compiledPagesMatch(original)) && (await count()) === beforeResize,
 );
-const narrowPageWidth = await c.evaluate(
-  "document.querySelector('#preview-host>svg').getBoundingClientRect().width",
-);
+const narrowPageWidth = await c.evaluate("window.__pageSvgs()[0].getBoundingClientRect().width");
 check("窗口变窄后页面继续缩小", narrowPageWidth < widePageWidth * 0.8);
 check(
   "页面等比缩放且没有横向溢出",
   await c.evaluate(
-    "(() => {const b=document.querySelector('.preview-body'),s=document.querySelector('#preview-host>svg'),r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return b.scrollWidth<=b.clientWidth+1 && Math.abs(r.width/r.height-v.width/v.height)<.001})()",
+    "(() => {const b=document.querySelector('.preview-body'),s=window.__pageSvgs()[0],r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return b.scrollWidth<=b.clientWidth+1 && Math.abs(r.width/r.height-v.width/v.height)<.001})()",
   ),
 );
 await c.send("Emulation.setDeviceMetricsOverride", {
@@ -311,14 +333,10 @@ await c.send("Emulation.setDeviceMetricsOverride", {
   mobile: false,
 });
 await sleep(100);
-const pageAt100 = await c.evaluate(
-  "document.querySelector('#preview-host>svg').getBoundingClientRect().width",
-);
+const pageAt100 = await c.evaluate("window.__pageSvgs()[0].getBoundingClientRect().width");
 await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
 await sleep(100);
-const pageAt110 = await c.evaluate(
-  "document.querySelector('#preview-host>svg').getBoundingClientRect().width",
-);
+const pageAt110 = await c.evaluate("window.__pageSvgs()[0].getBoundingClientRect().width");
 check("用户缩放继续影响页面内容", pageAt110 > pageAt100 * 1.05);
 await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
 await sleep(100);
@@ -401,11 +419,11 @@ await c.evaluate(
 );
 await settled(original);
 check("光标移出修好的错误区域自动收起源码", await compiledPagesMatch(original));
-const beforeFailure = await c.evaluate("document.querySelector('#preview-host').innerHTML");
+const beforeFailure = await c.evaluate("window.__pageSvgs().map(s=>s.outerHTML).join('')");
 await replace("DIAG-EXTERNAL-ERROR-MARKER");
 check(
   "外部文件错误无法局部回退时保留上次完整结果",
-  (await c.evaluate("document.querySelector('#preview-host').innerHTML")) === beforeFailure,
+  (await c.evaluate("window.__pageSvgs().map(s=>s.outerHTML).join('')")) === beforeFailure,
 );
 check(
   "失败只在状态栏报错（预览区不再画错误框）",
@@ -494,7 +512,10 @@ await c.waitFor(
 );
 check(
   "切换文件清除旧产物与编辑镜像",
-  (await doc()) === "" && (await c.evaluate("window.__browserDevLastCompile.src===''")),
+  (await doc()) === "" &&
+    (await c.evaluate(
+      "window.__browserDevLastCompile.src==='' && window.__browserDevLastCompile.knownPages===null",
+    )),
 );
 check("没有脚本异常", await c.evaluate("!document.body.innerText.includes('脚本错误')"));
 await c.screenshot(shotPath("document-mode-full-pages"));

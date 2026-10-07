@@ -1,15 +1,17 @@
 // 编译世界：`World` 实现（主文档 / 相对 include / 包解析）+ 输出与诊断类型。
 use super::*;
 
-/// 编译输出（成功：pages 为每页 SVG；失败：diagnostics 为错误列表；warnings 附加在成功分支）。
-/// 空字段序列化时省略，成功分支只有 ok/pages(/warnings)，失败分支只有 ok/diagnostics，
-/// 与前端契约一致。
+/// 编译输出：普通探针 P=String；增量 IPC P=Option<String>，null 引用已持有的 pageKeys。
+/// warnings 附加在成功分支；空字段省略，失败不携带页面清单或几何编号。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompileOutput {
+pub struct CompileOutput<P = String> {
     pub ok: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub pages: Vec<String>,
+    pub pages: Vec<P>,
+    /// IPC 增量页指纹；普通完整导出不携带，失败时也省略。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub page_keys: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geometry_id: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -18,12 +20,13 @@ pub struct CompileOutput {
     pub warnings: Vec<Diagnostic>,
 }
 
-impl CompileOutput {
+impl<P> CompileOutput<P> {
     /// 内部错误（编译任务异常等）：对外表现为编译失败
     pub(crate) fn internal_error(msg: &str) -> Self {
         Self {
             ok: false,
             pages: Vec::new(),
+            page_keys: Vec::new(),
             geometry_id: None,
             diagnostics: vec![Diagnostic {
                 message: msg.to_string(),

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-// typst-engine 单元测试：纯函数（诊断转换 / 页序拼接）+ invoke/dialog 已 mock 的
+// typst-engine 单元测试：纯函数（诊断转换）+ invoke/dialog 已 mock 的
 // compileToSvg / compileToPdf 契约映射。不接触真实 Tauri 环境。
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
@@ -9,7 +9,6 @@ import {
   diagnosticToLocation,
   errorLocations,
   formatDiagnostic,
-  composePages,
   compileToSvg,
   compileToPdf,
   listFontFamilies,
@@ -92,29 +91,12 @@ describe("formatDiagnostic", () => {
   });
 });
 
-describe("composePages（每页 SVG → 预览容器 HTML）", () => {
-  it("多页按页序拼接，页间插入分隔线", () => {
-    const out = composePages(["<svg>A</svg>", "<svg>B</svg>", "<svg>C</svg>"]);
-    expect(out).toBe(
-      '<svg>A</svg><div class="page-separator"></div><svg>B</svg><div class="page-separator"></div><svg>C</svg>',
-    );
-  });
-
-  it("单页不插分隔线", () => {
-    expect(composePages(["<svg>A</svg>"])).toBe("<svg>A</svg>");
-  });
-
-  it("空数组 → 空字符串", () => {
-    expect(composePages([])).toBe("");
-  });
-});
-
 describe("compileToSvg（invoke 已 mock）", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
   });
 
-  it("成功：页序拼接为 svg、pageCount = 页数，invoke 入参含已保存文档绝对路径", async () => {
+  it("成功：完整页面按页序透传、pageCount = 页数，invoke 入参含已保存文档绝对路径", async () => {
     vi.mocked(invoke).mockResolvedValue({
       ok: true,
       pages: ["<svg>p1</svg>", "<svg>p2</svg>"],
@@ -122,16 +104,75 @@ describe("compileToSvg（invoke 已 mock）", () => {
     const r = await compileToSvg("#let x = 1", SAVED_DOC_PATH);
     expect(r).toEqual({
       ok: true,
-      svg: '<svg>p1</svg><div class="page-separator"></div><svg>p2</svg>',
+      pages: ["<svg>p1</svg>", "<svg>p2</svg>"],
       pageCount: 2,
     });
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("compile_doc", {
       src: "#let x = 1",
       documentPath: SAVED_DOC_PATH,
+      knownPages: null,
       // 预览页宽（预览重排）缺省为 null = 不重排（导出 PDF 走 export_pdf，不受它影响）
       fontFamilies: null,
       fontDirs: null,
     });
+  });
+
+  it("增量响应还原完整页面，按同位置指纹复用，几何与警告仍更新", async () => {
+    const previous = {
+      ok: true as const,
+      pages: ["<svg>A</svg>", "<svg>B</svg>"],
+      pageKeys: ["a", "b"],
+      pageCount: 2,
+      geometryId: 1,
+    };
+    vi.mocked(invoke).mockResolvedValue({
+      ok: true,
+      pages: ["<svg>new A</svg>", null],
+      pageKeys: ["new-a", "b"],
+      geometryId: 2,
+      warnings: [{ message: "fresh", severity: "warning", line: 1, column: 1 }],
+    });
+    const result = await compileToSvg("new source", null, undefined, previous);
+    expect(result).toMatchObject({
+      ok: true,
+      pages: ["<svg>new A</svg>", "<svg>B</svg>"],
+      pageKeys: ["new-a", "b"],
+      pageCount: 2,
+      geometryId: 2,
+      warnings: [{ message: "fresh" }],
+    });
+    expect(vi.mocked(invoke).mock.calls[0][1]).toMatchObject({ knownPages: ["a", "b"] });
+    expect(previous.pages).toEqual(["<svg>A</svg>", "<svg>B</svg>"]);
+    vi.mocked(invoke).mockResolvedValue({
+      ok: true,
+      pages: [null],
+      pageKeys: ["a"],
+      geometryId: 3,
+    });
+    expect(await compileToSvg("short", null, undefined, previous)).toMatchObject({
+      ok: true,
+      pages: ["<svg>A</svg>"],
+      pageCount: 1,
+      geometryId: 3,
+    });
+  });
+
+  it("无基准、错位指纹或不完整清单拒绝引用，不猜测或使用别的会话页面", async () => {
+    const previous = { ok: true as const, pages: ["<svg>A</svg>"], pageKeys: ["a"], pageCount: 1 };
+    for (const response of [
+      { ok: true, pages: [null] },
+      { ok: true, pages: [null], pageKeys: ["wrong"] },
+      { ok: true, pages: [null, null], pageKeys: ["a", "a"] },
+      { ok: true, pages: ["<svg/>"], pageKeys: [] },
+    ]) {
+      vi.mocked(invoke).mockResolvedValue(response);
+      expect(await compileToSvg("source", null, undefined, previous)).toMatchObject({
+        ok: false,
+        errors: [],
+      });
+    }
+    vi.mocked(invoke).mockResolvedValue({ ok: true, pages: [null], pageKeys: ["a"] });
+    expect(await compileToSvg("new session", null)).toMatchObject({ ok: false, errors: [] });
   });
 
   it("未保存新文档：documentPath 传 null", async () => {
@@ -140,6 +181,7 @@ describe("compileToSvg（invoke 已 mock）", () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("compile_doc", {
       src: "x",
       documentPath: null,
+      knownPages: null,
       fontFamilies: null,
       fontDirs: null,
     });

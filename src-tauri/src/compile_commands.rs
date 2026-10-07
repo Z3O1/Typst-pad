@@ -58,7 +58,8 @@ where
 
 /// 编译文档为每页 SVG（compile_doc）：src 为主文档源码，document_path 为磁盘路径
 /// （None = 未保存，相对导入会报"需要先保存文档"）。
-/// 返回 CompileOutput：成功 { ok, pages }，失败 { ok, diagnostics }，成功且带警告时附加 warnings。
+/// 成功携带 pages/pageKeys，已持有同位置指纹的页为 null；无 knownPages 时全量返回。
+/// 失败返回 diagnostics，成功且带警告时附加 warnings。
 /// 编译在 spawn_blocking 中执行（不阻塞 UI），内部互斥锁串行化。
 /// Err 仅用于编译任务本身异常终止（正常编译失败仍走 Ok(ok:false)）。
 #[tauri::command]
@@ -68,9 +69,10 @@ pub async fn compile_doc(
     document_path: Option<String>,
     font_families: Option<Vec<String>>,
     font_dirs: Option<Vec<String>>,
-) -> Result<crate::typst_world::CompileOutput, String> {
+    known_pages: Option<Vec<String>>,
+) -> Result<crate::typst_world::CompileOutput<Option<String>>, String> {
     let out = in_compile_channel(&state, font_families, font_dirs, move |fonts_dir, fonts| {
-        crate::typst_world::compile_with_page_width(src, document_path, fonts_dir, fonts, None)
+        crate::typst_world::compile_incremental(src, document_path, fonts_dir, fonts, known_pages)
     })
     .await
     .unwrap_or_else(|()| crate::typst_world::CompileOutput::internal_error("编译任务异常终止"));

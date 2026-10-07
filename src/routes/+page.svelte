@@ -9,8 +9,13 @@
     listFontFamilies,
     defaultFontFamilies,
   } from "$lib/core/typst-engine";
-  import type { CompileErrorLocation, Diagnostic, DocumentCaret } from "$lib/core/typst-engine";
-  import { byteOffsetsToPositions, positionsToByteOffsets } from "$lib/core/block-offsets";
+  import type {
+    CompileErrorLocation,
+    CompileOk,
+    Diagnostic,
+    DocumentCaret,
+  } from "$lib/core/typst-engine";
+  import { createSourceCoordinates } from "$lib/core/source-coordinates";
   import { clickSourceRange, sourceRevealRange } from "$lib/core/document-interaction";
   import { compileDocumentWithFallback } from "$lib/core/document-error-fallback";
   import {
@@ -109,7 +114,7 @@
   import { copyPlainText } from "$lib/core/clipboard";
   import { mark, reportStartup } from "$lib/core/startup-timing";
   import { dbg, setCliDebug } from "$lib/core/debug";
-  import { previewCanvasWidth, viewBoxWidthPt } from "$lib/core/preview-scale";
+  import { previewCanvasWidth } from "$lib/core/preview-scale";
   import {
     checkForUpdate,
     downloadAndInstallUpdate,
@@ -196,7 +201,7 @@
   // 上次打开/保存时的旧值，任何让 Editor 重挂载或让 props 重新生效的情形（窗口重载、组件树重建）
   // 都会把旧值当成"外部文档"推回去，表现为"切个模式未保存的新内容就退回上一个版本"。
   let editorDoc = $state(SAMPLE_DOC);
-  let filePath: string | null = null;
+  let filePath = $state<string | null>(null);
   /**
    * 未保存修改的判据基线 = **上次打开 / 保存时**的正文（`null` = 基线未知，见 `doc-utils`
    * 的 `isDocModified`）；打开/重新读取/保存/新建四条路都由 `core/document-session` 的状态迁移
@@ -216,11 +221,14 @@
   /**
    * 预览栏组件句柄：画布（paper）与滚动容器（body）两个元素都在 PreviewPane.svelte 里，
    * 页面拿不到 bind:this ⇒ 组件用 export function 交出来（见那边文件头）。
-   * 挂载前为 null；页面对这两个元素只做四件事：写 innerHTML、设内联宽度、找 <svg>、量 clientWidth。
+   * 挂载前为 null；SVG 页级更新由组件管理，页面只装配产物与计算共同缩放比例。
    */
   let previewPaneRef = $state<{
     paper(): HTMLElement | undefined;
     body(): HTMLElement | undefined;
+    updatePages(pages: string[]): void;
+    clearPages(): void;
+    pageWidthPt(): number;
   } | null>(null);
   let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
   let previewScaleFrame = 0; // 已排队的重算帧号（见 onMount 里的 ResizeObserver）
@@ -321,8 +329,8 @@
     log: (msg) => dbg.log("zoom", msg),
   });
   // 展开范围生成临时 Typst 编译输入；原文档与光标交互保持各自状态。
-  let documentSession = 0;
-  let documentRevision = 0;
+  let documentSession = $state(0);
+  let documentRevision = $state(0);
   let renderedInput = $state("");
   let documentGeometryId = $state(0);
   let sourceOpen = $state(false);
@@ -330,13 +338,17 @@
   let documentErrorRanges: SourceRange[] = [];
   let errorEditRange: SourceRange | null = null;
   let renderedProjection: DocumentProjection = projectDocument("", null);
+  let renderedPages: CompileOk | null = null;
+  let renderedCoordinates = createSourceCoordinates("");
+  const documentCoordinates = $derived(createSourceCoordinates(doc));
   let inputPosition = $state<{ left: number; top: number; height: number } | null>(null);
   let documentCaret = $state<DocumentCaret | null>(null);
   let interactionSeq = 0;
   let positioningFromPage = false;
 
-  function currentInput(): string {
-    return JSON.stringify([
+  // 按输入变化生成一次指纹，而不是在滚动/选区查询里反复序列化全文。
+  const inputFingerprint = $derived(
+    JSON.stringify([
       documentSession,
       documentRevision,
       doc,
@@ -345,7 +357,10 @@
       filePath,
       fontArgs(),
       viewMode === "write" ? sourceRange : null,
-    ]);
+    ]),
+  );
+  function currentInput(): string {
+    return inputFingerprint;
   }
 
   function handleOpenLink(href: string): void {
@@ -369,7 +384,7 @@
       return;
     }
     const prefix = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
-    const renderedPos = byteOffsetsToPositions(renderedProjection.source, [hit.offset])[0];
+    const renderedPos = renderedCoordinates.toPosition(hit.offset);
     const sourcePos = renderedProjection.renderedToSource(renderedPos);
     if (sourcePos < prefix.length) {
       statusText = "请在设置中编辑前缀代码";
@@ -422,13 +437,11 @@
       documentCaret = null;
       return;
     }
-    const lines = doc.split("\n");
-    const pos =
-      lines.slice(0, line - 1).reduce((sum, value) => sum + value.length + 1, 0) + col - 1;
+    const pos = documentCoordinates.linePosition(line, col);
     const prefix = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
-    const offset = positionsToByteOffsets(renderedProjection.source, [
+    const offset = renderedCoordinates.toByte(
       renderedProjection.sourceToRendered(prefix.length + pos),
-    ])[0];
+    );
     if (documentCaret?.offset === offset) return;
     const caret = await locateDocumentCursor(documentGeometryId, offset);
     if (seq === interactionSeq && input === currentInput() && input === renderedInput)
@@ -1031,12 +1044,14 @@
     sourceOpen = false;
     sourceRange = null;
     renderedProjection = projectDocument("", null);
+    renderedCoordinates = createSourceCoordinates("");
+    renderedPages = null;
     documentErrorRanges = [];
     errorEditRange = null;
     previewStatus = "idle";
     previewError = "";
     pageCount = 0;
-    previewPaneRef?.paper()?.replaceChildren();
+    previewPaneRef?.clearPages();
   }
 
   function fontArgs() {
@@ -1181,25 +1196,19 @@
     const body = previewPaneRef?.body();
     const paper = previewPaneRef?.paper();
     if (!body || !paper) return;
-    const pages = [...paper.querySelectorAll<SVGSVGElement>(":scope > svg")];
-    const svg = pages[0];
-    if (!svg) {
+    const actualPageWidthPt = previewPaneRef?.pageWidthPt() ?? 0;
+    if (actualPageWidthPt <= 0) {
       paper.style.width = "";
       return;
     }
     const containerWidth = body.clientWidth;
-    const widths = pages.map((page) => viewBoxWidthPt(page.getAttribute("viewBox") ?? ""));
-    const actualPageWidthPt = Math.max(...widths);
-    pages.forEach((page, i) => {
-      page.style.width = `${(widths[i] / actualPageWidthPt) * 100}%`;
-      page.style.marginInline = "auto";
-    });
     const displayWidth = previewCanvasWidth({
       containerWidth,
       pageWidthPt: actualPageWidthPt,
       uiZoom,
     });
-    paper.style.width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
+    const width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
+    if (paper.style.width !== width) paper.style.width = width;
   }
 
   /**
@@ -1230,6 +1239,8 @@
     const mode = viewMode;
     const path = filePath;
     const fonts = fontArgs();
+    // 基准只来自已经落地的本会话产物；在途和回退中的临时产物不能成为引用来源。
+    const previous = renderedPages;
     const editing = errorEditRange;
     const isCurrent = () =>
       mySeq === compileSeq &&
@@ -1249,7 +1260,7 @@
             ? { from: prefixLength + editing.from, to: prefixLength + editing.to }
             : null,
         recover: mode === "write",
-        compile: (src) => compileToSvg(src, path, fonts),
+        compile: (src) => compileToSvg(src, path, fonts, previous),
         isCurrent,
         canRetry: () => {
           if (!writeScheduler.stats().composing) return true;
@@ -1265,12 +1276,14 @@
     // 文本、会话、字体和前缀在等待期间变化时，迟到的成功与失败均不能落地。
     if (!isCurrent() || deferred) return;
     if (result.ok) {
-      const paper = previewPaneRef?.paper();
-      if (!paper) return;
-      paper.innerHTML = result.svg;
+      if (!previewPaneRef?.paper()) return;
+      previewPaneRef.updatePages(result.pages);
+      renderedPages = result;
       documentGeometryId = result.geometryId ?? 0;
       documentCaret = null;
       renderedInput = input;
+      if (renderedProjection.source !== projection.source)
+        renderedCoordinates = createSourceCoordinates(projection.source);
       renderedProjection = projection;
       documentErrorRanges = errorRanges.map((range) => ({
         from: range.from - prefixLength,

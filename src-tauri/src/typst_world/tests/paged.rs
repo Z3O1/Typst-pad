@@ -22,11 +22,117 @@ $ a^2 + b^2 = c^2 $
 }
 
 #[test]
+fn incremental_pages_keep_full_export_identity_and_fresh_geometry() {
+    let source = "#set page(width: 300pt, height: 400pt)\n版本 A\n#pagebreak()\n第二页";
+    let fonts = FontConfig::default();
+    let first = compile_incremental(source.into(), None, &fonts_dir(), &fonts, None);
+    assert!(first.ok);
+    let full = compile(source.into(), None, &fonts_dir(), &fonts);
+    assert_eq!(
+        first.pages,
+        full.pages.into_iter().map(Some).collect::<Vec<_>>()
+    );
+    let same = compile_incremental(
+        source.into(),
+        None,
+        &fonts_dir(),
+        &fonts,
+        Some(first.page_keys.clone()),
+    );
+    assert!(same.pages.iter().all(Option::is_none));
+    assert_eq!(same.page_keys, first.page_keys);
+    assert_ne!(same.geometry_id, first.geometry_id);
+    let json = serde_json::to_value(&same).unwrap();
+    assert_eq!(json["pages"], serde_json::json!([null, null]));
+    assert_eq!(json["pageKeys"].as_array().unwrap().len(), 2);
+    let changed = source.replace("版本 A", "版本 B");
+    let next = compile_incremental(
+        changed.clone(),
+        None,
+        &fonts_dir(),
+        &fonts,
+        Some(first.page_keys.clone()),
+    );
+    assert!(next.pages[0].is_some());
+    assert!(next.pages[1].is_none());
+    let complete = compile(changed, None, &fonts_dir(), &fonts);
+    let reconstructed: Vec<_> = next
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(i, page)| page.as_ref().or(first.pages[i].as_ref()).unwrap().clone())
+        .collect();
+    assert_eq!(reconstructed, complete.pages);
+    let missing = compile_incremental(
+        source.into(),
+        None,
+        &fonts_dir(),
+        &fonts,
+        Some(first.page_keys[..1].to_vec()),
+    );
+    assert!(missing.pages[0].is_none());
+    assert!(missing.pages[1].is_some());
+    let reordered = compile_incremental(
+        source.into(),
+        None,
+        &fonts_dir(),
+        &fonts,
+        Some(first.page_keys.iter().rev().cloned().collect()),
+    );
+    assert!(reordered.pages.iter().all(Option::is_some));
+    // 非等长输入、纸型/字体变化和增删页也必须按同位置基准重建完整产物。
+    for edited in [
+        source.replace("版本 A", "新增的版本 A"),
+        source.replace("300pt", "480pt"),
+        format!("#set text(size: 20pt)\n{source}"),
+        format!("{source}\n#pagebreak()\n新增页"),
+        source.split("#pagebreak()").next().unwrap().to_string(),
+    ] {
+        let partial = compile_incremental(
+            edited.clone(),
+            None,
+            &fonts_dir(),
+            &fonts,
+            Some(first.page_keys.clone()),
+        );
+        assert!(partial.ok);
+        let complete = compile(edited, None, &fonts_dir(), &fonts);
+        let restored: Vec<_> = partial
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, page)| {
+                page.as_ref()
+                    .or_else(|| first.pages.get(i).and_then(Option::as_ref))
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        assert_eq!(restored, complete.pages);
+    }
+    let failed = compile_incremental(
+        "$unknown$".into(),
+        None,
+        &fonts_dir(),
+        &fonts,
+        Some(first.page_keys),
+    );
+    assert!(!failed.ok);
+    assert!(failed.page_keys.is_empty());
+    assert!(failed.geometry_id.is_none());
+    assert!(serde_json::to_value(failed)
+        .unwrap()
+        .get("pageKeys")
+        .is_none());
+}
+
+#[test]
 fn json_keys_are_camel_case() {
     let out = CompileOutput {
         geometry_id: None,
         ok: true,
         pages: vec!["<svg>…</svg>".to_string()],
+        page_keys: Vec::new(),
         diagnostics: Vec::new(),
         warnings: vec![Diagnostic {
             message: "警告".to_string(),
@@ -81,6 +187,8 @@ $ sum_(i=1)^n i = frac(n(n+1), 2) $
 #pagebreak()
 #set page(width: 480pt, height: 300pt, margin: 30pt)
 = 第二页
+#link("https://typst.app")[页面链接]
+
 第二页使用不同纸型，仍由 Typst 完整呈现。
 "##.to_string()
 }
