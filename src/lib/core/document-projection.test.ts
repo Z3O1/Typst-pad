@@ -29,7 +29,9 @@ describe("Typst 原地源码展开", () => {
   it("多行及嵌套反引号选用不会提前闭合的围栏", () => {
     const doc = "#block[\n```typ\n#let x = 1\n```\n]";
     const projection = projectDocument(doc, { from: 0, to: doc.length });
-    expect(projection.source).toBe("````typ\n" + doc + "\n````");
+    expect(projection.source).toBe("````\n" + doc + "\n````");
+    for (let pos = 0; pos <= doc.length; pos++)
+      expect(projection.renderedToSource(projection.sourceToRendered(pos))).toBe(pos);
   });
   it("展开声明保留它的作用域，同时只把输入位置映射到可见源码", () => {
     const doc = "#let x = [内容]\n#x";

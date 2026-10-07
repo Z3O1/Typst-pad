@@ -15,7 +15,7 @@ const [
   original,
   edited,
   mathExpanded,
-  mathEdited,
+  _mathEdited,
   tableExpanded,
   imageExpanded,
   whitespaceEdited,
@@ -127,12 +127,11 @@ check(
   (await count()) === whitespaceBefore && (await c.evaluate("!window.__browserDevWrites?.length")),
 );
 const dragPoint = await whitespacePoint(original.whitespaceHits[0]);
-const hitsBeforeDrag = await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0");
 await c.drag(dragPoint.x, dragPoint.y, dragPoint.x, dragPoint.y + 20);
-await sleep(100);
+await c.waitFor("window.__typstPadView.hasFocus");
 check(
-  "拖动空白不触发光标命中",
-  (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === hitsBeforeDrag,
+  "空白拖动使用源码选区，不修改文档或重新排版",
+  (await doc()) === original.doc && (await count()) === whitespaceBefore,
 );
 async function moveOutAndBack(distance) {
   const base = { x: dragPoint.x, y: dragPoint.y, button: "left", clickCount: 1 };
@@ -148,15 +147,244 @@ async function moveOutAndBack(distance) {
   await sleep(100);
 }
 await moveOutAndBack(20);
+await c.waitFor("window.__typstPadView.state.selection.main.empty");
 check(
-  "拖动后回到起点仍不触发命中",
-  (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === hitsBeforeDrag,
+  "拖动回到起点收拢选区且不展开源码",
+  (await count()) === whitespaceBefore && (await compiledPagesMatch(original)),
 );
+const hitsBeforeJitter = await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0");
 await moveOutAndBack(2);
+await c.waitFor(`window.__browserDevCallCounts.document_hit_test===${hitsBeforeJitter + 1}`);
 check(
   "轻微手抖仍视为正常点击",
-  (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) === hitsBeforeDrag + 1,
+  (await c.evaluate("window.__browserDevCallCounts.document_hit_test ?? 0")) ===
+    hitsBeforeJitter + 1,
 );
+
+function textProbe(part) {
+  const at = original.doc.indexOf(part);
+  if (at < 0) throw new Error(`夹具缺少源码：${part}`);
+  const offset = Buffer.byteLength(original.doc.slice(0, at));
+  const probe = original.carets.find((p) => p.offset === offset);
+  if (!probe) throw new Error(`缺少真实文字探针：${part}`);
+  return probe;
+}
+async function textPoint(probe) {
+  return c.evaluate(
+    `(() => {const p=${JSON.stringify(probe)},s=window.__pageSvgs()[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal;return {x:r.left+(p.xPt-v.x)*r.width/v.width+.5,y:r.top+(p.yPt-v.y+p.heightPt/2)*r.height/v.height}})()`,
+  );
+}
+const selectionBytes = (anchor, head) =>
+  `(() => {const v=window.__typstPadView,s=v.state.selection.main,b=p=>new TextEncoder().encode(v.state.doc.sliceString(0,p)).length;return b(s.anchor)===${anchor} && b(s.head)===${head}})()`;
+const startProbe = textProbe("正文含");
+const endProbe = textProbe("emoji");
+await whitespacePoint(startProbe);
+const startPoint = await textPoint(startProbe);
+const endPoint = await textPoint(endProbe);
+const beforeSelection = await count();
+await c.send("Input.dispatchMouseEvent", {
+  type: "mousePressed",
+  ...startPoint,
+  button: "left",
+  buttons: 1,
+  clickCount: 1,
+});
+await sleep(450);
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseMoved",
+  ...endPoint,
+  button: "left",
+  buttons: 1,
+});
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseReleased",
+  ...endPoint,
+  button: "left",
+  buttons: 0,
+  clickCount: 1,
+});
+await c.waitFor(
+  `${selectionBytes(startProbe.offset, endProbe.offset)} && !!document.querySelector('.document-selection path')`,
+);
+check("按住鼠标后拖动选中中文，anchor/head 与真实 UTF-8 命中一致", (await doc()) === original.doc);
+await c.screenshot(shotPath("document-drag-selection"));
+const selectionPathBefore = await c.evaluate(
+  "document.querySelector('.document-selection path').getAttribute('d')",
+);
+check("选区高亮来自真实帧几何且不修改原生 SVG", await compiledPagesMatch(original));
+await c.send("Emulation.setDeviceMetricsOverride", {
+  width: 1000,
+  height: 900,
+  deviceScaleFactor: 1,
+  mobile: false,
+});
+await c.waitFor(
+  `document.querySelector('.document-selection path')?.getAttribute('d')!==${JSON.stringify(selectionPathBefore)}`,
+);
+check("窗口缩放同步选区和光标，不触发编译", (await count()) === beforeSelection);
+await c.send("Emulation.setDeviceMetricsOverride", {
+  width: 1200,
+  height: 900,
+  deviceScaleFactor: 1,
+  mobile: false,
+});
+await sleep(100);
+await c.drag(
+  (await textPoint(endProbe)).x,
+  (await textPoint(endProbe)).y,
+  (await textPoint(startProbe)).x,
+  (await textPoint(startProbe)).y,
+);
+await c.waitFor(selectionBytes(endProbe.offset, startProbe.offset));
+check("反向拖动保留按下端点，不反转源码内容", (await doc()) === original.doc);
+const contextPoint = await textPoint(startProbe);
+await c.send("Input.dispatchMouseEvent", {
+  type: "mousePressed",
+  ...contextPoint,
+  button: "right",
+  buttons: 2,
+  clickCount: 1,
+});
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseReleased",
+  ...contextPoint,
+  button: "right",
+  buttons: 0,
+  clickCount: 1,
+});
+await c.waitFor("!!document.querySelector('.context-menu')");
+check(
+  "文档右键菜单使用源码选区启用复制和剪切",
+  await c.evaluate(
+    "['剪切','复制'].every(label=>[...document.querySelectorAll('.context-menu button')].some(b=>b.textContent.trim()===label && !b.disabled))",
+  ),
+);
+await c.evaluate(
+  "[...document.querySelectorAll('.context-menu button')].find(b=>b.textContent.trim()==='复制').click()",
+);
+check(
+  "拖选后复制原始源码而非 SVG 或选区标记",
+  await c.evaluate("window.__browserDevCopied.at(-1)==='正文含中文与 '"),
+);
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await c.waitFor("!document.querySelector('.document-pane')");
+check(
+  "切到源码模式保留真实选区",
+  await c.evaluate(selectionBytes(endProbe.offset, startProbe.offset)),
+);
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await c.waitFor("!!document.querySelector('.document-selection path')");
+check("返回文档模式恢复选区高亮而不重新编译", (await count()) === beforeSelection);
+await whitespacePoint(startProbe);
+const acrossStart = await textPoint(startProbe);
+await c.send("Input.dispatchMouseEvent", {
+  type: "mousePressed",
+  ...acrossStart,
+  button: "left",
+  buttons: 1,
+  clickCount: 1,
+});
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseMoved",
+  x: acrossStart.x + 10,
+  y: acrossStart.y,
+  button: "left",
+  buttons: 1,
+});
+// 页面滚动时重新换算坐标；pointer capture 保持同一个按下锚点。
+await whitespacePoint(textProbe("第二页使用"));
+const visibleEnd = await textPoint(textProbe("第二页使用"));
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseMoved",
+  ...visibleEnd,
+  button: "left",
+  buttons: 1,
+});
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseReleased",
+  ...visibleEnd,
+  button: "left",
+  buttons: 0,
+  clickCount: 1,
+});
+await c.waitFor(selectionBytes(startProbe.offset, textProbe("第二页使用").offset));
+check(
+  "跨行跨页拖选不自动展开穿过的公式或脚本",
+  (await count()) === beforeSelection && (await compiledPagesMatch(original)),
+);
+// 让手势离开预览区，验证捕获和自动滚动，松开之后滚动必须停止。
+await whitespacePoint(startProbe);
+const edgeStart = await textPoint(startProbe);
+const previewBottom = await c.evaluate(
+  "document.querySelector('.preview-body').getBoundingClientRect().bottom",
+);
+await c.send("Input.dispatchMouseEvent", {
+  type: "mousePressed",
+  ...edgeStart,
+  button: "left",
+  buttons: 1,
+  clickCount: 1,
+});
+const scrollAtEdgeStart = await c.evaluate("document.querySelector('.preview-body').scrollTop");
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseMoved",
+  x: edgeStart.x,
+  y: previewBottom + 10,
+  button: "left",
+  buttons: 1,
+});
+await c.waitFor(`document.querySelector('.preview-body').scrollTop>${scrollAtEdgeStart + 40}`);
+await c.send("Input.dispatchMouseEvent", {
+  type: "mouseReleased",
+  x: edgeStart.x,
+  y: previewBottom + 10,
+  button: "left",
+  buttons: 0,
+  clickCount: 1,
+});
+await sleep(100);
+const stoppedScroll = await c.evaluate("document.querySelector('.preview-body').scrollTop");
+await sleep(150);
+check(
+  "离开预览边缘仍可拖选，松开后停止自动滚动",
+  (await c.evaluate("document.querySelector('.preview-body').scrollTop")) === stoppedScroll,
+);
+await whitespacePoint(startProbe);
+await c.click((await textPoint(startProbe)).x, (await textPoint(startProbe)).y);
+await c.waitFor(
+  "window.__typstPadView.state.selection.main.empty && !document.querySelector('.document-selection') && !!document.querySelector('.document-caret')",
+);
+check(
+  "单击收拢选区并恢复独立光标",
+  await c.evaluate(selectionBytes(startProbe.offset, startProbe.offset)),
+);
+await c.key("ArrowRight", { keyCode: 39 });
+const nextCaret = original.carets.find(
+  (p) => p.offset === startProbe.offset + Buffer.byteLength("正"),
+);
+if (!nextCaret) throw new Error("缺少中文下一字符的真实光标探针");
+await c.waitFor(
+  `${selectionBytes(nextCaret.offset, nextCaret.offset)} && (()=>{const p=${JSON.stringify(nextCaret)},s=window.__pageSvgs()[p.page-1],r=s.getBoundingClientRect(),v=s.viewBox.baseVal,c=document.querySelector('.document-caret')?.getBoundingClientRect();return c && Math.abs(c.left-r.left-(p.xPt-v.x)*r.width/v.width)<1 && Math.abs(c.top-r.top-(p.yPt-v.y)*r.height/v.height)<1})()`,
+);
+check("键盘光标按中文字符移动且叠加位置与真实几何一致", (await count()) === beforeSelection);
+await c.drag(
+  (await textPoint(endProbe)).x,
+  (await textPoint(endProbe)).y,
+  (await textPoint(startProbe)).x,
+  (await textPoint(startProbe)).y,
+);
+await c.waitFor(selectionBytes(endProbe.offset, startProbe.offset));
+await c.type("修改后的正文含中文与 ");
+await settled(edited);
+check(
+  "拖选后输入替换真实源码选区，不写入临时高亮内容",
+  (await doc()) === edited.doc &&
+    (await compiledPagesMatch(edited)) &&
+    (await c.evaluate("!window.__browserDevWrites?.length")),
+);
+await c.key("z", { keyCode: 90, modifiers: 2 });
+await settled(original);
+check("拖动选区不产生额外撤销步骤", (await doc()) === original.doc);
 const macroProbe = original.whitespaceHits.find((probe) => probe.name === "macro-side");
 if (!macroProbe?.caret?.isWhitespace) throw new Error("缺少宏输出旁的真实空白探针");
 const macroPoint = await whitespacePoint(macroProbe);
@@ -255,20 +483,20 @@ await c.evaluate(
   `window.__typstPadView.dispatch({selection:{anchor:${textFrom},head:${textFrom + "正文含中文".length}}})`,
 );
 await c.type("修改后的正文含中文");
-await settled(mathEdited);
+await settled(edited);
 check("真实输入修改唯一源文档", (await doc()) === edited.doc);
-check("展开态编辑后重新由 Typst 排版", await compiledPagesMatch(mathEdited));
+check("光标在展开范围外编辑后自动恢复正常排版", await compiledPagesMatch(edited));
 await c.key("z", { keyCode: 90, modifiers: 2 });
-await settled(mathExpanded);
+await settled(original);
 check(
-  "展开态撤销恢复原文和完整产物",
-  (await doc()) === original.doc && (await compiledPagesMatch(mathExpanded)),
+  "范围外编辑撤销恢复原文和完整产物，不重新打开旧展开",
+  (await doc()) === original.doc && (await compiledPagesMatch(original)),
 );
 await c.key("y", { keyCode: 89, modifiers: 2 });
-await settled(mathEdited);
+await settled(edited);
 check(
-  "展开态重做恢复原文和完整产物",
-  (await doc()) === edited.doc && (await compiledPagesMatch(mathEdited)),
+  "范围外编辑重做保持当前光标的正常排版",
+  (await doc()) === edited.doc && (await compiledPagesMatch(edited)),
 );
 await c.key("Escape", { keyCode: 27 });
 await settled(edited);
@@ -487,6 +715,40 @@ await c.evaluate(
 await settled(errorRecovered);
 check("合成结束重新诊断并恢复错误源码", await compiledPagesMatch(errorRecovered));
 await boot(c, `${DEV_URL}&compileslow=1`, { pageFixtures: fixtures });
+await replace(original.doc);
+await whitespacePoint(startProbe);
+await c.drag(
+  (await textPoint(startProbe)).x,
+  (await textPoint(startProbe)).y,
+  (await textPoint(endProbe)).x,
+  (await textPoint(endProbe)).y,
+);
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await sleep(800);
+check(
+  "模式切换作废在途拖选，不回写迟到选区",
+  await c.evaluate(
+    "window.__typstPadView.state.selection.main.empty && !document.querySelector('.document-selection')",
+  ),
+);
+await replace(original.doc);
+await whitespacePoint(startProbe);
+await c.drag(
+  (await textPoint(startProbe)).x,
+  (await textPoint(startProbe)).y,
+  (await textPoint(endProbe)).x,
+  (await textPoint(endProbe)).y,
+);
+await c.evaluate(
+  "window.__typstPadView.dispatch({changes:{from:0,insert:'新'},selection:{anchor:1}})",
+);
+await c.waitFor(COMPILE_IDLE, { timeout: 8000 });
+check(
+  "编辑作废在途拖选和高亮查询",
+  await c.evaluate(
+    "window.__typstPadView.state.selection.main.head===1 && window.__typstPadView.state.selection.main.empty && !document.querySelector('.document-selection')",
+  ),
+);
 await replace(original.doc);
 await hitAt("x^2");
 await c.evaluate(

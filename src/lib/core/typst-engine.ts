@@ -271,6 +271,43 @@ export interface DocumentCaret {
   isWhitespace?: boolean;
 }
 
+/** 已排版选区四边形；源码范围为编译输入的 UTF-8 字节位置。 */
+export interface DocumentSelectionQuad {
+  from: number;
+  to: number;
+  page: number;
+  points: [number, number][];
+}
+
+export async function locateDocumentSelection(
+  geometryId: number,
+  from: number,
+  to: number,
+): Promise<DocumentSelectionQuad[]> {
+  try {
+    const quads = await invoke<DocumentSelectionQuad[]>("document_selection", {
+      geometryId,
+      from,
+      to,
+    });
+    return Array.isArray(quads)
+      ? quads.filter(
+          (quad) =>
+            quad &&
+            Number.isInteger(quad.page) &&
+            quad.page > 0 &&
+            Array.isArray(quad.points) &&
+            quad.points.length === 4 &&
+            quad.points.every(
+              (point) => Array.isArray(point) && point.length === 2 && point.every(Number.isFinite),
+            ),
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function validCaret(value: DocumentCaret | null): DocumentCaret | null {
   return value &&
     Number.isInteger(value.offset) &&

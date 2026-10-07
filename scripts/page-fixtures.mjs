@@ -26,4 +26,26 @@ if (!fixtures.length || fixtures.some((fixture) => !fixture.pages.length || !fix
   throw new Error("整页夹具或命中探针为空");
 mkdirSync(".browser-check", { recursive: true });
 writeFileSync(".browser-check/page-fixtures.json", JSON.stringify(fixtures));
-console.log(`已导出 ${fixtures.length} 份真实整页夹具`);
+const cursorFixtures = result.stdout
+  .split("\n")
+  .filter((line) => line.startsWith("CURSORFIXTURE:"))
+  .map((line) => JSON.parse(line.slice("CURSORFIXTURE:".length)));
+if (
+  cursorFixtures.length !== 6 ||
+  cursorFixtures.some((fixture) => !fixture.pages.length || !fixture.cursorQueries.length)
+)
+  throw new Error("光标渲染夹具缺失，不能使用空探针验收");
+writeFileSync(".browser-check/cursor-fixtures.json", JSON.stringify(cursorFixtures));
+const expansionFixtures = result.stdout
+  .split("\n")
+  .filter((line) => line.startsWith("EXPANSIONFIXTURE:"))
+  .map((line) => JSON.parse(line.slice("EXPANSIONFIXTURE:".length)));
+if (
+  expansionFixtures.length !== 9 ||
+  expansionFixtures.some((fixture) => !fixture.pages.length || !fixture.cursorQueries.length)
+)
+  throw new Error("光标展开夹具缺失，不能跳过真实重排验证");
+writeFileSync(".browser-check/expansion-fixtures.json", JSON.stringify(expansionFixtures));
+console.log(
+  `已导出 ${fixtures.length} 份真实整页夹具、${cursorFixtures.length} 份光标渲染夹具、${expansionFixtures.length} 份展开夹具`,
+);

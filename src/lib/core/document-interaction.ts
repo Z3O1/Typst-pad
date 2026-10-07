@@ -1,19 +1,5 @@
 // 整页交互只映射坐标与源码范围，不参与 Typst 排版。
 import { parser } from "codemirror-lang-typst/lezer";
-import type { SourceRange } from "./document-projection";
-
-/** 空白只移动插入点；已展开的源码内继续编辑，不因点到字间空白而收起。 */
-export function clickSourceRange(
-  doc: string,
-  pos: number,
-  current: SourceRange | null,
-  isWhitespace: boolean,
-): SourceRange | null {
-  if (current && pos >= current.from && pos <= current.to) return current;
-  if (isWhitespace) return null;
-  const range = sourceRevealRange(doc, pos);
-  return range.kind === "text" ? null : { from: range.from, to: range.to };
-}
 
 // 诊断起止点和光标移动复用同一快照；只保留一份树，编辑或换文件自动替换。
 let parsed: { doc: string; tree: ReturnType<typeof parser.parse> } | null = null;
@@ -22,6 +8,7 @@ export function sourceRevealRange(
   doc: string,
   pos: number,
   outermost = false,
+  affinity: -1 | 0 | 1 = 0,
 ): {
   from: number;
   to: number;
@@ -33,7 +20,7 @@ export function sourceRevealRange(
     if (!parsed || parsed.doc !== doc) parsed = { doc, tree: parser.parse(doc) };
     const tree = parsed.tree;
     let candidate: ReturnType<typeof sourceRevealRange> | null = null;
-    for (const side of [-1, 1] as const) {
+    for (const side of affinity === 0 ? ([-1, 1] as const) : [affinity]) {
       let node = tree.resolveInner(at, side);
       while (node.parent) {
         let range: ReturnType<typeof sourceRevealRange> | null = null;
@@ -42,7 +29,11 @@ export function sourceRevealRange(
           range = { from: node.from, to: node.nextSibling.to, kind: "code" };
         if (node.prevSibling?.name === "Hash")
           range = { from: node.prevSibling.from, to: node.to, kind: "code" };
-        if (range) {
+        if (
+          range &&
+          (affinity === 0 ||
+            (affinity > 0 ? at >= range.from && at < range.to : at > range.from && at <= range.to))
+        ) {
           if (!outermost) return range;
           if (!candidate || (range.from <= candidate.from && range.to >= candidate.to))
             candidate = range;

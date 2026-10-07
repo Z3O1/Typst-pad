@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { DocumentCaret } from "$lib/core/typst-engine";
-  import { createDocumentPages } from "./document-pages";
+  import type { DocumentCaret, DocumentSelectionQuad } from "$lib/core/typst-engine";
+  import type { DocumentPoint } from "$lib/core/document-drag-selection";
+  import { createDocumentPages, type DocumentPage } from "./document-pages";
+  import { caretScrollDelta, projectDocumentCaret } from "./document-caret";
 
   let {
     hidden,
@@ -9,7 +11,13 @@
     editable = false,
     stale = false,
     caret = null,
+    caretVisible = false,
+    composing = false,
+    selection = [],
     onPageClick,
+    onSelectionStart,
+    onSelectionMove,
+    onSelectionCancel,
     onOpenLink,
     onEditSource,
     onCaretPosition,
@@ -19,7 +27,13 @@
     editable?: boolean;
     stale?: boolean;
     caret?: DocumentCaret | null;
-    onPageClick?: (point: { page: number; xPt: number; yPt: number }) => void;
+    caretVisible?: boolean;
+    composing?: boolean;
+    selection?: DocumentSelectionQuad[];
+    onPageClick?: (point: DocumentPoint) => void;
+    onSelectionStart?: (point: DocumentPoint) => void;
+    onSelectionMove?: (point: DocumentPoint) => void;
+    onSelectionCancel?: () => void;
     onOpenLink?: (href: string) => void;
     onEditSource?: () => void;
     onCaretPosition?: (position: { left: number; top: number; height: number } | null) => void;
@@ -28,8 +42,19 @@
   let bodyEl = $state<HTMLElement | undefined>();
   let canvasEl: HTMLElement;
   let caretStyle = $state("");
+  let windowFocused = $state(true);
+  let selectionPath = $state("");
   let measureFrame = 0;
-  let pointerStart: { id: number; x: number; y: number; moved: boolean } | null = null;
+  let scrollFrame = 0;
+  let pointerStart: {
+    id: number;
+    x: number;
+    y: number;
+    moved: boolean;
+    selectable: boolean;
+    selecting: boolean;
+  } | null = null;
+  let dragPoint: { x: number; y: number } | null = null;
   let pages: ReturnType<typeof createDocumentPages> | undefined;
   export function updatePages(sources: string[]): void {
     if (!paperEl) return;
@@ -50,6 +75,24 @@
     return bodyEl;
   }
 
+  /** 展开/收起后的光标跟随真实新产物，避免重排把输入位置留在视口外。 */
+  export function revealCaret(value: DocumentCaret): void {
+    const page = pages?.page(value.page);
+    if (!page || !bodyEl || !editable || hidden || composing) return;
+    const position = projectDocumentCaret(value, page.host.getBoundingClientRect(), page.box);
+    if (!position) return;
+    const rect = bodyEl.getBoundingClientRect();
+    const delta = caretScrollDelta(position, {
+      left: rect.left,
+      top: rect.top,
+      width: bodyEl.clientWidth,
+      height: bodyEl.clientHeight,
+    });
+    bodyEl.scrollLeft += delta.x;
+    bodyEl.scrollTop += delta.y;
+    measureCaret();
+  }
+
   function measureCaret(): void {
     if (measureFrame) cancelAnimationFrame(measureFrame);
     measureFrame = requestAnimationFrame(() => {
@@ -59,38 +102,177 @@
         caretStyle = "";
         onCaretPosition?.(null);
       };
-      if (!caret || !editable || hidden || stale || !canvasEl || !paperEl) return hideCaret();
-      const page = pages?.page(caret.page);
-      if (!page) return hideCaret();
-      const rect = page.host.getBoundingClientRect();
+      if (!editable || hidden || (stale && !composing) || !canvasEl || !paperEl) {
+        selectionPath = "";
+        return hideCaret();
+      }
       const root = canvasEl.getBoundingClientRect();
-      const box = page.box;
-      if (box.width <= 0 || box.height <= 0 || rect.width <= 0) return hideCaret();
-      const scaleX = rect.width / box.width,
-        scaleY = rect.height / box.height;
-      onCaretPosition?.({
-        left: rect.left + (caret.xPt - box.x) * scaleX,
-        top: rect.top + (caret.yPt - box.y) * scaleY,
-        height: Math.max(2, caret.heightPt * scaleY),
-      });
-      caretStyle = `left:${rect.left - root.left + (caret.xPt - box.x) * scaleX}px;top:${rect.top - root.top + (caret.yPt - box.y) * scaleY}px;height:${Math.max(2, caret.heightPt * scaleY)}px;transform:rotate(${caret.rotationDeg ?? 0}deg)`;
+      const measured = new Map<number, { rect: DOMRect; box: DocumentPage["box"] }>();
+      function pageMeasure(number: number) {
+        if (measured.has(number)) return measured.get(number);
+        const page = pages?.page(number);
+        if (!page) return;
+        const rect = page.host.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        const value = { rect, box: page.box };
+        measured.set(number, value);
+        return value;
+      }
+      selectionPath = selection
+        .map((quad) => {
+          const page = pageMeasure(quad.page);
+          if (!page) return "";
+          const { rect, box } = page;
+          return (
+            quad.points
+              .map(
+                ([x, y], i) =>
+                  `${i === 0 ? "M" : "L"}${rect.left - root.left + ((x - box.x) * rect.width) / box.width},${rect.top - root.top + ((y - box.y) * rect.height) / box.height}`,
+              )
+              .join(" ") + " Z"
+          );
+        })
+        .join(" ");
+      if (!caret) return hideCaret();
+      const page = pageMeasure(caret.page);
+      if (!page) return hideCaret();
+      const position = projectDocumentCaret(caret, page.rect, page.box);
+      if (!position) return hideCaret();
+      onCaretPosition?.(position);
+      caretStyle = `left:${position.left - root.left}px;top:${position.top - root.top}px;height:${position.height}px;transform:rotate(${position.rotation}deg)`;
     });
   }
   $effect(() => {
     void caret;
+    void selection;
     void editable;
     void hidden;
     void stale;
+    void composing;
     void status;
     measureCaret();
   });
   onMount(() => {
     const observer = new ResizeObserver(measureCaret);
     if (paperEl) observer.observe(paperEl);
+    const onFocus = () => {
+      windowFocused = true;
+    };
+    const onBlur = () => {
+      windowFocused = false;
+    };
+    const onVisibility = () => {
+      windowFocused = document.visibilityState === "visible" && document.hasFocus();
+    };
+    windowFocused = document.hasFocus();
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibility);
       observer.disconnect();
+      cancelDrag();
       if (measureFrame) cancelAnimationFrame(measureFrame);
     };
+  });
+
+  function cancelDrag(): void {
+    const pointer = pointerStart;
+    pointerStart = null;
+    dragPoint = null;
+    if (scrollFrame) cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+    if (pointer && bodyEl?.hasPointerCapture(pointer.id)) bodyEl.releasePointerCapture(pointer.id);
+    if (pointer?.selecting) onSelectionCancel?.();
+  }
+
+  function moveSelection(): void {
+    if (!dragPoint) return;
+    const point = pages?.nearest(dragPoint);
+    if (point) onSelectionMove?.(point);
+  }
+
+  function autoScroll(): void {
+    scrollFrame = 0;
+    if (!pointerStart?.selecting || !dragPoint || !bodyEl || !editable || hidden || stale) return;
+    const rect = bodyEl.getBoundingClientRect();
+    const speed = (value: number, min: number, max: number) =>
+      value < min + 32
+        ? -Math.min(20, (min + 32 - value) / 3)
+        : value > max - 32
+          ? Math.min(20, (value - max + 32) / 3)
+          : 0;
+    const left = bodyEl.scrollLeft,
+      top = bodyEl.scrollTop;
+    bodyEl.scrollLeft += speed(dragPoint.x, rect.left, rect.left + bodyEl.clientWidth);
+    bodyEl.scrollTop += speed(dragPoint.y, rect.top, rect.top + bodyEl.clientHeight);
+    if (left === bodyEl.scrollLeft && top === bodyEl.scrollTop) return;
+    moveSelection();
+    measureCaret();
+    scrollFrame = requestAnimationFrame(autoScroll);
+  }
+
+  function handlePointerDown(event: PointerEvent): void {
+    cancelDrag();
+    if (!event.isPrimary || event.button !== 0) return;
+    const rect = bodyEl?.getBoundingClientRect();
+    const selectable =
+      editable &&
+      !stale &&
+      event.pointerType === "mouse" &&
+      !!rect &&
+      event.clientX < rect.left + bodyEl!.clientWidth &&
+      event.clientY < rect.top + bodyEl!.clientHeight &&
+      !event.composedPath().some((node) => node instanceof Element && node.localName === "a");
+    pointerStart = {
+      id: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      moved: false,
+      selectable,
+      selecting: false,
+    };
+    if (selectable) {
+      // 保留触屏滚动和链接默认行为；鼠标交给真实源码选区，不选择 SVG DOM。
+      event.preventDefault();
+      bodyEl?.setPointerCapture(event.pointerId);
+    }
+  }
+
+  function handlePointerMove(event: PointerEvent): void {
+    const start = pointerStart;
+    if (!start || start.id !== event.pointerId || event.buttons !== 1) return;
+    start.moved ||= Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5;
+    if (!start.selectable || !start.moved) return;
+    if (!editable || stale || hidden) return cancelDrag();
+    if (!start.selecting) {
+      const anchor = pages?.nearest({ x: start.x, y: start.y });
+      if (!anchor) return;
+      start.selecting = true;
+      onSelectionStart?.(anchor);
+    }
+    event.preventDefault();
+    dragPoint = { x: event.clientX, y: event.clientY };
+    moveSelection();
+    if (!scrollFrame) scrollFrame = requestAnimationFrame(autoScroll);
+  }
+
+  function handlePointerUp(event: PointerEvent): void {
+    if (pointerStart?.id !== event.pointerId) return;
+    if (pointerStart.selecting) {
+      dragPoint = { x: event.clientX, y: event.clientY };
+      moveSelection();
+    }
+    dragPoint = null;
+    if (scrollFrame) cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+    // moved 留到 click，避免松开拖动后再展开表达式或清掉选区。
+  }
+
+  $effect(() => {
+    if (!editable || stale || hidden) cancelDrag();
   });
 
   function handleClick(event: MouseEvent): void {
@@ -128,25 +310,21 @@
     data-context-zone="preview"
     bind:this={bodyEl}
     tabindex={editable ? 0 : undefined}
-    onscroll={measureCaret}
+    onscroll={() => {
+      measureCaret();
+      if (pointerStart?.selecting) moveSelection();
+    }}
     onclick={handleClick}
-    onpointerdown={(event) => {
-      pointerStart =
-        event.isPrimary && event.button === 0
-          ? { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false }
-          : null;
-    }}
-    onpointermove={(event) => {
-      if (pointerStart?.id === event.pointerId)
-        pointerStart.moved ||=
-          Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 5;
-    }}
+    onpointerdown={handlePointerDown}
+    onpointermove={handlePointerMove}
+    onpointerup={handlePointerUp}
     onpointerleave={(event) => {
       // 触屏抬指后也会发送 leave（buttons=0），不能把正常轻触算成拖动。
       if (pointerStart?.id === event.pointerId && event.buttons !== 0) pointerStart.moved = true;
     }}
-    onpointercancel={() => {
-      pointerStart = null;
+    onpointercancel={cancelDrag}
+    onlostpointercapture={() => {
+      if (dragPoint) cancelDrag();
     }}
     onkeydown={(event) => {
       if (editable && (event.key === "Enter" || event.key === "F2")) {
@@ -164,7 +342,14 @@
         class="preview-paper"
         hidden={status !== "ready"}
       ></div>
-      {#if caretStyle}<div class="document-caret" style={caretStyle} aria-hidden="true"></div>{/if}
+      {#if selectionPath}
+        <svg class="document-selection" aria-hidden="true"><path d={selectionPath}></path></svg>
+      {/if}
+      {#key caret}
+        {#if caretStyle && caretVisible && windowFocused}
+          <div class="document-caret" class:composing style={caretStyle} aria-hidden="true"></div>
+        {/if}
+      {/key}
     </div>
   </div>
 </section>
@@ -203,12 +388,43 @@
     position: relative;
     width: 100%;
   }
+  .document-selection {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    fill: var(--accent, #4daafc);
+    opacity: 0.28;
+  }
+  .document-pane .preview-body {
+    user-select: none;
+    cursor: text;
+  }
   .document-caret {
     position: absolute;
     width: 2px;
     background: var(--accent, #4daafc);
     pointer-events: none;
     transform-origin: top left;
+    animation: document-caret-blink 1s step-end infinite;
+  }
+  .document-caret.composing {
+    animation: none;
+  }
+  @keyframes document-caret-blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .document-caret {
+      animation: none;
+    }
   }
   .preview-paper {
     width: 100%;

@@ -2,6 +2,7 @@
 use super::*;
 use std::collections::HashMap;
 use typst::syntax::{LinkedNode, Span};
+use unicode_segmentation::UnicodeSegmentation;
 
 // 只属于这一轮 World/Source 的缓存；跨修订复用 Span 会映射到错误源码。
 #[derive(Default)]
@@ -83,6 +84,8 @@ pub struct PlacedItem {
     pub caret_start: Point,
     pub caret_end: Point,
     pub caret_vector: Point,
+    /// 仅多字素连字保留内部停靠点；普通字形不额外分配。
+    pub caret_stops: Option<Box<[usize]>>,
     /// 文本项的**基线** y（页面坐标）；图形/图片取 rect 顶端。
     ///
     /// 为什么单列出来：墨迹顶（`rect.min.y`）在同一行里会被上标、分式、矩阵拉得很散
@@ -111,11 +114,80 @@ impl PlacedItem {
             caret_start,
             caret_end,
             caret_vector,
+            caret_stops: None,
             baseline_pt: Point::new(local.min.x, Abs::pt(baseline_pt))
                 .transform(transform)
                 .y
                 .to_pt(),
         }
+    }
+
+    fn text_caret(
+        mut self,
+        text: &typst::text::TextItem,
+        glyph: &typst::text::Glyph,
+        x: Abs,
+        transform: Transform,
+    ) -> Self {
+        // 光标使用字体度量，墨迹 rect 仍供几何证明/背景判定使用。
+        // 不能用句号、逗号或小写字母的 bbox 当作输入行高。
+        let metrics = text.font.metrics();
+        let top = -metrics.ascender.at(text.size);
+        let bottom = metrics.descender.at(text.size).abs();
+        self.caret_start = Point::new(x, top).transform(transform);
+        self.caret_end = Point::new(x + glyph.x_advance.at(text.size), top).transform(transform);
+        self.caret_vector = Point::new(x, bottom).transform(transform) - self.caret_start;
+        if let Some(visible) = text
+            .text
+            .get(glyph.range())
+            .filter(|s| s.len() == self.range.len())
+        {
+            let mut graphemes = visible.grapheme_indices(true);
+            graphemes.next();
+            if let Some((second, _)) = graphemes.next() {
+                let mut stops = vec![self.range.start, self.range.start + second];
+                stops.extend(graphemes.map(|(i, _)| self.range.start + i));
+                stops.push(self.range.end);
+                self.caret_stops = Some(stops.into_boxed_slice());
+            }
+        }
+        self
+    }
+
+    pub fn caret_at(&self, offset: usize) -> Point {
+        if offset <= self.range.start {
+            return self.caret_start;
+        }
+        if offset >= self.range.end {
+            return self.caret_end;
+        }
+        let Some(stops) = &self.caret_stops else {
+            return self.caret_end;
+        };
+        let index = stops
+            .partition_point(|&stop| stop <= offset)
+            .saturating_sub(1);
+        self.caret_start
+            + (self.caret_end - self.caret_start) * (index as f64 / (stops.len() - 1) as f64)
+    }
+
+    pub fn hit_rect(&self) -> Rect {
+        if self.kind != PlacedItemKind::Text {
+            return self.rect;
+        }
+        let points = [
+            self.caret_start,
+            self.caret_end,
+            self.caret_start + self.caret_vector,
+            self.caret_end + self.caret_vector,
+        ];
+        let min = points
+            .iter()
+            .fold(points[0], |p, q| Point::new(p.x.min(q.x), p.y.min(q.y)));
+        let max = points
+            .iter()
+            .fold(points[0], |p, q| Point::new(p.x.max(q.x), p.y.max(q.y)));
+        Rect::new(min, max)
     }
 }
 
@@ -281,14 +353,17 @@ fn walk_frame(
                         // 主文档的 span 却解不出区间：不多见，也不算外源
                         Some(id) if id == main_id => {
                             if let Some(range) = glyph_range(world, text, glyph, ranges) {
-                                out.push(PlacedItem::new(
-                                    page,
-                                    range,
-                                    local,
-                                    0.0,
-                                    PlacedItemKind::Text,
-                                    item_ts,
-                                ));
+                                out.push(
+                                    PlacedItem::new(
+                                        page,
+                                        range,
+                                        local,
+                                        0.0,
+                                        PlacedItemKind::Text,
+                                        item_ts,
+                                    )
+                                    .text_caret(text, glyph, x, item_ts),
+                                );
                                 stats.glyphs_mapped += 1;
                             }
                         }
