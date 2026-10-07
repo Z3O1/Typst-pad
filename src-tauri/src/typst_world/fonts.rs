@@ -86,12 +86,30 @@ impl Default for FontConfig {
 /// typst-eval 的入口是 `StyleChain::new(&library.styles).chain(&target)`——库样式在**外层**、
 /// 文档样式在内层，查找内层先命中，所以文档里的 `#set text(font: ...)` 照旧覆盖这里
 /// （与原生 typst 的「用户设置 > 默认设置」一致）。列表为空则完全不注入。
-pub(crate) fn build_library(families: &[String]) -> Library {
+pub(crate) fn build_library(families: &[String]) -> Arc<LazyHash<Library>> {
+    use super::cache::BoundedCache;
+    type Libraries = BoundedCache<Vec<String>, Arc<LazyHash<Library>>>;
+    static LIBRARIES: OnceLock<Mutex<Libraries>> = OnceLock::new();
+    let cache = LIBRARIES.get_or_init(|| Mutex::new(BoundedCache::new(8, usize::MAX)));
+    let key = families.to_vec();
+    if let Some(library) = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .cloned()
+    {
+        return library;
+    }
     let mut library = Library::default();
     if !families.is_empty() {
         let list = FontList(families.iter().map(|f| FontFamily::new(f)).collect());
         library.styles.set(TextElem::font, list);
     }
+    let library = Arc::new(LazyHash::new(library));
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key, library.clone(), 0);
     library
 }
 
@@ -234,34 +252,36 @@ fn system_font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// 字体缓存的值：目录列表 → 加载好的 FontBook + 用于回退匹配的 Font 列表
-type FontCacheMap = HashMap<Vec<PathBuf>, Arc<(FontBook, Vec<Font>)>>;
+/// 共享 FontBook 的惰性摘要与字体向量，避免每轮克隆并重新散列全部元数据。
+pub(crate) type SharedFonts = Arc<(LazyHash<FontBook>, Vec<Font>)>;
+type FontCacheMap = super::cache::BoundedCache<Vec<PathBuf>, SharedFonts>;
 
-/// 进程级字体缓存：按「打包目录 + 额外字体目录」列表做 key。
-/// 字体集合在一个进程内是静态的（打包/系统目录不变），但用户可以在设置里增删额外字体
-/// 目录，所以缓存必须按目录列表区分；Font 为 Arc 引用计数，FontBook 克隆廉价。
-/// 前端每次按键都会触发编译，若每次重读几百个系统字体文件将严重拖慢输入。
+/// 按「打包目录 + 额外字体目录」列表区分，最多保留 4 套；旧 World 自己持有 Arc。
+/// 字体集合在进程内复用；目录配置被淘汰后可重新加载，不改变解析与回退优先序。
 static FONT_CACHE: OnceLock<Mutex<FontCacheMap>> = OnceLock::new();
 
-/// 获取字体集：命中缓存返回克隆，未命中则从打包目录 + 系统目录 + 额外目录全量加载。
-pub(crate) fn cached_fonts(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> (FontBook, Vec<Font>) {
+pub(crate) fn cached_fonts(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> SharedFonts {
     let mut key = Vec::with_capacity(extra_dirs.len() + 1);
     key.push(fonts_dir.to_path_buf());
     key.extend(extra_dirs.iter().cloned());
-    let cache = FONT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = FONT_CACHE.get_or_init(|| Mutex::new(FontCacheMap::new(4, usize::MAX)));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = guard
-        .entry(key)
-        .or_insert_with(|| Arc::new(load_fonts_with_system(fonts_dir, extra_dirs)));
-    (**entry).clone()
+    if let Some(fonts) = guard.get(&key) {
+        return fonts.clone();
+    }
+    let (book, fonts) = load_fonts_with_system(fonts_dir, extra_dirs);
+    let fonts = Arc::new((LazyHash::new(book), fonts));
+    guard.insert(key, fonts.clone(), 0);
+    fonts
 }
 
 /// 列出 FontBook 里的字体族名（排序去重）——设置里「中文字体」下拉的数据源。
 /// 选项取自真实注册的字体，用户不可能写出一个不存在的族名（写错的后果是 typst 只发
 /// warning 就静默回退到楷体，见模块文档）。
 pub fn list_font_families(fonts_dir: &Path, extra_dirs: &[PathBuf]) -> Vec<String> {
-    let (book, _) = cached_fonts(fonts_dir, extra_dirs);
-    let mut names: Vec<String> = book
+    let fonts = cached_fonts(fonts_dir, extra_dirs);
+    let mut names: Vec<String> = fonts
+        .0
         .families()
         .map(|(family, _)| family.to_string())
         .collect();
