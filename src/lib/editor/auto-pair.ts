@@ -15,7 +15,6 @@ import { scanMathRanges } from "../core/math-ranges";
 /** 行间公式脚手架：`$` + 两个空格 + `$`（光标落在中间第 2 个字符位，敲字即 `$ x $`） */
 const DISPLAY_SCAFFOLD = "$  $";
 const DISPLAY_SCAFFOLD_CARET = 2;
-
 /** 行内公式配对：`$$`，光标落在中间 */
 const INLINE_PAIR = "$$";
 const INLINE_PAIR_CARET = 1;
@@ -49,13 +48,57 @@ function nextDollarOnLine(doc: string, pos: number): number {
   return k < end && doc[k] === "$" ? k : -1;
 }
 
-/** 光标是否落在已有公式**内部**（`$a + |b$`）——那里的 `$` 是"闭合公式"，不该再补一对 */
+/** 光标是否落在已有公式**内部**（`$a + |b$`）——那里的 `$` 是“闭合公式”，不该再补一对 */
 function insideMath(
   doc: string,
   pos: number,
   opaque: ReturnType<typeof scanNonMarkupRegions>,
 ): boolean {
   return scanMathRanges(doc, opaque).some((r) => pos > r.from && pos < r.to);
+}
+
+/** 空脚手架的 Enter 展开计划：替换脚手架为三行，光标落中行一档之后（绝对位置） */
+export interface ScaffoldExpand {
+  from: number; // 替换范围（脚手架 `$  $` 本身；行首缩进不动）
+  to: number;
+  insert: string;
+  caret: number;
+}
+
+/**
+ * 光标在**独占一行的空脚手架** `$  $` 内部（两个 `$` 之间）时，Enter 的展开计划：
+ * 换成 `$` + 换行 + 一档 + 换行 + `$`，光标落中行一档之后，接着打字就写在公式里。
+ * 与 `emptyPairBackspace` 对称（那条管空配对的“整对删”，这条管空脚手架的“展开”）；
+ * 不接管的三类：
+ * 1. 行 trim 后不是 `$  $`（同行有别的内容 / 空公式 `$ $` 单空格 / 有内容的 `$ x $`）——
+ *    不改写用户的行；
+ * 2. 光标不在两个 `$` 之间（行首/行尾的 Enter 仍是普通换行）；
+ * 3. 越界位置（同 planDollarInput 的防御）。
+ *
+ * `unit` = 中行一档（调用方传 `tabUnit(tabSpaces)`）：与 Tab 键插入的档宽联动，
+ * 设置 0 时就是制表符。
+ */
+export function planScaffoldExpand(
+  doc: string,
+  pos: number,
+  lineBreak: string,
+  unit: string,
+): ScaffoldExpand | null {
+  if (!(pos >= 0) || pos > doc.length) return null;
+  // raw / 代码 / 注释 / 字符串里的 `$  $` 不是公式脚手架（同 planDollarInput 的护栏）
+  if (regionAt(scanNonMarkupRegions(doc), pos)) return null;
+  const { start, end } = lineBounds(doc, pos);
+  const line = doc.slice(start, end);
+  if (line.trim() !== DISPLAY_SCAFFOLD) return null;
+  const from = start + line.length - line.trimStart().length; // 脚手架起点（跳过行首缩进）
+  if (pos <= from || pos >= from + DISPLAY_SCAFFOLD.length) return null;
+  const insert = `$${lineBreak}${unit}${lineBreak}$`;
+  return {
+    from,
+    to: from + DISPLAY_SCAFFOLD.length,
+    insert,
+    caret: from + 1 + lineBreak.length + unit.length,
+  };
 }
 
 /**

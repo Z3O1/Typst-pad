@@ -133,5 +133,17 @@ await c.evaluate(
 );
 await c.key("Tab", { code: "Tab", keyCode: 9 });
 check("tabSpaces=0 恢复后 Tab 插一个制表符", (await doc()).startsWith("\t"));
+
+// 空脚手架 `$  $` 的 Enter 展开：中行一档与 tabSpaces 联动（本存档 = 0 → 制表符）
+await c.evaluate(
+  `window.__typstPadView.dispatch({changes:{from:0,to:window.__typstPadView.state.doc.length,insert:"$  $"},selection:{anchor:2}}); window.__typstPadView.focus(); true`,
+);
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+check("空脚手架中间 Enter 展开为三行（中行 = 制表符）", (await doc()) === "$\n\t\n$");
+await c.evaluate(
+  `window.__typstPadView.dispatch({selection:{anchor:0}}); window.__typstPadView.focus(); true`,
+);
+await c.key("Enter", { code: "Enter", keyCode: 13 });
+check("光标不在脚手架中间 → 不接管（行首回车仍是普通换行）", (await doc()).startsWith("\n$\n"));
 await c.close();
 finish(`通过 ${state.passed} 项检查；源码与文件流程`);

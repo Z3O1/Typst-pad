@@ -34,7 +34,7 @@ const SUITES = [
   ["document-mode.mjs", 64],
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
-  ["source-workflows.mjs", 14],
+  ["source-workflows.mjs", 16],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
 

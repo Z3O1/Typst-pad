@@ -376,6 +376,54 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     view.destroy();
   });
 
+  it("**空脚手架 `$  $` 中间按 Enter → 展开三行**（中行一档 = 默认 2 空格，光标落档后）", () => {
+    // 源码模式（editorKeymap 默认 tabSpaces=2）
+    let view = makeView("$  $");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("$\n  \n$");
+    expect(view.state.selection.main.head).toBe(4); // 中行 2 个空格之后
+    view.destroy();
+
+    // 写作模式同样接管（展开在列表命令之前，模式无关）
+    view = makeWriteView("$  $");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("$\n  \n$");
+    view.destroy();
+
+    // 展开后接着打字：直接写进公式里
+    view = makeView("$  $");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    view.dispatch(view.state.update(view.state.replaceSelection("x^2"), { userEvent: "input" }));
+    expect(view.state.doc.toString()).toBe("$\n  x^2\n$");
+    view.destroy();
+  });
+
+  it("脚手架展开不接管：光标不在中间 / 行内有内容 / Shift+Enter", () => {
+    // 光标在行首（不在两个 $ 之间）→ 普通换行（源码模式：换行继承前导空白，此处无）
+    let view = makeView("$  $");
+    view.dispatch({ selection: { anchor: 0 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("\n$  $");
+    view.destroy();
+
+    // 有内容的公式 `$ x $` → 不接管，走原有链路（公式内 = 单个换行，非段落语义）
+    view = makeWriteView("$ x $");
+    view.dispatch({ selection: { anchor: 3 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(view.state.doc.toString()).toBe("$ x\n $");
+    view.destroy();
+
+    // Shift+Enter 不展开（它是 Typst 显式换行的语义）
+    view = makeWriteView("$  $");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("$ \\\n $");
+    view.destroy();
+  });
+
   it("写作模式：Enter 分段，Shift+Enter 写 Typst 显式换行并保留缩进", () => {
     let view = makeWriteView("  abcdef");
     view.dispatch({ selection: { anchor: 5 } });

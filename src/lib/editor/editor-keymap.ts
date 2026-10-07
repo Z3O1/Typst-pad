@@ -13,7 +13,7 @@ import {
 } from "@codemirror/commands";
 import type { Command } from "@codemirror/view";
 import { insertNewTypstListItem, insertTypstListContinuation } from "codemirror-lang-typst/lezer";
-import { emptyPairBackspace } from "./auto-pair";
+import { emptyPairBackspace, planScaffoldExpand } from "./auto-pair";
 import { indentForNewLine, isBlankLine } from "./auto-indent";
 import { scanMathRanges } from "../core/math-ranges";
 import { scanNonMarkupRegions } from "../core/typst-lex";
@@ -382,6 +382,35 @@ function listAwareEnter(
   };
 }
 
+/**
+ * 光标在**独占一行的空行间脚手架** `$  $` 内部时，Enter 把它展开成三行：
+ * `$` / 一档 / `$`（一档 = `tabUnit(tabSpaces)`，与 Tab 键的档宽联动；
+ * 设置 0 时就是制表符）。光标落中行一档之后，接着打字就写在公式里。
+ *
+ * 与 `auto-pair.planScaffoldExpand`（判定）配套，这里是落事务的那一半；
+ * 不匹配（选区非空、多光标、非脚手架行）返回 false 交回常规 Enter 链路
+ * （列表命令 → 段落/续行换行），模式无关、两套模式都能展开。
+ */
+function expandMathScaffold(view: EditorView, tabSpaces: number): boolean {
+  if (view.state.readOnly) return false;
+  const { state } = view;
+  if (state.selection.ranges.length !== 1 || !state.selection.main.empty) return false;
+  const plan = planScaffoldExpand(
+    state.doc.toString(),
+    state.selection.main.head,
+    state.lineBreak,
+    tabUnit(tabSpaces),
+  );
+  if (!plan) return false;
+  view.dispatch({
+    changes: { from: plan.from, to: plan.to, insert: plan.insert },
+    selection: { anchor: plan.caret },
+    scrollIntoView: true,
+    userEvent: "input",
+  });
+  return true;
+}
+
 // CM6 中同一按键的多条绑定按注册顺序执行、先返回 true 者胜出，因此把自定义键位放在
 // basicSetup 之后无法覆盖其默认绑定（例如 Mod-d 会被 searchKeymap 的"选中下一处"
 // 在空选区时抢先返回 true）。用 Prec.high 提升优先级，保证自定义快捷键先被检查。
@@ -389,6 +418,11 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
   const isWriteMode = opts.isWriteMode ?? (() => false);
   // 未传 getter 时（源码模式的 editorKeymap 导出、单测直建）回落 app-settings 的唯一默认源
   const tabSpaces = opts.tabSpaces ?? (() => defaultSettings().tabSpaces);
+  // Enter 的完整链路：空脚手架展开（新，最优先）→ 列表命令 → 段落/续行换行。
+  // 展开不匹配时必须交回原链路，所以包成一层而不是拆开 listAwareEnter。
+  const enterWithScaffold = (view: EditorView): boolean =>
+    expandMathScaffold(view, tabSpaces()) ||
+    listAwareEnter(isWriteMode, insertNewTypstListItem, false)(view);
   return Prec.high(
     keymap.of([
       // **Tab / Shift+Tab**（2026-09-28 接管普通 Tab；2026-10-07 档宽改为设置项 tabSpaces）：
@@ -416,7 +450,7 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
       { key: "Ctrl-Shift-Tab", run: indentLess, preventDefault: true },
       {
         key: "Enter",
-        run: listAwareEnter(isWriteMode, insertNewTypstListItem, false),
+        run: enterWithScaffold,
         preventDefault: true,
       },
       {
