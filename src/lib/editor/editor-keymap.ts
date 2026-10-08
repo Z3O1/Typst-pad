@@ -3,6 +3,7 @@ import { keymap } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
 import { EditorSelection, Prec } from "@codemirror/state";
 import { acceptCompletion } from "@codemirror/autocomplete";
+import { ensureSyntaxTree, language } from "@codemirror/language";
 import {
   indentLess,
   indentMore,
@@ -14,6 +15,7 @@ import {
 import type { Command } from "@codemirror/view";
 import { insertNewTypstListItem, insertTypstListContinuation } from "codemirror-lang-typst/lezer";
 import { emptyPairBackspace, planScaffoldExpand } from "./auto-pair";
+import { addDollarPair } from "./dollar-pair-state";
 import { indentForNewLine, isBlankLine } from "./auto-indent";
 import { scanMathRanges } from "../core/math-ranges";
 import { scanNonMarkupRegions } from "../core/typst-lex";
@@ -21,19 +23,41 @@ import type { Region } from "../core/typst-lex";
 import { defaultSettings } from "../core/app-settings";
 
 /**
- * 退格时把补出来的空配对整对删掉（`$|$` 与 `$  |  $` 都一次删干净）。
+ * 退格删掉空 $$；空行间公式先缩回 $$，下一次才删除定界符。
  * 不接管时返回 false，keymap 会继续往下找 basicSetup 的默认退格（不会丢功能）。
  * 删除范围由 emptyPairBackspace 给（**光标两侧各删几个**，行间脚手架是跨在光标两侧的），
- * 只针对配对逻辑补出来的空配对，不会吃掉用户真写进公式的内容。
+ * 所有光标都匹配才接管（与 CM deleteBracketPair 一致），混合情况交回默认退格。
  */
 function deleteEmptyDollarPair(view: EditorView): boolean {
-  const sel = view.state.selection.main;
-  if (!sel.empty) return false;
-  const span = emptyPairBackspace(view.state.doc.toString(), sel.head);
-  if (!span) return false;
-  const from = sel.head - span.before;
-  const to = sel.head + span.after;
-  view.dispatch({ changes: { from, to }, selection: { anchor: from } });
+  const { state } = view;
+  if (state.readOnly || view.composing || view.compositionStarted) return false;
+  const doc = state.doc.toString();
+  const syntax = ensureSyntaxTree(state, state.doc.length, 20);
+  if (!syntax && state.facet(language)) return false;
+  const tree = syntax?.topNode.name === "Typst" ? syntax : undefined;
+  let complete = true;
+  const changes = state.changeByRange((range) => {
+    const span = range.empty ? emptyPairBackspace(doc, range.head, tree) : null;
+    if (!span) {
+      complete = false;
+      return { range };
+    }
+    const from = range.head - span.before;
+    const to = range.head + span.after;
+    const compact = doc[from - 1] === "$" && doc[to] === "$" && !doc.slice(from, to).includes("$");
+    return {
+      changes: { from, to },
+      range: EditorSelection.cursor(from),
+      effects: compact ? addDollarPair.of({ open: from - 1, close: from, display: false }) : [],
+    };
+  });
+  if (!complete) return false;
+  view.dispatch(
+    state.update(changes, {
+      scrollIntoView: true,
+      userEvent: "delete.backward",
+    }),
+  );
   return true;
 }
 
@@ -383,7 +407,7 @@ function listAwareEnter(
 }
 
 /**
- * 光标在**独占一行的空行间脚手架** `$  $` 内部时，Enter 把它展开成三行：
+ * 光标在**独占一行的空配对** `$$` 或空行间脚手架 `$  $` 内部时，Enter 展开成三行：
  * `$` / 一档 / `$`（一档 = `tabUnit(tabSpaces)`，与 Tab 键的档宽联动；
  * 设置 0 时就是制表符）。光标落中行一档之后，接着打字就写在公式里。
  *
@@ -392,19 +416,30 @@ function listAwareEnter(
  * （列表命令 → 段落/续行换行），模式无关、两套模式都能展开。
  */
 function expandMathScaffold(view: EditorView, tabSpaces: number): boolean {
-  if (view.state.readOnly) return false;
+  if (view.state.readOnly || view.composing || view.compositionStarted) return false;
   const { state } = view;
   if (state.selection.ranges.length !== 1 || !state.selection.main.empty) return false;
+  const syntax = ensureSyntaxTree(state, state.doc.length, 20);
+  if (!syntax && state.facet(language)) return false;
+  const tree = syntax?.topNode.name === "Typst" ? syntax : undefined;
   const plan = planScaffoldExpand(
     state.doc.toString(),
     state.selection.main.head,
     state.lineBreak,
     tabUnit(tabSpaces),
+    tree,
   );
   if (!plan) return false;
+  const insert = state.toText(plan.insert);
+  const caret = plan.from + state.toText(plan.insert.slice(0, plan.caret - plan.from)).length;
   view.dispatch({
-    changes: { from: plan.from, to: plan.to, insert: plan.insert },
-    selection: { anchor: plan.caret },
+    changes: { from: plan.from, to: plan.to, insert },
+    selection: { anchor: caret },
+    effects: addDollarPair.of({
+      open: plan.from,
+      close: plan.from + insert.length - 1,
+      display: true,
+    }),
     scrollIntoView: true,
     userEvent: "input",
   });

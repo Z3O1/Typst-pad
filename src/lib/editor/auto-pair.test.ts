@@ -11,11 +11,17 @@ const plan = (doc: string, pos: number) => {
 };
 
 describe("planDollarInput（输入 `$` 的配对决策）", () => {
-  it("独占一行 → 行间公式脚手架 `$  $`，光标在中间（敲字即 `$ x $`）", () => {
-    expect(plan("", 0)).toBe('insert("$  $",2)');
-    expect(plan("上一段\n\n下一段", 4)).toBe('insert("$  $",2)');
-    // 行内已有的空白不算"有内容"：只有空格的行仍按行间公式处理
-    expect(plan("   ", 3)).toBe('insert("$  $",2)');
+  it("空行也像 ( 配出 $$，不额外插入空格", () => {
+    expect(plan("", 0)).toBe('insert("$$",1)');
+    expect(plan("上一段\n\n下一段", 4)).toBe('insert("$$",1)');
+    expect(plan("   ", 3)).toBe('insert("$$",1)');
+  });
+
+  it("像 ( 一样在词中不强行配对，行尾、空白和闭合标点前可以配对", () => {
+    expect(plan("abc", 1)).toBe("none");
+    expect(plan("正文", 1)).toBe("none");
+    expect(plan("abc", 3)).toBe('insert("$$",1)');
+    expect(plan(")", 0)).toBe('insert("$$",1)');
   });
 
   it("行内（同行还有别的字）→ 配对 `$$`，光标在中间（敲字即 `$x$`）", () => {
@@ -77,8 +83,101 @@ describe("planDollarInput（输入 `$` 的配对决策）", () => {
   });
 
   it("越界位置 → 不配对（防御性，不 panic）", () => {
-    expect(plan("abc", -1)).toBe("none");
-    expect(plan("abc", 99)).toBe("none");
+    for (const pos of [-1, 99, NaN, Infinity, 0.5]) expect(plan("abc", pos)).toBe("none");
+  });
+
+  it("只跳闭合符，不跳右侧公式的起始符", () => {
+    expect(plan("$x$", 0)).toBe('insert("$$",1)');
+    expect(plan("前 $x$", 1)).toBe('insert("$$",1)');
+    expect(plan("$a$ $b$", 4)).toBe('insert("$$",1)');
+    expect(plan("$a$ $b$", 3)).toBe('insert("$$",1)');
+  });
+
+  it("空公式和未闭合公式内部不再补一对", () => {
+    expect(plan("$", 1)).toBe("none");
+    expect(plan("$x + ", 5)).toBe("none");
+    expect(plan("$  $", 1)).toBe("skip(3)");
+    expect(plan("$\n  \n$", 4)).toBe("skip(2)");
+    expect(plan("$\n x\n$", 2)).toBe("none");
+    expect(plan("$#x$", 3)).toBe("skip(1)");
+  });
+
+  it("EOF 的行注释、未闭合块注释/raw/代码字符串仍不可配对", () => {
+    for (const doc of [
+      "// 注释",
+      "/* 注释",
+      "/* /* */",
+      "`raw",
+      "```\nraw",
+      '#let s = "abc',
+      '#let s = "',
+    ]) {
+      expect(plan(doc, doc.length)).toBe("none");
+    }
+    expect(plan("/* 注释 */", 8)).toBe('insert("$$",1)');
+    expect(plan("/* /* */ */", 11)).toBe('insert("$$",1)');
+  });
+
+  it("正文直引号与未闭合代码内容块回到 markup", () => {
+    expect(plan('"正 文"', 2)).toBe('insert("$$",1)');
+    expect(plan("#f[", 3)).toBe('insert("$$",1)');
+    expect(plan("#let s = [\n  ", 13)).toBe('insert("$$",1)');
+  });
+
+  it("按反斜杠奇偶判断转义，首行起点和 CRLF 正确识别空行", () => {
+    expect(plan("\\\\", 2)).toBe('insert("$$",1)');
+    expect(plan("\\\\\\", 3)).toBe("none");
+    expect(plan("\n正文", 0)).toBe('insert("$$",1)');
+    expect(plan("  \r\n正文", 2)).toBe('insert("$$",1)');
+  });
+
+  it("像 ( 一样原样包裹正文选区，不包裹不透明文本或既有公式", () => {
+    expect(planDollarInput("x + y", 0, 5)).toEqual({
+      kind: "wrap",
+      from: 0,
+      to: 5,
+      before: "$",
+      after: "$",
+    });
+    expect(planDollarInput("前 x 后", 2, 3)).toEqual({
+      kind: "wrap",
+      from: 2,
+      to: 3,
+      before: "$",
+      after: "$",
+    });
+    expect(planDollarInput("  x\n  y", 2, 7)).toEqual({
+      kind: "wrap",
+      from: 2,
+      to: 7,
+      before: "$",
+      after: "$",
+    });
+    expect(planDollarInput("前 x 后", 1, 4)).toEqual({
+      kind: "wrap",
+      from: 1,
+      to: 4,
+      before: "$",
+      after: "$",
+    });
+    expect(planDollarInput("  ", 0, 2)).toEqual({
+      kind: "wrap",
+      from: 0,
+      to: 2,
+      before: "$",
+      after: "$",
+    });
+    expect(planDollarInput("x\\", 0, 2)).toEqual({ kind: "none" });
+    for (const doc of ["$x$", "`x`", "// x", "#x", "a $x$ b"]) {
+      expect(planDollarInput(doc, 0, doc.length)).toEqual({ kind: "none" });
+    }
+    expect(planDollarInput("#f[abc]", 3, 6)).toEqual({
+      kind: "wrap",
+      from: 3,
+      to: 6,
+      before: "$",
+      after: "$",
+    });
   });
 
   it("行内配对后光标在中间：模拟「敲 $ 再敲 x」的完整结果", () => {
@@ -93,13 +192,13 @@ describe("planDollarInput（输入 `$` 的配对决策）", () => {
     expect(typed).toBe("前文 $x$");
   });
 
-  it("独占一行时敲一个字得到行间公式 `$ x $`", () => {
+  it("独占一行时默认也得到紧凑的 `$x$`", () => {
     const doc = "";
     const p = planDollarInput(doc, 0);
     expect(p.kind).toBe("insert");
     if (p.kind !== "insert") return;
     const typed = p.text.slice(0, p.caret) + "x" + p.text.slice(p.caret);
-    expect(typed).toBe("$ x $");
+    expect(typed).toBe("$x$");
   });
 });
 
@@ -111,8 +210,8 @@ describe("emptyPairBackspace（空配对整对退格）", () => {
     expect(emptyPairBackspace("前文$$后文", 3)).toEqual({ before: 1, after: 1 });
   });
 
-  it("行间脚手架 `$  |  $` → 两侧各删 2 个（一共 4 个字符）", () => {
-    expect(emptyPairBackspace("$  $", 2)).toEqual({ before: 2, after: 2 });
+  it("空行间脚手架先退回 $$，不连同定界符一起删除", () => {
+    expect(emptyPairBackspace("$  $", 2)).toEqual({ before: 1, after: 1 });
   });
 
   it("配对里已经有内容 → null（走默认退格，不整对删）", () => {
@@ -124,8 +223,24 @@ describe("emptyPairBackspace（空配对整对退格）", () => {
 
   it("相邻成对 `$$$$` 每处都只删自己那一对（不做贪婪匹配）", () => {
     expect(emptyPairBackspace("$$$$", 1)).toEqual({ before: 1, after: 1 });
-    expect(emptyPairBackspace("$$$$", 2)).toEqual({ before: 1, after: 1 });
+    expect(emptyPairBackspace("$$$$", 2)).toBeNull(); // 前一个闭合符与后一个起始符不是一对
     expect(emptyPairBackspace("$$$$", 3)).toEqual({ before: 1, after: 1 });
+  });
+
+  it("raw、注释、代码和转义中的同形文本不整对删除", () => {
+    for (const [doc, pos] of [
+      ["`$$`", 2],
+      ["// $$", 4],
+      ['#let s = "$$"', 11],
+      ["\\$$", 2],
+    ] as const) {
+      expect(emptyPairBackspace(doc, pos)).toBeNull();
+    }
+  });
+
+  it("空三行公式先退回 $$，已有公式内容不接管", () => {
+    expect(emptyPairBackspace("  $\n    \n  $", 8)).toEqual({ before: 5, after: 3 });
+    expect(emptyPairBackspace("$\n  x\n$", 4)).toBeNull();
   });
 
   it("普通文本位置 → null（不接管退格）", () => {
@@ -145,11 +260,12 @@ describe("planScaffoldExpand（空脚手架 Enter 展开）", () => {
   };
 
   it("独占一行的空脚手架、光标在两个 $ 之间 → 展开为三行，光标落中行一档之后", () => {
+    expect(expand("$$", 1)).toBe('0..2 "$\\n  \\n$"@4');
     expect(expand("$  $", 1)).toBe('0..4 "$\\n  \\n$"@4');
     expect(expand("$  $", 2)).toBe('0..4 "$\\n  \\n$"@4');
     expect(expand("$  $", 3)).toBe('0..4 "$\\n  \\n$"@4');
     // 行首有缩进：只换脚手架本身，缩进不动（from 跳过前导空白）
-    expect(expand("  $  $", 5)).toBe('2..6 "$\\n  \\n$"@6');
+    expect(expand("  $  $", 5)).toBe('2..6 "$\\n    \\n  $"@8');
     // 单位可传制表符（tabSpaces=0）
     expect(expand("$  $", 2, "\t")).toBe('0..4 "$\\n\\t\\n$"@3');
     // 换行符跟随编辑器（CRLF 场景）
