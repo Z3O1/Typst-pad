@@ -5968,6 +5968,7 @@ dependencies = [
  "typst-pdf",
  "typst-svg",
  "typst-syntax",
+ "unicode-segmentation",
  "ureq",
  "webview2-com",
  "windows-core 0.61.2",

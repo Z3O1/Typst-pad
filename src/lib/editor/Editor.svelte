@@ -14,6 +14,8 @@
   import { typst_lezer } from "codemirror-lang-typst/lezer";
   import { typstHeadingHighlight } from "./typst-highlight";
   import { createEditorKeymap } from "./editor-keymap";
+  import { observeEditorComposition } from "./editor-composition";
+  import type { SourceCursorChange } from "$lib/core/document-source-expansion";
   import { planDollarInput } from "./auto-pair";
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
@@ -31,7 +33,8 @@
   interface Props {
     initialDoc?: string;
     onDocChange?: (doc: string, mapPosition: (pos: number, assoc?: number) => number) => void;
-    onCursor?: (line: number, col: number) => void;
+    onCursor?: (line: number, col: number, change: SourceCursorChange) => void;
+    onFocusChange?: (focused: boolean) => void;
     doc?: string;
     theme?: "dark" | "light";
     /** 编译错误位置列表（父组件传入）；为空时不显示波浪线 */
@@ -42,6 +45,7 @@
     jumpTo?: { line: number; col: number; seq: number } | null;
     /** 文档模式源码层保留段落/列表输入语义；源码模式直接编辑 Typst 原文。 */
     mode?: "write" | "source";
+    revealRange?: { from: number; to: number } | null;
     /** 合成期间暂停后台整页编译，源码镜像仍实时更新。 */
     onComposition?: (active: boolean) => void;
     /**
@@ -58,12 +62,14 @@
     initialDoc = "",
     onDocChange,
     onCursor,
+    onFocusChange,
     doc,
     theme = "dark",
     diagnostics,
     prefixCode = "",
     jumpTo = null,
     mode = "source",
+    revealRange = null,
     onComposition,
     wrap = false,
     tabSpaces = defaultSettings().tabSpaces,
@@ -147,19 +153,8 @@
       wrapCompartment.of(wrap ? EditorView.lineWrapping : []),
       diagTheme,
       revealField,
-      EditorView.domEventHandlers({
-        compositionstart: () => {
-          onComposition?.(true);
-          return false;
-        },
-        compositionend: () => {
-          queueMicrotask(() => {
-            if (view) onComposition?.(false);
-          });
-          return false;
-        },
-      }),
       EditorView.updateListener.of((update) => {
+        if (update.focusChanged) onFocusChange?.(update.view.hasFocus);
         if (update.docChanged && !applyingExternal) {
           onDocChange?.(update.state.doc.toString(), (pos, assoc) =>
             update.changes.mapPos(pos, assoc),
@@ -167,7 +162,13 @@
         }
         const head = update.state.selection.main.head;
         const line = update.state.doc.lineAt(head);
-        if (update.selectionSet || update.docChanged) onCursor?.(line.number, head - line.from + 1);
+        if (update.selectionSet || update.docChanged)
+          onCursor?.(line.number, head - line.from + 1, {
+            anchor: update.state.selection.main.anchor,
+            head,
+            previousHead: update.startState.selection.main.head,
+            reason: applyingExternal ? "restore" : update.docChanged ? "edit" : "move",
+          });
       }),
     ];
   }
@@ -184,8 +185,12 @@
     });
     mark("editor-created");
     registerEditorView(view);
+    const stopComposition = observeEditorComposition(view.contentDOM, (active) =>
+      onComposition?.(active),
+    );
 
     return () => {
+      stopComposition();
       // 视图销毁：让已经排队的那次"模式切换恢复"作废（它要去动一个已经拆掉的视图）
       caretAnchorEpoch += 1;
       caretAnchor = null;
@@ -234,6 +239,11 @@
       effects: EditorView.scrollIntoView(pos, { y: "center" }),
     });
     view.focus();
+  });
+
+  // 装饰与页面的展开状态共用同一范围，键盘收起或模式切换也会清除。
+  $effect(() => {
+    if (view) view.dispatch({ effects: revealEffect.of(revealRange) });
   });
 
   // 源码层主题独立于完整页面的滤镜，不重建视图。
@@ -392,6 +402,20 @@
       effects: [revealEffect.of(range ?? null), EditorView.scrollIntoView(at, { y: "center" })],
     });
     view.focus();
+  }
+
+  /** 页面拖动使用真实 CodeMirror 选区，不滚动透明输入层，也不写入撤销历史。 */
+  export function selectRange(anchor: number, head: number): void {
+    if (!view) return;
+    const clamp = (pos: number) => Math.max(0, Math.min(pos, view.state.doc.length));
+    view.dispatch({ selection: { anchor: clamp(anchor), head: clamp(head) } });
+    view.focus();
+  }
+
+  export function selection(): { anchor: number; head: number } | null {
+    if (!view) return null;
+    const { anchor, head } = view.state.selection.main;
+    return { anchor, head };
   }
 
   export function focus(): void {

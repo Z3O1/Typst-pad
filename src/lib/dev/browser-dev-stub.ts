@@ -232,6 +232,8 @@ interface PageFixture {
   doc: string;
   pages: string[];
   carets: import("../core/typst-engine").DocumentCaret[];
+  cursorQueries?: { offset: number; caret: import("../core/typst-engine").DocumentCaret | null }[];
+  selectionQuads?: import("../core/typst-engine").DocumentSelectionQuad[];
   whitespaceHits?: {
     page: number;
     xPt: number;
@@ -269,7 +271,10 @@ async function handleCommand(
   if (
     compileSlowEnabled() &&
     // 命中也放慢，以便验收编辑/换文档时作废在途交互。
-    (command === "compile_doc" || command === "document_hit_test")
+    (command === "compile_doc" ||
+      command === "document_hit_test" ||
+      command === "document_cursor" ||
+      command === "document_selection")
   ) {
     await new Promise((r) => setTimeout(r, SLOW_COMPILE_MS));
   }
@@ -378,7 +383,23 @@ async function handleCommand(
     case "document_cursor": {
       notify(command);
       if (!pageSnapshot || a.geometryId !== pageSnapshot.id) return null;
+      if (pageSnapshot.fixture.cursorQueries)
+        return (
+          pageSnapshot.fixture.cursorQueries.find((query) => query.offset === a.offset)?.caret ??
+          null
+        );
       return pageSnapshot.fixture.carets.find((p) => p.offset === a.offset) ?? null;
+    }
+    case "document_selection": {
+      notify(command);
+      if (!pageSnapshot || a.geometryId !== pageSnapshot.id) return [];
+      const from = Math.min(Number(a.from), Number(a.to));
+      const to = Math.max(Number(a.from), Number(a.to));
+      if (from === to) return [];
+      return (
+        pageSnapshot.fixture.selectionQuads?.filter((quad) => quad.from < to && quad.to > from) ??
+        []
+      );
     }
     case "write_file": {
       const path = typeof a.path === "string" ? a.path : FAKE_PATH;
@@ -552,10 +573,22 @@ function installFakeClipboard(): void {
   document.execCommand = ((commandId: string, showUi?: boolean, value?: string) => {
     if (commandId !== "copy") return original(commandId, showUi, value);
     const active = document.activeElement;
-    const text =
+    let text =
       active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement
         ? active.value
         : (window.getSelection()?.toString() ?? "");
+    if (active instanceof HTMLElement && active.closest(".cm-editor")) {
+      // 透明输入层的 DOM 选区可能只含可见片段；必须走 CM 原生 copy 处理器，
+      // 由它序列化真实源码选区，而不是绕过事件误复制 DOM 文本。
+      const data = new DataTransfer();
+      const event = new ClipboardEvent("copy", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: data,
+      });
+      active.dispatchEvent(event);
+      if (event.defaultPrevented) text = data.getData("text/plain");
+    }
     const copied = w.__browserDevCopied as string[];
     copied.push(text);
     console.info(`[browser-dev] 假剪贴板：已"复制" ${text.length} 字符`);

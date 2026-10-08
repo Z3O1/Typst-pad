@@ -6,6 +6,7 @@
     compileToPdf,
     hitTestDocument,
     locateDocumentCursor,
+    locateDocumentSelection,
     listFontFamilies,
     defaultFontFamilies,
   } from "$lib/core/typst-engine";
@@ -14,9 +15,19 @@
     CompileOk,
     Diagnostic,
     DocumentCaret,
+    DocumentSelectionQuad,
   } from "$lib/core/typst-engine";
   import { createSourceCoordinates } from "$lib/core/source-coordinates";
-  import { clickSourceRange, sourceRevealRange } from "$lib/core/document-interaction";
+  import {
+    resolveSourceExpansion,
+    sameSourceRange,
+    type ExpansionIntent,
+    type SourceCursorChange,
+  } from "$lib/core/document-source-expansion";
+  import {
+    createDocumentDragSelection,
+    type DocumentPoint,
+  } from "$lib/core/document-drag-selection";
   import { compileDocumentWithFallback } from "$lib/core/document-error-fallback";
   import {
     projectDocument,
@@ -180,6 +191,8 @@
     /** 切换模式前记下光标在视口里的高度（用户要求：切换模式不改变光标位置，见 Editor.svelte） */
     captureCaretAnchor(): void;
     revealAt(pos: number, range?: { from: number; to: number }): void;
+    selectRange(anchor: number, head: number): void;
+    selection(): { anchor: number; head: number } | null;
     focus(): void;
   }
 
@@ -229,6 +242,7 @@
     updatePages(pages: string[]): void;
     clearPages(): void;
     pageWidthPt(): number;
+    revealCaret(caret: DocumentCaret): void;
   } | null>(null);
   let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
   let previewScaleFrame = 0; // 已排队的重算帧号（见 onMount 里的 ResizeObserver）
@@ -336,15 +350,25 @@
   let sourceOpen = $state(false);
   let sourceRange = $state<SourceRange | null>(null);
   let documentErrorRanges: SourceRange[] = [];
-  let errorEditRange: SourceRange | null = null;
+  let errorEditRange = $state<SourceRange | null>(null);
   let renderedProjection: DocumentProjection = projectDocument("", null);
   let renderedPages: CompileOk | null = null;
   let renderedCoordinates = createSourceCoordinates("");
   const documentCoordinates = $derived(createSourceCoordinates(doc));
   let inputPosition = $state<{ left: number; top: number; height: number } | null>(null);
   let documentCaret = $state<DocumentCaret | null>(null);
+  let documentSelection = $state<DocumentSelectionQuad[]>([]);
+  let documentInputFocused = $state(false);
+  let documentHasSelection = $state(false);
+  let inputComposing = $state(false);
+  let compositionCaret = $state<DocumentCaret | null>(null);
   let interactionSeq = 0;
+  let caretSeq = 0;
+  let selectionSeq = 0;
   let positioningFromPage = false;
+  let pendingCaretReveal = false;
+  type PageHit = { pos: number; caret: DocumentCaret };
+  let dragSelection: ReturnType<typeof createDocumentDragSelection<PageHit>> | null = null;
 
   // 按输入变化生成一次指纹，而不是在滚动/选区查询里反复序列化全文。
   const inputFingerprint = $derived(
@@ -373,6 +397,7 @@
   async function handlePageClick(req: { page: number; xPt: number; yPt: number }): Promise<void> {
     const input = currentInput();
     const seq = ++interactionSeq;
+    pendingCaretReveal = false;
     if (input !== renderedInput || documentGeometryId === 0) {
       statusText = previewError ? "请先修正编译错误" : "正在编译";
       return;
@@ -391,33 +416,64 @@
       return;
     }
     const pos = Math.min(doc.length, sourcePos - prefix.length);
-    const previousEdit = errorEditRange;
-    const errorRange =
-      previousEdit && pos >= previousEdit.from && pos <= previousEdit.to
-        ? previousEdit
-        : documentErrorRanges.find((range) => pos >= range.from && pos <= range.to);
-    // 错误区的编辑锁独立于手动展开；空白落点只移动光标，不展开邻近公式或脚本。
-    const nextRange = errorRange
-      ? null
-      : clickSourceRange(doc, pos, sourceRange, hit.isWhitespace === true);
-    const changed =
-      JSON.stringify(nextRange) !== JSON.stringify(sourceRange) ||
-      (previousEdit !== null && previousEdit !== errorRange);
-    errorEditRange = errorRange ?? null;
+    const changed = reconcileSourceExpansion(
+      "click",
+      { anchor: pos, head: pos },
+      hit.isWhitespace === true,
+    );
     sourceOpen = true;
-    sourceRange = nextRange;
+    caretSeq++;
     documentCaret = changed ? null : hit;
     const clickedInput = currentInput();
     await tick();
     if (seq !== interactionSeq || clickedInput !== currentInput()) return;
     positioningFromPage = true;
     try {
-      editorRef?.revealAt(pos, sourceRange ?? errorRange);
+      editorRef?.revealAt(pos, sourceRange ?? errorEditRange ?? undefined);
     } finally {
       positioningFromPage = false;
     }
-    if (changed || (previousEdit !== errorEditRange && writeScheduler.stats().inFlight))
-      void compileNow("mode");
+    if (changed) void compileNow("mode");
+  }
+
+  function handleSelectionStart(point: DocumentPoint): void {
+    pendingCaretReveal = false;
+    dragSelection?.cancel();
+    const input = currentInput();
+    const geometryId = documentGeometryId;
+    const seq = ++interactionSeq;
+    if (input !== renderedInput || !geometryId || viewMode !== "write") return;
+    const prefix = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
+    const isCurrent = () =>
+      seq === interactionSeq &&
+      viewMode === "write" &&
+      geometryId === documentGeometryId &&
+      input === currentInput() &&
+      input === renderedInput;
+    dragSelection = createDocumentDragSelection<PageHit>({
+      isCurrent,
+      resolve: async (point) => {
+        const hit = await hitTestDocument(geometryId, point.page, point.xPt, point.yPt);
+        if (!hit || !isCurrent()) return null;
+        const sourcePos = renderedProjection.renderedToSource(
+          renderedCoordinates.toPosition(hit.offset),
+        );
+        if (sourcePos < prefix.length) return null;
+        return { pos: Math.min(doc.length, sourcePos - prefix.length), caret: hit };
+      },
+      apply: (anchor, head) => {
+        sourceOpen = true;
+        caretSeq++; // 命中几何优先，不能被早先的源码光标查询覆盖。
+        documentCaret = head.caret;
+        positioningFromPage = true;
+        try {
+          editorRef?.selectRange(anchor.pos, head.pos);
+        } finally {
+          positioningFromPage = false;
+        }
+      },
+    });
+    dragSelection.start(point);
   }
 
   function closeSource(): void {
@@ -425,6 +481,7 @@
     sourceOpen = false;
     sourceRange = null;
     errorEditRange = null;
+    pendingCaretReveal = false;
     interactionSeq++;
     previewPaneRef?.body()?.focus();
     if (expanded) void compileNow("mode");
@@ -432,8 +489,9 @@
 
   async function updateDocumentCaret(line: number, col: number): Promise<void> {
     const input = currentInput();
-    const seq = ++interactionSeq;
-    if (input !== renderedInput || documentGeometryId === 0) {
+    const seq = ++caretSeq;
+    const geometryId = documentGeometryId;
+    if (viewMode !== "write" || input !== renderedInput || geometryId === 0) {
       documentCaret = null;
       return;
     }
@@ -442,10 +500,62 @@
     const offset = renderedCoordinates.toByte(
       renderedProjection.sourceToRendered(prefix.length + pos),
     );
-    if (documentCaret?.offset === offset) return;
-    const caret = await locateDocumentCursor(documentGeometryId, offset);
-    if (seq === interactionSeq && input === currentInput() && input === renderedInput)
+    if (documentCaret?.offset === offset) {
+      if (pendingCaretReveal && !inputComposing) {
+        pendingCaretReveal = false;
+        if (documentInputFocused && !documentHasSelection)
+          previewPaneRef?.revealCaret(documentCaret);
+      }
+      return;
+    }
+    const caret = await locateDocumentCursor(geometryId, offset);
+    if (
+      seq === caretSeq &&
+      viewMode === "write" &&
+      geometryId === documentGeometryId &&
+      input === currentInput() &&
+      input === renderedInput
+    ) {
       documentCaret = caret;
+      if (pendingCaretReveal && !inputComposing) {
+        pendingCaretReveal = false;
+        if (caret && documentInputFocused && !documentHasSelection)
+          previewPaneRef?.revealCaret(caret);
+      }
+    }
+  }
+
+  async function updateDocumentSelection(): Promise<void> {
+    const seq = ++selectionSeq;
+    const input = currentInput();
+    const geometryId = documentGeometryId;
+    const range = editorRef?.selection();
+    if (
+      !range ||
+      range.anchor === range.head ||
+      viewMode !== "write" ||
+      input !== renderedInput ||
+      !geometryId
+    ) {
+      documentSelection = [];
+      return;
+    }
+    const prefix = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
+    const toByte = (pos: number) =>
+      renderedCoordinates.toByte(renderedProjection.sourceToRendered(prefix.length + pos));
+    const quads = await locateDocumentSelection(
+      geometryId,
+      toByte(Math.min(range.anchor, range.head)),
+      toByte(Math.max(range.anchor, range.head)),
+    );
+    if (
+      seq === selectionSeq &&
+      viewMode === "write" &&
+      geometryId === documentGeometryId &&
+      input === currentInput() &&
+      input === renderedInput
+    )
+      documentSelection = quads;
   }
 
   // 设置弹窗里的**草稿**（点“保存”才写回并持久化）：一个 `$state` 对象，
@@ -716,6 +826,10 @@
   function toggleViewMode() {
     editorRef?.captureCaretAnchor();
     interactionSeq++;
+    caretSeq++;
+    selectionSeq++;
+    dragSelection?.cancel();
+    pendingCaretReveal = false;
     const needsCompile =
       sourceRange !== null ||
       errorEditRange !== null ||
@@ -738,6 +852,10 @@
     void tick().then(() => {
       applyPreviewScale();
       if (viewMode === "source") editorRef?.focus();
+      else {
+        void updateDocumentCaret(cursorLine, cursorCol);
+        void updateDocumentSelection();
+      }
     });
   }
 
@@ -751,35 +869,60 @@
     statusText = wrapNotice(editorWrap);
   }
 
-  function handleCursor(line: number, col: number) {
+  /** 点击、键盘与合成结束共用一份范围转换；仅真实范围变化才请求重排。 */
+  function reconcileSourceExpansion(
+    intent: ExpansionIntent,
+    cursor: { anchor: number; head: number; previousHead?: number },
+    whitespace = false,
+  ): boolean {
+    const next = resolveSourceExpansion(
+      doc,
+      { range: sourceRange, error: errorEditRange },
+      cursor,
+      intent,
+      {
+        errors: documentErrorRanges,
+        whitespace,
+        composing: inputComposing,
+      },
+    );
+    if (sameSourceRange(next.range, sourceRange) && sameSourceRange(next.error, errorEditRange))
+      return false;
+    // 已自动回退的错误源码本来就可见，进入/离开其编辑锁不必重复排版。
+    // 修好的编辑锁不在错误表里，收起会改变产物；在途请求也必须换成新编辑锁。
+    const needsRender =
+      !sameSourceRange(next.range, sourceRange) ||
+      (!!errorEditRange &&
+        !documentErrorRanges.some((range) => sameSourceRange(range, errorEditRange))) ||
+      writeScheduler.stats().inFlight;
+    sourceRange = next.range;
+    errorEditRange = next.error;
+    if (needsRender) {
+      pendingCaretReveal = true;
+      caretSeq++;
+      selectionSeq++;
+      documentCaret = null;
+      documentSelection = [];
+    }
+    return needsRender;
+  }
+
+  function handleCursor(line: number, col: number, change?: SourceCursorChange) {
     cursorLine = line;
     cursorCol = col;
-    if (viewMode === "write" && sourceOpen && !sourceRange && !positioningFromPage) {
-      const pos =
-        doc
-          .split("\n")
-          .slice(0, line - 1)
-          .reduce((sum, text) => sum + text.length + 1, 0) +
-        col -
-        1;
-      let recompile = false;
-      if (errorEditRange && (pos < errorEditRange.from || pos > errorEditRange.to)) {
-        errorEditRange = null;
-        recompile = true;
-      }
-      const inErrorSource =
-        errorEditRange !== null ||
-        documentErrorRanges.some((range) => pos >= range.from && pos <= range.to);
-      if (!inErrorSource) {
-        const range = sourceRevealRange(doc, pos);
-        if (range.kind !== "text" && range.to > range.from) {
-          sourceRange = { from: range.from, to: range.to };
-          recompile = true;
-        }
-      }
-      if (recompile) void compileNow("mode");
+    if (!positioningFromPage) interactionSeq++;
+    const selection = change ?? editorRef?.selection();
+    documentHasSelection = !!selection && selection.anchor !== selection.head;
+    if (viewMode === "write" && sourceOpen && !positioningFromPage && selection) {
+      if (change?.reason !== "restore") pendingCaretReveal = !documentHasSelection;
+      const changed = reconcileSourceExpansion(change?.reason ?? "explicit", selection);
+      // 编辑本身已由 handleDocChange 去抖；不要因为输入进入表达式而变成逐键立即编译。
+      if (changed && change?.reason !== "edit" && change?.reason !== "restore")
+        void compileNow("mode");
     }
-    void updateDocumentCaret(line, col);
+    // 点击/拖动保留实际命中的那份几何，尤其是同一源码的重复宏输出。
+    if (!positioningFromPage) void updateDocumentCaret(line, col);
+    void updateDocumentSelection();
   }
 
   function handleDocChange(newDoc: string, mapPosition: (pos: number, assoc?: number) => number) {
@@ -800,7 +943,9 @@
     // 文档修订 +1：在途的编译结果据此判废（见 runCompile 的戳比较）
     documentRevision += 1;
     interactionSeq++;
+    dragSelection?.cancel();
     documentCaret = null;
+    documentSelection = [];
     scheduleCompile();
     schedulePersist();
   }
@@ -872,7 +1017,9 @@
    * - 其余区域：原样放行浏览器原生菜单。
    */
   function handleContextMenu(e: MouseEvent) {
-    const zone = resolveContextZone(e.target);
+    const targetZone = resolveContextZone(e.target);
+    // 文档本体是可编辑源码的投影，菜单必须使用真实 CodeMirror 选区。
+    const zone = viewMode === "write" && targetZone === "preview" ? "editor" : targetZone;
     if (zone === "other") return;
     e.preventDefault();
     // chrome（菜单栏/状态栏）无效果：无需弹自定义菜单，也无需收起 MenuBar
@@ -1033,6 +1180,14 @@
   }
 
   function handleComposition(active: boolean): void {
+    // 合成只冻结本会话最后的可见起点，不拿过期偏移定位新源码。
+    compositionCaret = active ? documentCaret : null;
+    inputComposing = active;
+    // 恢复调度前先按最终选区决定展开，避免旧范围抢先发起一轮编译。
+    if (!active && sourceOpen && viewMode === "write") {
+      const selection = editorRef?.selection();
+      if (selection && reconcileSourceExpansion("edit", selection)) scheduleCompile();
+    }
     writeScheduler.setComposing(active);
   }
 
@@ -1043,7 +1198,12 @@
     interactionSeq++;
     documentGeometryId = 0;
     renderedInput = "";
+    dragSelection?.cancel();
+    inputPosition = null;
+    pendingCaretReveal = false;
+    compositionCaret = null;
     documentCaret = null;
+    documentSelection = [];
     sourceOpen = false;
     sourceRange = null;
     renderedProjection = projectDocument("", null);
@@ -1301,6 +1461,7 @@
       await tick();
       applyPreviewScale();
       void updateDocumentCaret(cursorLine, cursorCol);
+      void updateDocumentSelection();
     } else {
       documentGeometryId = 0;
       documentCaret = null;
@@ -1703,6 +1864,9 @@
       writeScheduler.dispose();
       unregisterWriteTestHooks();
       interactionSeq++; // 卸载后不得展开源码或写入页面光标
+      caretSeq++;
+      selectionSeq++;
+      dragSelection?.cancel();
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
     };
   });
@@ -1741,8 +1905,12 @@
             prefixCode={prefixEnabled ? ensureTrailingNewline(prefixCode) : ""}
             jumpTo={jumpTarget}
             onCursor={handleCursor}
+            onFocusChange={(focused) => {
+              documentInputFocused = focused;
+            }}
             onDocChange={handleDocChange}
             mode={viewMode}
+            revealRange={viewMode === "write" ? (sourceRange ?? errorEditRange) : null}
             wrap={viewMode === "source" ? editorWrap : false}
             {tabSpaces}
             onComposition={handleComposition}
@@ -1754,11 +1922,19 @@
         hidden={viewMode === "source" && !showPreview}
         status={previewStatus}
         editable={viewMode === "write"}
-        caret={viewMode === "write" ? documentCaret : null}
+        caret={viewMode === "write" ? (inputComposing ? compositionCaret : documentCaret) : null}
+        caretVisible={documentInputFocused && !documentHasSelection}
+        composing={inputComposing}
+        selection={viewMode === "write" ? documentSelection : []}
         stale={previewStatus === "ready" && renderedInput !== currentInput()}
         onPageClick={handlePageClick}
+        onSelectionStart={handleSelectionStart}
+        onSelectionMove={(point) => dragSelection?.move(point)}
+        onSelectionCancel={() => dragSelection?.cancel()}
         onOpenLink={handleOpenLink}
         onCaretPosition={(position) => {
+          // 同一文档等待新排版时保留输入/IME 的最后锚点，不能瞬移到窗口左上角。
+          // 新会话由 resetDocumentRender 显式清除。
           if (position) inputPosition = position;
         }}
         onEditSource={toggleViewMode}

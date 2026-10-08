@@ -31,7 +31,9 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 
 // 套件清单（期望项数写在这里，跑完直接对账；改套件计数时**两处一起改**）
 const SUITES = [
-  ["document-mode.mjs", 64],
+  ["document-mode.mjs", 80],
+  ["document-cursor.mjs", 29],
+  ["document-expansion.mjs", 26],
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
   ["source-workflows.mjs", 18],
@@ -41,6 +43,8 @@ const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s
 // ONLY 时只导出实际套件依赖的真实夹具。
 const SUITE_FIXTURES = {
   "document-mode.mjs": ["pages"],
+  "document-cursor.mjs": ["pages"],
+  "document-expansion.mjs": ["pages"],
   "document-performance.mjs": ["pages"],
   "computed-style.mjs": [],
   "source-workflows.mjs": [],

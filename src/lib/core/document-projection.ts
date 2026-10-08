@@ -56,7 +56,9 @@ export function projectDocumentRanges(
     const fence = "`".repeat(Math.max(block ? 3 : 1, longest + 1));
     const declaration =
       preserveDeclaration !== false && /^#(?:let|set|show)\b/.test(text) ? `${text}\n` : "";
-    const head = declaration + (block ? `${fence}typ\n` : `${fence} `);
+    // Typst 0.15.1 的 typ 高亮把 raw 第一行各 token 的 span_offset 重置为 0。
+    // 展开以源码停靠点为准：使用无语言 raw，保留每个实际字符的原生来源，不猜字形坐标。
+    const head = declaration + (block ? `${fence}\n` : `${fence} `);
     const tail = block ? `\n${fence}` : ` ${fence}`;
     const start = from + offset;
     const textStart = start + head.length;

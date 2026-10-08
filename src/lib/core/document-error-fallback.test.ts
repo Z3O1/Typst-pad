@@ -106,7 +106,7 @@ describe("文档模式编译错误源码回退", () => {
       .mockResolvedValueOnce(fail(local, ["missing"]))
       .mockResolvedValueOnce(ok);
     const output = await compileDocumentWithFallback({ ...options(source), compile });
-    expect(output.projection.source).toBe("```typ\n" + source + "\n```");
+    expect(output.projection.source).toBe("```\n" + source + "\n```");
     expect(compile).toHaveBeenCalledTimes(3);
   });
 
@@ -129,7 +129,7 @@ describe("文档模式编译错误源码回退", () => {
       })
       .mockResolvedValueOnce(ok);
     const output = await compileDocumentWithFallback({ ...options(source), compile });
-    expect(output.projection.source).toBe("````typ\n" + source + "\n````");
+    expect(output.projection.source).toBe("````\n" + source + "\n````");
   });
 
   it("不可恢复的前缀、外部文件、无位置错误及源码模式不重试", async () => {
@@ -216,7 +216,7 @@ describe("文档模式编译错误源码回退", () => {
     const editing = { from: 0, to: source.length };
     const compile = vi.fn().mockResolvedValue(ok);
     const output = await compileDocumentWithFallback({ ...options(source), editing, compile });
-    expect(output.projection.source).toBe("```typ\n" + source + "\n```");
+    expect(output.projection.source).toBe("```\n" + source + "\n```");
     expect(output.editingRange).toEqual(editing);
   });
 
