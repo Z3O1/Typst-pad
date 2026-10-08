@@ -21,7 +21,9 @@ fn font_count() -> usize {
     load_fonts(&fonts_dir()).1.len()
 }
 
+mod cursor;
 mod edit_performance;
+mod expansion;
 mod fonts;
 mod packages;
 mod paged;

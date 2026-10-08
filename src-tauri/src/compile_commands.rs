@@ -98,6 +98,16 @@ pub fn document_hit_test(
     crate::document_geometry::hit_test(geometry_id, page, x_pt, y_pt)
 }
 
+/// 源码选区对应的整页高亮；只读取该编译快照，不触发排版。
+#[tauri::command]
+pub fn document_selection(
+    geometry_id: u64,
+    from: usize,
+    to: usize,
+) -> Vec<crate::document_geometry::DocumentSelectionQuad> {
+    crate::document_geometry::selection(geometry_id, from, to)
+}
+
 /// 源码光标对应的页面位置。没有可映射输出时返回 None。
 #[tauri::command]
 pub fn document_cursor(

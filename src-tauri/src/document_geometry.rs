@@ -88,11 +88,7 @@ pub fn store(items: Vec<PlacedItem>, source_len: usize, foreign_ink: Vec<(usize,
 }
 
 pub(crate) fn caret_for_item(item: &PlacedItem, offset: usize) -> DocumentCaret {
-    let point = if offset <= item.range.start {
-        item.caret_start
-    } else {
-        item.caret_end
-    };
+    let point = item.caret_at(offset);
     DocumentCaret {
         offset,
         page: item.page,
@@ -202,16 +198,27 @@ pub fn hit_test(id: u64, page: usize, x_pt: f64, y_pt: f64) -> Option<DocumentCa
             item.page == page && item.range.start < snapshot.source_len && item.range.end > 0
         })
     };
-    let edge = if y >= item.rect.min.y && y <= item.rect.max.y {
+    let input_rect = item.hit_rect();
+    let edge = if y >= input_rect.min.y && y <= input_rect.max.y {
         None
     } else {
-        let top =
-            candidates().min_by(|a, b| a.rect.min.y.to_pt().total_cmp(&b.rect.min.y.to_pt()))?;
-        let bottom =
-            candidates().max_by(|a, b| a.rect.max.y.to_pt().total_cmp(&b.rect.max.y.to_pt()))?;
-        if y < top.rect.min.y {
+        let top = candidates().min_by(|a, b| {
+            a.hit_rect()
+                .min
+                .y
+                .to_pt()
+                .total_cmp(&b.hit_rect().min.y.to_pt())
+        })?;
+        let bottom = candidates().max_by(|a, b| {
+            a.hit_rect()
+                .max
+                .y
+                .to_pt()
+                .total_cmp(&b.hit_rect().max.y.to_pt())
+        })?;
+        if y < top.hit_rect().min.y {
             Some((top, false))
-        } else if y > bottom.rect.max.y {
+        } else if y > bottom.hit_rect().max.y {
             Some((bottom, true))
         } else {
             None
@@ -259,6 +266,67 @@ pub fn hit_test(id: u64, page: usize, x_pt: f64, y_pt: f64) -> Option<DocumentCa
         }
     };
     Some(hit_for_item(item, offset, true))
+}
+
+/// 编译源码选区对应的真实帧四边形，保留旋转、缩放和重复宏输出。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentSelectionQuad {
+    pub from: usize,
+    pub to: usize,
+    pub page: usize,
+    pub points: [[f64; 2]; 4],
+}
+
+pub fn selection(id: u64, from: usize, to: usize) -> Vec<DocumentSelectionQuad> {
+    let Ok(cache) = SNAPSHOTS.lock() else {
+        return vec![];
+    };
+    let Some(snapshot) = cache.iter().find(|s| s.id == id) else {
+        return vec![];
+    };
+    let (from, to) = (from.min(to), from.max(to));
+    if from == to || to > snapshot.source_len {
+        return vec![];
+    }
+    let upper = snapshot
+        .source_order
+        .partition_point(|&i| snapshot.items[i].range.start < to);
+    let lower = snapshot.max_end[..upper].partition_point(|&end| end <= from);
+    snapshot.source_order[lower..upper]
+        .iter()
+        .map(|&i| &snapshot.items[i])
+        .filter(|item| item.range.end > from && item.range.start < item.range.end)
+        // 正文的背景不能盖住整个块；独立图形和图片仍可选择。
+        .filter(|item| {
+            item.kind != PlacedItemKind::Shape
+                || text_in_rect(snapshot, item.page, item.rect)
+                    .next()
+                    .is_none()
+        })
+        .map(|item| {
+            let from = from.max(item.range.start);
+            let to = to.min(item.range.end);
+            // 只有连字存在可分割的内部输出；图片、图形和单字素仍是原子选区。
+            let (start, end) = if item.caret_stops.is_some() {
+                (item.caret_at(from), item.caret_at(to))
+            } else {
+                (item.caret_start, item.caret_end)
+            };
+            let corners = [
+                start,
+                end,
+                end + item.caret_vector,
+                start + item.caret_vector,
+            ];
+            DocumentSelectionQuad {
+                from,
+                to,
+                page: item.page,
+                points: corners.map(|point| [point.x.to_pt(), point.y.to_pt()]),
+            }
+        })
+        .collect()
 }
 
 pub fn locate(id: u64, offset: usize) -> Option<DocumentCaret> {
@@ -319,6 +387,66 @@ mod tests {
             typst::layout::Transform::identity(),
         )
     }
+    #[test]
+    fn selection_is_half_open_reversible_and_keeps_repeated_output() {
+        let id = store(
+            vec![item(1, 0, 3), item(1, 3, 6), item(2, 3, 6), item(2, 6, 9)],
+            9,
+            vec![],
+        );
+        let selected = selection(id, 3, 6);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected.iter().map(|quad| quad.page).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(selection(id, 6, 3), selected);
+        assert!(selection(id, 3, 3).is_empty());
+        assert!(selection(id, 0, 10).is_empty());
+        assert!(selection(0, 0, 9).is_empty());
+        let other = store(vec![], 9, vec![]);
+        assert!(selection(other, 0, 9).is_empty());
+        assert_eq!(selection(id, 0, 9).len(), 4);
+    }
+
+    #[test]
+    fn selection_uses_transformed_corners_not_axis_aligned_bounds() {
+        let mut placed = item(2, 0, 3);
+        placed.caret_start = Point::new(Abs::pt(40.0), Abs::pt(20.0));
+        placed.caret_end = Point::new(Abs::pt(40.0), Abs::pt(30.0));
+        placed.caret_vector = Point::new(Abs::pt(-12.0), Abs::zero());
+        let id = store(vec![placed], 3, vec![]);
+        assert_eq!(
+            selection(id, 0, 3)[0].points,
+            [[40.0, 20.0], [40.0, 30.0], [28.0, 30.0], [28.0, 20.0]]
+        );
+    }
+
+    #[test]
+    fn selection_ignores_text_background_but_keeps_images_and_standalone_shapes() {
+        let mut background = item(1, 0, 9);
+        background.kind = PlacedItemKind::Shape;
+        let mut image = item(2, 3, 6);
+        image.kind = PlacedItemKind::Image;
+        let mut shape = item(2, 6, 9);
+        shape.kind = PlacedItemKind::Shape;
+        let id = store(vec![background, item(1, 0, 3), image, shape], 9, vec![]);
+        let selected = selection(id, 0, 9);
+        assert_eq!(selected.len(), 3);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|quad| (quad.from, quad.to))
+                .collect::<Vec<_>>(),
+            vec![(0, 3), (3, 6), (6, 9)]
+        );
+        for (from, to) in [(4, 5), (7, 8)] {
+            let atomic = selection(id, from, to);
+            assert_eq!(atomic.len(), 1);
+            assert_eq!(atomic[0].points[1][0] - atomic[0].points[0][0], 10.0);
+        }
+    }
+
     #[test]
     fn source_index_preserves_linear_lookup_and_duplicate_output_priority() {
         let mut items = Vec::new();

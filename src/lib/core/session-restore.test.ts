@@ -24,6 +24,7 @@ const stored = (patch: Partial<PersistedState> = {}): Partial<PersistedState> =>
   uiZoom: 1.5,
   chineseFont: "SimSun",
   fontDirs: ["/fonts/a"],
+  tabSpaces: 4,
   ...patch,
 });
 
@@ -75,6 +76,7 @@ describe("planRestore · 偏好", () => {
       fontDirs: ["/fonts/a", "/fonts/b"],
       restoreSession: true,
       autoCheckUpdates: false,
+      tabSpaces: 4,
     });
   });
 
@@ -155,6 +157,16 @@ describe("planRestore · 内容", () => {
     expect(p.settings.restoreSession).toBe(true);
     expect(p.content?.text).toBe("x");
     expect(p.content?.dirty).toBe(false);
+  });
+
+  it("`tabSpaces` 按存档恢复；缺失回默认 2，越界经归一化收敛", () => {
+    expect(plan().settings.tabSpaces).toBe(4);
+    const missing = planRestore({}, { isSecondaryWindow: false });
+    expect(missing.settings.tabSpaces).toBe(2);
+    // 存档里的脏值（12）经 normalizeSettings 收敛到 8；0 = 制表符是合法值不能被改
+    expect(plan({ tabSpaces: 12 }).settings.tabSpaces).toBe(8);
+    expect(plan({ tabSpaces: 0 }).settings.tabSpaces).toBe(0);
+    expect(plan({ tabSpaces: "四" as unknown as number }).settings.tabSpaces).toBe(2);
   });
 
   it("`restoreSession` 关掉时只恢复偏好，不恢复内容", () => {

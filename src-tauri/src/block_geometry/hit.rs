@@ -93,8 +93,10 @@ pub fn pick_hit_item(
         if item.range.start >= end || item.range.end < start {
             continue;
         }
-        let dy = gap(item.rect.min.y, item.rect.max.y, y);
-        let dx = gap(item.rect.min.x, item.rect.max.x, x);
+        // 字形墨迹之外、同一输入行内也应命中该字符（尤其是标点）。
+        let rect = item.hit_rect();
+        let dy = gap(rect.min.y, rect.max.y, y);
+        let dx = gap(rect.min.x, rect.max.x, x);
         let take = match best {
             None => true,
             // 同距时保留先遇到的（帧遍历顺序稳定 ⇒ 结果可复现）
@@ -112,7 +114,14 @@ pub fn pick_hit_item(
     let point = Point::new(x, y) - (item.caret_start + item.caret_vector / 2.0);
     let projection = point.x.to_pt() * axis.x.to_pt() + point.y.to_pt() * axis.y.to_pt();
     let length_squared = axis.x.to_pt().powi(2) + axis.y.to_pt().powi(2);
-    let offset = if projection < length_squared / 2.0 {
+    let offset = if let Some(stops) = &item.caret_stops {
+        let ratio = if length_squared > 0.0 {
+            (projection / length_squared).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        stops[(ratio * (stops.len() - 1) as f64).round() as usize]
+    } else if projection < length_squared / 2.0 {
         item.range.start
     } else {
         item.range.end

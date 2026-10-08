@@ -24,6 +24,7 @@ const fullState = (over: Partial<PersistedState> = {}): PersistedState => ({
   uiZoom: 1,
   chineseFont: "",
   fontDirs: [],
+  tabSpaces: 2,
   ...over,
 });
 
@@ -55,6 +56,7 @@ describe("persistence", () => {
       uiZoom: 1.3,
       chineseFont: "SimSun",
       fontDirs: ["D:\\fonts"],
+      tabSpaces: 6,
     });
     expect(loadState()).toEqual({
       theme: "dark",
@@ -74,6 +76,7 @@ describe("persistence", () => {
       uiZoom: 1.3,
       chineseFont: "SimSun",
       fontDirs: ["D:\\fonts"],
+      tabSpaces: 6,
     });
   });
 
@@ -101,6 +104,7 @@ describe("persistence", () => {
       uiZoom: 1,
       chineseFont: "",
       fontDirs: [],
+      tabSpaces: 2,
     });
     clearState();
     expect(loadState()).toEqual({});
@@ -125,6 +129,7 @@ describe("persistence", () => {
       uiZoom: 1,
       chineseFont: "",
       fontDirs: [],
+      tabSpaces: 2,
     });
     expect(loadState().theme).toBe("system");
   });
@@ -244,6 +249,15 @@ describe("persistence", () => {
     expect(state.updateDismissedAt).toBeNull();
     // 界面缩放也是新增字段：旧存档读出来是默认 100%
     expect(state.uiZoom).toBe(1);
+    // Tab 档宽也是新字段：旧存档读出来是默认 2 空格
+    expect(state.tabSpaces).toBe(2);
+  });
+
+  it("tabSpaces 损坏（字符串/NaN）时回落默认 2，不让脏数据把 Tab 变成怪档宽", () => {
+    localStorage.setItem("typst-pad:state", JSON.stringify({ tabSpaces: "四个" }));
+    expect(loadState().tabSpaces).toBe(2);
+    localStorage.setItem("typst-pad:state", JSON.stringify({ tabSpaces: Number.NaN }));
+    expect(loadState().tabSpaces).toBe(2);
   });
 
   it("uiZoom 损坏（字符串）时回落默认 100%，不让脏数据把界面放大", () => {

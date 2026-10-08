@@ -14,10 +14,13 @@
   import { typst_lezer } from "codemirror-lang-typst/lezer";
   import { typstHeadingHighlight } from "./typst-highlight";
   import { createEditorKeymap } from "./editor-keymap";
+  import { observeEditorComposition } from "./editor-composition";
+  import type { SourceCursorChange } from "$lib/core/document-source-expansion";
   import { planDollarInput } from "./auto-pair";
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation } from "../core/typst-engine";
+  import { defaultSettings } from "../core/app-settings";
   import { squiggleRanges, offsetAt } from "../core/diagnostics-utils";
   import { planForCommand } from "../core/write-commands";
   import type { WriteCommand } from "../core/write-commands";
@@ -30,7 +33,8 @@
   interface Props {
     initialDoc?: string;
     onDocChange?: (doc: string, mapPosition: (pos: number, assoc?: number) => number) => void;
-    onCursor?: (line: number, col: number) => void;
+    onCursor?: (line: number, col: number, change: SourceCursorChange) => void;
+    onFocusChange?: (focused: boolean) => void;
     doc?: string;
     theme?: "dark" | "light";
     /** 编译错误位置列表（父组件传入）；为空时不显示波浪线 */
@@ -41,6 +45,7 @@
     jumpTo?: { line: number; col: number; seq: number } | null;
     /** 文档模式源码层保留段落/列表输入语义；源码模式直接编辑 Typst 原文。 */
     mode?: "write" | "source";
+    revealRange?: { from: number; to: number } | null;
     /** 合成期间暂停后台整页编译，源码镜像仍实时更新。 */
     onComposition?: (active: boolean) => void;
     /**
@@ -49,20 +54,25 @@
      * 长行折行显示、不再需要横向滚动。
      */
     wrap?: boolean;
+    /** Tab 一档插几个空格（0 = 制表符）；来自设置，改动后不重建键位、下一次 Tab 生效 */
+    tabSpaces?: number;
   }
 
   let {
     initialDoc = "",
     onDocChange,
     onCursor,
+    onFocusChange,
     doc,
     theme = "dark",
     diagnostics,
     prefixCode = "",
     jumpTo = null,
     mode = "source",
+    revealRange = null,
     onComposition,
     wrap = false,
+    tabSpaces = defaultSettings().tabSpaces,
   }: Props = $props();
 
   let host: HTMLElement;
@@ -127,11 +137,12 @@
     return [
       basicSetup,
       // 自定义编辑快捷键（Prec.high，优先于 basicSetup 默认键位）。**模式感知**：
-      // 写作模式先把 Enter 交给 typst 的列表命令（续项 / 空项退出），它不认才沿用上一行缩进
-      createEditorKeymap({ isWriteMode: () => mode === "write" }),
-      // 一档缩进 = 4 个空格（用户要求「缩进应该是四格」）：Ctrl+Tab / Ctrl+Shift+Tab 与语言侧
-      // 自动缩进都走这个 facet。普通 Tab / Shift+Tab **不走它** —— Tab 插入制表符本身（有选区
-      // 给行首加一个 tab，有补全候选先接受所选候选），Shift+Tab 反缩进（见 editor-keymap.ts）。
+      // 写作模式先把 Enter 交给 typst 的列表命令（续项 / 空项退出），它不认才沿用上一行缩进；
+      // tabSpaces 用 getter 传，设置改了不重建键位、下一次 Tab 生效（见 editor-keymap.ts）
+      createEditorKeymap({ isWriteMode: () => mode === "write", tabSpaces: () => tabSpaces }),
+      // 一档缩进 = 4 个空格（用户要求「缩进应该是四格」）：**Ctrl+Tab / Ctrl+Shift+Tab** 与语言侧
+      // 自动缩进走这个 facet。普通 Tab / Shift+Tab **不走它** —— 档宽由设置 tabSpaces 决定
+      //（有选区给行首加一档，有补全候选先接受所选候选，Shift+Tab 对称退一档，见 editor-keymap.ts）。
       // 回车那条也**不用它** —— 新行照抄上一行实际的前导空白（见 auto-indent.ts）。
       indentUnit.of(INDENT_UNIT),
       typst_lezer(),
@@ -142,19 +153,8 @@
       wrapCompartment.of(wrap ? EditorView.lineWrapping : []),
       diagTheme,
       revealField,
-      EditorView.domEventHandlers({
-        compositionstart: () => {
-          onComposition?.(true);
-          return false;
-        },
-        compositionend: () => {
-          queueMicrotask(() => {
-            if (view) onComposition?.(false);
-          });
-          return false;
-        },
-      }),
       EditorView.updateListener.of((update) => {
+        if (update.focusChanged) onFocusChange?.(update.view.hasFocus);
         if (update.docChanged && !applyingExternal) {
           onDocChange?.(update.state.doc.toString(), (pos, assoc) =>
             update.changes.mapPos(pos, assoc),
@@ -162,7 +162,13 @@
         }
         const head = update.state.selection.main.head;
         const line = update.state.doc.lineAt(head);
-        if (update.selectionSet || update.docChanged) onCursor?.(line.number, head - line.from + 1);
+        if (update.selectionSet || update.docChanged)
+          onCursor?.(line.number, head - line.from + 1, {
+            anchor: update.state.selection.main.anchor,
+            head,
+            previousHead: update.startState.selection.main.head,
+            reason: applyingExternal ? "restore" : update.docChanged ? "edit" : "move",
+          });
       }),
     ];
   }
@@ -179,8 +185,12 @@
     });
     mark("editor-created");
     registerEditorView(view);
+    const stopComposition = observeEditorComposition(view.contentDOM, (active) =>
+      onComposition?.(active),
+    );
 
     return () => {
+      stopComposition();
       // 视图销毁：让已经排队的那次"模式切换恢复"作废（它要去动一个已经拆掉的视图）
       caretAnchorEpoch += 1;
       caretAnchor = null;
@@ -214,15 +224,26 @@
     dbg.log("editor", `外部文档替换 ${current.length} → ${doc.length} 字符`);
   });
 
-  // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见
+  // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见。
+  // **按 seq 幂等**：`jumpTo` 是对象 prop，父组件每次输入重渲染都会让这个 effect 重跑
+  // （实测：点一次错误、输入一个字符 → effect 多跑 2 次，光标被反复拉回错误行）。
+  // seq 只在点击时递增（见 +page 的 jumpSeq），同一次点击只跳一次 —— 与 appliedWrap/appliedMode 同款守卫。
+  let appliedJumpSeq = -1;
   $effect(() => {
     if (!view || !jumpTo) return;
+    if (appliedJumpSeq === jumpTo.seq) return;
+    appliedJumpSeq = jumpTo.seq;
     const pos = offsetAt(view.state.doc, jumpTo.line, jumpTo.col);
     view.dispatch({
       selection: { anchor: pos },
       effects: EditorView.scrollIntoView(pos, { y: "center" }),
     });
     view.focus();
+  });
+
+  // 装饰与页面的展开状态共用同一范围，键盘收起或模式切换也会清除。
+  $effect(() => {
+    if (view) view.dispatch({ effects: revealEffect.of(revealRange) });
   });
 
   // 源码层主题独立于完整页面的滤镜，不重建视图。
@@ -381,6 +402,20 @@
       effects: [revealEffect.of(range ?? null), EditorView.scrollIntoView(at, { y: "center" })],
     });
     view.focus();
+  }
+
+  /** 页面拖动使用真实 CodeMirror 选区，不滚动透明输入层，也不写入撤销历史。 */
+  export function selectRange(anchor: number, head: number): void {
+    if (!view) return;
+    const clamp = (pos: number) => Math.max(0, Math.min(pos, view.state.doc.length));
+    view.dispatch({ selection: { anchor: clamp(anchor), head: clamp(head) } });
+    view.focus();
+  }
+
+  export function selection(): { anchor: number; head: number } | null {
+    if (!view) return null;
+    const { anchor, head } = view.state.selection.main;
+    return { anchor, head };
   }
 
   export function focus(): void {

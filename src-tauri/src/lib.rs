@@ -115,6 +115,7 @@ pub fn run() {
             compile_commands::compile_doc,
             compile_commands::document_hit_test,
             compile_commands::document_cursor,
+            compile_commands::document_selection,
             compile_commands::compile_blocks,
             compile_commands::block_hit_test,
             compile_commands::compile_math,

@@ -194,6 +194,28 @@ $ sum_(i=1)^n i = frac(n(n+1), 2) $
 }
 
 #[test]
+fn document_selection_tracks_unicode_and_cross_page_output() {
+    let src = document_mode_sample();
+    let out = compile(src.clone(), None, &fonts_dir(), &FontConfig::default());
+    assert!(out.ok, "{:?}", out.diagnostics);
+    let id = out.geometry_id.unwrap();
+    let from = src.find("正文含").unwrap();
+    let emoji = src.find('😀').unwrap();
+    let first = crate::document_geometry::selection(id, from, emoji + '😀'.len_utf8());
+    assert!(!first.is_empty());
+    assert!(first.iter().all(|quad| quad.page == 1
+        && quad.to > from
+        && quad.from <= emoji
+        && quad.points.iter().flatten().all(|value| value.is_finite())));
+    assert!(first.iter().any(|quad| quad.from == emoji));
+    let to = src.find("第二页使用").unwrap() + "第二页".len();
+    let all = crate::document_geometry::selection(id, from, to);
+    assert!(all.iter().any(|quad| quad.page == 1));
+    assert!(all.iter().any(|quad| quad.page == 2));
+    assert_eq!(all, crate::document_geometry::selection(id, to, from));
+}
+
+#[test]
 fn document_mode_preserves_all_pages_and_geometry() {
     let src = document_mode_sample();
     let out = compile(src.clone(), None, &fonts_dir(), &FontConfig::default());
@@ -586,6 +608,7 @@ fn dump_page_fixtures() {
         println!(
             "PAGEFIXTURE:{}",
             serde_json::json!({ "doc": src, "pages": pages, "carets": carets,
+                "selectionQuads": crate::document_geometry::selection(id, 0, src.len()),
                 "whitespaceHits": whitespace_hits,
                 "brokenDoc": if src == recovered { Some(&broken) } else { None },
                 "diagnostics": if src == recovered { Some(&recovery_diagnostics) } else { None },

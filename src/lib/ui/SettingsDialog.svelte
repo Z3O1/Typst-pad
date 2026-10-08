@@ -14,6 +14,7 @@
     prefixCode = $bindable(),
     chineseFont = $bindable(),
     fontDirs = $bindable(),
+    tabSpaces = $bindable(),
     availableFonts,
     fontsLoading,
     onAddFontDir,
@@ -27,6 +28,8 @@
     prefixCode: string;
     chineseFont: string;
     fontDirs: string[];
+    /** Tab 一档插几个空格（0 = 制表符）；数字输入，保存时由 normalizeSettings 收敛 0~8 */
+    tabSpaces: number;
     availableFonts: string[];
     fontsLoading: boolean;
     onAddFontDir: () => void;
@@ -66,6 +69,19 @@
     <label class="settings-row">
       <input type="checkbox" bind:checked={prefixEnabled} />
       <span>启用前缀代码</span>
+    </label>
+    <label class="settings-row">
+      <span>Tab 一档 =</span>
+      <input
+        class="settings-tab-input"
+        type="number"
+        min="0"
+        max="8"
+        step="1"
+        bind:value={tabSpaces}
+        aria-label="Tab 一档插几个空格（0 = 制表符）"
+      />
+      <span>个空格（0 = 制表符）</span>
     </label>
     <textarea
       class="settings-textarea"
@@ -173,6 +189,23 @@
     border-radius: 4px;
     color: var(--fg);
     font-size: 13px;
+  }
+
+  /* Tab 档宽的数字输入：窄框右对齐数字，聚焦边框与其它输入一致 */
+  .settings-tab-input {
+    width: 56px;
+    padding: 4px 6px;
+    background: var(--bg-pane);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg);
+    font-size: 13px;
+    text-align: right;
+  }
+
+  .settings-tab-input:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 
   .settings-block {
