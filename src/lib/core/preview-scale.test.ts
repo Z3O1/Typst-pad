@@ -1,33 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { normalizeUiZoom, previewCanvasWidth, previewScale, viewBoxWidthPt } from "./preview-scale";
+import {
+  DEFAULT_PAPER,
+  EDITOR_FONT_PX,
+  PREVIEW_PAGE_MIN_PT,
+  TYPST_DEFAULT_TEXT_PT,
+  isReflowApplied,
+  naturalScale,
+  previewCanvasWidth,
+  previewPage,
+  previewScale,
+  reflowCanvasWidth,
+  viewBoxSizePt,
+} from "./preview-scale";
 
 const A4_WIDTH_PT = 595.28;
+const A4_HEIGHT_PT = 841.89;
 
-describe("previewScale", () => {
-  it("100% 时页面始终铺满预览栏", () => {
-    expect(previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT })).toBeCloseTo(
-      400,
-      10,
-    );
-    expect(previewCanvasWidth({ containerWidth: 960, pageWidthPt: A4_WIDTH_PT })).toBeCloseTo(
-      960,
-      10,
-    );
+describe("naturalScale", () => {
+  it("typst 11pt 正文 ↔ 编辑区 14px", () => {
+    expect(naturalScale()).toBeCloseTo(EDITOR_FONT_PX / TYPST_DEFAULT_TEXT_PT, 10);
+    expect(A4_WIDTH_PT * naturalScale()).toBeCloseTo(757.63, 1);
+  });
+});
+
+describe("previewScale（兜底路径：等比缩放整页）", () => {
+  it("窄栏：画布铺满栏宽，但永远不超过它（永不横向滚动）", () => {
+    const width = previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT });
+    expect(width).toBeCloseTo(400, 10);
+    expect(width).toBeLessThanOrEqual(400);
   });
 
-  it("窗口宽度持续影响页面，不在固定自然尺寸停止", () => {
-    const narrow = previewCanvasWidth({ containerWidth: 480, pageWidthPt: A4_WIDTH_PT });
-    const wide = previewCanvasWidth({ containerWidth: 960, pageWidthPt: A4_WIDTH_PT });
-    expect(wide).toBeCloseTo(narrow * 2, 10);
+  it("宽栏：停在自然字号（不再随窗口放大），字与代码一样大", () => {
+    for (const containerWidth of [800, 960, 1600]) {
+      const width = previewCanvasWidth({ containerWidth, pageWidthPt: A4_WIDTH_PT });
+      expect(width).toBeCloseTo(A4_WIDTH_PT * naturalScale(), 10);
+      expect(width).toBeLessThanOrEqual(containerWidth);
+    }
   });
 
-  it("用户缩放继续作用于页面内容", () => {
-    expect(
-      previewCanvasWidth({ containerWidth: 500, pageWidthPt: A4_WIDTH_PT, uiZoom: 1.5 }),
-    ).toBeCloseTo(750, 10);
-    expect(
-      previewCanvasWidth({ containerWidth: 500, pageWidthPt: A4_WIDTH_PT, uiZoom: 0.5 }),
-    ).toBeCloseTo(250, 10);
+  it("任何栏宽下画布都 ≤ 栏宽（硬保证）", () => {
+    for (const containerWidth of [120, 300, 757.6, 758, 1200, 2400]) {
+      expect(previewCanvasWidth({ containerWidth, pageWidthPt: A4_WIDTH_PT })).toBeLessThanOrEqual(
+        containerWidth + 1e-9,
+      );
+    }
   });
 
   it("非法尺寸返回 NaN", () => {
@@ -37,23 +53,96 @@ describe("previewScale", () => {
   });
 });
 
-describe("normalizeUiZoom", () => {
-  it("只接受有限正数", () => {
-    expect(normalizeUiZoom(1.3)).toBe(1.3);
-    for (const value of [undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(normalizeUiZoom(value)).toBe(1);
-    }
+describe("previewPage（重排路径：纸张跟着预览栏走）", () => {
+  it("栏宽 → 页宽 = 栏宽 × 11/14：正文按 14px 排版", () => {
+    const page = previewPage(700);
+    expect(page).not.toBeNull();
+    expect(page!.widthPt).toBeCloseTo(700 * (TYPST_DEFAULT_TEXT_PT / EDITOR_FONT_PX), 10);
+    // 页高与页边距按文档自己的纸型等比缩放
+    const factor = page!.widthPt / A4_WIDTH_PT;
+    expect(page!.heightPt).toBeCloseTo(A4_HEIGHT_PT * factor, 6);
+    expect(page!.marginPt).toBeCloseTo(70.87 * factor, 6);
+    expect(page!.marginPt).toBeLessThan(70.87);
+  });
+
+  it("栏宽够放下自然尺寸：不重排（返回 null，走兜底路径）", () => {
+    expect(previewPage(A4_WIDTH_PT * naturalScale())).toBeNull();
+    expect(previewPage(2000)).toBeNull();
+  });
+
+  it("极窄栏：页宽停在 180pt 下限（正文不成碎字）", () => {
+    const page = previewPage(30);
+    expect(page!.widthPt).toBeCloseTo(PREVIEW_PAGE_MIN_PT, 10);
+    // 文档纸型比下限还窄时只缩窄、不加宽
+    expect(previewPage(30, { widthPt: 120, heightPt: 200 })!.widthPt).toBeCloseTo(120, 10);
+  });
+
+  it("按文档自己的纸型缩放（不是写死 A4）", () => {
+    const a5 = { widthPt: 419.53, heightPt: 595.28 };
+    const page = previewPage(400, a5);
+    const factor = page!.widthPt / a5.widthPt;
+    expect(page!.heightPt).toBeCloseTo(a5.heightPt * factor, 6);
+    // A5 窄，同样的栏宽下比例与 A4 不同：页宽只由栏宽与字号决定
+    expect(page!.widthPt).toBeCloseTo(400 * (TYPST_DEFAULT_TEXT_PT / EDITOR_FONT_PX), 10);
+  });
+
+  it("纸型非法/栏宽不可测：退回默认 A4 / 不给请求", () => {
+    expect(previewPage(0)).toBeNull();
+    expect(previewPage(Number.NaN)).toBeNull();
+    const page = previewPage(400, { widthPt: 0, heightPt: 0 });
+    expect(page!.widthPt).toBeCloseTo(400 * (TYPST_DEFAULT_TEXT_PT / EDITOR_FONT_PX), 10);
+    expect(page!.heightPt).toBeCloseTo(
+      DEFAULT_PAPER.heightPt * (page!.widthPt / DEFAULT_PAPER.widthPt),
+      6,
+    );
   });
 });
 
-describe("viewBoxWidthPt", () => {
-  it("读取空格或逗号分隔的页面宽度", () => {
-    expect(viewBoxWidthPt("0 0 595.28 841.89")).toBeCloseTo(595.28, 10);
-    expect(viewBoxWidthPt("0,0,360,480")).toBe(360);
+describe("reflowCanvasWidth（重排生效时的画布）", () => {
+  it("恒 ≤ 栏宽：这是无横向滚动条的保证", () => {
+    for (const containerWidth of [180, 320, 700, 1400]) {
+      const page = previewPage(containerWidth);
+      if (!page) continue;
+      const canvas = reflowCanvasWidth(containerWidth, page.widthPt);
+      expect(canvas).toBeLessThanOrEqual(containerWidth + 1e-9);
+      expect(canvas).toBeCloseTo(containerWidth, 6);
+    }
+  });
+
+  it("页宽被下限夹住时不再铺满（栏太窄，画布跟着变小）", () => {
+    const page = previewPage(30)!;
+    expect(reflowCanvasWidth(30, page.widthPt)).toBeCloseTo(30, 10);
+  });
+
+  it("非法输入返回 NaN", () => {
+    expect(reflowCanvasWidth(0, 300)).toBeNaN();
+    expect(reflowCanvasWidth(500, Number.NaN)).toBeNaN();
+  });
+});
+
+describe("isReflowApplied", () => {
+  it("产物页宽等于请求页宽（±1pt）才算生效", () => {
+    expect(isReflowApplied(400, 400)).toBe(true);
+    expect(isReflowApplied(400.8, 400)).toBe(true);
+    expect(isReflowApplied(595.28, 400)).toBe(false);
+    expect(isReflowApplied(Number.NaN, 400)).toBe(false);
+    expect(isReflowApplied(400, Number.NaN)).toBe(false);
+  });
+});
+
+describe("viewBoxSizePt", () => {
+  it("读取空格或逗号分隔的纸型", () => {
+    expect(viewBoxSizePt("0 0 595.28 841.89")).toEqual({
+      widthPt: 595.28,
+      heightPt: 841.89,
+    });
+    expect(viewBoxSizePt("0,0,360,480")).toEqual({ widthPt: 360, heightPt: 480 });
   });
 
   it("拒绝无效 viewBox", () => {
-    expect(viewBoxWidthPt("")).toBeNaN();
-    expect(viewBoxWidthPt("0 0 x 841")).toBeNaN();
+    expect(viewBoxSizePt("")).toBeNull();
+    expect(viewBoxSizePt("0 0 x 841")).toBeNull();
+    expect(viewBoxSizePt("0 0 0 841")).toBeNull();
+    expect(viewBoxSizePt("0 0 595")).toBeNull();
   });
 });

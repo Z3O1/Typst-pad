@@ -28,13 +28,13 @@ export function escapeXml(text: string): string {
 }
 
 /** CJK 字符按 2 列计宽的简单折行（仅为了假预览不横向溢出，不做真实排版） */
-function wrapLine(line: string): string[] {
+function wrapLine(line: string, maxColumns: number): string[] {
   const lines: string[] = [];
   let current = "";
   let columns = 0;
   for (const ch of line) {
     const width = /[\u2e80-\u9fff\uff00-\uffef]/.test(ch) ? 2 : 1;
-    if (columns + width > MAX_COLUMNS) {
+    if (columns + width > maxColumns) {
       lines.push(current);
       current = "";
       columns = 0;
@@ -47,14 +47,14 @@ function wrapLine(line: string): string[] {
 }
 
 /** 文档 → 供假 SVG 渲染的行数组（空行保留为空白行，段落不丢失） */
-function docToLines(doc: string): string[] {
+function docToLines(doc: string, maxColumns: number): string[] {
   const out: string[] = [];
   for (const raw of doc.split("\n")) {
     if (raw.trim() === "") {
       out.push("");
       continue;
     }
-    out.push(...wrapLine(raw));
+    out.push(...wrapLine(raw, maxColumns));
   }
   if (out.length === 0) out.push("");
   return out;
@@ -65,11 +65,9 @@ function renderPage(
   lines: string[],
   pageIndex: number,
   pageCount: number,
-  pageWidthPt: number = PAGE_WIDTH,
+  paper: { widthPt: number; heightPt: number; marginPt: number },
 ): string {
-  const width = pageWidthPt;
-  const height = PAGE_HEIGHT;
-  const margin = MARGIN;
+  const { widthPt: width, heightPt: height, marginPt: margin } = paper;
   const parts: string[] = [];
   parts.push(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
@@ -101,12 +99,24 @@ export function warnFakeRendering(): void {
   );
 }
 
-/** 当前文档 → 假 SVG 页数组；只用于没有原生夹具的基础 UI 验收。 */
-export function fakePages(doc: string): string[] {
-  const lines = docToLines(doc);
-  const perPage = Math.max(1, Math.floor((PAGE_HEIGHT - 2 * MARGIN) / LINE_HEIGHT));
+/**
+ * 当前文档 → 假 SVG 页数组；只用于没有原生夹具的基础 UI 验收。
+ *
+ * `paper` 为**预览重排**请求的纸型：窄页照实变窄、折行列数与每页行数跟着变
+ * （页数会变多）—— 浏览器验收靠它验证"重排版生效 → 永不横向滚动条 + 字号与代码一致"。
+ */
+export function fakePages(
+  doc: string,
+  paper = { widthPt: PAGE_WIDTH, heightPt: PAGE_HEIGHT, marginPt: MARGIN },
+): string[] {
+  const columns = (widthPt: number, marginPt: number) =>
+    Math.max(4, Math.round(MAX_COLUMNS * ((widthPt - 2 * marginPt) / (PAGE_WIDTH - 2 * MARGIN))));
+  const maxColumns = columns(paper.widthPt, paper.marginPt);
+  const lines = docToLines(doc, maxColumns);
+  const textHeight = paper.heightPt - 2 * paper.marginPt;
+  const perPage = Math.max(1, Math.floor(textHeight / LINE_HEIGHT));
   const pages: string[][] = [];
   for (let i = 0; i < lines.length; i += perPage) pages.push(lines.slice(i, i + perPage));
   if (!pages.length) pages.push([""]);
-  return pages.map((pageLines, i) => renderPage(pageLines, i, pages.length));
+  return pages.map((pageLines, i) => renderPage(pageLines, i, pages.length, paper));
 }

@@ -4,6 +4,7 @@
   import type { DocumentPoint } from "$lib/core/document-drag-selection";
   import { createDocumentPages, type DocumentPage } from "./document-pages";
   import { caretScrollDelta, projectDocumentCaret } from "./document-caret";
+  import type { PaperShape } from "$lib/core/preview-scale";
 
   let {
     hidden,
@@ -67,6 +68,10 @@
   }
   export function pageWidthPt(): number {
     return pages?.widthPt() ?? 0;
+  }
+  /** 文档自己的纸型（最宽那页，pt）：预览重排按它等比缩放页高/页边距；没有产物时为 null */
+  export function pageShape(): PaperShape | null {
+    return pages?.shape() ?? null;
   }
   export function paper(): HTMLElement | undefined {
     return paperEl;

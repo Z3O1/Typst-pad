@@ -4,11 +4,13 @@
 
 ## 编译链路
 
-前端在 `src/routes/+page.svelte` 管理编译调度与结果应用：两种模式都调用 `compile_doc`，并将当前文档源码、文档路径和字体设置传入 Tauri 命令。未保存文档的路径为 `null`。Rust 命令位于 `src-tauri/src/compile_commands.rs`，排版引擎位于 `src-tauri/src/typst_world/`。
+前端在 `src/routes/+page.svelte` 管理编译调度与结果应用：两种模式都调用 `compile_doc`，并将当前文档源码、文档路径、字体设置与可选的预览重排页面几何传入 Tauri 命令。未保存文档的路径为 `null`。Rust 命令位于 `src-tauri/src/compile_commands.rs`，排版引擎位于 `src-tauri/src/typst_world/`。
 
 编译在 `spawn_blocking` 中执行，并由 `CompileState` 的互斥锁串行化，避免 Typst 编译任务并行使用该状态。前端用编译序号和会话/文档/上下文指纹忽略过期结果。文档模式编译失败时，前端把主文档的出错表达式临时投影为源码并重试整页编译，保留结构化错误诊断；源码模式或无法恢复的错误保留最后一次成功的预览。诊断映射回用户文档行列并形成编辑器标记，警告则在状态栏呈现。错误回退只改变预览输入，不修改原文或 PDF 导出输入，详见[文档模式](writing-rendering.md)。
 
-`compile_doc` 返回 `CompileOutput { ok, pages, pageKeys, geometryId, diagnostics, warnings }`。请求可携带 `knownPages`（前端已落地产物的同位置指纹）；成功时 `pages` 按页序为 SVG 字符串或 `null`，后者只引用前端持有的对应 `pageKeys`。首次请求、切换文件或没有基准时传 `null`，完整返回全部 SVG。前端验证指纹和基准后还原完整页面；缺少或错位的引用按失败处理，不猜测页面。正常的排版错误以 `ok: false` 返回，`Err` 留给任务异常终止。成功产物携带新的整页命中编号与诊断，失败产物不携带编号或页清单。诊断行列从 1 开始，结束位置为独占边界；Rust 序列化省略主文档的 `path`，前端仍把桥接桩或旧 IPC 形状里的 `null` / 空字符串归一为“主文档”，以兼容无路径诊断。前端位置换算由 `src/lib/core/diagnostics-utils.ts` 负责；产品编译不注入随容器变化的页面设置。
+`compile_doc` 返回 `CompileOutput { ok, pages, pageKeys, geometryId, diagnostics, warnings }`。请求可携带 `knownPages`（前端已落地产物的同位置指纹）；成功时 `pages` 按页序为 SVG 字符串或 `null`，后者只引用前端持有的对应 `pageKeys`。首次请求、切换文件或没有基准时传 `null`，完整返回全部 SVG。前端验证指纹和基准后还原完整页面；缺少或错位的引用按失败处理，不猜测页面。正常的排版错误以 `ok: false` 返回，`Err` 留给任务异常终止。成功产物携带新的整页命中编号与诊断，失败产物不携带编号或页清单。诊断行列从 1 开始，结束位置为独占边界；Rust 序列化省略主文档的 `path`，前端仍把桥接桩或旧 IPC 形状里的 `null` / 空字符串归一为“主文档”，以兼容无路径诊断。前端位置换算由 `src/lib/core/diagnostics-utils.ts` 负责。
+
+`compile_doc` 还可携带 `previewPage { widthPt, heightPt, marginPt }`（**预览重排**，见下）：Rust 把一行 `#set page(...)` 插到**文档自己的页面设置之后**再编译，因此预览的换行/分页与保存、PDF 导出的产物不同（用户明确接受），但两者使用的是同一份原文：`export_pdf` 与写盘从不带这个参数。注入点由 `typst-syntax` 的顶层 `SetRule` / `ShowRule` 定位（typst 的 set 规则后写的赢，插在最前面会被文档的 `#set page(paper: "a4")` 覆盖）；注入行造成的诊断行号位移与几何字节偏移在 Rust 侧回映（`InjectedLines` / `OffsetMapping`），前端仍按“前缀 + 用户文档”的线性坐标消费。产物页宽与请求不符（注入被覆盖）时前端退回等比缩放，不硬套重排假设。
 
 整页几何每轮按当前 World 收集：主文档 Span 区间一次建索引，字形墨迹按字体、字号和 glyph ID 在同轮复用；不跨 Source 修订缓存源码映射。SVG 在导出前比较完整 Page 指纹，进程级 LRU 缓存最多 256 页、32 MiB SVG 文本，未变页直接复用导出字符串；超大单页不缓存。增量 IPC 在导出前比较带协议版本的完整 Page 指纹；前端已持有的同位置页不复制 SVG 字符串，也不重新序列化页面内容。它不依赖服务器历史快照是否仍在缓存，未匹配的页照常导出并传输；几何编号与诊断始终更新，不把页清单当成编译或诊断缓存。前端基准只在成功结果实际落地时更新，在途、失败及回退中的临时产物不能成为新基准。验证与复现见[测试](testing.md#文档模式性能复现)。
 
@@ -26,7 +28,7 @@ PDF 导出由前端选择目标路径，再调用 `export_pdf`；Rust 编译 PDF
 
 包路径（`@`）、根相对路径（以 `/` 开始）和绝对路径不参与向上放宽。目标尚不存在时仍按词法路径计算，以便报告文件不存在而非项目根越界。单根模型不能覆盖跨卷引用。实现与测试位于 `src-tauri/src/typst_world/paths.rs`。
 
-整页编译按源码定义的纸型、页边距和分页输出。前端不传视口宽度，也不注入页面设置；窗口变化只改变显示比例。
+整页编译默认按源码定义的纸型、页边距和分页输出；只在带 `previewPage` 时按该几何重新排版预览（见上）。视口宽度本身仍不进编译输入，前端只传“把预览栏换算成页宽”的结果，且只在**需要缩窄**时才传。
 
 ## Typst 包
 

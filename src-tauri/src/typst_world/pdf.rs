@@ -28,10 +28,10 @@ pub fn compile_to_pdf_bytes(
             warnings: _,
         } => {
             // 导出失败时给出第一条诊断的可读信息
-            // PDF 导出不做预览重排注入（偏移恒为 0）
+            // PDF 导出不做预览重排注入（没有注入行要回映）
             let first = errors
                 .into_iter()
-                .find_map(|d| to_diagnostic(&world, &d, 0));
+                .find_map(|d| to_diagnostic(&world, &d, InjectedLines::default()));
             return Err(first.map_or_else(
                 || "编译失败".to_string(),
                 |d| format!("{}: 行 {} 列 {}", d.message, d.line, d.column),
@@ -41,10 +41,10 @@ pub fn compile_to_pdf_bytes(
     match typst_pdf::pdf(&document, &PdfOptions::default()) {
         Ok(bytes) => Ok(bytes),
         Err(errors) => {
-            // PDF 导出不做预览重排注入（偏移恒为 0）
+            // PDF 导出不做预览重排注入（没有注入行要回映）
             let first = errors
                 .into_iter()
-                .find_map(|d| to_diagnostic(&world, &d, 0));
+                .find_map(|d| to_diagnostic(&world, &d, InjectedLines::default()));
             Err(first.map_or_else(
                 || "PDF 导出失败".to_string(),
                 |d| format!("PDF 导出失败: {}: 行 {} 列 {}", d.message, d.line, d.column),

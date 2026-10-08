@@ -1,5 +1,6 @@
 // 完整 SVG 保持原样；每页独立引用作用域，稳定宿主只替换实际变化的产物。
 import { nearestPageCoordinates } from "../core/document-interaction";
+import type { PaperShape } from "../core/preview-scale";
 
 export interface DocumentPage {
   host: HTMLDivElement;
@@ -11,6 +12,8 @@ export interface DocumentPage {
 export function createDocumentPages(paper: HTMLElement) {
   const pages: DocumentPage[] = [];
   let widthPt = 0;
+  // 文档自己的纸型（取最宽那页）：预览重排按它等比缩放页高/页边距（不写死 A4）
+  let shape: PaperShape | null = null;
 
   function update(sources: string[]): number {
     let changed = 0;
@@ -56,12 +59,18 @@ export function createDocumentPages(paper: HTMLElement) {
       if (page.host.style.width !== width) page.host.style.width = width;
     }
     widthPt = nextWidth;
+    const widest = pages.reduce<DocumentPage | null>(
+      (max, page) => (max && max.box.width >= page.box.width ? max : page),
+      null,
+    );
+    shape = widest ? { widthPt: widest.box.width, heightPt: widest.box.height } : null;
     return changed;
   }
 
   function clear(): void {
     pages.length = 0;
     widthPt = 0;
+    shape = null;
     paper.replaceChildren();
   }
 
@@ -89,5 +98,6 @@ export function createDocumentPages(paper: HTMLElement) {
     nearest,
     page: (number: number) => pages[number - 1],
     widthPt: () => widthPt,
+    shape: () => shape,
   };
 }

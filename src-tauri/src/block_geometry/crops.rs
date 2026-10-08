@@ -223,8 +223,8 @@ pub fn compile_blocks(
     let doc_start = injected.len() + doc_offset;
 
     let world = TypstWorld::new(compiled_src, document_path, fonts_dir, font_config);
-    // `main_line_offset = 1`：注入的 `#set page(...)` 占了一行，主源诊断的行号要减回去
-    // （与 compile_with_page_width 同一口径；前缀行仍留在行号里，由前端 mapCompiledPosToDoc 处理）
+    // `InjectedLines::front()`：注入的 `#set page(...)` 占了一行，主源诊断的行号要减回去
+    // （与 compile.rs 的注入路径同一口径；前缀行仍留在行号里，由前端 mapCompiledPosToDoc 处理）
     let (document, raw_warnings) = match typst::compile::<PagedDocument>(&world) {
         typst::diag::Warned {
             output: Ok(doc),
@@ -234,11 +234,19 @@ pub fn compile_blocks(
             output: Err(errors),
             ..
         } => {
-            let diags = crate::typst_world::collect_diagnostics(&world, errors, 1);
+            let diags = crate::typst_world::collect_diagnostics(
+                &world,
+                errors,
+                crate::typst_world::InjectedLines::front(),
+            );
             return BlocksOutput::fail(diags, page_width_pt);
         }
     };
-    let warnings = crate::typst_world::collect_diagnostics(&world, raw_warnings, 1);
+    let warnings = crate::typst_world::collect_diagnostics(
+        &world,
+        raw_warnings,
+        crate::typst_world::InjectedLines::front(),
+    );
 
     // 块划分只看用户文档那一段（前缀不属于编辑器里的内容）
     let Some(doc_text) = src.get(doc_offset..) else {

@@ -1,6 +1,6 @@
 // 整页编译调度：尾随去抖、至多一个在途与一份待执行，合成期间暂停启动。
 /** 这次编译是**为什么**排的。合并时取并集（诊断用；真正跑的时候并不区分） */
-export type CompileReason = "edit" | "context" | "mode" | "composing-end";
+export type CompileReason = "edit" | "context" | "mode" | "composing-end" | "preview-reflow";
 
 export interface DocumentCompileSchedulerHooks {
   /** 真正跑一次编译（页面的 `runCompile`）。异常由它自己处理，这里只保证 `inFlight` 会复位 */

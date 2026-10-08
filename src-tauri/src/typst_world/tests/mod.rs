@@ -29,3 +29,4 @@ mod packages;
 mod paged;
 mod paths;
 mod performance;
+mod preview;

@@ -36,6 +36,7 @@ const SUITES = [
   ["document-expansion.mjs", 26],
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
+  ["preview-reflow.mjs", 11],
   ["source-workflows.mjs", 18],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
@@ -47,6 +48,7 @@ const SUITE_FIXTURES = {
   "document-expansion.mjs": ["pages"],
   "document-performance.mjs": ["pages"],
   "computed-style.mjs": [],
+  "preview-reflow.mjs": [],
   "source-workflows.mjs": [],
 };
 const FIXTURE_STEPS = { pages: ["fixtures-pages", ["run", "fixtures:pages"]] };
