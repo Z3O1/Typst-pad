@@ -5950,7 +5950,7 @@ dependencies = [
 
 [[package]]
 name = "typst-pad"
-version = "0.12.0"
+version = "0.11.4"
 dependencies = [
  "dirs",
  "flate2",
