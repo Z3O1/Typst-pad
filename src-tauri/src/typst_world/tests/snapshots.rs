@@ -100,8 +100,8 @@ fn incremental_ast_matches_fresh_compile_and_error_positions() {
                     .collect::<Vec<_>>()
             ),
             (Err(a), Err(b)) => {
-                let a = collect_diagnostics(&incremental, a, 0);
-                let b = collect_diagnostics(&fresh, b, 0);
+                let a = collect_diagnostics(&incremental, a, InjectedLines::default());
+                let b = collect_diagnostics(&fresh, b, InjectedLines::default());
                 assert_eq!(
                     serde_json::to_value(a).unwrap(),
                     serde_json::to_value(b).unwrap()

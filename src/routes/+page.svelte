@@ -1420,7 +1420,11 @@
   /** 重排请求是否有实质变化（页宽差 > 阈值；有/无重排也算变化） */
   function reflowChanged(next: PreviewPage | null, current: PreviewPage | null): boolean {
     if (next === null || current === null) return (next === null) !== (current === null);
-    return Math.abs(next.widthPt - current.widthPt) > PREVIEW_REFLOW_MIN_DELTA_PT;
+    return (
+      Math.abs(next.widthPt - current.widthPt) > PREVIEW_REFLOW_MIN_DELTA_PT ||
+      Math.abs(next.heightPt - current.heightPt) > PREVIEW_REFLOW_MIN_DELTA_PT ||
+      Math.abs(next.marginPt - current.marginPt) > PREVIEW_REFLOW_MIN_DELTA_PT
+    );
   }
 
   /**
@@ -1434,7 +1438,7 @@
     clearTimeout(previewReflowTimer);
     previewReflowTimer = setTimeout(() => {
       const body = previewPaneRef?.body();
-      if (!body) return;
+      if (!body || body.clientWidth <= 0) return;
       const next = paperShape ? previewPage(body.clientWidth, paperShape) : null;
       if (!reflowChanged(next, previewPageRequest)) return;
       previewPageRequest = next;

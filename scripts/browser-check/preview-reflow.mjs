@@ -11,7 +11,7 @@
 // 写在别处、注入被覆盖"，必须退回等比缩放。
 
 import { connect, DEV_URL } from "./cdp.mjs";
-import { boot, createChecker, finish, sleep } from "./harness.mjs";
+import { boot, createChecker, finish, sleep, COMPILE_IDLE, loadFixtures } from "./harness.mjs";
 
 const { check, state } = createChecker();
 const c = await connect();
@@ -19,13 +19,16 @@ const c = await connect();
 /** 等编译次数稳定：重排是"先编译学文档纸型 → 再按栏宽重编译"两步 */
 async function settledCompiles() {
   let last = -1;
-  for (let i = 0; i < 40; i++) {
+  let stableSince = Date.now();
+  for (let i = 0; i < 60; i++) {
     const count = await c.evaluate("window.__browserDevCompileCount ?? 0");
-    if (count === last && count > 0) return count;
+    if (count !== last) stableSince = Date.now();
+    if (count > 0 && Date.now() - stableSince >= 600 && (await c.evaluate(COMPILE_IDLE)))
+      return count;
     last = count;
-    await sleep(200);
+    await sleep(100);
   }
-  return last;
+  throw new Error("预览编译未稳定（包括 250ms 重排去抖）");
 }
 
 async function viewport(width, height = 900) {
@@ -152,4 +155,112 @@ check(
   `页宽 ${fallback.pageWidthPt}pt / 字号 ${fallback.fontPx.toFixed(2)}px / 溢出 ${fallback.overflowX}px`,
 );
 
-await finish(`预览重排：${state.passed} 项通过`);
+// 回到宽栏必须关闭重排，不能把已缩窄的产物误学为自然纸型、也不能无限重编译。
+await c.evaluate("history.replaceState(null, '', location.pathname + '?browserdev=1'); true");
+await toDocumentMode();
+await viewport(1400);
+const restored = await measured();
+const stableCount = await settledCompiles();
+await sleep(800);
+check(
+  "变宽恢复自然纸型且没有重排编译循环",
+  restored.requestedWidthPt === null &&
+    Math.abs(restored.pageWidthPt - 595.28) <= 1 &&
+    Math.abs(restored.fontPx - 14) <= 0.1 &&
+    (await c.evaluate("window.__browserDevCompileCount")) === stableCount,
+);
+
+// 连续拖动仅提交最后一份几何，旧的宽栏产物也不能在窄栏横滚。
+const beforeDrag = await c.evaluate("window.__browserDevCompileCount");
+for (const width of [1000, 900, 800, 700]) {
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await sleep(30);
+}
+await sleep(100);
+const duringDrag = await measured();
+const afterDrag = await settledCompiles();
+const dragged = await measured();
+check(
+  "连续缩窄去抖为一次编译，过渡和最终均不横滚",
+  afterDrag === beforeDrag + 1 &&
+    duringDrag.overflowX <= 1 &&
+    dragged.overflowX <= 1 &&
+    Math.abs(dragged.pageWidthPt - dragged.requestedWidthPt) <= 1 &&
+    dragged.fontPx <= 14.1,
+);
+
+// 直接收窄可用栏宽到页宽下限以下，字号应减小而不能突破栏宽。
+await c.evaluate("document.querySelector('.preview-body').style.width='100px'; true");
+await settledCompiles();
+const tiny = await measured();
+check(
+  "小于页宽下限的栏仍不横滚且字号不超过源码",
+  tiny.requestedWidthPt === 180 &&
+    Math.abs(tiny.pageWidthPt - 180) <= 1 &&
+    tiny.paperWidth <= tiny.clientWidth + 1 &&
+    tiny.overflowX <= 1 &&
+    tiny.fontPx > 0 &&
+    tiny.fontPx < 14,
+);
+await c.evaluate("document.querySelector('.preview-body').style.width=''; true");
+
+// 在途的窄栏结果不能回写已经恢复宽栏的文档模式。
+await viewport(1400);
+await boot(c, `${DEV_URL}&compileslow=1`, { pageFixtures: [], settleMs: 600 });
+await settledCompiles();
+await c.evaluate(`(() => {
+  window.__reflowWidths = [];
+  new MutationObserver(() => {
+    const svg = document.querySelector('#preview-host .document-page')?.shadowRoot?.querySelector('svg');
+    if (svg) window.__reflowWidths.push(svg.viewBox.baseVal.width);
+  }).observe(document.querySelector('#preview-host'), {childList:true,subtree:true});
+  return true;
+})()`);
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+await c.waitFor("window.__typstPadScheduleStats?.().inFlight");
+await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+await settledCompiles();
+const late = await measured();
+check(
+  "迟到窄栏结果不回写已恢复的宽栏文档模式",
+  late.requestedWidthPt === null &&
+    Math.abs(late.pageWidthPt - 595.28) <= 1 &&
+    (await c.evaluate("window.__reflowWidths.every(width=>Math.abs(width-595.28)<=1)")),
+);
+
+// 真实不同纸型夹具不照做请求：自然纸型来自最宽页，不得学成已请求的窄页或来回编译。
+const [real] = loadFixtures("page-fixtures.json");
+await boot(c, DEV_URL, { pageFixtures: [real] });
+await c.evaluate(`(() => {
+  const v=window.__typstPadView;
+  v.dispatch({changes:{from:0,to:v.state.doc.length,insert:${JSON.stringify(real.doc)}}});
+  return true;
+})()`);
+await settledCompiles();
+await viewport(1200);
+await toSourceMode();
+const realSize = await c.evaluate(`(() => {
+  const request=window.__browserDevLastCompile.previewPage;
+  const svgs=[...document.querySelectorAll('#preview-host .document-page')].map(h=>h.shadowRoot.querySelector('svg'));
+  const widest=svgs.reduce((a,b)=>a.viewBox.baseVal.width>b.viewBox.baseVal.width?a:b);
+  const box=widest.viewBox.baseVal, body=document.querySelector('.preview-body');
+  return {request, ratio:box.height/box.width, width:box.width, overflow:body.scrollWidth-body.clientWidth};
+})()`);
+const realCount = await settledCompiles();
+await sleep(800);
+check(
+  "真实多纸型产物学最宽页比例，覆盖回退不横滚且不循环",
+  realSize.request &&
+    Math.abs(realSize.width - 480) <= 1 &&
+    Math.abs(realSize.request.heightPt / realSize.request.widthPt - realSize.ratio) < 0.001 &&
+    realSize.overflow <= 1 &&
+    (await c.evaluate("window.__browserDevCompileCount")) === realCount,
+  JSON.stringify(realSize),
+);
+
+await finish(`通过 ${state.passed} 项检查（预览重排）`);

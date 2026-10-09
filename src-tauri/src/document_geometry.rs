@@ -10,6 +10,9 @@ use crate::block_geometry::{pick_hit_item, PlacedItem, PlacedItemKind};
 
 struct Snapshot {
     id: u64,
+    // 并行 Rust 测试各自模拟独立进程，不能互相淘汰尚在断言中的产物。
+    #[cfg(test)]
+    test_owner: std::thread::ThreadId,
     source_len: usize,
     items: Vec<PlacedItem>,
     // 同一页通常连续；不连续的探针也保留原顺序，用包围区间并由命中规则过滤。
@@ -71,6 +74,8 @@ pub fn store(items: Vec<PlacedItem>, source_len: usize, foreign_ink: Vec<(usize,
     // 建索引不持全局缓存锁，避免阻塞其他窗口的命中。
     let snapshot = Snapshot {
         id,
+        #[cfg(test)]
+        test_owner: std::thread::current().id(),
         source_len,
         items,
         pages,
@@ -81,8 +86,17 @@ pub fn store(items: Vec<PlacedItem>, source_len: usize, foreign_ink: Vec<(usize,
     };
     let mut cache = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
     cache.push_back(snapshot);
+    #[cfg(not(test))]
     while cache.len() > MAX_SNAPSHOTS {
         cache.pop_front();
+    }
+    #[cfg(test)]
+    {
+        let owner = std::thread::current().id();
+        while cache.iter().filter(|s| s.test_owner == owner).count() > MAX_SNAPSHOTS {
+            let oldest = cache.iter().position(|s| s.test_owner == owner).unwrap();
+            cache.remove(oldest);
+        }
     }
     id
 }
@@ -387,6 +401,28 @@ mod tests {
             typst::layout::Transform::identity(),
         )
     }
+    #[test]
+    fn parallel_test_snapshots_are_isolated_but_each_cache_still_evicts_at_sixteen() {
+        let first = store(vec![item(1, 0, 3)], 3, vec![]);
+        std::thread::spawn(|| {
+            for _ in 0..MAX_SNAPSHOTS + 1 {
+                store(vec![item(1, 0, 3)], 3, vec![]);
+            }
+        })
+        .join()
+        .unwrap();
+        assert!(
+            locate(first, 0).is_some(),
+            "别的测试线程不能淘汰当前断言的产物"
+        );
+        for _ in 0..MAX_SNAPSHOTS - 1 {
+            store(vec![item(1, 0, 3)], 3, vec![]);
+        }
+        assert!(locate(first, 0).is_some(), "第 16 份产物仍应保留首份");
+        store(vec![item(1, 0, 3)], 3, vec![]);
+        assert!(locate(first, 0).is_none(), "第 17 份产物必须淘汰首份");
+    }
+
     #[test]
     fn selection_is_half_open_reversible_and_keeps_repeated_output() {
         let id = store(

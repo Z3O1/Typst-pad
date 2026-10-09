@@ -160,6 +160,8 @@
   onMount(() => {
     const observer = new ResizeObserver(measureCaret);
     if (paperEl) observer.observe(paperEl);
+    // 自然尺寸纸张不随栏宽变化，但居中位置会变，光标与选区也需要重测。
+    if (bodyEl) observer.observe(bodyEl);
     const onFocus = () => {
       windowFocused = true;
     };

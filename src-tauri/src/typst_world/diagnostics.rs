@@ -1,22 +1,30 @@
 // 诊断转换：typst `SourceDiagnostic` → 前端 `Diagnostic`（span → 1-based 行列）。
 use super::*;
 
-/// 编译源里注入的那一行在**编译源**里的位置（预览重排的 `#set page(...)`，见
-/// [`crate::typst_world::PreviewPage`]）。
-///
-/// 为什么不是"最前面注入了 N 行"这么简单：注入点必须在**文档自己的页面设置之后**
-/// （typst 的 set 规则后写的赢，插在最前面会被文档的 `#set page(paper: "a4")` 覆盖），
-/// 于是只有它**之后**的行号要减 1。
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct InjectedLines {
-    /// 注入行在编译源里的 1-based 行号；0 = 没注入
-    pub(crate) at_line: u32,
+/// 切片的行首注入与预览的中途字节注入共用诊断转换；后者还原同行后缀的列号。
+#[derive(Clone, Copy, Default)]
+pub(crate) struct InjectedLines<'a> {
+    at_line: u32,
+    insertion: Option<(&'a typst::syntax::Lines<String>, OffsetMapping)>,
 }
 
-impl InjectedLines {
+impl<'a> InjectedLines<'a> {
+    pub(crate) fn inserted(
+        lines: &'a typst::syntax::Lines<String>,
+        mapping: OffsetMapping,
+    ) -> Self {
+        Self {
+            at_line: 0,
+            insertion: Some((lines, mapping)),
+        }
+    }
+
     /// 注入在编译源最前面（`compile_blocks` 的切片路径：它的注入行永远在开头）
     pub(crate) fn front() -> Self {
-        Self { at_line: 1 }
+        Self {
+            at_line: 1,
+            insertion: None,
+        }
     }
 
     /// 编译源行号（1-based）→ 注入前的源行号
@@ -34,7 +42,7 @@ impl InjectedLines {
 pub(crate) fn collect_diagnostics(
     world: &TypstWorld,
     diags: impl IntoIterator<Item = SourceDiagnostic>,
-    injected: InjectedLines,
+    injected: InjectedLines<'_>,
 ) -> Vec<Diagnostic> {
     diags
         .into_iter()
@@ -42,13 +50,12 @@ pub(crate) fn collect_diagnostics(
         .collect()
 }
 
-/// `injected` 描述编译源里注入的那一行：**只对主源**（path 为 None）的诊断把行号减回去，
-/// 这样前端"编译源行号 → 用户文档行号"的映射不需要知道注入这件事；
-/// include 文件的行号本来就是那个文件自己的，不动。
+/// 按 span 的文件身份映射主源行列；消息中 searched-at 的路径不改变坐标所属源文件。
+/// include 文件使用自己的行列，不受主源注入影响。
 pub(crate) fn to_diagnostic(
     world: &TypstWorld,
     diag: &SourceDiagnostic,
-    injected: InjectedLines,
+    injected: InjectedLines<'_>,
 ) -> Option<Diagnostic> {
     let severity = match diag.severity {
         Severity::Error => "error",
@@ -61,10 +68,21 @@ pub(crate) fn to_diagnostic(
     // 主文档/include 源码有完整的行列信息；外部数据文件（如 csv 错误）退化为 1,1
     let (start, end) = match world.read_source(id) {
         Ok(source) => {
-            let lines = source.lines();
-            let start = lines.byte_to_line_column(range.start)?;
-            let end = fix_span_end(lines, start, range.end);
-            (start, end)
+            if id == world.main() {
+                if let Some((lines, mapping)) = injected.insertion {
+                    let start = lines.byte_to_line_column(mapping.source_offset(range.start))?;
+                    let end = fix_span_end(lines, start, mapping.source_offset(range.end));
+                    (start, end)
+                } else {
+                    let lines = source.lines();
+                    let start = lines.byte_to_line_column(range.start)?;
+                    (start, fix_span_end(lines, start, range.end))
+                }
+            } else {
+                let lines = source.lines();
+                let start = lines.byte_to_line_column(range.start)?;
+                (start, fix_span_end(lines, start, range.end))
+            }
         }
         Err(_) => ((0, 0), (0, 0)),
     };
@@ -79,7 +97,7 @@ pub(crate) fn to_diagnostic(
         .or_else(|| world.path_of(id));
 
     // 主源诊断的行号减回注入的行（include 文件的行号是它自己的，不动）
-    let lines = if path.is_none() {
+    let lines = if id == world.main() {
         injected
     } else {
         InjectedLines::default()
@@ -104,8 +122,8 @@ pub(crate) fn to_diagnostic(
 
 /// 修正 span 结束位置：结束字节落在行首（整行诊断常见）时，归一到上一行行尾，
 /// 避免 CodeMirror 波浪线跨到下一行。
-fn fix_span_end(
-    lines: &typst::syntax::Lines<String>,
+fn fix_span_end<T: AsRef<str>>(
+    lines: &typst::syntax::Lines<T>,
     start: (usize, usize),
     end_byte: usize,
 ) -> (usize, usize) {

@@ -536,7 +536,7 @@ check(
 const beforeResize = await count();
 const widePageWidth = await c.evaluate("window.__pageSvgs()[0].getBoundingClientRect().width");
 await c.send("Emulation.setDeviceMetricsOverride", {
-  width: 760,
+  width: 480,
   height: 640,
   deviceScaleFactor: 1,
   mobile: false,

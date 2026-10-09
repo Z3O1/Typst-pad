@@ -50,25 +50,17 @@ impl PreviewPage {
 /// 注入点在文档**中间**，所以只有它之后的偏移/行号要回映。几何项（`PlacedItem` 的源区间、
 /// 字素停靠点）与主源诊断都要过这一手，前端才能继续按"前缀 + 用户文档"的线性坐标消费。
 #[derive(Debug, Clone, Copy)]
-struct OffsetMapping {
+pub(crate) struct OffsetMapping {
     /// 注入点（**注入前**的源字节偏移）
     offset: usize,
-    /// 注入文本长度（`\n` + 那一行）
+    /// 注入文本的字节长度
     len: usize,
-    /// 注入行在**编译源**里的 1-based 行号
-    at_line: u32,
 }
 
 impl OffsetMapping {
-    fn lines(&self) -> InjectedLines {
-        InjectedLines {
-            at_line: self.at_line,
-        }
-    }
-
     /// 编译源字节偏移 → 注入前的源字节偏移。落进注入文本里的偏移收敛到注入点
     /// （实际只可能是引擎把诊断报在注入行上）。
-    fn source_offset(&self, offset: usize) -> usize {
+    pub(crate) fn source_offset(&self, offset: usize) -> usize {
         if offset >= self.offset + self.len {
             offset - self.len
         } else if offset > self.offset {
@@ -99,7 +91,6 @@ fn inject_preview_page(src: &str, page: &PreviewPage) -> Option<Injected> {
         return None;
     }
     let (offset, insertion) = injection(src, &page.setup_line());
-    let at_line = src[..offset].matches('\n').count() as u32 + 1;
     let len = insertion.len();
     let mut injected = String::with_capacity(src.len() + len);
     injected.push_str(&src[..offset]);
@@ -107,20 +98,14 @@ fn inject_preview_page(src: &str, page: &PreviewPage) -> Option<Injected> {
     injected.push_str(&src[offset..]);
     Some(Injected {
         src: injected,
-        mapping: OffsetMapping {
-            offset,
-            len,
-            at_line,
-        },
+        mapping: OffsetMapping { offset, len },
     })
 }
 
 /// 注入点（注入前的源字节偏移）+ 要插入的文本。
 ///
-/// 插入点取**行首**（最后一个顶层 `set`/`show` 节点之后的第一行行首），插入内容是
-/// “那一行 + 换行”—— 于是编译源**只多出整整一行**，诊断行号回映就是一句
-/// “注入行之后的都减 1”（见 [`OffsetMapping::lines`]）。
-/// 文件末尾没有换行时先补一个换行，避免把注入行拼到上一行尾巴上。
+/// 直接取语法节点末尾，不向后找换行：换行可能在块注释内部，或者同一行已出现正文。
+/// 两侧换行隔开规则与原文；同行余下内容的行列通过字节映射还原。
 fn injection(src: &str, line: &str) -> (usize, String) {
     let offset = injection_offset(src);
     let mut insertion = String::new();
@@ -132,7 +117,7 @@ fn injection(src: &str, line: &str) -> (usize, String) {
     (offset, insertion)
 }
 
-/// 注入点：最后一个顶层 `#set` / `#show` 节点**所在行**之后的第一个行首；没有这类节点就是 0。
+/// 注入点：最后一个顶层 `#set` / `#show` 节点末尾；没有这类节点就是 0。
 fn injection_offset(src: &str) -> usize {
     let root = typst_syntax::parse(src);
     let mut end = None;
@@ -144,12 +129,7 @@ fn injection_offset(src: &str) -> usize {
             end = Some(node.offset() + node.get().len());
         }
     }
-    let Some(end) = end else {
-        return 0;
-    };
-    src[end..]
-        .find('\n')
-        .map_or(src.len(), |newline| end + newline + 1)
+    end.unwrap_or(0)
 }
 
 /// 几何项的源区间回映：`PlacedItem` 的区间与字素停靠点都是**编译源**坐标。
@@ -247,16 +227,22 @@ fn compile_with_renderer<P>(
         }
     }
 
+    let source_len = src.len();
     let injected = preview.and_then(|page| inject_preview_page(&src, &page));
-    let (src, mapping) = match injected {
-        Some(injected) => (injected.src, Some(injected.mapping)),
-        None => (src, None),
+    let (compilation_source, original_lines, mapping) = match injected {
+        Some(injected) => (
+            injected.src,
+            Some(typst::syntax::Lines::new(src)),
+            Some(injected.mapping),
+        ),
+        None => (src, None, None),
     };
-    let injected_lines = mapping.map_or_else(InjectedLines::default, |m| m.lines());
-    // 几何项的区间要落在"前缀 + 用户文档"的坐标里：注入长度得先减掉（见 OffsetMapping）
-    let source_len = mapping.map_or_else(|| src.len(), |m| src.len() - m.len);
+    let injected_lines = match (original_lines.as_ref(), mapping) {
+        (Some(lines), Some(mapping)) => InjectedLines::inserted(lines, mapping),
+        _ => InjectedLines::default(),
+    };
 
-    let world = TypstWorld::new(src, document_path, fonts_dir, font_config);
+    let world = TypstWorld::new(compilation_source, document_path, fonts_dir, font_config);
     match typst::compile::<PagedDocument>(&world) {
         typst::diag::Warned {
             output: Ok(document),

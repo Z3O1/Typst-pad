@@ -6,6 +6,7 @@ import {
   createChecker,
   finish,
   compileSettled,
+  COMPILE_IDLE,
   sleep,
   shotPath,
 } from "./harness.mjs";
@@ -175,14 +176,16 @@ for (const [width, height, deviceScaleFactor] of [
     deviceScaleFactor,
     mobile: false,
   });
-  // 等容器缩放与光标测量的级联 RAF 都结束，再跨 CDP 命令对照盒模型。
+  // 页宽是编译输入：等待 250ms 重排去抖、编译和光标查询，再对照实际盒模型。
+  await sleep(600);
+  await c.waitFor(COMPILE_IDLE);
   await c.evaluate(
     "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))",
   );
   await pose(mixed, asciiQuery, { dispatch: false });
   check(
-    `视口 ${width}px / DPR ${deviceScaleFactor}：重测光标不重新编译`,
-    (await count()) === beforeResize,
+    `视口 ${width}px / DPR ${deviceScaleFactor}：光标随栏宽正确重测，仅窄栏重编译`,
+    (await count()) === beforeResize + (width === 480 ? 1 : 0),
   );
 }
 await c.send("Emulation.setDeviceMetricsOverride", {
@@ -191,9 +194,12 @@ await c.send("Emulation.setDeviceMetricsOverride", {
   deviceScaleFactor: 1,
   mobile: false,
 });
+await sleep(600);
+await c.waitFor(COMPILE_IDLE);
+const afterResize = await count();
 await c.key("+", { code: "Equal", keyCode: 187, modifiers: 10 });
 await pose(mixed, asciiQuery, { dispatch: false });
-check("用户缩放后光标仍与原生字符边界重合", (await count()) === beforeResize);
+check("用户缩放后光标仍与原生字符边界重合", (await count()) === afterResize);
 await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
 for (const theme of ["dark", "light"]) {
   await c.send("Emulation.setEmulatedMedia", {
@@ -207,7 +213,7 @@ for (const theme of ["dark", "light"]) {
   await c.screenshot(shotPath(`document-cursor-${theme}`));
   check(
     `${theme} 主题：完整产物和光标位置保持不变`,
-    (await compiledPagesMatch(mixed)) && (await count()) === beforeResize,
+    (await compiledPagesMatch(mixed)) && (await count()) === afterResize,
   );
 }
 
