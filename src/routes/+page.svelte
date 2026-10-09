@@ -266,6 +266,8 @@
   let previewPageRequest = $state.raw<PreviewPage | null>(null);
   let previewPageUsed: PreviewPage | null = null;
   let paperShape: PaperShape | null = null;
+  // 自然纸型只属于已通过过期检查的源码/前缀上下文；栏宽和展开态不使它失效。
+  let paperShapeInput: string | null = null;
   let previewReflowTimer: ReturnType<typeof setTimeout> | undefined;
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
@@ -394,7 +396,7 @@
   // 按输入变化生成一次指纹，而不是在滚动/选区查询里反复序列化全文。
   // 预览重排的页宽也是编译输入（Rust 侧据此注入），不进指纹就会出现"栏宽变了、在途结果
   // 却被当成同一份输入"的漏网。
-  const inputFingerprint = $derived(
+  const naturalPaperInput = $derived(
     JSON.stringify([
       documentSession,
       documentRevision,
@@ -403,6 +405,11 @@
       prefixCode,
       filePath,
       fontArgs(),
+    ]),
+  );
+  const inputFingerprint = $derived(
+    JSON.stringify([
+      naturalPaperInput,
       viewMode === "write" ? sourceRange : null,
       previewPageRequest,
     ]),
@@ -1245,8 +1252,10 @@
     previewPaneRef?.clearPages();
     // 换文档/清空：纸型要重新学（新文档可能是 A5/横向），重排请求跟着作废
     paperShape = null;
+    paperShapeInput = null;
     previewPageRequest = null;
     previewPageUsed = null;
+    clearTimeout(previewReflowTimer);
   }
 
   function fontArgs() {
@@ -1438,8 +1447,9 @@
     clearTimeout(previewReflowTimer);
     previewReflowTimer = setTimeout(() => {
       const body = previewPaneRef?.body();
-      if (!body || body.clientWidth <= 0) return;
-      const next = paperShape ? previewPage(body.clientWidth, paperShape) : null;
+      if (!body || body.clientWidth <= 0 || !paperShape || paperShapeInput !== naturalPaperInput)
+        return;
+      const next = previewPage(body.clientWidth, paperShape);
       if (!reflowChanged(next, previewPageRequest)) return;
       previewPageRequest = next;
       dbg.log("preview-reflow", next ? `页宽 ${next.widthPt.toFixed(1)}pt` : "关闭（不重排）");
@@ -1453,11 +1463,12 @@
    * 页宽就是请求值 → 不学；没请求过、或请求被文档自己的纸型覆盖 → 学。
    * 学到新纸型后重新排一次（页高/页边距比例变了，也可能因此不再需要缩窄）。
    */
-  function learnPaperShape(): void {
+  function learnPaperShape(input: string): void {
     const pageWidthPt = previewPaneRef?.pageWidthPt() ?? 0;
     if (previewPageUsed && isReflowApplied(pageWidthPt, previewPageUsed.widthPt)) return;
     const shape = previewPaneRef?.pageShape() ?? null;
     if (!shape || shape.widthPt <= 0 || shape.heightPt <= 0) return;
+    paperShapeInput = input;
     if (
       paperShape &&
       paperShape.widthPt === shape.widthPt &&
@@ -1489,6 +1500,13 @@
 
   async function runCompile() {
     if (compileSeq === 0) mark("compile-request");
+    const paperInput = naturalPaperInput;
+    if (paperShapeInput !== paperInput) {
+      // 输入改变后先走既有无注入编译；成功且仍为当前输入时才能学习，然后去抖重排。
+      clearTimeout(previewReflowTimer);
+      paperShape = null;
+      previewPageRequest = null;
+    }
     const mySeq = ++compileSeq;
     const input = currentInput();
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
@@ -1537,7 +1555,7 @@
       if (!previewPaneRef?.paper()) return;
       previewPageUsed = previewPageRequested;
       previewPaneRef.updatePages(result.pages);
-      learnPaperShape();
+      learnPaperShape(paperInput);
       renderedPages = result;
       documentGeometryId = result.geometryId ?? 0;
       documentCaret = null;

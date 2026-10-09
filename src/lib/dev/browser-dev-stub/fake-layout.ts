@@ -99,16 +99,27 @@ export function warnFakeRendering(): void {
   );
 }
 
+// 仅识别验收用的显式数值纸型，不模拟 Typst 表达式/模板；复杂纸型仍使用真实夹具。
+function fakePaper(doc: string) {
+  const defaults = { widthPt: PAGE_WIDTH, heightPt: PAGE_HEIGHT, marginPt: MARGIN };
+  const rules = [
+    ...doc.matchAll(/#set page\(width: ([\d.]+)pt, height: ([\d.]+)pt, margin: ([\d.]+)pt\)/g),
+  ];
+  const rule = rules.at(-1);
+  if (!rule) return defaults;
+  const [widthPt, heightPt, marginPt] = rule.slice(1).map(Number);
+  return [widthPt, heightPt, marginPt].every((value) => Number.isFinite(value) && value > 0)
+    ? { widthPt, heightPt, marginPt }
+    : defaults;
+}
+
 /**
  * 当前文档 → 假 SVG 页数组；只用于没有原生夹具的基础 UI 验收。
  *
  * `paper` 为**预览重排**请求的纸型：窄页照实变窄、折行列数与每页行数跟着变
  * （页数会变多）—— 浏览器验收靠它验证"重排版生效 → 永不横向滚动条 + 字号与代码一致"。
  */
-export function fakePages(
-  doc: string,
-  paper = { widthPt: PAGE_WIDTH, heightPt: PAGE_HEIGHT, marginPt: MARGIN },
-): string[] {
+export function fakePages(doc: string, paper = fakePaper(doc)): string[] {
   const columns = (widthPt: number, marginPt: number) =>
     Math.max(4, Math.round(MAX_COLUMNS * ((widthPt - 2 * marginPt) / (PAGE_WIDTH - 2 * MARGIN))));
   const maxColumns = columns(paper.widthPt, paper.marginPt);

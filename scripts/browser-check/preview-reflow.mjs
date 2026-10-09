@@ -56,7 +56,9 @@ const measured = () =>
       overflowX: body.scrollWidth - body.clientWidth,
       paperWidth: rect.width,
       pageWidthPt,
+      pageHeightPt: svg?.viewBox.baseVal.height ?? 0,
       requestedWidthPt: requested ? requested.widthPt : null,
+      requestedHeightPt: requested ? requested.heightPt : null,
       fontPx: pageWidthPt ? (rect.width / pageWidthPt) * 11 : NaN,
     };
   })()`);
@@ -209,28 +211,77 @@ check(
 );
 await c.evaluate("document.querySelector('.preview-body').style.width=''; true");
 
+async function replaceSource(src) {
+  await c.evaluate(`(() => {
+    const v=window.__typstPadView;
+    v.dispatch({changes:{from:0,to:v.state.doc.length,insert:${JSON.stringify(src)}},selection:{anchor:${src.length}}});
+    return true;
+  })()`);
+}
+
+async function trackCompileRequests() {
+  await c.evaluate(`(() => {
+    window.__reflowRequests=[];
+    const internals=window.__TAURI_INTERNALS__, invoke=internals.invoke;
+    internals.invoke=async (command,args) => {
+      if(command!=='compile_doc')return invoke(command,args);
+      const request={src:args.src,preview:args.previewPage??null,completed:false,widths:[]};
+      window.__reflowRequests.push(request);
+      const result=await invoke(command,args);
+      request.completed=true;
+      request.widths=(result.pages??[]).filter(Boolean).map(svg=>Number(svg.match(/viewBox="[^" ]+ [^" ]+ ([^" ]+)/)[1]));
+      return result;
+    };
+    return true;
+  })()`);
+}
+
+async function observeSinglePageUpdates() {
+  await c.evaluate(`(() => {
+    const hosts=[...document.querySelectorAll('#preview-host .document-page')];
+    if(hosts.length!==1)throw Error('迟到场景必须从单页开始');
+    window.__reflowPageHost=hosts[0];
+    window.__reflowUpdates=[];
+    window.__lightDomReflowUpdates=0;
+    new MutationObserver(() => { window.__lightDomReflowUpdates++; })
+      .observe(document.querySelector('#preview-host'),{childList:true,subtree:true});
+    new MutationObserver(() => {
+      const svg=hosts[0].shadowRoot.querySelector('svg');
+      if(!svg)throw Error('页面应用后缺少SVG');
+      window.__reflowUpdates.push({width:svg.viewBox.baseVal.width,text:svg.textContent,
+        pages:document.querySelectorAll('#preview-host .document-page').length});
+    }).observe(hosts[0].shadowRoot,{childList:true,subtree:true});
+    return true;
+  })()`);
+}
+
 // 在途的窄栏结果不能回写已经恢复宽栏的文档模式。
 await viewport(1400);
 await boot(c, `${DEV_URL}&compileslow=1`, { pageFixtures: [], settleMs: 600 });
 await settledCompiles();
-await c.evaluate(`(() => {
-  window.__reflowWidths = [];
-  new MutationObserver(() => {
-    const svg = document.querySelector('#preview-host .document-page')?.shadowRoot?.querySelector('svg');
-    if (svg) window.__reflowWidths.push(svg.viewBox.baseVal.width);
-  }).observe(document.querySelector('#preview-host'), {childList:true,subtree:true});
-  return true;
-})()`);
+await replaceSource("迟到单页初始");
+await settledCompiles();
+await trackCompileRequests();
+await observeSinglePageUpdates();
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
-await c.waitFor("window.__typstPadScheduleStats?.().inFlight");
+await c.waitFor("window.__reflowRequests.some(r=>r.preview!==null&&!r.completed)");
 await c.key("e", { code: "KeyE", keyCode: 69, modifiers: 2 });
+await replaceSource("迟到单页更新");
 await settledCompiles();
 const late = await measured();
 check(
   "迟到窄栏结果不回写已恢复的宽栏文档模式",
   late.requestedWidthPt === null &&
     Math.abs(late.pageWidthPt - 595.28) <= 1 &&
-    (await c.evaluate("window.__reflowWidths.every(width=>Math.abs(width-595.28)<=1)")),
+    (await c.evaluate(`window.__reflowUpdates.length>0 &&
+      window.__reflowUpdates.some(update=>update.text.includes('迟到单页更新')) &&
+      window.__reflowUpdates.every(update=>Math.abs(update.width-595.28)<=1 && update.pages===1) &&
+      window.__lightDomReflowUpdates===0 &&
+      window.__reflowPageHost===document.querySelector('#preview-host .document-page') &&
+      window.__reflowRequests.some(r=>r.preview!==null && r.completed && r.widths.length===1 && r.widths[0]<595)`)),
+  await c.evaluate(
+    "JSON.stringify({requests:window.__reflowRequests,updates:window.__reflowUpdates})",
+  ),
 );
 
 // 真实不同纸型夹具不照做请求：自然纸型来自最宽页，不得学成已请求的窄页或来回编译。
@@ -261,6 +312,152 @@ check(
     realSize.overflow <= 1 &&
     (await c.evaluate("window.__browserDevCompileCount")) === realCount,
   JSON.stringify(realSize),
+);
+
+// 同会话修改纸型：先学习当前原文的自然纸型，再决定是否缩窄，不能把旧投影当基准。
+await viewport(1400);
+await boot(c, DEV_URL, { pageFixtures: [] });
+const paperSource = (width, height, text = "单页纸型") =>
+  `#set page(width: ${width}pt, height: ${height}pt, margin: 20pt)\n${text}`;
+const largePaper = paperSource(480, 640);
+const smallPaper = paperSource(240, 320);
+await replaceSource(largePaper);
+await settledCompiles();
+await toSourceMode();
+await c.evaluate(`(() => {
+  const body=document.querySelector('.preview-body');
+  body.style.width=(400+body.offsetWidth-body.clientWidth)+'px';
+  return true;
+})()`);
+await settledCompiles();
+await trackCompileRequests();
+const baseline = await measured();
+if (Math.abs(baseline.requestedWidthPt - 314.29) > 1)
+  throw new Error(`未建立约400px窄栏的重排基线：${JSON.stringify(baseline)}`);
+let firstRequest = await c.evaluate("window.__reflowRequests.length");
+await replaceSource(smallPaper);
+await settledCompiles();
+const small = await measured();
+check(
+  "同会话纸型缩小到能容纳时关闭投影，恢复240pt自然宽度",
+  small.requestedWidthPt === null &&
+    Math.abs(small.pageWidthPt - 240) <= 0.01 &&
+    Math.abs(small.paperWidth - 305.45) <= 1 &&
+    small.overflowX <= 1 &&
+    (await c.evaluate(`window.__reflowRequests[${firstRequest}]?.preview===null`)),
+  JSON.stringify(small),
+);
+firstRequest = await c.evaluate("window.__reflowRequests.length");
+await replaceSource(largePaper);
+await settledCompiles();
+const enlarged = await measured();
+check(
+  "同会话反向改大先无投影学习，再按新自然比例缩窄",
+  Math.abs(enlarged.requestedWidthPt - 314.29) <= 1 &&
+    Math.abs(enlarged.requestedHeightPt / enlarged.requestedWidthPt - 640 / 480) < 0.001 &&
+    (await c.evaluate(`window.__reflowRequests[${firstRequest}]?.preview===null &&
+      window.__reflowRequests.slice(${firstRequest}).length===2`)),
+);
+await replaceSource(paperSource(480, 960));
+await settledCompiles();
+const taller = await measured();
+check(
+  "自然页宽不变而页高变化时重新学习比例",
+  Math.abs(taller.requestedWidthPt - 314.29) <= 1 &&
+    Math.abs(taller.requestedHeightPt / taller.requestedWidthPt - 2) < 0.001 &&
+    Math.abs(taller.pageHeightPt / taller.pageWidthPt - 2) < 0.001,
+  JSON.stringify(taller),
+);
+
+async function savePrefix(code, enabled = true) {
+  await c.evaluate(`(() => {
+    [...document.querySelectorAll('.menubar .menu-title')].find(e=>e.textContent.trim().startsWith('文件')).click();
+    return true;
+  })()`);
+  await c.waitFor("!!document.querySelector('.menu-dropdown')");
+  await c.evaluate(
+    "[...document.querySelectorAll('.menu-dropdown .menu-item')].find(e=>e.textContent.includes('设置')).click(); true",
+  );
+  await c.waitFor("!!document.querySelector('.settings-modal')");
+  await c.evaluate(`(() => {
+    const label=[...document.querySelectorAll('.settings-row')].find(e=>e.textContent.includes('启用前缀代码'));
+    const checkbox=label.querySelector('input');
+    if(checkbox.checked!==${enabled})checkbox.click();
+    const textarea=document.querySelector('.settings-textarea');
+    textarea.value=${JSON.stringify(code)};textarea.dispatchEvent(new Event('input',{bubbles:true}));
+    document.querySelector('.settings-modal .modal-btn.primary').click();
+    return true;
+  })()`);
+  await settledCompiles();
+}
+await replaceSource("前缀纸型正文");
+await settledCompiles();
+await savePrefix(largePaper.split("\n")[0]);
+const prefixedLarge = await measured();
+firstRequest = await c.evaluate("window.__reflowRequests.length");
+await savePrefix(smallPaper.split("\n")[0]);
+const prefixedSmall = await measured();
+await savePrefix(smallPaper.split("\n")[0], false);
+const prefixDisabled = await measured();
+check(
+  "前缀纸型修改与禁用均重新学习当前自然纸型",
+  prefixedLarge.requestedWidthPt !== null &&
+    prefixedSmall.requestedWidthPt === null &&
+    Math.abs(prefixedSmall.pageWidthPt - 240) <= 0.01 &&
+    prefixDisabled.requestedWidthPt !== null &&
+    Math.abs(prefixDisabled.pageHeightPt / prefixDisabled.pageWidthPt - 841.89 / 595.28) < 0.001 &&
+    (await c.evaluate(`window.__reflowRequests[${firstRequest}]?.preview===null`)),
+  JSON.stringify({ prefixedLarge, prefixedSmall, prefixDisabled }),
+);
+
+// 快速连续编辑只学习最终源码；resize不应使已学习的自然纸型失效。
+firstRequest = await c.evaluate("window.__reflowRequests.length");
+const finalPaper = paperSource(480, 480, "快速编辑最终纸型");
+for (const src of [smallPaper, largePaper, finalPaper]) {
+  await replaceSource(src);
+  await sleep(30);
+}
+const rapidCount = await settledCompiles();
+await sleep(800);
+const rapid = await measured();
+check(
+  "快速连续编辑去抖为最终源码的自然学习及一次重排，随后稳定",
+  Math.abs(rapid.requestedHeightPt / rapid.requestedWidthPt - 1) < 0.001 &&
+    (await c.evaluate(`window.__reflowRequests.slice(${firstRequest}).length===2 &&
+      window.__reflowRequests.slice(${firstRequest}).every(r=>r.src===${JSON.stringify(finalPaper)}) &&
+      window.__browserDevCompileCount===${rapidCount}`)),
+);
+
+// 旧源码的自然学习已在途时继续编辑，不能把旧的小纸型学进当前文档或短暂显示它。
+await c.evaluate(
+  "history.replaceState(null,'',location.pathname+'?browserdev=1&compileslow=1'); true",
+);
+await observeSinglePageUpdates();
+firstRequest = await c.evaluate("window.__reflowRequests.length");
+await replaceSource(smallPaper);
+await c.waitFor(
+  `window.__reflowRequests.length>${firstRequest} && window.__typstPadScheduleStats?.().inFlight`,
+);
+const staleNaturalRequest = await c.evaluate(`window.__reflowRequests[${firstRequest}].preview`);
+await replaceSource(paperSource(480, 960, "中间编辑纸型"));
+await sleep(30);
+await replaceSource(finalPaper);
+const latestCount = await settledCompiles();
+await sleep(800);
+const latest = await measured();
+check(
+  "过期自然学习不能落地或污染新纸型，连续编辑最终稳定",
+  staleNaturalRequest === null &&
+    Math.abs(latest.requestedWidthPt - 314.29) <= 1 &&
+    Math.abs(latest.requestedHeightPt / latest.requestedWidthPt - 1) < 0.001 &&
+    (await c.evaluate(`window.__reflowUpdates.length>0 &&
+      window.__reflowUpdates.some(update=>update.text.includes('快速编辑最终纸型')) &&
+      window.__reflowUpdates.every(update=>Math.abs(update.width-240)>1 && update.pages===1) &&
+      window.__reflowRequests.slice(${firstRequest}).length===3 &&
+      window.__browserDevCompileCount===${latestCount}`)),
+  await c.evaluate(
+    "JSON.stringify({requests:window.__reflowRequests.slice(-3),updates:window.__reflowUpdates})",
+  ),
 );
 
 await finish(`通过 ${state.passed} 项检查（预览重排）`);

@@ -33,6 +33,9 @@ await c.key("s", { keyCode: 83, modifiers: 2 });
 await c.waitFor(
   `window.__browserDevLastCompile?.documentPath === '/fake/saved.typ' && ${COMPILE_IDLE}`,
 );
+// 路径改变也使自然纸型上下文失效：等无注入学习后的250ms重排，再固定PDF前的页面基准。
+await sleep(350);
+await c.waitFor(COMPILE_IDLE);
 check(
   "保存写入当前源码并更新排版路径",
   await c.evaluate(
