@@ -1,6 +1,6 @@
 // $ 输入接线：默认像 ( 配出 $|$；空格/Enter 再显式进入 Typst 行间公式。
-import { EditorSelection, Prec } from "@codemirror/state";
-import type { EditorState, Transaction } from "@codemirror/state";
+import { EditorSelection, Prec, Transaction } from "@codemirror/state";
+import type { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { ensureSyntaxTree } from "@codemirror/language";
 import type { CloseBracketConfig } from "@codemirror/autocomplete";
@@ -96,6 +96,8 @@ function dollarInput(state: EditorState, text: "$" | " "): Transaction | null {
     ? state.update(changes, {
         scrollIntoView: true,
         userEvent: edited ? "input.type" : "select",
+        // 纯跳过不是用户移动选区：不能在历史中留下 selection 事件，拆开前后连续输入。
+        annotations: edited ? [] : Transaction.addToHistory.of(false),
       })
     : null;
 }

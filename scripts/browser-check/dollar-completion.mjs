@@ -23,6 +23,29 @@ await c.type("x");
 await c.type("$");
 check("行内依次输入 $、x、$ 不增加多余定界符", (await doc()) === "前 $x$" && (await head()) === 5);
 
+const continuousHistory = [];
+for (const [open, close] of [
+  ["(", ")"],
+  ["$", "$"],
+]) {
+  await replace("");
+  for (const text of [open, "x", close, "y"]) await c.type(text);
+  await c.key("z", { keyCode: 90, modifiers: 2 });
+  const undone = { doc: (await doc()).replace(/[()]/g, "$"), head: await head() };
+  await c.key("y", { keyCode: 89, modifiers: 2 });
+  continuousHistory.push({
+    undone,
+    redone: { doc: (await doc()).replace(/[()]/g, "$"), head: await head() },
+  });
+}
+check(
+  "跳过闭合符后继续键入正文，撤销/重做与原生括号同组",
+  continuousHistory[1].undone.doc === "" &&
+    continuousHistory[1].redone.doc === "$x$y" &&
+    JSON.stringify(continuousHistory[0]) === JSON.stringify(continuousHistory[1]),
+  JSON.stringify(continuousHistory),
+);
+
 await replace("");
 await c.type("$");
 check("空行像 ( 一样只补出 $$，光标在中间", (await doc()) === "$$" && (await head()) === 1);

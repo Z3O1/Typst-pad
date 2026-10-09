@@ -72,6 +72,28 @@ describe("$ 与 CM 原生 ( 的手感对照", () => {
     expect(run("$", "$")).toEqual(run("(", ")"));
   });
 
+  it("跳过闭合符后继续输入正文，撤销分组与 ( 相同", () => {
+    const run = (open: string, close: string) => {
+      let state = type(stateFor(), open);
+      state = type(state, "x");
+      state = type(state, close);
+      state = type(state, "y");
+      const target = {
+        get state() {
+          return state;
+        },
+        dispatch: (tr: ReturnType<EditorState["update"]>) => {
+          state = tr.state;
+        },
+      };
+      expect(undo(target)).toBe(true);
+      const undone = normalized(state);
+      expect(redo(target)).toBe(true);
+      return { undone, redone: normalized(state) };
+    };
+    expect(run("$", "$")).toEqual(run("(", ")"));
+  });
+
   it("读入的闭合符不被跳过，自动配对按括号规则只在本次编辑内跳过", () => {
     const dollar = stateFor("$x$", 2);
     const bracket = stateFor("(x)", 2);
