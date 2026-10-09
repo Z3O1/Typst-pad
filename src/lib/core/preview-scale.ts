@@ -123,6 +123,18 @@ export function isReflowApplied(actualPageWidthPt: number, requestedPageWidthPt:
   return Math.abs(actualPageWidthPt - requestedPageWidthPt) <= 1;
 }
 
+/** 从指定编译产物取最宽页纸型；调用方必须保证这是无注入、未投影的原文产物。 */
+export function paperShapeFromPages(pages: string[]): PaperShape | null {
+  let widest: PaperShape | null = null;
+  for (const page of pages) {
+    const viewBox = page.match(/\bviewBox="([^"]+)"/)?.[1];
+    const shape = viewBox ? viewBoxSizePt(viewBox) : null;
+    if (!shape) return null;
+    if (!widest || shape.widthPt > widest.widthPt) widest = shape;
+  }
+  return widest;
+}
+
 /** 从 SVG viewBox 解析页面物理尺寸（pt）："0 0 W H" → {W, H}；解析失败返回 null */
 export function viewBoxSizePt(viewBox: string): PaperShape | null {
   const parts = viewBox.trim().split(/[\s,]+/);

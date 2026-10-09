@@ -127,6 +127,7 @@
   import { dbg, setCliDebug } from "$lib/core/debug";
   import {
     isReflowApplied,
+    paperShapeFromPages,
     previewCanvasWidth,
     previewPage,
     reflowCanvasWidth,
@@ -1457,19 +1458,14 @@
     }, PREVIEW_REFLOW_DELAY_MS);
   }
 
-  /**
-   * 学文档自己的纸型：只有**没有照做重排**那次编译的产物才能当基准 —— 重排生效的产物已被
-   * 改窄，拿它当基准会在"要重排"与"不用重排"之间来回跳、无限重编译。所以：请求过且产物
-   * 页宽就是请求值 → 不学；没请求过、或请求被文档自己的纸型覆盖 → 学。
-   * 学到新纸型后重新排一次（页高/页边距比例变了，也可能因此不再需要缩窄）。
-   */
-  function learnPaperShape(input: string): void {
-    const pageWidthPt = previewPaneRef?.pageWidthPt() ?? 0;
-    if (previewPageUsed && isReflowApplied(pageWidthPt, previewPageUsed.widthPt)) return;
-    const shape = previewPaneRef?.pageShape() ?? null;
+  /** 只消费同一当前输入的无注入原文成功页；展示的raw/展开/回退页不能成为自然基准。 */
+  function learnPaperShape(input: string, pages: string[]): void {
+    const shape = paperShapeFromPages(pages);
     if (!shape || shape.widthPt <= 0 || shape.heightPt <= 0) return;
+    const inputChanged = paperShapeInput !== input;
     paperShapeInput = input;
     if (
+      !inputChanged &&
       paperShape &&
       paperShape.widthPt === shape.widthPt &&
       paperShape.heightPt === shape.heightPt
@@ -1501,10 +1497,10 @@
   async function runCompile() {
     if (compileSeq === 0) mark("compile-request");
     const paperInput = naturalPaperInput;
-    if (paperShapeInput !== paperInput) {
-      // 输入改变后先走既有无注入编译；成功且仍为当前输入时才能学习，然后去抖重排。
+    const needsNaturalPaper = paperShapeInput !== paperInput;
+    if (needsNaturalPaper) {
+      // 保留旧基准但不绑定新上下文；本轮无注入，原文成功前不学习或请求重排。
       clearTimeout(previewReflowTimer);
-      paperShape = null;
       previewPageRequest = null;
     }
     const mySeq = ++compileSeq;
@@ -1523,7 +1519,7 @@
       input === currentInput() &&
       mode === viewMode &&
       editing === errorEditRange;
-    const { result, projection, failure, errorRanges, editingRange, deferred } =
+    const { result, originalResult, projection, failure, errorRanges, editingRange, deferred } =
       await compileDocumentWithFallback({
         source,
         prefixLength,
@@ -1537,6 +1533,9 @@
             : null,
         recover: mode === "write",
         compile: (src) => compileToSvg(src, path, fonts, previous, previewPageRequested),
+        measureOriginal: needsNaturalPaper
+          ? (src) => compileToSvg(src, path, fonts, previous, null)
+          : undefined,
         isCurrent,
         canRetry: () => {
           if (!writeScheduler.stats().composing) return true;
@@ -1551,11 +1550,12 @@
     }
     // 文本、会话、字体和前缀在等待期间变化时，迟到的成功与失败均不能落地。
     if (!isCurrent() || deferred) return;
+    if (needsNaturalPaper && previewPageRequested === null && originalResult?.ok)
+      learnPaperShape(paperInput, originalResult.pages);
     if (result.ok) {
       if (!previewPaneRef?.paper()) return;
       previewPageUsed = previewPageRequested;
       previewPaneRef.updatePages(result.pages);
-      learnPaperShape(paperInput);
       renderedPages = result;
       documentGeometryId = result.geometryId ?? 0;
       documentCaret = null;

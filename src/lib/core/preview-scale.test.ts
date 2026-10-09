@@ -6,6 +6,7 @@ import {
   TYPST_DEFAULT_TEXT_PT,
   isReflowApplied,
   naturalScale,
+  paperShapeFromPages,
   previewCanvasWidth,
   previewPage,
   previewScale,
@@ -15,6 +16,22 @@ import {
 
 const A4_WIDTH_PT = 595.28;
 const A4_HEIGHT_PT = 841.89;
+
+describe("paperShapeFromPages", () => {
+  it("取指定原文产物的最宽页，不与raw展示页混用", () => {
+    const original = ['<svg viewBox="0 0 240 320"/>', '<svg viewBox="0 0 480 960"/>'];
+    const raw = ['<svg viewBox="0 0 595.28 841.89"/>'];
+    expect(paperShapeFromPages(original)).toEqual({ widthPt: 480, heightPt: 960 });
+    expect(paperShapeFromPages(raw)).toEqual({ widthPt: 595.28, heightPt: 841.89 });
+  });
+  it("缺页或非法页面不伪造纸型", () => {
+    expect(paperShapeFromPages([])).toBeNull();
+    expect(paperShapeFromPages(["<svg/>"])).toBeNull();
+    expect(
+      paperShapeFromPages(['<svg viewBox="0 0 480 960"/>', '<svg viewBox="0 0 0 5"/>']),
+    ).toBeNull();
+  });
+});
 
 describe("naturalScale", () => {
   it("typst 11pt 正文 ↔ 编辑区 14px", () => {

@@ -161,12 +161,26 @@ check(
 await cursor(math.range.to - 1);
 await settled(math);
 const beforeTyping = await count();
+await c.evaluate(`(() => {
+  window.__expansionTypingInputs=[];
+  const internals=window.__TAURI_INTERNALS__,invoke=internals.invoke;
+  internals.invoke=(command,args)=>{
+    if(command==='compile_doc')window.__expansionTypingInputs.push(args.src);
+    return invoke(command,args);
+  };
+  return true;
+})()`);
 await c.type(" + ");
 await c.type("z");
+const immediateTypingCount = await count();
 await settled(edited);
 check(
-  "逐键输入共用编辑去抖，不每键立即重编译",
-  (await count()) === beforeTyping + 1 &&
+  "逐键输入共用编辑去抖，最终仅原文测量及展示各一次",
+  immediateTypingCount === beforeTyping &&
+    (await count()) === beforeTyping + 2 &&
+    (await c.evaluate(
+      `JSON.stringify(window.__expansionTypingInputs)===${JSON.stringify(JSON.stringify([edited.original, edited.doc]))}`,
+    )) &&
     (await doc()) === edited.original &&
     (await pagesMatch(edited)),
 );

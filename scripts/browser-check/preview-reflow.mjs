@@ -460,4 +460,123 @@ check(
   ),
 );
 
+// 原生产物：整正文raw不能执行其中的页面声明，真实A4展示页必须与480×960自然页隔离。
+const paperFixtures = loadFixtures("preview-paper-fixtures.json");
+const nativeOriginal = paperFixtures.find((f) => f.name === "original" && f.previewPage === null);
+const nativeSmall = paperFixtures.find(
+  (f) => f.name === "small-original" && f.previewPage === null,
+);
+const nativeRecovered = paperFixtures.find((f) => f.name === "recovered" && f.previewPage === null);
+if (!nativeOriginal || !nativeSmall || !nativeRecovered) throw new Error("原文/raw真实夹具缺失");
+async function matchesNativePaper(name) {
+  const requested = await c.evaluate("window.__browserDevLastCompile.previewPage");
+  const expected = paperFixtures.find(
+    (f) =>
+      f.name === name &&
+      (!requested
+        ? f.previewPage === null
+        : f.previewPage &&
+          ["widthPt", "heightPt", "marginPt"].every(
+            (key) => Math.abs(f.previewPage[key] - requested[key]) < 0.02,
+          )),
+  );
+  if (!expected) throw new Error(`缺少对应纸型的原生${name}夹具`);
+  return c.evaluate(`(() => {
+    const expected=${JSON.stringify(expected.pages)},hosts=[...document.querySelectorAll('#preview-host .document-page')];
+    return hosts.length===expected.length && hosts.every((host,i)=>{
+      const el=document.createElement('div');el.innerHTML=expected[i];
+      return host.shadowRoot.querySelector('svg').isEqualNode(el.firstElementChild);
+    });
+  })()`);
+}
+async function lockWholeBodyError() {
+  const at = nativeRecovered.doc.indexOf("width");
+  const byte = Buffer.byteLength(nativeRecovered.doc.slice(0, at));
+  const caret = nativeRecovered.carets.find((p) => p.offset >= byte && p.offset < byte + 5);
+  if (!caret) throw new Error("整正文raw缺少真实命中探针");
+  const point = await c.evaluate(`(() => {
+    const p=${JSON.stringify(caret)},body=document.querySelector('.preview-body');
+    const svg=document.querySelectorAll('#preview-host .document-page')[p.page-1].shadowRoot.querySelector('svg');
+    let r=svg.getBoundingClientRect(),v=svg.viewBox.baseVal,b=body.getBoundingClientRect();
+    body.scrollTop+=r.top+(p.yPt+p.heightPt/2)*r.height/v.height-(b.top+b.height/2);
+    r=svg.getBoundingClientRect();
+    return {x:r.left+p.xPt*r.width/v.width+.5,y:r.top+(p.yPt+p.heightPt/2)*r.height/v.height};
+  })()`);
+  await c.click(point.x, point.y);
+  await settledCompiles();
+}
+await viewport(1400);
+await boot(c, DEV_URL, { pageFixtures: paperFixtures });
+await replaceSource(nativeOriginal.doc);
+await settledCompiles();
+await c.evaluate(`(() => {
+  const body=document.querySelector('.preview-body');
+  body.style.width=(400+body.offsetWidth-body.clientWidth)+'px';
+  return true;
+})()`);
+await settledCompiles();
+await trackCompileRequests();
+await replaceSource(nativeRecovered.brokenDoc);
+const failedNaturalCount = await settledCompiles();
+await sleep(800);
+check(
+  "真实原文失败时保留A4整正文raw，但不误学为自然纸型或重排循环",
+  (await matchesNativePaper("recovered")) &&
+    (await measured()).requestedWidthPt === null &&
+    (await c.evaluate(`document.querySelectorAll('.error-count')[0].textContent!=='0' &&
+      window.__browserDevCompileCount===${failedNaturalCount}`)),
+);
+await lockWholeBodyError();
+const repairStart = await c.evaluate("window.__reflowRequests.length");
+await replaceSource(nativeOriginal.doc);
+await settledCompiles();
+const retainedNative = await measured();
+const retainedMatches = await matchesNativePaper("retained");
+const originalReused = await c.evaluate(`window.__reflowRequests.slice(${repairStart})
+  .filter(r=>r.src===${JSON.stringify(nativeOriginal.doc)} && r.preview===null).length===1`);
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+const closedNativeCount = await settledCompiles();
+await sleep(800);
+const closedNative = await measured();
+check(
+  "真实整正文错误锁修好后继续raw，收起后仍按480×960比例且复用原文成功页",
+  retainedMatches &&
+    Math.abs(retainedNative.requestedHeightPt / retainedNative.requestedWidthPt - 2) < 0.001 &&
+    originalReused &&
+    (await matchesNativePaper("original")) &&
+    Math.abs(closedNative.requestedHeightPt - 628.57) < 1 &&
+    (await c.evaluate(`document.querySelectorAll('.error-count')[0].textContent==='0' &&
+      window.__browserDevCompileCount===${closedNativeCount}`)),
+  JSON.stringify({ retainedNative, closedNative, originalReused }),
+);
+
+// 在途的真实480×960原文编译迟到后不能污染更新到240×320的整正文编辑锁。
+await replaceSource(nativeRecovered.brokenDoc);
+await settledCompiles();
+await lockWholeBodyError();
+await c.evaluate(
+  "history.replaceState(null,'',location.pathname+'?browserdev=1&compileslow=1'); true",
+);
+const nativeLateStart = await c.evaluate("window.__reflowRequests.length");
+await replaceSource(nativeOriginal.doc);
+await c.waitFor(
+  `window.__reflowRequests.slice(${nativeLateStart}).some(r=>r.src===${JSON.stringify(nativeOriginal.doc)} && !r.completed)`,
+);
+await replaceSource(nativeSmall.doc);
+await settledCompiles();
+const smallRetained = await matchesNativePaper("small-retained");
+await c.key("Escape", { code: "Escape", keyCode: 27 });
+await settledCompiles();
+const latestNative = await measured();
+check(
+  "过期真实自然测量不落地：新整正文raw收起仍为240×320且不携投影",
+  smallRetained &&
+    (await matchesNativePaper("small-original")) &&
+    latestNative.requestedWidthPt === null &&
+    Math.abs(latestNative.pageWidthPt - 240) < 0.01 &&
+    (await c.evaluate(`window.__reflowRequests.slice(${nativeLateStart}).some(r=>
+      r.src===${JSON.stringify(nativeOriginal.doc)} && r.completed && r.widths[0]===480)`)),
+  JSON.stringify(latestNative),
+);
+
 await finish(`通过 ${state.passed} 项检查（预览重排）`);

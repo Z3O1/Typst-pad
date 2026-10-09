@@ -231,6 +231,8 @@ const SLOW_COMPILE_MS = 350;
 // ---------------------------------------------------------------------------
 interface PageFixture {
   doc: string;
+  // 显式参数的原生纸型夹具只匹配对应请求；旧夹具未声明时仍作为固定产物使用。
+  previewPage?: PreviewPage | null;
   pages: string[];
   carets: import("../core/typst-engine").DocumentCaret[];
   cursorQueries?: { offset: number; caret: import("../core/typst-engine").DocumentCaret | null }[];
@@ -350,12 +352,24 @@ async function handleCommand(
         };
       }
       // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
-      const fixture = pageFixtures().find((f) => f.doc === src);
+      const requested = previewPageArg(a.previewPage);
+      const fixture = pageFixtures().find((f) => {
+        if (f.doc !== src) return false;
+        if (f.previewPage === undefined) return true;
+        if (!f.previewPage || !requested) return !f.previewPage && !requested;
+        return ["widthPt", "heightPt", "marginPt"].every(
+          (key) =>
+            Math.abs(
+              f.previewPage![key as keyof PreviewPage] - requested[key as keyof PreviewPage],
+            ) < 0.02,
+        );
+      });
+      if (!fixture && pageFixtures().some((f) => f.doc === src && f.previewPage !== undefined))
+        throw new Error("缺少对应previewPage的真实纸型夹具");
       pageSnapshot = fixture ? { id: ++pageGeometrySeq, fixture } : null;
       // 预览重排：桩照实按请求的纸型重排假产物（窄页 → 折行更窄、页数更多）。真实夹具
       // 不重排（它有自己的纸型）—— 那正是前端 `isReflowApplied` 要退回等比缩放的情形。
       // `&reflowfail=1` 模拟"文档把纸型写在别处、注入被覆盖"：产物仍是默认 A4。
-      const requested = previewPageArg(a.previewPage);
       const honored = new URLSearchParams(window.location.search).has("reflowfail")
         ? undefined
         : requested;

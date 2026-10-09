@@ -13,6 +13,8 @@ import type { CompileFail, CompileResult } from "./typst-engine";
 
 export interface DocumentCompileResult {
   result: CompileResult;
+  // 只记录源码字节与原文完全相同的编译，绝不从展示投影猜测原文语义。
+  originalResult: CompileResult | null;
   projection: DocumentProjection;
   failure: CompileFail | null;
   errorRanges: SourceRange[];
@@ -27,7 +29,7 @@ function position(source: Text, line: number, col: number): number | null {
   return row.from + Math.min(col - 1, row.length);
 }
 
-export async function compileDocumentWithFallback(options: {
+interface DocumentCompileOptions {
   source: string;
   prefixLength: number;
   reveal: SourceRange | null;
@@ -35,10 +37,58 @@ export async function compileDocumentWithFallback(options: {
   editing?: SourceRange | null;
   recover: boolean;
   compile: (source: string) => Promise<CompileResult>;
+  // 需要自然纸型时，compile也必须无页面注入；已有原文结果优先复用，否则至多测量一次。
+  measureOriginal?: (source: string) => Promise<CompileResult>;
   isCurrent: () => boolean;
   // 在途编译允许结束，但后续恢复轮次必须尊重调度器的输入法暂停。
   canRetry?: () => boolean;
-}): Promise<DocumentCompileResult> {
+}
+
+export async function compileDocumentWithFallback(
+  options: DocumentCompileOptions,
+): Promise<DocumentCompileResult> {
+  let originalResult: CompileResult | null = null;
+  let originalAttempted = false;
+  let deferred = false;
+  const output = await compileProjectedDocument({
+    ...options,
+    compile: async (source) => {
+      if (
+        source !== options.source &&
+        options.measureOriginal &&
+        !originalAttempted &&
+        options.isCurrent()
+      ) {
+        if (options.canRetry && !options.canRetry()) deferred = true;
+        else {
+          originalAttempted = true;
+          originalResult = await options.measureOriginal(options.source);
+          // 自然测量先于展示编译；过期或合成暂停后不再启动旧投影。
+          if (!options.isCurrent()) return originalResult;
+          if (options.canRetry && !options.canRetry()) {
+            deferred = true;
+            return originalResult;
+          }
+        }
+      }
+      const result = await options.compile(source);
+      if (source === options.source) {
+        originalAttempted = true;
+        originalResult = result;
+      }
+      return result;
+    },
+  });
+  return {
+    ...output,
+    originalResult: !deferred && options.isCurrent() ? originalResult : null,
+    ...(deferred ? { deferred: true } : {}),
+  };
+}
+
+async function compileProjectedDocument(
+  options: DocumentCompileOptions,
+): Promise<Omit<DocumentCompileResult, "originalResult">> {
   const { source, prefixLength, reveal, recover, compile, isCurrent } = options;
   const editing =
     recover && options.editing && options.editing.to > options.editing.from

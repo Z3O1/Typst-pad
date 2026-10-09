@@ -302,6 +302,93 @@ fn preview_reflow_cache_roundtrips_do_not_change_pdf_paper() {
     assert_eq!(pdf, original_pdf, "预览投影不得改变随后导出的原文 PDF");
 }
 
+fn retained_paper_source() -> String {
+    "#set page(width: 480pt, height: 960pt, margin: 20pt)\n自然纸型正文".into()
+}
+
+#[test]
+fn whole_body_raw_does_not_preserve_original_natural_paper() {
+    let source = retained_paper_source();
+    let original = compile(source.clone(), None, &fonts_dir(), &FontConfig::default());
+    let raw = compile(
+        format!("```\n{source}\n```"),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+    );
+    assert!(original.ok && raw.ok);
+    assert_eq!(view_box_width(&original.pages[0]), Some(480.0));
+    assert!(original.pages[0].contains("viewBox=\"0 0 480 960\""));
+    assert!((view_box_width(&raw.pages[0]).unwrap() - 595.28).abs() < 0.01);
+    assert!(
+        raw.pages[0].contains("841.889"),
+        "整正文raw使用默认A4，而非原文480×960"
+    );
+}
+
+/// 原文与保留整正文raw分开导出，连同真实预览注入产物供浏览器核对；不以桩正则推断纸型。
+#[test]
+#[ignore]
+fn dump_page_fixtures_preview_paper() {
+    let source = retained_paper_source();
+    let small = source.replace("480pt, height: 960pt", "240pt, height: 320pt");
+    let broken = format!("```typ\n{source}");
+    let diagnostics =
+        compile(broken.clone(), None, &fonts_dir(), &FontConfig::default()).diagnostics;
+    assert!(!diagnostics.is_empty());
+    let recovered = format!("````\n{broken}\n````");
+    let default_page = compile("正文".into(), None, &fonts_dir(), &FontConfig::default());
+    let a4_width = view_box_width(&default_page.pages[0]).unwrap();
+    let width = 400.0 * 11.0 / 14.0;
+    for (name, doc) in [
+        ("original", source.clone()),
+        ("retained", format!("```\n{source}\n```")),
+        ("recovered", recovered),
+        ("small-original", small.clone()),
+        ("small-retained", format!("```\n{small}\n```")),
+    ] {
+        for preview in [
+            None,
+            Some(PreviewPage {
+                width_pt: width,
+                height_pt: width * 2.0,
+                margin_pt: 70.87 * width / 480.0,
+            }),
+            Some(PreviewPage {
+                width_pt: width,
+                height_pt: width * 841.8897637795276 / a4_width,
+                margin_pt: 70.87 * width / a4_width,
+            }),
+        ] {
+            let out = compile_incremental_with_preview(
+                doc.clone(),
+                None,
+                &fonts_dir(),
+                &FontConfig::default(),
+                None,
+                preview,
+            );
+            assert!(out.ok, "{name}: {:?}", out.diagnostics);
+            let id = out.geometry_id.unwrap();
+            let carets: Vec<_> = doc
+                .char_indices()
+                .filter_map(|(at, _)| locate(id, at))
+                .collect();
+            assert!(!carets.is_empty());
+            let pages: Vec<_> = out.pages.into_iter().map(Option::unwrap).collect();
+            let preview_json = preview.map(|p| serde_json::json!({"widthPt":p.width_pt,"heightPt":p.height_pt,"marginPt":p.margin_pt}));
+            println!(
+                "PAPERFIXTURE:{}",
+                serde_json::json!({
+                    "name":name, "doc":doc, "pages":pages, "carets":carets, "previewPage":preview_json,
+                    "brokenDoc":if name == "recovered" {Some(&broken)} else {None},
+                    "diagnostics":if name == "recovered" {Some(&diagnostics)} else {None},
+                })
+            );
+        }
+    }
+}
+
 /// 脏输入不注入（不因为一个坏数字把编译弄挂）
 #[test]
 fn preview_reflow_ignores_invalid_geometry() {
