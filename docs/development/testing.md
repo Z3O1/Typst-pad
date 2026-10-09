@@ -43,6 +43,7 @@ npm run verify:browser
 ONLY=document-mode.mjs npm run verify:browser
 ONLY=document-cursor.mjs npm run verify:browser
 ONLY=document-expansion.mjs npm run verify:browser
+ONLY=dollar-completion.mjs npm run verify:browser
 CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 ```
 
@@ -55,6 +56,7 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 | `document-expansion.mjs` | 9 份真实 Typst 展开产物：光标进入/内部保持/左右跨出边界、直接切换、最小与嵌套归属、选区冻结/收拢、多行首行标点停靠点、重排后可见插入点、编辑去抖、映射/撤销/重做、合成结束最终光标、模式切换与迟到展开作废 |
 | `document-performance.mjs` | 重复真实 SVG 组成 100 页 DOM 隔离探针：完整节点、引用作用域、单页更新复用、离屏尺寸与末页命中；直接 SVG 与 Shadow DOM 首屏像素一致，输出初始化及更新耗时，不设固定时间阈值 |
 | `source-workflows.mjs` | 输入无隐式写盘，取消保存/新建，显式保存、路径变化重编译、打开文件、会话恢复与字体配置、Tab 档宽（tabSpaces）设置恢复后按键生效、空行 `$` 脚手架与其 Enter 展开 |
+| `dollar-completion.mjs` | `$` 与原生 `(` 的词中输入/闭合符对照、默认紧凑配对、空格与 Enter 行间手势、未闭合上下文、原样选区与反向选区、多光标、缩进三行脚手架、两级退格与撤销、粘贴及 DOM/EditContext（含空格）合成护栏、两种模式共用输入且无隐式写盘 |
 | `computed-style.mjs` | 弹窗和窄窗口的 box-sizing、主题颜色及溢出边界；设置弹窗含 Tab 档宽输入 |
 
 `npm run fixtures:pages` 调用真实原生引擎，导出包含中文、emoji、公式、表格、图片和宏输出的整页夹具与命中探针，覆盖正常、编辑和源码展开状态；另导出 6 份光标渲染夹具及原生源码位置查询（含空文档与不可映射位置），用于盒模型和截图像素对照；另导出 9 份正常、嵌套公式/调用和多行脚本的光标展开夹具，包含编辑与收起后的真实产物。测试先确认完整显示，再确认编辑交互，不以点击覆盖率决定页面如何呈现。
