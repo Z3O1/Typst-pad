@@ -776,7 +776,7 @@ check(
   "切换文件清除旧产物与编辑镜像",
   (await doc()) === "" &&
     (await c.evaluate(
-      "window.__browserDevLastCompile.src==='' && window.__browserDevLastCompile.knownPages===null",
+      "window.__browserDevLastCompile.src===String.fromCharCode(0x00a0) && window.__browserDevLastCompile.knownPages===null",
     )),
 );
 check("没有脚本异常", await c.evaluate("!document.body.innerText.includes('脚本错误')"));

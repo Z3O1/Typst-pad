@@ -1,0 +1,10 @@
+{
+  "head": "#[#set std.raw(lang: none, theme: none);#show std.raw: it => { set std.text(font: (\"DejaVu Sans Mono\", \"Noto Serif CJK SC\"), size: 10.5pt, weight: 400, style: \"normal\", tracking: 0pt, dir: ltr, lang: \"en\", hyphenate: false, fill: std.rgb(\"#334155\")); let body = it.lines.map(line => line.body).join(std.linebreak()); if it.block { set std.par(justify: false, leading: 0.55em); std.block(width: 100%, breakable: true, fill: std.rgb(\"#f5f6f8\"), stroke: 0.5pt + std.rgb(\"#dde2e9\"), radius: 3pt, inset: (x: 7pt, y: 5pt), above: 0.4em, below: 0.4em, body) } else { std.highlight(fill: std.rgb(\"#f0f2f5\"), radius: 2pt, extent: 1.5pt, body) } };",
+  "formulaHead": "#[#set std.raw(lang: none, theme: none);#show std.raw: it => { set std.text(font: (\"DejaVu Sans Mono\", \"Noto Serif CJK SC\"), size: 10.5pt, weight: 400, style: \"normal\", tracking: 0pt, dir: ltr, lang: \"en\", hyphenate: false, fill: std.rgb(\"#7e22ce\")); let body = it.lines.map(line => line.body).join(std.linebreak()); if it.block { set std.par(justify: false, leading: 0.55em); std.block(width: 100%, breakable: true, fill: std.rgb(\"#f1eef6\"), stroke: 0.5pt + std.rgb(\"#dfd7eb\"), radius: 3pt, inset: (x: 7pt, y: 5pt), above: 0.4em, below: 0.4em, body) } else { std.highlight(fill: std.rgb(\"#f1eef6\"), radius: 1.5pt, extent: 1.5pt, body) } };",
+  "tail": "]",
+  "previewInlineHead": "#[#let body = [#set std.text(fill: white);",
+  "previewBlockHead": "#[#let body = [#set std.text(fill: white);",
+  "previewTail": "\n];#context { let size = std.measure(body); std.box(width: 0pt, height: 0pt)[#std.box(width: size.width, height: size.height)[#body] <_typstpad_formula_preview>] }]",
+  "outputHead": "#[#let body = [",
+  "outputTail": "\n];#context { let size = std.measure(body); std.box(width: 0pt, height: 0pt)[#std.box(width: size.width, height: size.height)[#body] <_typstpad_expansion_output>] }]"
+}

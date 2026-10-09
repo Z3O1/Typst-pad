@@ -16,6 +16,7 @@
     Diagnostic,
     DocumentCaret,
     DocumentSelectionQuad,
+    FormulaPreview,
   } from "$lib/core/typst-engine";
   import { createSourceCoordinates } from "$lib/core/source-coordinates";
   import {
@@ -29,6 +30,7 @@
     type DocumentPoint,
   } from "$lib/core/document-drag-selection";
   import { compileDocumentWithFallback } from "$lib/core/document-error-fallback";
+  import { hasEmptyParagraphs } from "$lib/core/document-empty-paragraphs";
   import {
     projectDocument,
     type SourceRange,
@@ -358,6 +360,8 @@
   let inputPosition = $state<{ left: number; top: number; height: number } | null>(null);
   let documentCaret = $state<DocumentCaret | null>(null);
   let documentSelection = $state<DocumentSelectionQuad[]>([]);
+  let formulaPreview = $state<FormulaPreview | null>(null);
+  let formulaAnchor = $state<DocumentSelectionQuad[]>([]);
   let documentInputFocused = $state(false);
   let documentHasSelection = $state(false);
   let inputComposing = $state(false);
@@ -367,9 +371,10 @@
   let selectionSeq = 0;
   let positioningFromPage = false;
   let pendingCaretReveal = false;
-  type PageHit = { pos: number; caret: DocumentCaret };
+  type PageHit = { pos: number; caret: DocumentCaret; preview: boolean };
   let dragSelection: ReturnType<typeof createDocumentDragSelection<PageHit>> | null = null;
 
+  const documentHasEmptyParagraphs = $derived(hasEmptyParagraphs(doc));
   // 按输入变化生成一次指纹，而不是在滚动/选区查询里反复序列化全文。
   const inputFingerprint = $derived(
     JSON.stringify([
@@ -381,6 +386,7 @@
       filePath,
       fontArgs(),
       viewMode === "write" ? sourceRange : null,
+      viewMode === "write" && documentHasEmptyParagraphs,
     ]),
   );
   function currentInput(): string {
@@ -423,7 +429,8 @@
     );
     sourceOpen = true;
     caretSeq++;
-    documentCaret = changed ? null : hit;
+    const previewHit = renderedProjection.isPreview?.(renderedPos) ?? false;
+    documentCaret = changed || previewHit ? null : hit;
     const clickedInput = currentInput();
     await tick();
     if (seq !== interactionSeq || clickedInput !== currentInput()) return;
@@ -434,6 +441,7 @@
       positioningFromPage = false;
     }
     if (changed) void compileNow("mode");
+    else if (previewHit) void updateDocumentCaret(cursorLine, cursorCol);
   }
 
   function handleSelectionStart(point: DocumentPoint): void {
@@ -455,22 +463,26 @@
       resolve: async (point) => {
         const hit = await hitTestDocument(geometryId, point.page, point.xPt, point.yPt);
         if (!hit || !isCurrent()) return null;
-        const sourcePos = renderedProjection.renderedToSource(
-          renderedCoordinates.toPosition(hit.offset),
-        );
+        const renderedPos = renderedCoordinates.toPosition(hit.offset);
+        const sourcePos = renderedProjection.renderedToSource(renderedPos);
         if (sourcePos < prefix.length) return null;
-        return { pos: Math.min(doc.length, sourcePos - prefix.length), caret: hit };
+        return {
+          pos: Math.min(doc.length, sourcePos - prefix.length),
+          caret: hit,
+          preview: renderedProjection.isPreview?.(renderedPos) ?? false,
+        };
       },
       apply: (anchor, head) => {
         sourceOpen = true;
         caretSeq++; // 命中几何优先，不能被早先的源码光标查询覆盖。
-        documentCaret = head.caret;
+        documentCaret = head.preview ? null : head.caret;
         positioningFromPage = true;
         try {
           editorRef?.selectRange(anchor.pos, head.pos);
         } finally {
           positioningFromPage = false;
         }
+        if (head.preview) void updateDocumentCaret(cursorLine, cursorCol);
       },
     });
     dragSelection.start(point);
@@ -497,8 +509,10 @@
     }
     const pos = documentCoordinates.linePosition(line, col);
     const prefix = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
+    const sourcePos = prefix.length + pos;
     const offset = renderedCoordinates.toByte(
-      renderedProjection.sourceToRendered(prefix.length + pos),
+      renderedProjection.sourceToCaret?.(sourcePos) ??
+        renderedProjection.sourceToRendered(sourcePos),
     );
     if (documentCaret?.offset === offset) {
       if (pendingCaretReveal && !inputComposing) {
@@ -523,6 +537,24 @@
           previewPaneRef?.revealCaret(caret);
       }
     }
+  }
+
+  async function updateFormulaAnchor(): Promise<void> {
+    const input = currentInput(),
+      geometryId = documentGeometryId;
+    const range = sourceRange ?? errorEditRange;
+    if (!formulaPreview || !range || input !== renderedInput || !geometryId) {
+      formulaAnchor = [];
+      return;
+    }
+    const prefix = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
+    const quads = await locateDocumentSelection(
+      geometryId,
+      renderedCoordinates.toByte(renderedProjection.sourceToRendered(prefix.length + range.from)),
+      renderedCoordinates.toByte(renderedProjection.sourceToRendered(prefix.length + range.to)),
+    );
+    if (input === currentInput() && input === renderedInput && geometryId === documentGeometryId)
+      formulaAnchor = quads;
   }
 
   async function updateDocumentSelection(): Promise<void> {
@@ -831,6 +863,7 @@
     dragSelection?.cancel();
     pendingCaretReveal = false;
     const needsCompile =
+      documentHasEmptyParagraphs ||
       sourceRange !== null ||
       errorEditRange !== null ||
       documentErrorRanges.length > 0 ||
@@ -1215,6 +1248,8 @@
     previewError = "";
     pageCount = 0;
     previewPaneRef?.clearPages();
+    formulaPreview = null;
+    formulaAnchor = [];
   }
 
   function fontArgs() {
@@ -1425,6 +1460,9 @@
             ? { from: prefixLength + editing.from, to: prefixLength + editing.to }
             : null,
         recover: mode === "write",
+        emptyParagraphs: mode === "write",
+        styleExpansion: mode === "write",
+        previewExpansion: mode === "write",
         compile: (src) => compileToSvg(src, path, fonts, previous),
         isCurrent,
         canRetry: () => {
@@ -1443,6 +1481,7 @@
     if (result.ok) {
       if (!previewPaneRef?.paper()) return;
       previewPaneRef.updatePages(result.pages);
+      formulaPreview = result.formulaPreview ?? null;
       renderedPages = result;
       documentGeometryId = result.geometryId ?? 0;
       documentCaret = null;
@@ -1462,6 +1501,7 @@
       applyPreviewScale();
       void updateDocumentCaret(cursorLine, cursorCol);
       void updateDocumentSelection();
+      void updateFormulaAnchor();
     } else {
       documentGeometryId = 0;
       documentCaret = null;
@@ -1926,6 +1966,8 @@
         caretVisible={documentInputFocused && !documentHasSelection}
         composing={inputComposing}
         selection={viewMode === "write" ? documentSelection : []}
+        formulaPreview={viewMode === "write" ? formulaPreview : null}
+        {formulaAnchor}
         stale={previewStatus === "ready" && renderedInput !== currentInput()}
         onPageClick={handlePageClick}
         onSelectionStart={handleSelectionStart}
@@ -1938,6 +1980,10 @@
           if (position) inputPosition = position;
         }}
         onEditSource={toggleViewMode}
+        onFormulaClick={() => {
+          sourceOpen = true;
+          editorRef?.focus();
+        }}
       />
     </main>
 

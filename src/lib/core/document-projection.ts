@@ -1,5 +1,7 @@
 // 源码展开仅改变本轮排版输入；保存、撤销和编辑器始终持有原文档。
 import { Text } from "@codemirror/state";
+import expansionStyle from "./document-expansion-style.json";
+import { sourceRevealRange } from "./document-interaction";
 import type { CompileErrorLocation, Diagnostic } from "./typst-engine";
 export interface SourceRange {
   from: number;
@@ -9,7 +11,11 @@ export interface DocumentProjection {
   source: string;
   original: string;
   sourceToRendered(pos: number): number;
+  // 空段中的源码空白可共用占位字形，但选区与诊断仍使用精确位置映射。
+  sourceToCaret?(pos: number): number;
   renderedToSource(pos: number): number;
+  // 预览使用同一原表达式的第二份来源，命中后仍回到源码区编辑。
+  isPreview?(pos: number): boolean;
 }
 
 export interface ProjectionRange extends SourceRange {
@@ -38,6 +44,7 @@ export function mergeProjectionRanges(ranges: ProjectionRange[]): ProjectionRang
 export function projectDocumentRanges(
   source: string,
   ranges: ProjectionRange[],
+  options: { styled?: boolean; preview?: boolean } = {},
 ): DocumentProjection {
   const normalized = mergeProjectionRanges(
     ranges.map((range) => ({
@@ -52,22 +59,58 @@ export function projectDocumentRanges(
   const segments = normalized.map(({ from, to, preserveDeclaration }) => {
     const text = source.slice(from, to);
     const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
-    const block = text.includes("\n") || longest >= 2;
+    const block =
+      text.includes("\n") || longest >= 2 || (options.preview && /^\$\s[\s\S]*\s\$$/.test(text));
     const fence = "`".repeat(Math.max(block ? 3 : 1, longest + 1));
-    const declaration =
-      preserveDeclaration !== false && /^#(?:let|set|show)\b/.test(text) ? `${text}\n` : "";
+    const isDeclaration = /^#(?:let|set|show|import)\b/.test(text);
+    const declaration = preserveDeclaration !== false && isDeclaration ? `${text}\n` : "";
     // Typst 0.15.1 的 typ 高亮把 raw 第一行各 token 的 span_offset 重置为 0。
     // 展开以源码停靠点为准：使用无语言 raw，保留每个实际字符的原生来源，不猜字形坐标。
-    const head = declaration + (block ? `${fence}\n` : `${fence} `);
-    const tail = block ? `\n${fence}` : ` ${fence}`;
+    // 局部规则消费 raw 的原始行 body，防止用户 show raw 隐藏/替换源码；不重造字形来源。
+    const syntax = text.startsWith("$") ? sourceRevealRange(source, from + 1) : null;
+    const formula = syntax?.kind === "math" && syntax.from === from && syntax.to === to;
+    const style = options.styled
+      ? {
+          head: options.preview && formula ? expansionStyle.formulaHead : expansionStyle.head,
+          tail: expansionStyle.tail,
+        }
+      : { head: "", tail: "" };
+    const head = declaration + style.head + (block ? `${fence}\n` : `${fence} `);
+    const tail = (block ? `\n${fence}` : ` ${fence}`) + style.tail;
     const start = from + offset;
     const textStart = start + head.length;
     const textEnd = textStart + text.length;
-    const added = head.length + tail.length;
-    rendered += source.slice(previousEnd, from) + head + text + tail;
+    const previewLive = !!options.preview && preserveDeclaration !== false && !isDeclaration;
+    const previewHead = previewLive
+      ? formula
+        ? expansionStyle.previewInlineHead
+        : expansionStyle.outputHead
+      : "";
+    const previewBody = previewLive ? text : "";
+    const preview =
+      previewHead +
+      previewBody +
+      (previewLive ? (formula ? expansionStyle.previewTail : expansionStyle.outputTail) : "");
+    const previewFrom = textEnd + tail.length;
+    const previewTextStart = previewFrom + previewHead.length;
+    const previewTextEnd = previewTextStart + previewBody.length;
+    const added = head.length + tail.length + preview.length;
+    rendered += source.slice(previousEnd, from) + head + text + tail + preview;
     previousEnd = to;
     offset += added;
-    return { from, to, start, textStart, textEnd, end: to + offset, added };
+    return {
+      from,
+      to,
+      start,
+      textStart,
+      textEnd,
+      previewFrom,
+      previewTextStart,
+      previewTextEnd,
+      previewLive,
+      end: to + offset,
+      added,
+    };
   });
   return {
     source: rendered + source.slice(previousEnd),
@@ -87,10 +130,24 @@ export function projectDocumentRanges(
         if (pos < segment.start) break;
         if (pos < segment.textStart) return segment.from;
         if (pos <= segment.textEnd) return segment.from + pos - segment.textStart;
-        if (pos < segment.end) return segment.to;
+        if (pos < segment.end) {
+          if (pos >= segment.previewFrom) {
+            if (
+              segment.previewLive &&
+              pos >= segment.previewTextStart &&
+              pos <= segment.previewTextEnd
+            )
+              return segment.from + pos - segment.previewTextStart;
+            return segment.from;
+          }
+          return segment.to;
+        }
         delta += segment.added;
       }
       return pos - delta;
+    },
+    isPreview(pos) {
+      return segments.some((segment) => pos >= segment.previewFrom && pos < segment.end);
     },
   };
 }

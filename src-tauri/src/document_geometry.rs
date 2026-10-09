@@ -10,6 +10,8 @@ use crate::block_geometry::{pick_hit_item, PlacedItem, PlacedItemKind};
 
 struct Snapshot {
     id: u64,
+    #[cfg(test)]
+    test_owner: std::thread::ThreadId,
     source_len: usize,
     items: Vec<PlacedItem>,
     // 同一页通常连续；不连续的探针也保留原顺序，用包围区间并由命中规则过滤。
@@ -18,6 +20,7 @@ struct Snapshot {
     max_end: Vec<usize>,
     end_order: Vec<usize>,
     foreign_ink: Vec<(usize, Rect)>,
+    formulas: Vec<PlacedItem>,
 }
 
 impl Snapshot {
@@ -48,6 +51,9 @@ pub struct DocumentCaret {
 }
 
 pub fn store(items: Vec<PlacedItem>, source_len: usize, foreign_ink: Vec<(usize, Rect)>) -> u64 {
+    let (formulas, items): (Vec<_>, Vec<_>) = items
+        .into_iter()
+        .partition(|item| item.kind == PlacedItemKind::Formula);
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let mut pages: HashMap<usize, std::ops::Range<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
@@ -71,6 +77,8 @@ pub fn store(items: Vec<PlacedItem>, source_len: usize, foreign_ink: Vec<(usize,
     // 建索引不持全局缓存锁，避免阻塞其他窗口的命中。
     let snapshot = Snapshot {
         id,
+        #[cfg(test)]
+        test_owner: std::thread::current().id(),
         source_len,
         items,
         pages,
@@ -78,11 +86,31 @@ pub fn store(items: Vec<PlacedItem>, source_len: usize, foreign_ink: Vec<(usize,
         max_end,
         end_order,
         foreign_ink,
+        formulas,
     };
     let mut cache = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
     cache.push_back(snapshot);
+    #[cfg(not(test))]
     while cache.len() > MAX_SNAPSHOTS {
         cache.pop_front();
+    }
+    // Rust 单测并行运行：按测试线程隔离淘汰，避免其他用例的编译
+    // 抢占当前用例仍需验证的快照；每个用例仍使用相同的 16 份上限。
+    #[cfg(test)]
+    {
+        let owner = std::thread::current().id();
+        while cache
+            .iter()
+            .filter(|snapshot| snapshot.test_owner == owner)
+            .count()
+            > MAX_SNAPSHOTS
+        {
+            let index = cache
+                .iter()
+                .position(|snapshot| snapshot.test_owner == owner)
+                .unwrap();
+            cache.remove(index);
+        }
     }
     id
 }
@@ -151,6 +179,41 @@ pub fn hit_test(id: u64, page: usize, x_pt: f64, y_pt: f64) -> Option<DocumentCa
         *p == page && x >= rect.min.x && x <= rect.max.x && y >= rect.min.y && y <= rect.max.y
     }) {
         return None;
+    }
+    // 字形没有源码（合成符号、分式线）或点中公式内部留白时，仍按真实公式帧展开。
+    if let Some(formula) = snapshot
+        .formulas
+        .iter()
+        .filter(|f| {
+            f.page == page
+                && x >= f.rect.min.x
+                && x <= f.rect.max.x
+                && y >= f.rect.min.y
+                && y <= f.rect.max.y
+        })
+        .min_by_key(|f| f.range.len())
+    {
+        let (item, offset) = pick_hit_item(
+            snapshot.page_items(page),
+            formula.range.start,
+            formula.range.end,
+            page,
+            x,
+            y,
+        )
+        .unwrap_or((formula, formula.range.start + 1));
+        return Some(hit_for_item(
+            item,
+            offset.clamp(
+                formula.range.start + 1,
+                formula
+                    .range
+                    .end
+                    .saturating_sub(1)
+                    .max(formula.range.start + 1),
+            ),
+            false,
+        ));
     }
     let (mut item, mut offset) = pick_hit_item(
         snapshot.page_items(page),

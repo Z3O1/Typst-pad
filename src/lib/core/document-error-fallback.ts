@@ -1,6 +1,7 @@
 // 只修复本轮排版输入，绝不改写编辑器文档。每轮重新诊断，修复后自动退出回退。
 import { Text } from "@codemirror/state";
 import { sourceRevealRange } from "./document-interaction";
+import { projectEmptyParagraphs } from "./document-empty-paragraphs";
 import {
   mergeProjectionRanges,
   projectDocumentRanges,
@@ -34,6 +35,9 @@ export async function compileDocumentWithFallback(options: {
   // 已经点击编辑的错误区域：修复后仍排版为源码，直到退出该区域。
   editing?: SourceRange | null;
   recover: boolean;
+  emptyParagraphs?: boolean;
+  styleExpansion?: boolean;
+  previewExpansion?: boolean;
   compile: (source: string) => Promise<CompileResult>;
   isCurrent: () => boolean;
   // 在途编译允许结束，但后续恢复轮次必须尊重调度器的输入法暂停。
@@ -55,13 +59,20 @@ export async function compileDocumentWithFallback(options: {
   let errorRanges: ProjectionRange[] = [];
   let failure: CompileFail | null = null;
   let sourceText: Text | null = null;
+  const project = (ranges: ProjectionRange[]) => {
+    const projection = projectDocumentRanges(source, ranges, {
+      styled: options.styleExpansion,
+      preview: options.previewExpansion,
+    });
+    return options.emptyParagraphs ? projectEmptyParagraphs(projection, prefixLength) : projection;
+  };
   for (let attempt = 0; ; attempt++) {
-    const projection = projectDocumentRanges(source, ranges);
+    const projection = project(ranges);
     const result = await compile(projection.source);
     if (result.ok) {
       if (result.warnings) result.warnings = sourceDiagnostics(projection, result.warnings);
       if (editing && editingProjection) {
-        const expanded = projectDocumentRanges(source, [...ranges, editingProjection]);
+        const expanded = project([...ranges, editingProjection]);
         if (expanded.source !== projection.source) {
           if (isCurrent() && options.canRetry && !options.canRetry())
             return {

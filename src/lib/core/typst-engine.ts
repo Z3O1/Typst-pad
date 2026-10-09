@@ -34,12 +34,19 @@ export interface Diagnostic {
   path?: string | null;
 }
 
+export interface FormulaPreview {
+  svg: string;
+  widthPt: number;
+  heightPt: number;
+}
+
 /** compile_doc 按页序返回 SVG；null 引用已持有的同位置 pageKeys，旧桩可返回全量页。 */
 export interface CompileOutputOk {
   ok: true;
   pages: (string | null)[];
   pageKeys?: string[];
   geometryId?: number;
+  formulaPreview?: FormulaPreview;
   warnings?: Diagnostic[];
 }
 
@@ -72,6 +79,7 @@ export interface CompileOk {
   pageKeys?: string[];
   pageCount: number;
   geometryId?: number;
+  formulaPreview?: FormulaPreview;
   /** 编译警告（Rust 侧携带；UI 在状态栏徽标里展示，字体族写错只有这里看得见） */
   warnings?: Diagnostic[];
 }
@@ -219,6 +227,7 @@ export async function compileToSvg(
         pageKeys: out.pageKeys,
         pageCount: out.pages.length,
         geometryId: out.geometryId,
+        formulaPreview: out.formulaPreview,
         warnings: out.warnings,
       };
     }

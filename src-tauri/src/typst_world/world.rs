@@ -14,6 +14,8 @@ pub struct CompileOutput<P = String> {
     pub page_keys: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geometry_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula_preview: Option<FormulaPreview>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<Diagnostic>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -28,6 +30,7 @@ impl<P> CompileOutput<P> {
             pages: Vec::new(),
             page_keys: Vec::new(),
             geometry_id: None,
+            formula_preview: None,
             diagnostics: vec![Diagnostic {
                 message: msg.to_string(),
                 severity: "error".to_string(),

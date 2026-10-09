@@ -98,6 +98,7 @@ fn compile_with_renderer<P>(
                 pages: Vec::new(),
                 page_keys: Vec::new(),
                 geometry_id: None,
+                formula_preview: None,
                 diagnostics: diags,
                 warnings: Vec::new(),
             };
@@ -118,6 +119,7 @@ fn compile_with_renderer<P>(
             output: Ok(document),
             warnings,
         } => {
+            let (document, formula_preview) = super::formula_preview::extract(&document);
             let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
             let geometry_id = crate::document_geometry::store(items, source_len, stats.foreign_ink);
             let (pages, page_keys) = render(document.pages());
@@ -126,6 +128,7 @@ fn compile_with_renderer<P>(
                 pages,
                 page_keys,
                 geometry_id: Some(geometry_id),
+                formula_preview,
                 diagnostics: Vec::new(),
                 warnings: collect_diagnostics(&world, warnings, main_line_offset),
             }
@@ -138,6 +141,7 @@ fn compile_with_renderer<P>(
             pages: Vec::new(),
             page_keys: Vec::new(),
             geometry_id: None,
+            formula_preview: None,
             diagnostics: collect_diagnostics(&world, errors, main_line_offset),
             warnings: Vec::new(),
         },

@@ -71,6 +71,7 @@ pub enum PlacedItemKind {
     Text,
     Image,
     Shape,
+    Formula,
 }
 
 /// 帧里一项的几何 + 它对应的源字节区间（页面坐标，单位 pt）
@@ -191,7 +192,7 @@ impl PlacedItem {
     }
 }
 
-fn transformed_rect(rect: Rect, transform: Transform) -> Rect {
+pub(crate) fn transformed_rect(rect: Rect, transform: Transform) -> Rect {
     if transform.kx == typst::layout::Ratio::zero() && transform.ky == typst::layout::Ratio::zero()
     {
         // 平移/轴对齐缩放只需两个角；负缩放同样保留 min/max 规范化。
@@ -325,7 +326,33 @@ fn walk_frame(
     stats: &mut FrameStats,
     ranges: &mut SpanRanges,
 ) {
+    let mut equation: Option<(Range<usize>, typst::introspection::Location, Option<Rect>)> = None;
     for (pos, item) in frame.items() {
+        match item {
+            FrameItem::Tag(typst::introspection::Tag::Start(elem, _))
+                if elem.elem().name() == "equation" && elem.span().id() == Some(main_id) =>
+            {
+                if let Some(range) = world.range(elem.span()) {
+                    equation = Some((range, elem.location().unwrap(), None));
+                }
+            }
+            FrameItem::Tag(typst::introspection::Tag::End(location, _, _))
+                if equation.as_ref().is_some_and(|(_, loc, _)| loc == location) =>
+            {
+                if let Some((range, _, Some(rect))) = equation.take() {
+                    out.push(PlacedItem::new(
+                        page,
+                        range,
+                        rect,
+                        0.0,
+                        PlacedItemKind::Formula,
+                        Transform::identity(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        let before = out.len();
         // 与 typst-svg 同序：父变换 → 项平移 → 子组变换。
         let item_ts = ts.pre_concat(Transform::translate(pos.x, pos.y));
         let origin = Point::zero().transform(item_ts);
@@ -464,6 +491,23 @@ fn walk_frame(
             // Tag 有 Location 但没有 Span（元素级定位另走 introspector，阶段 1 再说）
             FrameItem::Tag(_) => {}
         }
+        if let Some((_, _, bounds)) = &mut equation {
+            for item in &out[before..] {
+                *bounds = Some(match *bounds {
+                    Some(rect) => Rect::new(
+                        Point::new(
+                            rect.min.x.min(item.rect.min.x),
+                            rect.min.y.min(item.rect.min.y),
+                        ),
+                        Point::new(
+                            rect.max.x.max(item.rect.max.x),
+                            rect.max.y.max(item.rect.max.y),
+                        ),
+                    ),
+                    None => item.rect,
+                });
+            }
+        }
     }
 }
 
@@ -520,7 +564,7 @@ fn glyph_range(
 /// 但**没有字形包围盒时它返回的是带符号值**（`-ascender`, `|descender|`），直接拿去做
 /// `original.y ± v` 会得到一个上下颠倒的矩形（实测踩过：块高出现负数）。
 /// 所以这里统一规范化成"两个正值"，再统一按 `y - up .. y + down` 组装。
-fn glyph_ink(text: &typst::text::TextItem, id: u16) -> (Abs, Abs) {
+pub(crate) fn glyph_ink(text: &typst::text::TextItem, id: u16) -> (Abs, Abs) {
     let (top, bottom) = text.font.edges(
         TopEdge::Metric(TopEdgeMetric::Bounds),
         BottomEdge::Metric(BottomEdgeMetric::Bounds),

@@ -13,6 +13,30 @@ const expanded: SourceExpansion = { range: math, error: null };
 const at = (head: number, previousHead = head, anchor = head) => ({ head, previousHead, anchor });
 
 describe("光标主导的源码展开", () => {
+  it("# 语法空白和结束分号都展开，跨出完整代码边界才收起", () => {
+    const source = "正文 #let x = 1 /* 注释 */ ; 后文";
+    const range = { from: source.indexOf("#"), to: source.indexOf(";") + 1 };
+    const active = { range, error: null };
+    for (let head = range.from; head < range.to; head++)
+      expect(resolve(source, empty, at(head, head - 1), "move")).toEqual(active);
+    expect(resolve(source, active, at(range.to, range.to - 1), "move")).toEqual(empty);
+    expect(resolve(source, empty, at(range.to, range.to + 1), "move")).toEqual(active);
+  });
+  it("数学中的 # 和代码中的公式遵循所在语法模式，不单独替换内部子串", () => {
+    for (const [source, head] of [
+      ["前文 $a + #sym.beta$ 后文", 10],
+      ["前文 #let value = $a + b$; 后文", 18],
+    ] as const) {
+      const range = source.startsWith("前文 $")
+        ? { from: 3, to: source.lastIndexOf("$") + 1 }
+        : { from: 3, to: source.indexOf(";") + 1 };
+      expect(resolve(source, empty, at(head, head - 1), "move")).toEqual({ range, error: null });
+    }
+  });
+  it("普通空段与空段占位不属于 # 或数学语法模式", () => {
+    for (const source of ["正文\n\n\n\n后文", "\u00a0\n\n正文"])
+      expect(resolve(source, empty, at(source.indexOf("\n") + 1), "move")).toBe(empty);
+  });
   it("进入表达式打开完整范围，普通文字不展开", () => {
     expect(resolve(doc, empty, at(math.from + 1, math.from), "move")).toEqual(expanded);
     expect(resolve(doc, empty, at(1, 0), "move")).toBe(empty);

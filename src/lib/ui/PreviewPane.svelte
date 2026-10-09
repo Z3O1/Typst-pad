@@ -1,6 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { DocumentCaret, DocumentSelectionQuad } from "$lib/core/typst-engine";
+  import type {
+    DocumentCaret,
+    DocumentSelectionQuad,
+    FormulaPreview,
+  } from "$lib/core/typst-engine";
   import type { DocumentPoint } from "$lib/core/document-drag-selection";
   import { createDocumentPages, type DocumentPage } from "./document-pages";
   import { caretScrollDelta, projectDocumentCaret } from "./document-caret";
@@ -14,12 +18,15 @@
     caretVisible = false,
     composing = false,
     selection = [],
+    formulaPreview = null,
+    formulaAnchor = [],
     onPageClick,
     onSelectionStart,
     onSelectionMove,
     onSelectionCancel,
     onOpenLink,
     onEditSource,
+    onFormulaClick,
     onCaretPosition,
   }: {
     hidden: boolean;
@@ -30,12 +37,15 @@
     caretVisible?: boolean;
     composing?: boolean;
     selection?: DocumentSelectionQuad[];
+    formulaPreview?: FormulaPreview | null;
+    formulaAnchor?: DocumentSelectionQuad[];
     onPageClick?: (point: DocumentPoint) => void;
     onSelectionStart?: (point: DocumentPoint) => void;
     onSelectionMove?: (point: DocumentPoint) => void;
     onSelectionCancel?: () => void;
     onOpenLink?: (href: string) => void;
     onEditSource?: () => void;
+    onFormulaClick?: () => void;
     onCaretPosition?: (position: { left: number; top: number; height: number } | null) => void;
   } = $props();
   let paperEl = $state<HTMLElement | undefined>();
@@ -44,6 +54,7 @@
   let caretStyle = $state("");
   let windowFocused = $state(true);
   let selectionPath = $state("");
+  let formulaStyle = $state("");
   let measureFrame = 0;
   let scrollFrame = 0;
   let pointerStart: {
@@ -104,9 +115,37 @@
       };
       if (!editable || hidden || (stale && !composing) || !canvasEl || !paperEl) {
         selectionPath = "";
+        formulaStyle = "";
         return hideCaret();
       }
       const root = canvasEl.getBoundingClientRect();
+      formulaStyle = "";
+      if (formulaPreview && formulaAnchor.length && bodyEl && !stale) {
+        const pageNumber = caret?.page ?? formulaAnchor[0].page;
+        const page = pages?.page(pageNumber);
+        const quads = formulaAnchor.filter((q) => q.page === pageNumber);
+        if (page && quads.length) {
+          const rect = page.host.getBoundingClientRect(),
+            body = bodyEl.getBoundingClientRect();
+          const points = quads.flatMap((q) => q.points);
+          const scale = rect.width / page.box.width;
+          const x =
+            rect.left +
+            ((Math.min(...points.map((p) => p[0])) + Math.max(...points.map((p) => p[0]))) / 2 -
+              page.box.x) *
+              scale;
+          const y = rect.top + (Math.max(...points.map((p) => p[1])) - page.box.y) * scale + 9;
+          const width = Math.max(
+            36,
+            Math.min(formulaPreview.widthPt * scale, bodyEl.clientWidth - 48, 420),
+          );
+          const left = Math.max(
+            body.left + 12,
+            Math.min(x - (width + 24) / 2, body.right - width - 36),
+          );
+          formulaStyle = `left:${left - root.left}px;top:${y - root.top}px;--formula-width:${width}px;--formula-arrow:${Math.max(12, Math.min(width + 12, x - left))}px`;
+        }
+      }
       const measured = new Map<number, { rect: DOMRect; box: DocumentPage["box"] }>();
       function pageMeasure(number: number) {
         if (measured.has(number)) return measured.get(number);
@@ -150,6 +189,8 @@
     void stale;
     void composing;
     void status;
+    void formulaPreview;
+    void formulaAnchor;
     measureCaret();
   });
   onMount(() => {
@@ -217,6 +258,7 @@
   function handlePointerDown(event: PointerEvent): void {
     cancelDrag();
     if (!event.isPrimary || event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest(".formula-preview")) return;
     const rect = bodyEl?.getBoundingClientRect();
     const selectable =
       editable &&
@@ -276,6 +318,11 @@
   });
 
   function handleClick(event: MouseEvent): void {
+    if (event.target instanceof Element && event.target.closest(".formula-preview")) {
+      event.preventDefault();
+      onFormulaClick?.();
+      return;
+    }
     const moved =
       pointerStart &&
       (pointerStart.moved ||
@@ -336,6 +383,11 @@
     <!-- 文档模式只有文档本体：预览区不画占位、更新提示、编译错误框和右上角按钮；
          失败与进度只在状态栏与错误徽标里体现（见 docs/development/writing-rendering.md）。 -->
     <div class="preview-canvas" bind:this={canvasEl}>
+      {#if formulaPreview && formulaStyle && editable && !stale}
+        <div class="formula-preview" role="tooltip" aria-label="公式预览" style={formulaStyle}>
+          <div class="formula-preview-content">{@html formulaPreview.svg}</div>
+        </div>
+      {/if}
       <div
         id="preview-host"
         bind:this={paperEl}
@@ -355,6 +407,37 @@
 </section>
 
 <style>
+  .formula-preview {
+    position: absolute;
+    z-index: 12;
+    padding: 10px 12px;
+    background: #111;
+    color: white;
+    border-radius: 6px;
+    box-shadow: 0 4px 14px #0004;
+    user-select: none;
+    cursor: text;
+  }
+  .formula-preview::before {
+    content: "";
+    position: absolute;
+    top: -7px;
+    left: var(--formula-arrow);
+    transform: translateX(-50%);
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-bottom: 7px solid #111;
+  }
+  .formula-preview-content {
+    width: var(--formula-width);
+    max-height: 260px;
+    overflow: auto;
+  }
+  .formula-preview-content :global(svg) {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
   /* 页面那条 `* { box-sizing: border-box }` 因 Svelte 作用域命中不了子组件（见 07 分册），
      搬出来的组件要自己声明 —— `.preview-pane` / `.preview-paper` 都是 `width:100%`，缺了这条
      内边距与边框会叠到宽度之外（横向溢出），计算样式守卫也按 border-box 断言。 */

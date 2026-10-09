@@ -10,7 +10,7 @@ import {
   shotPath,
 } from "./harness.mjs";
 const expansion = loadFixtures("expansion-fixtures.json", {
-  predicate: (fs) => fs.length === 9 && fs.every((f) => f.pages.length && f.cursorQueries.length),
+  predicate: (fs) => fs.length === 24 && fs.every((f) => f.pages.length && f.cursorQueries.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const fixtures = [...loadFixtures("page-fixtures.json"), ...expansion];
@@ -39,17 +39,25 @@ async function pagesMatch(value) {
     `(() => {const expected=${JSON.stringify(value.pages)},svgs=[...document.querySelectorAll('#preview-host>.document-page')].map(host=>host.shadowRoot.querySelector('svg'));return svgs.length===expected.length&&svgs.every((svg,i)=>{const div=document.createElement('div');div.innerHTML=expected[i];return svg.isEqualNode(div.firstElementChild)})})()`,
   );
 }
+async function bubbleMatches(value) {
+  await c.waitFor("!!document.querySelector('.formula-preview-content svg')");
+  return c.evaluate(
+    `(() => {const div=document.createElement('div');div.innerHTML=${JSON.stringify(value.formulaPreview?.svg)};return document.querySelector('.formula-preview-content svg').isEqualNode(div.firstElementChild)})()`,
+  );
+}
 function query(value, head) {
   let rendered = head;
   if (value.range) {
     const { from, to } = value.range;
-    const text = value.original.slice(from, to);
-    if (head >= from && head <= to) rendered = value.doc.indexOf(text) + head - from;
+    if (head >= from && head <= to) rendered = value.range.renderedFrom + head - from;
     else if (head > to) rendered += value.doc.length - value.original.length;
   }
+  return renderedQuery(value, rendered);
+}
+function renderedQuery(value, rendered) {
   const offset = Buffer.byteLength(value.doc.slice(0, rendered));
   const result = value.cursorQueries.find((q) => q.offset === offset);
-  if (!result?.caret) throw Error(`所测展开字素必须有原生光标：${value.name}:${head}`);
+  if (!result?.caret) throw Error(`所测展开字素必须有原生光标：${value.name}:${rendered}`);
   return result.caret;
 }
 async function caretMatches(value, head, visible = false) {
@@ -58,21 +66,21 @@ async function caretMatches(value, head, visible = false) {
   await c.waitFor(expression, { timeout: 4000, interval: 16 });
   return true;
 }
-async function replace() {
+async function replace(value = base) {
   if (await c.evaluate("!!document.querySelector('.document-pane')"))
     await c.key("e", { keyCode: 69, modifiers: 2 });
   await c.selectAll();
-  await c.type(base.original);
+  await c.type(value.original);
   await c.key("e", { keyCode: 69, modifiers: 2 });
-  await settled(base);
+  await settled(value);
   // 先点击实际正文激活输入；后续选择事务与真实键盘复用同一展开流程。
-  const p = query(base, base.original.indexOf("正文"));
+  const p = query(value, value.original.indexOf("正文"));
   const point = await c.evaluate(
     `(() => {const p=${JSON.stringify(p)},h=document.querySelectorAll('#preview-host>.document-page')[p.page-1],r=h.getBoundingClientRect(),v=h.shadowRoot.querySelector('svg').viewBox.baseVal;return{x:r.left+(p.xPt+1-v.x)*r.width/v.width,y:r.top+(p.yPt+p.heightPt/2-v.y)*r.height/v.height}})()`,
   );
   await c.click(point.x, point.y);
   await c.waitFor(
-    `window.__typstPadView.hasFocus&&window.__typstPadView.state.selection.main.head===${base.original.indexOf("正文")}`,
+    `window.__typstPadView.hasFocus&&window.__typstPadView.state.selection.main.head===${value.original.indexOf("正文")}`,
   );
 }
 await replace();
@@ -86,6 +94,25 @@ check(
 );
 await caretMatches(math, math.range.from + 1, true);
 check("展开后的插入点来自新原生几何且位于视口内", true);
+check(
+  "公式预览为源码下方黑色浮动气泡，SVG 来自真实 Typst 帧",
+  (await bubbleMatches(math)) &&
+    (await c.evaluate(
+      "document.querySelector('.formula-preview').getBoundingClientRect().top > document.querySelector('.document-caret').getBoundingClientRect().bottom && getComputedStyle(document.querySelector('.formula-preview')).backgroundColor === 'rgb(17, 17, 17)'",
+    )),
+);
+const beforePreviewClick = await count();
+const previewPoint = await c.evaluate(
+  "(() => {const r=document.querySelector('.formula-preview').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()",
+);
+await c.click(previewPoint.x, previewPoint.y);
+await c.waitFor(`window.__typstPadView.state.selection.main.head===${math.range.from + 1}`);
+await caretMatches(math, math.range.from + 1, true);
+check(
+  "点击预览回到对应源码编辑，不重复编译或把插入点留在预览",
+  (await count()) === beforePreviewClick && (await doc()) === base.original,
+);
+await c.screenshot(shotPath("document-expansion-inline-preview"));
 const stable = await count();
 await c.key("ArrowRight", { keyCode: 39 });
 await caretMatches(math, math.range.from + 2);
@@ -133,6 +160,50 @@ check("选区收拢后由活动端决定收起", await pagesMatch(base));
 await cursor(base.original.indexOf("c + d"));
 await settled(f("nested-math"));
 check("未展开父范围时定位内层公式只展开最小完整表达式", await pagesMatch(f("nested-math")));
+const embeddedMath = f("embedded-math"),
+  declaration = f("math-declaration"),
+  codeBlock = f("code-block");
+const embeddedHead = base.original.indexOf("#sym.beta");
+const beforeEmbedded = await count();
+await cursor(embeddedHead);
+await settled(embeddedMath);
+await caretMatches(embeddedMath, embeddedHead, true);
+check(
+  "数学模式中的 # 展开整段公式，直接使用新几何而不触发错误回退",
+  (await count()) === beforeEmbedded + 1 && (await pagesMatch(embeddedMath)),
+);
+const declarationHead = declaration.range.from + "#let formula = ".length;
+const beforeDeclaration = await count();
+await cursor(declarationHead);
+await settled(declaration);
+await caretMatches(declaration, declarationHead, true);
+check(
+  "代码模式中的公式展开完整 # 声明，保留执行和后文输出",
+  (await count()) === beforeDeclaration + 1 && (await pagesMatch(declaration)),
+);
+const declarationStable = await count();
+await cursor(declaration.range.to - 1);
+await caretMatches(declaration, declaration.range.to - 1);
+check(
+  "# 结束分号仍在展开范围内，不成为 raw 外的正文或重复重排",
+  (await count()) === declarationStable && (await pagesMatch(declaration)),
+);
+await c.key("ArrowRight", { keyCode: 39 });
+await settled(base);
+check("跨出 # 的完整语法边界后恢复原文排版", await pagesMatch(base));
+const blankCodeHead = codeBlock.original.indexOf("\n\n // 代码空白") + 1;
+const beforeCodeBlock = await count();
+await cursor(blankCodeHead);
+await settled(codeBlock);
+const commentHead = codeBlock.original.indexOf("代码空白");
+await cursor(commentHead);
+await caretMatches(codeBlock, commentHead, true);
+check(
+  "# 代码块的空白和注释也按语法展开，原文与后续输出不变",
+  (await count()) === beforeCodeBlock + 1 &&
+    (await doc()) === base.original &&
+    (await pagesMatch(codeBlock)),
+);
 await cursor(block.range.from + 2);
 await settled(block);
 const bracket = block.range.from + "#block".length;
@@ -140,6 +211,19 @@ await cursor(bracket);
 await caretMatches(block, bracket, true);
 check("多行展开首行标点有真实字素停靠点，不沿用函数名几何", await pagesMatch(block));
 await c.screenshot(shotPath("document-expansion-multiline"));
+const beforeTheme = await count();
+for (const theme of ["dark", "light"]) {
+  await c.send("Emulation.setEmulatedMedia", {
+    features: [{ name: "prefers-color-scheme", value: theme }],
+  });
+  await c.waitFor(
+    `document.querySelector('.app').classList.contains('light')===${theme === "light"}`,
+  );
+  await caretMatches(block, bracket, true);
+  if (!(await pagesMatch(block))) throw Error("主题切换不能改写展开的真实 SVG");
+  await c.screenshot(shotPath(`document-expansion-${theme}`));
+}
+check("展开面板在明暗主题下保留真实页面和光标，不重新编译", (await count()) === beforeTheme);
 const blockStable = await count();
 await cursor(block.original.indexOf("第二行中文"));
 await cursor(block.original.indexOf("多行脚本"));
@@ -230,9 +314,81 @@ check(
   "连续跨表达式移动作废迟到展开，最终产物跟随最后光标",
   (await doc()) === base.original && (await pagesMatch(base)),
 );
+for (const prefix of ["raw-hidden", "raw-replaced"]) {
+  const original = f(`${prefix}-base`),
+    expanded = f(`${prefix}-math`);
+  await replace(original);
+  const before = await count();
+  await cursor(expanded.range.from + 1);
+  await settled(expanded);
+  await caretMatches(expanded, expanded.range.from + 1, true);
+  check(
+    `${prefix}：用户 show raw 不隐藏或替换展开源码，真实停靠点可见`,
+    (await count()) === before + 1 &&
+      (await doc()) === original.original &&
+      (await pagesMatch(expanded)),
+  );
+  await c.key("Escape", { keyCode: 27 });
+  await settled(original);
+  check(`${prefix}：收起恢复原文，普通 raw 仍遵循用户规则`, await pagesMatch(original));
+}
+const display = f("display-math");
+await replace(f("display-base"));
+await cursor(display.range.from + 2);
+await settled(display);
+await caretMatches(display, display.range.from + 2, true);
+check(
+  "块公式同样在源码下方浮动预览，不进入正文页面",
+  (await bubbleMatches(display)) &&
+    (await pagesMatch(display)) &&
+    (await doc()) === display.original,
+);
+await c.screenshot(shotPath("document-expansion-display-preview"));
+const counter = f("counter");
+await replace(f("counter-base"));
+await cursor(counter.range.from + 2);
+await settled(counter);
+check(
+  "普通脚本不显示预览，但仍保留一次 counter 副作用",
+  /COUNT:\s*1/.test(counter.visibleText) &&
+    !counter.formulaPreview &&
+    (await c.evaluate("!document.querySelector('.formula-preview')")) &&
+    (await pagesMatch(counter)) &&
+    (await doc()) === counter.original,
+);
+for (const name of ["number", "fraction"]) {
+  const baseValue = f(`${name}-base`),
+    expanded = f(name);
+  await replace(baseValue);
+  const hit = baseValue.formulaHits.find(
+    (h) =>
+      h.caret.offset > Buffer.byteLength(baseValue.original.slice(0, expanded.range.from)) &&
+      h.caret.offset < Buffer.byteLength(baseValue.original.slice(0, expanded.range.to)),
+  );
+  if (!hit || hit.caret.isWhitespace) throw Error("真实公式区域命中不能被误判为空白");
+  const point = await c.evaluate(
+    `(() => {const p=${JSON.stringify(hit)},h=document.querySelectorAll('#preview-host>.document-page')[p.page-1],r=h.getBoundingClientRect(),v=h.shadowRoot.querySelector('svg').viewBox.baseVal;return{x:r.left+(p.xPt-v.x)*r.width/v.width,y:r.top+(p.yPt-v.y)*r.height/v.height}})()`,
+  );
+  await c.click(point.x, point.y);
+  await settled(expanded);
+  check(
+    `${name}：真实鼠标点击数字或分式中心正常展开`,
+    (await pagesMatch(expanded)) &&
+      (await bubbleMatches(expanded)) &&
+      (await doc()) === expanded.original,
+  );
+  await c.screenshot(shotPath(`document-expansion-${name}-bubble`));
+  await c.key("Escape", { keyCode: 27 });
+  await settled(baseValue);
+  check(
+    `${name}：收起移除气泡，恢复原始页面`,
+    (await pagesMatch(baseValue)) &&
+      (await c.evaluate("!document.querySelector('.formula-preview')")),
+  );
+}
 check(
   "展开流程没有隐式写盘或脚本异常",
   await c.evaluate("!window.__browserDevWrites?.length&&!window.__browserDevErrors?.length"),
 );
 await c.close();
-finish(`通过 ${state.passed} 项检查；光标主导展开 + 9 份真实 Typst 产物`);
+finish(`通过 ${state.passed} 项检查；光标主导展开 + 24 份真实 Typst 产物`);

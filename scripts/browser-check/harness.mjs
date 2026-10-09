@@ -120,13 +120,9 @@ let lastInjectedScriptIds = [];
 
 /**
  * 启动到"可以开始断言"的状态，顺序是踩出来的：
- * 1. **一次导航**（2026-09-26 提速）：`localStorage` 用 CDP 的 `Storage.clearDataForOrigin`
- *    从浏览器侧清掉，不再需要"先加载一遍页面才能读 localStorage"。以前 `boot` 是
- *    `goto(url)`（记得它自己还要两跳）→ `localStorage.clear()` → `goto(url)`，一次 boot 四跳；
- *    现在两跳就够。
- *    注意**必须在导航之前清**：页面一挂载就会读存档，清晚了这一轮又跑在上一轮的源代码模式上
- *    （`clearDataForOrigin` 是浏览器侧的，不受"当前在 about:blank 上读 localStorage 会抛
- *    SecurityError"这条限制）。
+ * 1. 先离开旧应用，再用 CDP 的 `Storage.clearDataForOrigin` 清 localStorage，
+ *    最后加载目标页面。旧应用还活着时清存储，防抖存档可能在导航前写回旧会话；
+ *    页面挂载后再清又会错过恢复时机。`about:blank` 不加载应用，清存储不受它的源限制。
  * 2. 夹具用 `Page.addScriptToEvaluateOnNewDocument` 注入，必须在**导航之前**注册，
  *    桩在 `compile_doc` 和整页命中里读取。
  */
@@ -142,6 +138,8 @@ export async function boot(c, url, { pageFixtures = null, runtime = false, settl
   lastInjectedScriptIds = [];
   // 只有要读控制台事件的套件才需要
   if (runtime) await c.send("Runtime.enable");
+  await c.send("Page.navigate", { url: "about:blank" });
+  await c.waitFor("location.href === 'about:blank'");
   /**
    * 清 localStorage。`Storage.clearDataForOrigin` 需要的是**源**（scheme://host:port），
    * 不带路径与查询；取不到源（URL 形状意外）就退回老路：先导航过去再把存档清掉。

@@ -38,6 +38,9 @@ fn fixtures() -> Vec<(&'static str, String, Vec<&'static str>)> {
         ("whitespace", "#set page(width: 360pt, height: 300pt, margin: 24pt)\n\n  第一段 office   \n\n\n第二段 😀\n\n".to_string(), vec!["第一段 office", "第二段 😀"]),
         ("repeated", "#set page(width: 360pt, height: 300pt, margin: 24pt)\n#let value = [REPEAToffice]\n#value\n#pagebreak()\n#value\n".to_string(), vec!["REPEAToffice"]),
         ("empty", String::new(), vec![]),
+        ("blank", "#set page(width: 360pt, height: 300pt, margin: 24pt)\n#set text(size: 12pt)\nA\n\n\n\nB\n\n".into(), vec!["A", "B"]),
+        ("blank-edited", "#set page(width: 360pt, height: 300pt, margin: 24pt)\n#set text(size: 12pt)\nA\n\nC\n\nB\n\n".into(), vec!["A", "C", "B"]),
+        ("blank-spaces", "  \n\n    \n\n".into(), vec![]),
     ]
 }
 
@@ -170,10 +173,53 @@ fn raw_unicode_and_transformed_cursor_stops_stay_inside_their_output() {
     }
 }
 
+// 与前端空段投影逐字比对的真实产物；不在浏览器桩里模拟空段排版。
+fn cursor_fixture_source(name: &str, source: &str) -> String {
+    match name {
+        "empty" => "\u{a0}".into(),
+        "whitespace" | "blank-edited" => format!("{source}\u{a0}"),
+        "blank" => format!("{}\u{a0}", source.replace("\n\n\n\n", "\n\n\u{a0}\n\n")),
+        "blank-spaces" => "  \u{a0}\n\n    \u{a0}\n\n\u{a0}".into(),
+        _ => source.into(),
+    }
+}
+
+#[test]
+fn blank_paragraph_placeholders_have_real_typst_carets_and_click_targets() {
+    for (name, original, _) in fixtures()
+        .into_iter()
+        .filter(|(name, _, _)| matches!(*name, "empty" | "blank" | "blank-spaces"))
+    {
+        let source = cursor_fixture_source(name, &original);
+        let (_, items, id) = laid_out(&source);
+        let mut previous_y = None;
+        for (offset, _) in source.char_indices().filter(|(_, ch)| *ch == '\u{a0}') {
+            let caret = locate(id, offset).expect("空段占位保留原生字形光标");
+            assert!(caret.height_pt > 5.0, "{name}");
+            assert!(caret.x_pt.is_finite() && caret.y_pt.is_finite());
+            if let Some(y) = previous_y {
+                assert!(caret.y_pt > y, "连续空段必须各自占用一行");
+            }
+            previous_y = Some(caret.y_pt);
+            let hit = hit_test(
+                id,
+                caret.page,
+                caret.x_pt + 8.0,
+                caret.y_pt + caret.height_pt / 2.0,
+            )
+            .expect("空段旁的空白可点击");
+            assert!(hit.offset == offset || hit.offset == offset + '\u{a0}'.len_utf8());
+            assert!((hit.y_pt - caret.y_pt).abs() < 0.001);
+        }
+        assert!(!items.is_empty(), "{name}");
+    }
+}
+
 #[test]
 #[ignore]
 fn dump_page_fixtures_cursor_rendering() {
-    for (name, source, parts) in fixtures() {
+    for (name, original, parts) in fixtures() {
+        let source = cursor_fixture_source(name, &original);
         let (document, items, id) = laid_out(&source);
         let carets: Vec<_> = items
             .iter()
@@ -185,26 +231,38 @@ fn dump_page_fixtures_cursor_rendering() {
             .chain(std::iter::once(source.len()))
             .map(|offset| serde_json::json!({ "offset": offset, "caret": locate(id, offset) }))
             .collect();
-        let whitespace_hits: Vec<_> = if name == "repeated" {
-            let end = source.find("REPEAToffice").unwrap() + "REPEAToffice".len();
-            items
-                .iter()
-                .filter(|item| item.range.end == end)
-                .map(|item| {
-                    let x = item.caret_end.x.to_pt() + 8.0;
-                    let y = (item.caret_start + item.caret_vector / 2.0).y.to_pt();
-                    let caret = hit_test(id, item.page, x, y).expect("重复输出旁的空白可命中");
-                    assert_eq!(caret.is_whitespace, Some(true));
-                    serde_json::json!({ "page": item.page, "xPt": x, "yPt": y, "caret": caret })
-                })
-                .collect()
-        } else {
-            vec![]
-        };
+        let whitespace_hits: Vec<_> =
+            if matches!(name, "repeated" | "empty" | "blank" | "blank-spaces") {
+                let repeated_end = source
+                    .find("REPEAToffice")
+                    .map(|start| start + "REPEAToffice".len());
+                items
+                    .iter()
+                    .filter(|item| {
+                        repeated_end.map_or_else(
+                            || source.get(item.range.clone()) == Some("\u{a0}"),
+                            |end| item.range.end == end,
+                        )
+                    })
+                    .map(|item| {
+                        let x = item.caret_end.x.to_pt() + 8.0;
+                        let y = (item.caret_start + item.caret_vector / 2.0).y.to_pt();
+                        let caret = hit_test(id, item.page, x, y).expect("重复输出旁的空白可命中");
+                        assert_eq!(caret.is_whitespace, Some(true));
+                        serde_json::json!({ "page": item.page, "xPt": x, "yPt": y, "caret": caret })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
         let pages: Vec<_> = document.pages().iter().map(svg_for_page).collect();
+        let original_pages: Option<Vec<_>> = (source != original).then(|| {
+            let (document, _, _) = laid_out(&original);
+            document.pages().iter().map(svg_for_page).collect()
+        });
         println!(
             "CURSORFIXTURE:{}",
-            serde_json::json!({ "name": name, "doc": source, "pages": pages, "carets": carets, "cursorQueries": cursor_queries, "parts": parts, "selectionQuads": selection(id, 0, source.len()), "whitespaceHits": whitespace_hits })
+            serde_json::json!({ "name": name, "doc": original, "source": source, "pages": pages, "originalPages": original_pages, "carets": carets, "cursorQueries": cursor_queries, "parts": parts, "selectionQuads": selection(id, 0, source.len()), "whitespaceHits": whitespace_hits })
         );
     }
 }

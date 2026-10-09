@@ -230,10 +230,20 @@ const SLOW_COMPILE_MS = 350;
 // ---------------------------------------------------------------------------
 interface PageFixture {
   doc: string;
+  // 显示投影夹具保留原文，同时单独指定实际编译输入。
+  source?: string;
+  originalPages?: string[] | null;
   pages: string[];
+  formulaPreview?: import("../core/typst-engine").FormulaPreview | null;
   carets: import("../core/typst-engine").DocumentCaret[];
   cursorQueries?: { offset: number; caret: import("../core/typst-engine").DocumentCaret | null }[];
   selectionQuads?: import("../core/typst-engine").DocumentSelectionQuad[];
+  formulaHits?: {
+    page: number;
+    xPt: number;
+    yPt: number;
+    caret: import("../core/typst-engine").DocumentCaret;
+  }[];
   whitespaceHits?: {
     page: number;
     xPt: number;
@@ -242,6 +252,8 @@ interface PageFixture {
   }[];
   brokenDoc?: string | null;
   diagnostics?: Diagnostic[] | null;
+  brokenPreviewDoc?: string | null;
+  previewDiagnostics?: Diagnostic[] | null;
 }
 let pageSnapshot: { id: number; fixture: PageFixture } | null = null;
 let pageGeometrySeq = 0;
@@ -306,8 +318,17 @@ async function handleCommand(
         knownPages: Array.isArray(a.knownPages) ? a.knownPages : null,
       };
       // 恢复夹具的失败诊断与成功 SVG 都来自原生编译，桩不模拟错误范围或排版。
-      const brokenFixture = pageFixtures().find((fixture) => fixture.brokenDoc === src);
-      if (brokenFixture) return { ok: false, diagnostics: brokenFixture.diagnostics };
+      const brokenFixture = pageFixtures().find(
+        (fixture) => fixture.brokenDoc === src || fixture.brokenPreviewDoc === src,
+      );
+      if (brokenFixture)
+        return {
+          ok: false,
+          diagnostics:
+            brokenFixture.brokenPreviewDoc === src
+              ? brokenFixture.previewDiagnostics
+              : brokenFixture.diagnostics,
+        };
       // 假编译错误：文档里出现标记 `DIAG-ERROR-MARKER` 时返回一条**主源错误诊断**，
       // 专门给验收锁住"编译错误必须在编辑器里画红波浪线"这条链路。
       // **故意发 `path: null`**：那是 Rust 0.4.0~0.8.2 的真实写法，前端的判据必须容忍它
@@ -337,7 +358,12 @@ async function handleCommand(
         };
       }
       // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
-      const fixture = pageFixtures().find((f) => f.doc === src);
+      const original = pageFixtures().find((f) => f.doc === src && f.originalPages);
+      const fixture =
+        pageFixtures().find((f) => (f.source ?? f.doc) === src) ??
+        (original?.originalPages
+          ? { doc: src, pages: original.originalPages, carets: [] }
+          : undefined);
       pageSnapshot = fixture ? { id: ++pageGeometrySeq, fixture } : null;
       const pages = fixture?.pages ?? fakePages(src);
       w.__browserDevLastPages = pages;
@@ -357,7 +383,14 @@ async function handleCommand(
         sent: output.filter((page) => page !== null).length,
         reused: output.filter((page) => page === null).length,
       };
-      return { ok: true, pages: output, pageKeys, geometryId: pageSnapshot?.id ?? 0, warnings };
+      return {
+        ok: true,
+        pages: output,
+        pageKeys,
+        geometryId: pageSnapshot?.id ?? 0,
+        formulaPreview: fixture?.formulaPreview ?? undefined,
+        warnings,
+      };
     }
     case "document_hit_test": {
       notify(command);
@@ -371,6 +404,13 @@ async function handleCommand(
           Math.abs(p.yPt - Number(a.yPt)) < 1,
       );
       if (whitespaceHit) return whitespaceHit.caret;
+      const formulaHit = pageSnapshot.fixture.formulaHits?.find(
+        (p) =>
+          p.page === a.page &&
+          Math.abs(p.xPt - Number(a.xPt)) < 1 &&
+          Math.abs(p.yPt - Number(a.yPt)) < 1,
+      );
+      if (formulaHit) return formulaHit.caret;
       const points = pageSnapshot.fixture.carets.filter((p) => p.page === a.page);
       return (
         points.sort(

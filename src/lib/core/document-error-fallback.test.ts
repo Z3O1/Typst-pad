@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { compileDocumentWithFallback } from "./document-error-fallback";
 import { projectDocumentRanges } from "./document-projection";
 import type { CompileErrorLocation, CompileResult } from "./typst-engine";
+import expansionStyle from "./document-expansion-style.json";
 
 const ok: CompileResult = { ok: true, pages: ["<svg/>"], pageCount: 1, geometryId: 42 };
 function fail(source: string, parts: string[], path?: string): CompileResult {
@@ -34,6 +35,88 @@ const options = (source: string) => ({
 });
 
 describe("文档模式编译错误源码回退", () => {
+  it("展开预览报错映射回原文，恢复轮次不再次执行无效预览", async () => {
+    const source = "正文 $unknown$";
+    const from = source.indexOf("$");
+    const compile = vi.fn(async (input: string): Promise<CompileResult> => {
+      if (!input.includes(expansionStyle.previewInlineHead)) return ok;
+      const at = input.lastIndexOf("unknown");
+      const before = input.slice(0, at);
+      return {
+        ok: false,
+        error: "unknown variable",
+        errors: [
+          {
+            message: "unknown variable",
+            line: before.split("\n").length,
+            col: [...before.slice(before.lastIndexOf("\n") + 1)].length + 1,
+            endLine: before.split("\n").length,
+            endCol: [...before.slice(before.lastIndexOf("\n") + 1)].length + 8,
+          },
+        ],
+      };
+    });
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      reveal: { from, to: source.length },
+      styleExpansion: true,
+      previewExpansion: true,
+      compile,
+    });
+    expect(compile).toHaveBeenCalledTimes(2);
+    expect(output.result.ok).toBe(true);
+    expect(output.failure?.errors[0]).toMatchObject({ line: 1, col: 5 });
+    expect(output.projection.source.split("$unknown$").length).toBe(2);
+    expect(output.projection.original).toBe(source);
+    expect(output.errorRanges).toEqual([{ from, to: source.length, preserveDeclaration: false }]);
+  });
+  it("错误回退也使用隔离样式，投影生成代码不污染原文诊断", async () => {
+    const source = "正文 $unknown$";
+    const compile = vi.fn(async (input: string) =>
+      input.includes("` $unknown$ `") ? ok : fail(input, ["unknown"]),
+    );
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      styleExpansion: true,
+      compile,
+    });
+    expect(output.result.ok).toBe(true);
+    expect(output.projection.source).toContain("#show std.raw: it =>");
+    expect(output.projection.original).toBe(source);
+    expect(output.failure?.errors[0]).toMatchObject({ line: 1, col: 5 });
+  });
+  it("只在显式启用时给空文档的编译输入加占位", async () => {
+    for (const enabled of [true, false]) {
+      const compile = vi.fn().mockResolvedValue(ok);
+      const output = await compileDocumentWithFallback({
+        ...options(""),
+        emptyParagraphs: enabled,
+        compile,
+      });
+      expect(compile).toHaveBeenCalledWith(enabled ? "\u00a0" : "");
+      expect(output.projection.original).toBe("");
+    }
+  });
+
+  it("空段占位与每轮错误回退组合，诊断仍指向未修改的原文", async () => {
+    const source = "\n\n$unknown$\n\n";
+    const compile = vi.fn(async (input: string) =>
+      input.includes("` $unknown$ `") ? ok : fail(input, ["unknown"]),
+    );
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      emptyParagraphs: true,
+      compile,
+    });
+    expect(compile.mock.calls.map(([input]) => input)).toEqual([
+      "\u00a0\n\n$unknown$\n\n\u00a0",
+      "\u00a0\n\n` $unknown$ `\n\n\u00a0",
+    ]);
+    expect(output.failure?.errors[0]).toMatchObject({ line: 3, col: 2 });
+    expect(output.projection.original).toBe(source);
+    expect(output.errorRanges).toEqual([{ from: 2, to: 11, preserveDeclaration: false }]);
+  });
+
   it("多个错误只展开对应表达式，保留前缀、正常正文和错误诊断", async () => {
     const prefix = "#set page(width: 300pt)\n";
     const source = prefix + "中文🙂 $unknown$，正文 #missing()\n后文";

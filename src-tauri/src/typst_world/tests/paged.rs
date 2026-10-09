@@ -130,6 +130,7 @@ fn incremental_pages_keep_full_export_identity_and_fresh_geometry() {
 fn json_keys_are_camel_case() {
     let out = CompileOutput {
         geometry_id: None,
+        formula_preview: None,
         ok: true,
         pages: vec!["<svg>…</svg>".to_string()],
         page_keys: Vec::new(),
@@ -547,6 +548,15 @@ fn dump_page_fixtures() {
         compile(broken.clone(), None, &fonts_dir(), &FontConfig::default()).diagnostics;
     assert!(!recovery_diagnostics.is_empty());
     let recovered = broken.replace("$unknown$", "` $unknown$ `");
+    let broken_preview = style_raw_ranges(&recovered, true);
+    let preview_diagnostics = compile(
+        broken_preview.clone(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+    )
+    .diagnostics;
+    assert!(!preview_diagnostics.is_empty());
     for src in [
         original.clone(),
         edited.clone(),
@@ -560,10 +570,13 @@ fn dump_page_fixtures() {
         ),
         recovered.clone(),
     ] {
+        let is_recovery = src == recovered;
+        let src = style_raw_ranges(&src, !is_recovery);
         let world = TypstWorld::new(src.clone(), None, &fonts_dir(), &FontConfig::default());
         let document = typst::compile::<PagedDocument>(&world)
             .output
             .expect("整页夹具必须编译成功");
+        let (document, formula_preview) = super::super::formula_preview::extract(&document);
         let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
         let carets: Vec<crate::document_geometry::DocumentCaret> = items
             .iter()
@@ -607,11 +620,13 @@ fn dump_page_fixtures() {
         let pages: Vec<String> = document.pages().iter().map(svg_for_page).collect();
         println!(
             "PAGEFIXTURE:{}",
-            serde_json::json!({ "doc": src, "pages": pages, "carets": carets,
+            serde_json::json!({ "doc": src, "pages": pages, "formulaPreview": formula_preview, "carets": carets,
                 "selectionQuads": crate::document_geometry::selection(id, 0, src.len()),
                 "whitespaceHits": whitespace_hits,
-                "brokenDoc": if src == recovered { Some(&broken) } else { None },
-                "diagnostics": if src == recovered { Some(&recovery_diagnostics) } else { None },
+                "brokenDoc": if is_recovery { Some(&broken) } else { None },
+                "diagnostics": if is_recovery { Some(&recovery_diagnostics) } else { None },
+                "brokenPreviewDoc": if is_recovery { Some(&broken_preview) } else { None },
+                "previewDiagnostics": if is_recovery { Some(&preview_diagnostics) } else { None },
             })
         );
     }

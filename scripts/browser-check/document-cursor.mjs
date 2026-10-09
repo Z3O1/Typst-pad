@@ -11,7 +11,7 @@ import {
 } from "./harness.mjs";
 const cursorFixtures = loadFixtures("cursor-fixtures.json", {
   predicate: (fixtures) =>
-    fixtures.length === 6 && fixtures.every((f) => f.cursorQueries?.length && f.pages.length),
+    fixtures.length === 9 && fixtures.every((f) => f.cursorQueries?.length && f.pages.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const pageFixtures = loadFixtures("page-fixtures.json");
@@ -34,7 +34,7 @@ await c.send("Emulation.setDeviceMetricsOverride", {
 });
 const doc = () => c.evaluate("window.__typstPadView.state.doc.toString()");
 const count = () => c.evaluate("window.__browserDevCallCounts.compile_doc ?? 0");
-const settled = (f) => c.waitFor(compileSettled(f.doc), { timeout: 8000 });
+const settled = (f) => c.waitFor(compileSettled(f.source ?? f.doc), { timeout: 8000 });
 check(
   "未聚焦输入层时不显示幽灵光标",
   await c.evaluate("!window.__typstPadView.hasFocus && !document.querySelector('.document-caret')"),
@@ -140,7 +140,7 @@ for (const name of ["mixed", "raw", "whitespace"]) {
     }
   }
   if (mapped === 0) throw new Error(`不允许用零光标几何验收：${name}`);
-  // 空白/围栏/无可映射内容的位置不应沿用上一个光标。
+  // 末尾空段定位到投影占位；真正不可映射的位置不沿用上一个光标。
   await pose(f, queryAt(f, Buffer.byteLength(f.doc)));
   check(
     `${name}：逐字素盒模型、分页、旋转、换行与不可映射位置正确`,
@@ -304,13 +304,89 @@ check(
   ),
 );
 await replace(fixture("empty"));
-await c.evaluate(
-  "window.__typstPadView.dispatch({selection:{anchor:0}});window.__typstPadView.focus();true",
-);
+await pose(fixture("empty"), queryAt(fixture("empty"), 0));
 check(
-  "空文档保留原生空页，不猜测或沿用其他文档的光标",
-  (await compiledPagesMatch(fixture("empty"))) &&
-    (await c.evaluate("!document.querySelector('.document-caret')")),
+  "空文档使用 Typst 占位字形显示真实光标，不修改原文",
+  (await compiledPagesMatch(fixture("empty"))) && (await doc()) === "",
+);
+
+const blank = fixture("blank"),
+  blankEdited = fixture("blank-edited"),
+  blankSpaces = fixture("blank-spaces");
+const blankPos = blank.doc.indexOf("\n\n\n\n") + 2;
+const placeholderQuery = (f, index = 0) => {
+  const at = [...f.source.matchAll(/\u00a0/g)][index]?.index;
+  if (at === undefined) throw new Error(`缺少空段占位：${f.name}:${index}`);
+  return queryAt(f, Buffer.byteLength(f.source.slice(0, at)));
+};
+async function poseOriginal(f, pos, query) {
+  await c.evaluate(
+    `window.__typstPadView.dispatch({selection:{anchor:${pos}}});window.__typstPadView.focus();true`,
+  );
+  await pose(f, query, { dispatch: false });
+}
+await replace(blank);
+await poseOriginal(blank, blankPos, placeholderQuery(blank));
+check(
+  "正文之间和末尾空段由真实 Typst 排版，占位不进入编辑器",
+  (await compiledPagesMatch(blank)) &&
+    (await doc()) === blank.doc &&
+    (await c.evaluate(`window.__browserDevLastCompile.src === ${JSON.stringify(blank.source)}`)),
+);
+for (const f of [fixture("empty"), blank, blankSpaces]) {
+  await replace(f);
+  if (!f.whitespaceHits.length) throw new Error(`不能用零空段点击验收：${f.name}`);
+  for (const hit of f.whitespaceHits) {
+    const point = await c.evaluate(
+      `(() => {const p=${JSON.stringify(hit)},h=document.querySelectorAll('#preview-host>.document-page')[p.page-1],r=h.getBoundingClientRect(),v=h.shadowRoot.querySelector('svg').viewBox.baseVal;return{x:r.left+p.xPt*r.width/v.width,y:r.top+p.yPt*r.height/v.height}})()`,
+    );
+    await c.click(point.x, point.y);
+    await c.waitFor(caretReady(hit.caret), { interval: 16 });
+    await assertBox(hit.caret, `${f.name} 空段点击`);
+    if ((await doc()) !== f.doc) throw new Error("点击空段不能写入占位或空白");
+  }
+}
+check("空文档、连续空段和带缩进的空段均可点击定位", (await doc()) === blankSpaces.doc);
+for (let pos = 0; pos <= blankSpaces.doc.length; pos++) {
+  const index = pos < 4 ? 0 : pos < blankSpaces.doc.length ? 1 : 2;
+  await poseOriginal(blankSpaces, pos, placeholderQuery(blankSpaces, index));
+}
+check("空段源码空白中的各个位置都有停靠点", await compiledPagesMatch(blankSpaces));
+await replace(blank);
+await poseOriginal(blank, blankPos, placeholderQuery(blank));
+await sleep(550);
+await c.type("C");
+await settled(blankEdited);
+check(
+  "在空段输入替换投影占位，原文只新增用户输入",
+  (await doc()) === blankEdited.doc && (await compiledPagesMatch(blankEdited)),
+);
+await c.key("z", { keyCode: 90, modifiers: 2 });
+await settled(blank);
+await poseOriginal(blank, blankPos, placeholderQuery(blank));
+check(
+  "撤销恢复空段排版和光标，历史没有占位字符",
+  (await doc()) === blank.doc && (await compiledPagesMatch(blank)),
+);
+await c.key("y", { keyCode: 89, modifiers: 2 });
+await settled(blankEdited);
+check(
+  "重做恢复用户输入，原文不包含虚拟空格",
+  (await doc()) === blankEdited.doc && (await compiledPagesMatch(blankEdited)),
+);
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await c.waitFor(compileSettled(blankEdited.doc));
+const originalPagesMatch = await compiledPagesMatch({
+  ...blankEdited,
+  pages: blankEdited.originalPages,
+});
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await settled(blankEdited);
+check(
+  "模式往返按需恢复原文/空段投影，源码与完整页面保持一致",
+  originalPagesMatch &&
+    (await doc()) === blankEdited.doc &&
+    (await compiledPagesMatch(blankEdited)),
 );
 
 const repeated = fixture("repeated");

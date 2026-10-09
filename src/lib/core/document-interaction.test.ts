@@ -104,3 +104,56 @@ it("图片调用起点和 Hash 边界展开完整多行脚本", () => {
     expect(doc.slice(range.from, range.to)).toBe('#image(\n "a.png",\n width: 60pt,\n)');
   }
 });
+
+it("按语法覆盖完整 # 代码模式，包含分号、注释和多行空白", () => {
+  for (const expression of [
+    "#sym.alpha",
+    "#(1 + 2)",
+    "#let x = 1;",
+    "#let x = 1 /* 注释 */ ;",
+    "#set text(size: 12pt);",
+    "#{\n let x = 1\n\n // 注释\n x\n}",
+  ]) {
+    const doc = `前文 ${expression} 后文`;
+    for (let pos = 3; pos < 3 + expression.length; pos++)
+      expect(sourceRevealRange(doc, pos, false, 1)).toEqual({
+        from: 3,
+        to: 3 + expression.length,
+        kind: "code",
+      });
+    expect(sourceRevealRange(doc, doc.length).kind).toBe("text");
+  }
+});
+
+it("数学模式中的 # 归属完整公式，代码模式中的公式归属外层代码", () => {
+  const math = "前文 $a + #sym.beta$ 后文";
+  expect(sourceRevealRange(math, math.indexOf("sym"))).toEqual({
+    from: 3,
+    to: math.lastIndexOf("$") + 1,
+    kind: "math",
+  });
+  const code = "前文 #let value = $a + b$; 后文";
+  for (let pos = code.indexOf("$"); pos <= code.lastIndexOf("$"); pos++)
+    expect(sourceRevealRange(code, pos)).toEqual({
+      from: 3,
+      to: code.indexOf(";") + 1,
+      kind: "code",
+    });
+});
+
+it("嵌套内容块回到 markup，仍可最小展开其中的公式或 # 表达式", () => {
+  const doc = "#text[正文 $a + #sym.beta$ 和 #strong[粗体]]";
+  const math = sourceRevealRange(doc, doc.indexOf("sym"));
+  expect(doc.slice(math.from, math.to)).toBe("$a + #sym.beta$");
+  const code = sourceRevealRange(doc, doc.indexOf("strong"));
+  expect(doc.slice(code.from, code.to)).toBe("#strong[粗体]");
+});
+
+it("未闭合语法仍按 #/$ 模式展开，raw、转义和注释中的同形字符不触发", () => {
+  for (const doc of ["#foo(\n 1,\n\n 2", "$a + b", "$$", "#"]) {
+    const range = sourceRevealRange(doc, doc.length);
+    expect(range).toEqual({ from: 0, to: doc.length, kind: doc.startsWith("#") ? "code" : "math" });
+  }
+  for (const doc of ["`#foo $x$`", "\\#foo \\$x\\$", "/* #foo $x$ */", "// #foo $x$"])
+    expect(sourceRevealRange(doc, doc.indexOf("foo")).kind).toBe("text");
+});
