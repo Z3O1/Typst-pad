@@ -32,7 +32,10 @@
 //!   * `world.rs`       `World` 实现（主文档 / 相对 include / 包解析）+ 输出与诊断类型
 //!   * `fonts.rs`       字体加载、逐 face 注册、进程内缓存、默认族注入
 //!   * `compile.rs`     整篇编译与增量页输出 + 预览重排的页面几何注入
-//!   * `svg_cache.rs`   页面指纹、增量传输清单与有界 SVG 缓存
+//!   * `source_cache.rs` 有界主源快照与 UTF-8 安全增量解析
+//!   * `svg_fingerprint.rs` 默认 SVG 输入指纹与有界帧摘要
+//!   * `svg_cache.rs`   增量传输清单与有界 SVG 缓存
+//!   * `cache.rs`       小容量 LRU / 帧摘要 FIFO 的数量与权重边界
 //!   * `math.rs`        公式级渲染：贴边透明单页 SVG + 基线探针 + 墨迹撑画布
 //!   * `pdf.rs`         PDF 导出
 //!   * `diagnostics.rs` 诊断转换（span → 1-based 行列）
@@ -58,13 +61,16 @@ use typst_layout::{Page, PagedDocument};
 use typst_pdf::PdfOptions;
 use typst_svg::SvgOptions;
 
+mod cache;
 mod compile;
 mod diagnostics;
 mod fonts;
 mod math;
 mod paths;
 mod pdf;
+mod source_cache;
 mod svg_cache;
+mod svg_fingerprint;
 mod world;
 
 pub use compile::*;

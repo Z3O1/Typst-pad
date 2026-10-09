@@ -38,6 +38,7 @@ const SUITES = [
   ["computed-style.mjs", 18],
   ["preview-reflow.mjs", 11],
   ["source-workflows.mjs", 18],
+  ["dollar-completion.mjs", 24],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
 
@@ -50,6 +51,7 @@ const SUITE_FIXTURES = {
   "computed-style.mjs": [],
   "preview-reflow.mjs": [],
   "source-workflows.mjs": [],
+  "dollar-completion.mjs": [],
 };
 const FIXTURE_STEPS = { pages: ["fixtures-pages", ["run", "fixtures:pages"]] };
 

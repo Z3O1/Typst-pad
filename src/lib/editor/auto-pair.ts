@@ -1,167 +1,280 @@
-// 输入时的自动配对：目前只有数学公式定界符 `$`（用户要求「加入功能：自动补全 $$」）。
-// 纯函数、可单测；CodeMirror 侧只在 Editor.svelte 的 inputHandler（插入）与
-// editor-keymap.ts 的退格命令里落事务。
-//
-// 为什么要配对：公式是 `$...$` 成对的定界符，手打时漏掉闭合符是最常见的输入事故；
-// 配好之后光标落在中间，打完公式直接继续写，不用回头补 `$`。
-//
-// 与 typst 语义对齐的两条（见 math-ranges.ts）：
-// - 行内公式 `$x$`：定界符内侧无空白；
-// - 行间公式 `$ x $`：内侧**两侧都是空白**（display 风格）——所以独占一行时补的是
-//   `$  $`（两个空格）并把光标放在中间，用户敲 `x` 就得到 `$ x $` 这个行间公式。
+// Typst 数学定界符的纯编辑计划。复用语言解析器，空公式与未闭合公式也保留上下文；
+// 不使用渲染用的 scanMathRanges（它有意忽略空公式和未闭合公式）。
+import { typstParser } from "codemirror-lang-typst/lezer";
+import type { SyntaxNode, Tree } from "@lezer/common";
 import { regionAt, scanNonMarkupRegions } from "../core/typst-lex";
-import { scanMathRanges } from "../core/math-ranges";
 
-/** 行间公式脚手架：`$` + 两个空格 + `$`（光标落在中间第 2 个字符位，敲字即 `$ x $`） */
 const DISPLAY_SCAFFOLD = "$  $";
-const DISPLAY_SCAFFOLD_CARET = 2;
 
-/** 行内公式配对：`$$`，光标落在中间 */
-const INLINE_PAIR = "$$";
-const INLINE_PAIR_CARET = 1;
-
-/**
- * 输入 `$` 时的决策。`caret` 一律是**相对输入起点**的偏移（调用方 `from + caret`）。
- */
 export type DollarPlan =
-  | { kind: "insert"; text: string; caret: number } // 补出一对定界符
-  | { kind: "skip"; caret: number } // 右侧已有闭合 `$`：只把光标移过去，不再插一对
-  | { kind: "none" }; // 交给默认行为（原样插入一个 `$`）
+  | { kind: "insert"; text: string; caret: number }
+  | { kind: "wrap"; from: number; to: number; before: string; after: string }
+  | { kind: "skip"; caret: number }
+  | { kind: "none" };
 
-/** 某行的行首/行尾 offset（行尾不含换行符） */
+type DollarContext =
+  { kind: "markup" } | { kind: "blocked" } | { kind: "math"; from: number; close: number | null };
+
+const codeNodes = new Set([
+  "Code",
+  "CodeBlock",
+  "Hash",
+  "Ident",
+  "LetBinding",
+  "SetRule",
+  "ShowRule",
+  "Contextual",
+  "Conditional",
+  "WhileLoop",
+  "ForLoop",
+  "ModuleImport",
+  "ModuleInclude",
+  "FuncCall",
+  "Args",
+  "Array",
+  "Dict",
+  "Closure",
+  "Parenthesized",
+  "Unary",
+  "Binary",
+]);
+const opaqueNodes = new Set(["Raw", "Str", "LineComment", "BlockComment", "Shebang"]);
+
+// 无 EditorState 的纯函数调用复用同一份解析；编辑器传入自己的语法树，不另解析全文。
+let cachedDoc: string | undefined;
+let cachedTree: Tree;
+function treeFor(doc: string): Tree {
+  if (cachedDoc !== doc) {
+    cachedTree = typstParser.parse(doc);
+    cachedDoc = doc;
+  }
+  return cachedTree;
+}
+
+function validPosition(doc: string, pos: number): boolean {
+  return Number.isInteger(pos) && pos >= 0 && pos <= doc.length;
+}
+
+function escapedAt(doc: string, pos: number): boolean {
+  let start = pos;
+  while (start > 0 && doc[start - 1] === "\\") start--;
+  return (pos - start) % 2 === 1;
+}
+
+/** 行尾不含 CR/LF；pos=0 时不能把第一个换行误当作上一行。 */
 function lineBounds(doc: string, pos: number): { start: number; end: number } {
-  const start = doc.lastIndexOf("\n", Math.max(0, pos - 1)) + 1;
+  const start = pos === 0 ? 0 : doc.lastIndexOf("\n", pos - 1) + 1;
   const nl = doc.indexOf("\n", pos);
-  return { start, end: nl === -1 ? doc.length : nl };
+  const end = nl === -1 ? doc.length : nl;
+  return { start, end: doc[end - 1] === "\r" ? end - 1 : end };
 }
 
-/** 光标所在行是否只有空白（独占一行的公式按 typst 语义是行间公式） */
-function onBlankLine(doc: string, pos: number): boolean {
-  const { start, end } = lineBounds(doc, pos);
-  return doc.slice(start, end).trim() === "";
+function equationContext(node: SyntaxNode, pos: number): DollarContext | null {
+  const last = node.lastChild;
+  const close = last?.name === "Dollar" && last.from > node.from ? last.from : null;
+  if (pos > node.from && (close === null ? pos <= node.to : pos <= close)) {
+    return { kind: "math", from: node.from, close };
+  }
+  return null;
 }
 
-/** 同行右侧（跳过空格/制表符）若是 `$`，返回它的 offset；否则 -1 */
-function nextDollarOnLine(doc: string, pos: number): number {
-  const { end } = lineBounds(doc, pos);
-  let k = pos;
-  while (k < end && (doc[k] === " " || doc[k] === "\t")) k++;
-  return k < end && doc[k] === "$" ? k : -1;
+function closedBlockComment(doc: string, node: SyntaxNode): boolean {
+  let depth = 0;
+  for (let i = node.from; i < node.to; i++) {
+    if (doc[i] === "/" && doc[i + 1] === "*") {
+      depth++;
+      i++;
+    } else if (doc[i] === "*" && doc[i + 1] === "/") {
+      depth--;
+      i++;
+    }
+  }
+  return depth === 0;
 }
 
-/** 光标是否落在已有公式**内部**（`$a + |b$`）——那里的 `$` 是"闭合公式"，不该再补一对 */
-function insideMath(
+function contextAt(doc: string, pos: number, tree: Tree): DollarContext {
+  // 左亲和性用于代码末尾；闭合公式/raw/注释的右边界则应回到外层模式。
+  for (let node: SyntaxNode | null = tree.resolveInner(pos, -1); node; node = node.parent) {
+    if (opaqueNodes.has(node.name) && pos > node.from) {
+      if (
+        pos < node.to ||
+        node.name === "LineComment" ||
+        node.name === "Shebang" ||
+        (node.name === "BlockComment" && !closedBlockComment(doc, node))
+      ) {
+        return { kind: "blocked" };
+      }
+    }
+    // 未闭合 raw 与数学字符串由上游以 Error 节点恢复，末端仍不可配对。
+    if (node.name === "Error" && pos > node.from && /^[`"]/.test(doc[node.from])) {
+      return { kind: "blocked" };
+    }
+    if (node.name === "Markup") return { kind: "markup" };
+    if (node.name === "ContentBlock") {
+      const markup = node.getChild("Markup");
+      if (markup && pos >= markup.from && pos <= markup.to) return { kind: "markup" };
+    }
+    // 错误恢复会把未闭合公式末尾的空白放到 Equation 的同级节点中。
+    if (node.name === "Space" || node.name === "Parbreak") {
+      const previous = node.prevSibling;
+      if (previous?.name === "Equation") {
+        const math = equationContext(previous, previous.to);
+        if (math?.kind === "math" && math.close === null) return math;
+      }
+    }
+    if (node.name === "Equation") {
+      const math = equationContext(node, pos);
+      if (math) return math;
+    }
+    if (codeNodes.has(node.name) && pos > node.from) {
+      // 数学内嵌代码刚结束、右侧紧跟闭合符：仍允许跳出公式。
+      if (doc[pos] === "$") {
+        for (let parent = node.parent; parent; parent = parent.parent) {
+          if (parent.name === "Markup") break;
+          if (parent.name === "Equation") {
+            const math = equationContext(parent, pos);
+            if (math?.kind === "math" && math.close === pos) return math;
+            break;
+          }
+        }
+      }
+      return { kind: "blocked" };
+    }
+  }
+  // 不完整代码字符串可能被解析器恢复成顶层正文，沿用词法扫描的保守护栏。
+  // 普通正文直引号不属于字符串；嵌套内容块的 Markup 已在上面优先返回。
+  const opaque = scanNonMarkupRegions(doc);
+  if (
+    regionAt(opaque, pos)?.kind === "code" ||
+    (pos > 0 && regionAt(opaque, pos - 1)?.kind === "code")
+  ) {
+    return { kind: "blocked" };
+  }
+  return { kind: "markup" };
+}
+
+/** 选区必须完整落在正文中；不包裹既有公式、代码或不透明文本。 */
+function canWrap(doc: string, from: number, to: number, tree: Tree): boolean {
+  if (contextAt(doc, from, tree).kind !== "markup" || contextAt(doc, to, tree).kind !== "markup")
+    return false;
+  let safe = true;
+  tree.iterate({
+    from,
+    to,
+    enter(node) {
+      if (node.from >= to || node.to <= from) return false;
+      if (
+        opaqueNodes.has(node.name) ||
+        node.name === "Equation" ||
+        (node.name === "Error" && /^[`"]/.test(doc[node.from]))
+      ) {
+        safe = false;
+        return false;
+      }
+      // 外层代码的内容块可以是正文，但选区不能穿过代码本身。
+      if (codeNodes.has(node.name) && (node.from >= from || node.to <= to)) safe = false;
+      return safe;
+    },
+  });
+  return safe;
+}
+
+/** caret 相对输入起点；非空选区包裹后保留原内容与选区方向。 */
+export function planDollarInput(
   doc: string,
-  pos: number,
-  opaque: ReturnType<typeof scanNonMarkupRegions>,
-): boolean {
-  return scanMathRanges(doc, opaque).some((r) => pos > r.from && pos < r.to);
+  from: number,
+  to = from,
+  tree = treeFor(doc),
+  closeBefore = ")]}:;>$",
+): DollarPlan {
+  if (!validPosition(doc, from) || !validPosition(doc, to) || to < from || escapedAt(doc, from)) {
+    return { kind: "none" };
+  }
+  if (from !== to) {
+    if (!canWrap(doc, from, to, tree)) return { kind: "none" };
+    if (escapedAt(doc, to)) return { kind: "none" };
+    // 像 ( 一样包裹完整选区，不按所在行自动加空格，也不收缩用户选中的空白。
+    return { kind: "wrap", from, to, before: "$", after: "$" };
+  }
+  const context = contextAt(doc, from, tree);
+  if (context.kind === "blocked") return { kind: "none" };
+  if (context.kind === "math") {
+    // 仅提供闭合符候选；输入接线还须核对它确为自动补出的字符。
+    if (context.close !== null && doc.slice(from, context.close).trim() === "") {
+      return { kind: "skip", caret: context.close + 1 - from };
+    }
+    return { kind: "none" };
+  }
+  // 与 ( 同样只在行尾、空白或闭合标点前补一对；既有 $ 也可作为右侧边界。
+  const next = doc[from];
+  if (next && !/\s/.test(next) && !closeBefore.includes(next)) return { kind: "none" };
+  return { kind: "insert", text: "$$", caret: 1 };
 }
 
-/** 空脚手架的 Enter 展开计划：替换脚手架为三行，光标落中行一档之后（绝对位置） */
 export interface ScaffoldExpand {
-  from: number; // 替换范围（脚手架 `$  $` 本身；行首缩进不动）
+  from: number;
   to: number;
   insert: string;
   caret: number;
 }
 
-/**
- * 光标在**独占一行的空脚手架** `$  $` 内部（两个 `$` 之间）时，Enter 的展开计划：
- * 换成 `$` + 换行 + 一档 + 换行 + `$`，光标落中行一档之后，接着打字就写在公式里。
- * 与 `emptyPairBackspace` 对称（那条管空配对的“整对删”，这条管空脚手架的“展开”）；
- * 不接管的三类：
- * 1. 行 trim 后不是 `$  $`（同行有别的内容 / 空公式 `$ $` 单空格 / 有内容的 `$ x $`）——
- *    不改写用户的行；
- * 2. 光标不在两个 `$` 之间（行首/行尾的 Enter 仍是普通换行）；
- * 3. 越界位置（同 planDollarInput 的防御）。
- *
- * `unit` = 中行一档（调用方传 `tabUnit(tabSpaces)`）：与 Tab 键插入的档宽联动，
- * 设置 0 时就是制表符。
- */
+/** 独占一行的 $$ 或空行间脚手架展开为三行，沿用实际缩进。 */
 export function planScaffoldExpand(
   doc: string,
   pos: number,
   lineBreak: string,
   unit: string,
+  tree = treeFor(doc),
 ): ScaffoldExpand | null {
-  if (!(pos >= 0) || pos > doc.length) return null;
-  // raw / 代码 / 注释 / 字符串里的 `$  $` 不是公式脚手架（同 planDollarInput 的护栏）
-  if (regionAt(scanNonMarkupRegions(doc), pos)) return null;
+  if (!validPosition(doc, pos)) return null;
   const { start, end } = lineBounds(doc, pos);
   const line = doc.slice(start, end);
-  if (line.trim() !== DISPLAY_SCAFFOLD) return null;
-  const from = start + line.length - line.trimStart().length; // 脚手架起点（跳过行首缩进）
-  if (pos <= from || pos >= from + DISPLAY_SCAFFOLD.length) return null;
-  const insert = `$${lineBreak}${unit}${lineBreak}$`;
+  const scaffold = line.trim();
+  if (scaffold !== "$$" && scaffold !== DISPLAY_SCAFFOLD) return null;
+  const indent = line.slice(0, line.length - line.trimStart().length);
+  const from = start + indent.length;
+  const context = contextAt(doc, pos, tree);
+  if (
+    context.kind !== "math" ||
+    context.from !== from ||
+    context.close !== from + scaffold.length - 1
+  )
+    return null;
+  const insert = `$${lineBreak}${indent}${unit}${lineBreak}${indent}$`;
   return {
     from,
-    to: from + DISPLAY_SCAFFOLD.length,
+    to: from + scaffold.length,
     insert,
-    caret: from + 1 + lineBreak.length + unit.length,
+    caret: from + 1 + lineBreak.length + indent.length + unit.length,
   };
 }
 
-/**
- * 决定输入 `$` 时做什么。不配对（返回 none）的四类上下文，都是踩过或必然踩的坑：
- * 1. 代码 / 原始文本 / 注释 / 字符串里（`#let s = "$"`、`// $`、`` `$` ``）——那里的 `$` 不是公式定界符；
- * 2. **代码区**的紧邻右边界（`#let s = 1|` 这种"正在写代码"的位置）——区域末端那个位置本身
- *    已经不算代码了（`regionAt` 是左闭右开），但用户显然还在写代码，补一对会插出
- *    `#let s = 1$$` 这种直接报错的垃圾。代价是 `#f(1)|$x$` 这种"代码后面紧跟公式"也要手打
- *    闭合符——按本仓库"宁可漏配对，不可误配对"的取向，这个代价可以接受；
- *    （raw 的右边界不受此限：```` ``` ```` 之后回到 markup，那里该配对。）
- * 3. 已有公式**内部**（`$a + |b$`）——用户这时要的是闭合公式，补一对会插出 `$a + $|$b$` 这种垃圾；
- *    **但这一条排在「右侧已有闭合 `$`」之后**，见下面 skip 那段的说明；
- * 4. 前面是反斜杠（`\$`）——转义的字面美元号。
- */
-export function planDollarInput(doc: string, pos: number): DollarPlan {
-  if (!(pos >= 0) || pos > doc.length) return { kind: "none" };
-  const opaque = scanNonMarkupRegions(doc);
-  if (regionAt(opaque, pos)) return { kind: "none" };
-  if (pos > 0 && regionAt(opaque, pos - 1)?.kind === "code") return { kind: "none" };
-  if (doc[pos - 1] === "\\") return { kind: "none" };
-
-  // 右侧（跳过同行空白）已经有 `$`：把光标移过去，**不再插任何字符**。
-  //
-  // 这条必须排在 `insideMath` **之前**（2026-09-14 用户报的 bug：「依次按 $ 1 $ 后会得到 $1$$」）：
-  // 配对是 `$|$` 起手，敲完 `1` 是 `$1|$` —— 那时光标正好在已有公式**内部**，而下面那条
-  // "公式内部不配对"会返回 none（原样插一个 `$`），于是得到 `$1$$`：一个多出来的、永远不闭合的
-  // `$`（typst 会报未闭合）。而行间脚手架更难看：`$ 1 $` 里再按 `$` 变成 `$ 1$ $`。
-  // 用户的意图很清楚——**他按的 `$` 就是那个已经存在的闭合符**，所以正确的动作是"跨过去"。
-  // 下面那条 `insideMath`（`$a + |b$`：右边不是 `$` 而是公式内容）依然照旧返回 none。
-  const next = nextDollarOnLine(doc, pos);
-  if (next !== -1) return { kind: "skip", caret: next + 1 - pos };
-
-  if (insideMath(doc, pos, opaque)) return { kind: "none" };
-
-  // 独占一行 → 行间公式脚手架（内侧两侧留白才是 typst 的 display 公式）；
-  // 行内（同行还有别的字）→ 普通配对。
-  return onBlankLine(doc, pos)
-    ? { kind: "insert", text: DISPLAY_SCAFFOLD, caret: DISPLAY_SCAFFOLD_CARET }
-    : { kind: "insert", text: INLINE_PAIR, caret: INLINE_PAIR_CARET };
-}
-
-/** 空配对的整对删除范围（相对光标）：`before` 个字符在光标左边、`after` 个在右边 */
 export interface PairBackspace {
   before: number;
   after: number;
 }
 
-/**
- * 光标正好在**空配对**中间时要删掉的范围，否则返回 null（走默认退格）。
- *
- * 返回值是"光标两侧各删几个字符"而不是一个总长度：行间脚手架 `$  |  $` 的配对**跨在光标两侧**
- * （左 `$ `、右 ` $`），用一个"向前删 N 个"的长度表达会算出负数位置（实测踩过：写成一侧长度后
- * 浏览器里退格只删掉一个空格、还抛了异常）。只有补出来的那两种空配对算，模式精确匹配：
- * - `$|$` → `{1, 1}`；
- * - `$  |  $`（行间脚手架，光标夹在两个空格中间）→ `{2, 2}`；
- * - `$$|$$` 这类相邻成对每处只删自己那一对；`$x$` 这种有内容的配对**不**匹配（不接管）。
- */
-export function emptyPairBackspace(doc: string, pos: number): PairBackspace | null {
-  if (pos <= 0 || pos > doc.length) return null;
-  if (doc[pos - 1] === "$" && doc[pos] === "$") return { before: 1, after: 1 };
-  if (pos >= 2 && doc.slice(pos - 2, pos) === "$ " && doc.slice(pos, pos + 2) === " $") {
-    return { before: 2, after: 2 };
-  }
-  return null;
+/** 只删除真正的空公式，不能把相邻公式之间的两个 $ 或 raw 中的文本当作配对。 */
+export function emptyPairBackspace(
+  doc: string,
+  pos: number,
+  tree = treeFor(doc),
+): PairBackspace | null {
+  if (!validPosition(doc, pos)) return null;
+  const context = contextAt(doc, pos, tree);
+  if (context.kind !== "math" || context.close === null) return null;
+  const { from, close } = context;
+  const body = doc.slice(from + 1, close);
+  if (body === "" && pos === from + 1) return { before: 1, after: 1 };
+  // 空格/Enter 的行间手势先退回 $$，下一次 Backspace 才删掉配对。
+  const padded = body === "  " && pos === from + 2;
+  const expanded =
+    /^\r?\n[ \t]*\r?\n[ \t]*$/.test(body) &&
+    doc.slice(lineBounds(doc, from).start, from).trim() === "" &&
+    doc.slice(close + 1, lineBounds(doc, close).end).trim() === "" &&
+    pos > from + 1 &&
+    pos < close &&
+    doc.slice(lineBounds(doc, pos).start, lineBounds(doc, pos).end).trim() === "";
+  if (!padded && !expanded) return null;
+  return { before: pos - from - 1, after: close - pos };
 }
