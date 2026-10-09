@@ -25,6 +25,14 @@ impl CompileState {
     }
 }
 
+/// 与 Typst CLI watch 一致，任务结束后清理超过 10 轮未命中的 comemo 历史。
+/// 返回产物自己持有数据；清理不作废 SVG 或交互几何，也不改变显式导出。
+pub(crate) fn with_compiler_cache<T>(job: impl FnOnce() -> T) -> T {
+    let output = job();
+    typst::comemo::evict(10);
+    output
+}
+
 /// 编译通道：克隆锁与字体目录 → 构造 `FontConfig` → 在 `spawn_blocking` 里**持锁**跑 `job`。
 ///
 /// 五个命令（`compile_doc` / `compile_blocks` / `compile_math` / `export_pdf` /
@@ -50,7 +58,7 @@ where
     let fonts = crate::typst_world::FontConfig::new(font_families, font_dirs);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        job(&fonts_dir, &fonts)
+        with_compiler_cache(|| job(&fonts_dir, &fonts))
     })
     .await
     .map_err(|_| ())

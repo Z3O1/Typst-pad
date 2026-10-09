@@ -72,7 +72,7 @@ PERF_PAGES=100 cargo test --manifest-path src-tauri/Cargo.toml document_performa
 ONLY=document-performance.mjs npm run verify:browser
 ```
 
-`DOCPERF` 记录 World、Typst 编译、几何、索引建立、目标页命中，以及页面 JSON 的时间和大小。生产输出成本看 `delta_svg_ms`（页清单/缺页导出）、`delta_json_ms`、`delta_bytes` 与 `sent_pages`；`svg_ms` 是差量生成后额外运行的全量校验，此时缓存已热，不能直接与旧版 SVG 导出耗时比较。`json_ms` / `json_bytes` 是同轮全量页面序列化对照。探针同时校验差量重建与完整导出一致；热修改比较应排除 `round=0`。`DOCDOMPERF` 记录浏览器解析与强制布局耗时。原生探针绕过 Tauri，DOM 探针重复静态真实夹具，都不是 Windows WebView2 的端到端测量；当前对照见[渲染与交互](writing-rendering.md#当前性能实现与基准)。首次导出、缓存淘汰、全部页面重排和实际 IPC 应另测，不能只凭热缓存结果承诺持续输入延迟。
+`DOCPERF` 记录 World、Typst 编译、几何、索引建立、目标页命中，以及页面 JSON 的时间和大小。生产输出成本看 `delta_svg_ms`（页清单/缺页导出）、`delta_json_ms`、`delta_bytes` 与 `sent_pages`；`svg_ms` 是差量生成后额外运行的全量校验，此时缓存已热，不能直接与旧版 SVG 导出耗时比较。`json_ms` / `json_bytes` 是同轮全量页面序列化对照。探针同时校验差量重建与完整导出一致；热修改比较应排除 `round=0`。`DOCDOMPERF` 记录浏览器解析与强制布局耗时。原生探针绕过 Tauri，DOM 探针重复静态真实夹具，都不是 Windows WebView2 的端到端测量；当前对照见[渲染与交互](writing-rendering.md#当前性能实现与基准)。首次导出、缓存淘汰、全部页面重排和实际 IPC 应另测，不能只凭热缓存结果承诺持续输入延迟；合成探针绕过命令通道，不含 comemo 清理成本。
 
 ### 只读外部文档编辑探针
 
@@ -85,7 +85,9 @@ PERF_FILES='/absolute/path/one.typ' \
   cargo test --manifest-path src-tauri/Cargo.toml world_component_performance -- --ignored --nocapture
 ```
 
-`EDITPERF` 给出每轮原生分段，`EDITVISUAL` 对比实际 SVG 变化页与传输页数，`WORLDPERF` 拆分字体、标准库、根扫描与 Source 构建。每轮用独立直接 SVG 导出校验完整重建；校验成本不计入产品分段。探针不启动编辑器或真实 IPC；共享日志前注意其中含输入文件路径，不提交课程原文或生成产物。
+默认 12 轮覆盖原文、连续输入、删除、段落、撤销和重复输入；设置 `PERF_VARIETY=1 PERF_ROUNDS=50` 时，第 7 轮以后使用不同文字版本，避免只测两种内容的热缓存。`EDITPERF` 给出原生分段与 `eviction_ms`（与命令通道同样调用 `comemo::evict(10)`），`total_ms` 是分段之和；`EDITVISUAL` 对比实际 SVG 变化页与传输页数。`EDITMEM` 在 Linux 读取探针进程 RSS，其他平台为 `na`；它包含 oracle、字体与历史快照，不代表桌面应用峰值。`WORLDPERF` 拆分共享字体/标准库、根扫描与主源快照命中成本，Source 部分是相同正文命中，不代表不同输入的解析成本。
+
+每轮用独立直接 SVG 导出校验完整重建；oracle 成本不计入产品分段。Rust 门禁还比较增量 AST 与完整解析的语法范围、编译产物和诊断，覆盖共享 UTF-8 尾字节的中文/emoji、旧世界不可变性、资源样式、依赖更新及缓存淘汰。探针不启动编辑器或真实 IPC；共享日志前注意其中含输入文件路径，不提交课程原文或生成产物。
 
 ## 桌面抽查
 
