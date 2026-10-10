@@ -10,7 +10,7 @@ import {
   shotPath,
 } from "./harness.mjs";
 const expansion = loadFixtures("expansion-fixtures.json", {
-  predicate: (fs) => fs.length === 24 && fs.every((f) => f.pages.length && f.cursorQueries.length),
+  predicate: (fs) => fs.length === 30 && fs.every((f) => f.pages.length && f.cursorQueries.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const fixtures = [...loadFixtures("page-fixtures.json"), ...expansion];
@@ -245,12 +245,26 @@ check(
 await cursor(math.range.to - 1);
 await settled(math);
 const beforeTyping = await count();
+await c.evaluate(`(() => {
+  window.__expansionTypingInputs=[];
+  const internals=window.__TAURI_INTERNALS__,invoke=internals.invoke;
+  internals.invoke=(command,args)=>{
+    if(command==='compile_doc')window.__expansionTypingInputs.push(args.src);
+    return invoke(command,args);
+  };
+  return true;
+})()`);
 await c.type(" + ");
 await c.type("z");
+const immediateTypingCount = await count();
 await settled(edited);
 check(
-  "逐键输入共用编辑去抖，不每键立即重编译",
-  (await count()) === beforeTyping + 1 &&
+  "逐键输入共用编辑去抖，最终仅原文测量及展示各一次",
+  immediateTypingCount === beforeTyping &&
+    (await count()) === beforeTyping + 2 &&
+    (await c.evaluate(
+      `JSON.stringify(window.__expansionTypingInputs)===${JSON.stringify(JSON.stringify([edited.original, edited.doc]))}`,
+    )) &&
     (await doc()) === edited.original &&
     (await pagesMatch(edited)),
 );
@@ -386,9 +400,38 @@ for (const name of ["number", "fraction"]) {
       (await c.evaluate("!document.querySelector('.formula-preview')")),
   );
 }
+for (const name of ["long-line", "tall-matrix", "nested-fraction"]) {
+  const baseValue = f(`${name}-base`),
+    expanded = f(name);
+  await replace(baseValue);
+  await cursor(expanded.range.from + 2);
+  await settled(expanded);
+  await caretMatches(expanded, expanded.range.from + 2, true);
+  check(
+    `${name}：长公式展开并显示同次编译的真实浮动预览`,
+    (await pagesMatch(expanded)) &&
+      (await bubbleMatches(expanded)) &&
+      (await doc()) === expanded.original,
+  );
+  // 长/高公式预览卡片不越出预览可见区，也不撑出横向滚动条（必要时只在卡片内滚动）。
+  check(
+    `${name}：预览卡片不越出预览可见区且不横滚`,
+    await c.evaluate(
+      `(() => {const b=document.querySelector('.formula-preview');if(!b)return false;const r=b.getBoundingClientRect();const body=document.querySelector('.preview-body');const br=body.getBoundingClientRect();return r.left>=br.left-0.5&&r.right<=br.right+0.5&&body.scrollWidth<=body.clientWidth+1})()`,
+    ),
+  );
+  await c.screenshot(shotPath(`document-expansion-${name}-preview`));
+  await c.key("Escape", { keyCode: 27 });
+  await settled(baseValue);
+  check(
+    `${name}：收起移除气泡，恢复原始页面`,
+    (await pagesMatch(baseValue)) &&
+      (await c.evaluate("!document.querySelector('.formula-preview')")),
+  );
+}
 check(
   "展开流程没有隐式写盘或脚本异常",
   await c.evaluate("!window.__browserDevWrites?.length&&!window.__browserDevErrors?.length"),
 );
 await c.close();
-finish(`通过 ${state.passed} 项检查；光标主导展开 + 24 份真实 Typst 产物`);
+finish(`通过 ${state.passed} 项检查；光标主导展开 + 30 份真实 Typst 产物`);

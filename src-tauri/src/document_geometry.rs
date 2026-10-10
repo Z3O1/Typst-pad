@@ -10,6 +10,7 @@ use crate::block_geometry::{pick_hit_item, PlacedItem, PlacedItemKind};
 
 struct Snapshot {
     id: u64,
+    // 并行 Rust 测试各自模拟独立进程，不能互相淘汰尚在断言中的产物。
     #[cfg(test)]
     test_owner: std::thread::ThreadId,
     source_len: usize,
@@ -450,6 +451,28 @@ mod tests {
             typst::layout::Transform::identity(),
         )
     }
+    #[test]
+    fn parallel_test_snapshots_are_isolated_but_each_cache_still_evicts_at_sixteen() {
+        let first = store(vec![item(1, 0, 3)], 3, vec![]);
+        std::thread::spawn(|| {
+            for _ in 0..MAX_SNAPSHOTS + 1 {
+                store(vec![item(1, 0, 3)], 3, vec![]);
+            }
+        })
+        .join()
+        .unwrap();
+        assert!(
+            locate(first, 0).is_some(),
+            "别的测试线程不能淘汰当前断言的产物"
+        );
+        for _ in 0..MAX_SNAPSHOTS - 1 {
+            store(vec![item(1, 0, 3)], 3, vec![]);
+        }
+        assert!(locate(first, 0).is_some(), "第 16 份产物仍应保留首份");
+        store(vec![item(1, 0, 3)], 3, vec![]);
+        assert!(locate(first, 0).is_none(), "第 17 份产物必须淘汰首份");
+    }
+
     #[test]
     fn selection_is_half_open_reversible_and_keeps_repeated_output() {
         let id = store(

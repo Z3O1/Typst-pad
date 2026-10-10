@@ -1,4 +1,4 @@
-// 完整 Page 的 128 位内容指纹（包括字体、图片、变换和背景），在 SVG 导出前比较。
+// SVG 实际输入的 128 位指纹（包括字体、图片、变换和背景），在导出前比较。
 // 不缓存几何或 Span 映射；它们必须读取本轮 World。
 use super::*;
 use std::collections::VecDeque;
@@ -44,7 +44,7 @@ impl SvgCache {
 }
 
 pub(super) fn cached_svg(page: &Page) -> String {
-    cached_svg_with_key(page, typst::utils::hash128(page))
+    cached_svg_with_key(page, super::svg_fingerprint::fingerprint(page))
 }
 
 fn cached_svg_with_key(page: &Page, key: u128) -> String {
@@ -70,8 +70,8 @@ pub(super) fn incremental_pages(
     let mut output = Vec::with_capacity(pages.len());
     let mut keys = Vec::with_capacity(pages.len());
     for (index, page) in pages.iter().enumerate() {
-        let hash = typst::utils::hash128(page);
-        let key = format!("v1:{hash:032x}");
+        let hash = super::svg_fingerprint::fingerprint(page);
+        let key = format!("v2:{hash:032x}");
         let held = known
             .and_then(|keys| keys.get(index))
             .is_some_and(|held| *held == key);
@@ -97,6 +97,11 @@ mod tests {
             "修改",
             "#set text(size: 18pt)\n大字",
             "#set page(fill: yellow)\n背景",
+            "#rect(width: 40pt, height: 20pt, fill: gradient.linear(red, blue))",
+            "#let pat = tiling(size: (8pt, 8pt), [#circle(radius: 2pt, fill: red)])\n#rect(width: 40pt, height: 20pt, fill: pat)",
+            "#box(width: 40pt, height: 20pt, clip: true)[#rotate(20deg)[#text(stroke: 0.5pt + red)[ABC😀]]]",
+            "#set text(lang: \"ar\")\nمرحبا",
+            "#image(bytes(\"<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20'><rect width='20' height='20' fill='blue'/></svg>\"), format: \"svg\", width: 20pt)",
         ] {
             let src = format!("#set page(width: 300pt, height: 400pt)\n{change} $x^2$\n#pagebreak()\n#table(columns: 2, [甲], [乙])\n#link(\"https://typst.app\")[链接]");
             let world = TypstWorld::new(src, None, &fonts, &FontConfig::default());
@@ -107,6 +112,31 @@ mod tests {
                 assert_eq!(cached_svg(page), expected);
             }
         }
+    }
+
+    #[test]
+    fn old_protocol_keys_force_full_svg_then_current_keys_reuse() {
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        let world = TypstWorld::new(
+            "甲\n#pagebreak()\n乙".into(),
+            None,
+            &fonts,
+            &FontConfig::default(),
+        );
+        let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+        let (full, keys) = incremental_pages(document.pages(), None);
+        let old: Vec<_> = keys
+            .iter()
+            .map(|key| key.replacen("v2:", "v1:", 1))
+            .collect();
+        assert_ne!(old, keys);
+        assert_eq!(incremental_pages(document.pages(), Some(&old)).0, full);
+        assert!(incremental_pages(document.pages(), Some(&keys))
+            .0
+            .iter()
+            .all(Option::is_none));
+        let swapped: Vec<_> = keys.iter().rev().cloned().collect();
+        assert_eq!(incremental_pages(document.pages(), Some(&swapped)).0, full);
     }
 
     #[test]

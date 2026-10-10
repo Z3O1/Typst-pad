@@ -536,18 +536,25 @@ check(
 const beforeResize = await count();
 const widePageWidth = await c.evaluate("window.__pageSvgs()[0].getBoundingClientRect().width");
 await c.send("Emulation.setDeviceMetricsOverride", {
-  width: 760,
+  width: 480,
   height: 640,
   deviceScaleFactor: 1,
   mobile: false,
 });
-await sleep(150);
+await sleep(700); // 重排请求有 250ms 去抖，之后再重编译
 check(
-  "窄窗口只缩放且不重新编译",
-  (await compiledPagesMatch(original)) && (await count()) === beforeResize,
+  "窄窗口按新栏宽重排（页宽是编译期输入 → 会重编译）",
+  (await compiledPagesMatch(original)) && (await count()) > beforeResize,
 );
 const narrowPageWidth = await c.evaluate("window.__pageSvgs()[0].getBoundingClientRect().width");
-check("窗口变窄后页面继续缩小", narrowPageWidth < widePageWidth * 0.8);
+check(
+  "窗口变窄后页面跟着缩窄且不超出栏宽",
+  narrowPageWidth < widePageWidth &&
+    (await c.evaluate(
+      "(() => {const b=document.querySelector('.preview-body'),s=window.__pageSvgs()[0].getBoundingClientRect();return s.width<=b.clientWidth+1})()",
+    )),
+  `纸 ${narrowPageWidth.toFixed(1)}px / 原 ${widePageWidth.toFixed(1)}px`,
+);
 check(
   "页面等比缩放且没有横向溢出",
   await c.evaluate(
@@ -561,11 +568,14 @@ await c.send("Emulation.setDeviceMetricsOverride", {
   mobile: false,
 });
 await sleep(100);
-const pageAt100 = await c.evaluate("window.__pageSvgs()[0].getBoundingClientRect().width");
 await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
-await sleep(100);
-const pageAt110 = await c.evaluate("window.__pageSvgs()[0].getBoundingClientRect().width");
-check("用户缩放继续影响页面内容", pageAt110 > pageAt100 * 1.05);
+await sleep(150);
+check(
+  "缩放不再把页面撑出栏宽，档位进状态栏",
+  (await c.evaluate(
+    "(() => {const b=document.querySelector('.preview-body'),s=window.__pageSvgs()[0].getBoundingClientRect();return b.scrollWidth<=b.clientWidth+1 && s.width<=b.clientWidth+1})()",
+  )) && (await c.evaluate("document.querySelector('.statusbar').textContent.includes('110%')")),
+);
 await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
 await sleep(100);
 await replace(errorRecovered.brokenDoc, errorRecovered.doc);

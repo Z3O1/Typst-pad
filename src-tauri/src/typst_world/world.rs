@@ -81,11 +81,9 @@ pub struct Diagnostic {
 /// 源码缓存用 Mutex 内可变性（World trait 方法只接受 &self）。
 pub struct TypstWorld {
     /// 标准库（typst 0.15 需要 LazyHash 包装以支持增量编译校验）
-    library: LazyHash<Library>,
-    /// 字体元数据
-    book: LazyHash<FontBook>,
-    /// 已加载字体（Font 为引用计数，克隆廉价）
-    fonts: Vec<Font>,
+    library: Arc<LazyHash<Library>>,
+    /// 共享不可变字体元数据与字体集，LazyHash 摘要只计算一次。
+    fonts: SharedFonts,
     /// 项目根目录（主文档所在目录；None = 文档未保存，无法解析相对导入）
     root: Option<PathBuf>,
     /// 主文档 FileId
@@ -109,7 +107,7 @@ impl TypstWorld {
         fonts_dir: &Path,
         font_config: &FontConfig,
     ) -> Self {
-        let (book, fonts) = cached_fonts(fonts_dir, &font_config.dirs);
+        let fonts = cached_fonts(fonts_dir, &font_config.dirs);
         let library = build_library(&font_config.families);
 
         // 项目根 = 文档所在目录（再按文档实际引用到的相对路径往上放宽，见
@@ -135,16 +133,21 @@ impl TypstWorld {
             None => (None, Self::anonymous_main_id()),
         };
 
-        let main_source = Source::new(main_id, src);
+        let main_source = super::source_cache::cached_main_source(src, root.as_deref(), main_id);
         Self {
-            library: LazyHash::new(library),
-            book: LazyHash::new(book),
+            library,
             fonts,
             root,
             main_id,
             main_source,
             sources: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 对照探针绕过增量 AST，其他上下文保持一致。
+    #[cfg(test)]
+    pub(super) fn reset_main_source_for_test(&mut self) {
+        self.main_source = Source::new(self.main_id, self.main_source.text().into());
     }
 
     /// 未保存文档时的虚拟主 FileId（无盘上文件对应，include 会报"需要先保存"）
@@ -219,7 +222,7 @@ impl World for TypstWorld {
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        &self.book
+        &self.fonts.0
     }
 
     fn main(&self) -> FileId {
@@ -240,7 +243,7 @@ impl World for TypstWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        self.fonts.get(index).cloned()
+        self.fonts.1.get(index).cloned()
     }
 
     /// 当前 UTC 日期（`datetime.today()` 用）。本地时区偏移未实现，统一按 UTC 返回，

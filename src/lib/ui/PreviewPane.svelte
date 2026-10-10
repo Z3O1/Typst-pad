@@ -8,6 +8,8 @@
   import type { DocumentPoint } from "$lib/core/document-drag-selection";
   import { createDocumentPages, type DocumentPage } from "./document-pages";
   import { caretScrollDelta, projectDocumentCaret } from "./document-caret";
+  import type { PaperShape } from "$lib/core/preview-scale";
+  import { layoutFormulaPreview } from "$lib/core/formula-preview-layout";
 
   let {
     hidden,
@@ -55,6 +57,7 @@
   let windowFocused = $state(true);
   let selectionPath = $state("");
   let formulaStyle = $state("");
+  let formulaFlipped = $state(false);
   let measureFrame = 0;
   let scrollFrame = 0;
   let pointerStart: {
@@ -78,6 +81,10 @@
   }
   export function pageWidthPt(): number {
     return pages?.widthPt() ?? 0;
+  }
+  /** 文档自己的纸型（最宽那页，pt）：预览重排按它等比缩放页高/页边距；没有产物时为 null */
+  export function pageShape(): PaperShape | null {
+    return pages?.shape() ?? null;
   }
   export function paper(): HTMLElement | undefined {
     return paperEl;
@@ -116,10 +123,12 @@
       if (!editable || hidden || (stale && !composing) || !canvasEl || !paperEl) {
         selectionPath = "";
         formulaStyle = "";
+        formulaFlipped = false;
         return hideCaret();
       }
       const root = canvasEl.getBoundingClientRect();
       formulaStyle = "";
+      formulaFlipped = false;
       if (formulaPreview && formulaAnchor.length && bodyEl && !stale) {
         const pageNumber = caret?.page ?? formulaAnchor[0].page;
         const page = pages?.page(pageNumber);
@@ -128,22 +137,29 @@
           const rect = page.host.getBoundingClientRect(),
             body = bodyEl.getBoundingClientRect();
           const points = quads.flatMap((q) => q.points);
+          const xs = points.map((p) => p[0]);
+          const ys = points.map((p) => p[1]);
           const scale = rect.width / page.box.width;
-          const x =
-            rect.left +
-            ((Math.min(...points.map((p) => p[0])) + Math.max(...points.map((p) => p[0]))) / 2 -
-              page.box.x) *
-              scale;
-          const y = rect.top + (Math.max(...points.map((p) => p[1])) - page.box.y) * scale + 9;
-          const width = Math.max(
-            36,
-            Math.min(formulaPreview.widthPt * scale, bodyEl.clientWidth - 48, 420),
-          );
-          const left = Math.max(
-            body.left + 12,
-            Math.min(x - (width + 24) / 2, body.right - width - 36),
-          );
-          formulaStyle = `left:${left - root.left}px;top:${y - root.top}px;--formula-width:${width}px;--formula-arrow:${Math.max(12, Math.min(width + 12, x - left))}px`;
+          const box = layoutFormulaPreview({
+            widthPt: formulaPreview.widthPt,
+            heightPt: formulaPreview.heightPt,
+            scale,
+            anchor: {
+              left: rect.left + (Math.min(...xs) - page.box.x) * scale,
+              top: rect.top + (Math.min(...ys) - page.box.y) * scale,
+              right: rect.left + (Math.max(...xs) - page.box.x) * scale,
+              bottom: rect.top + (Math.max(...ys) - page.box.y) * scale,
+            },
+            viewport: { left: body.left, top: body.top, right: body.right, bottom: body.bottom },
+          });
+          if (box) {
+            formulaFlipped = box.flipped;
+            formulaStyle =
+              `left:${box.left - root.left}px;top:${box.top - root.top}px;` +
+              `--formula-content-width:${box.contentWidth}px;--formula-content-height:${box.contentHeight}px;` +
+              `--formula-view-width:${box.viewWidth}px;--formula-view-height:${box.viewHeight}px;` +
+              `--formula-arrow:${box.arrowOffset}px`;
+          }
         }
       }
       const measured = new Map<number, { rect: DOMRect; box: DocumentPage["box"] }>();
@@ -196,6 +212,8 @@
   onMount(() => {
     const observer = new ResizeObserver(measureCaret);
     if (paperEl) observer.observe(paperEl);
+    // 自然尺寸纸张不随栏宽变化，但居中位置会变，光标与选区也需要重测。
+    if (bodyEl) observer.observe(bodyEl);
     const onFocus = () => {
       windowFocused = true;
     };
@@ -384,7 +402,13 @@
          失败与进度只在状态栏与错误徽标里体现（见 docs/development/writing-rendering.md）。 -->
     <div class="preview-canvas" bind:this={canvasEl}>
       {#if formulaPreview && formulaStyle && editable && !stale}
-        <div class="formula-preview" role="tooltip" aria-label="公式预览" style={formulaStyle}>
+        <div
+          class="formula-preview"
+          class:flipped={formulaFlipped}
+          role="tooltip"
+          aria-label="公式预览"
+          style={formulaStyle}
+        >
           <div class="formula-preview-content">{@html formulaPreview.svg}</div>
         </div>
       {/if}
@@ -410,33 +434,48 @@
   .formula-preview {
     position: absolute;
     z-index: 12;
-    padding: 10px 12px;
+    padding: 10px;
     background: #111;
     color: white;
-    border-radius: 6px;
-    box-shadow: 0 4px 14px #0004;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    box-shadow: 0 6px 20px #0006;
     user-select: none;
     cursor: text;
+    overflow: hidden;
   }
   .formula-preview::before {
     content: "";
     position: absolute;
-    top: -7px;
+    top: -8px;
     left: var(--formula-arrow);
     transform: translateX(-50%);
-    border-left: 7px solid transparent;
-    border-right: 7px solid transparent;
-    border-bottom: 7px solid #111;
+    border-left: 8px solid transparent;
+    border-right: 8px solid transparent;
+    border-bottom: 8px solid #111;
+  }
+  .formula-preview.flipped::before {
+    display: none;
+  }
+  .formula-preview.flipped::after {
+    content: "";
+    position: absolute;
+    bottom: -8px;
+    left: var(--formula-arrow);
+    transform: translateX(-50%);
+    border-left: 8px solid transparent;
+    border-right: 8px solid transparent;
+    border-top: 8px solid #111;
   }
   .formula-preview-content {
-    width: var(--formula-width);
-    max-height: 260px;
+    width: var(--formula-view-width);
+    height: var(--formula-view-height);
     overflow: auto;
   }
   .formula-preview-content :global(svg) {
     display: block;
-    width: 100%;
-    height: auto;
+    width: var(--formula-content-width);
+    height: var(--formula-content-height);
   }
   /* 页面那条 `* { box-sizing: border-box }` 因 Svelte 作用域命中不了子组件（见 07 分册），
      搬出来的组件要自己声明 —— `.preview-pane` / `.preview-paper` 都是 `width:100%`，缺了这条

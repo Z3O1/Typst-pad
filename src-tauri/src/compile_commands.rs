@@ -25,6 +25,14 @@ impl CompileState {
     }
 }
 
+/// 与 Typst CLI watch 一致，任务结束后清理超过 10 轮未命中的 comemo 历史。
+/// 返回产物自己持有数据；清理不作废 SVG 或交互几何，也不改变显式导出。
+pub(crate) fn with_compiler_cache<T>(job: impl FnOnce() -> T) -> T {
+    let output = job();
+    typst::comemo::evict(10);
+    output
+}
+
 /// 编译通道：克隆锁与字体目录 → 构造 `FontConfig` → 在 `spawn_blocking` 里**持锁**跑 `job`。
 ///
 /// 五个命令（`compile_doc` / `compile_blocks` / `compile_math` / `export_pdf` /
@@ -50,7 +58,7 @@ where
     let fonts = crate::typst_world::FontConfig::new(font_families, font_dirs);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        job(&fonts_dir, &fonts)
+        with_compiler_cache(|| job(&fonts_dir, &fonts))
     })
     .await
     .map_err(|_| ())
@@ -58,6 +66,8 @@ where
 
 /// 编译文档为每页 SVG（compile_doc）：src 为主文档源码，document_path 为磁盘路径
 /// （None = 未保存，相对导入会报"需要先保存文档"）。
+/// `preview_page` 为 `Some` 时按该几何**重新排版预览**（纸张跟着预览栏走、不出现横向滚动条，
+/// 见 `typst_world::PreviewPage`）；几何由前端算（`src/lib/core/preview-scale.ts`）。
 /// 成功携带 pages/pageKeys，已持有同位置指纹的页为 null；无 knownPages 时全量返回。
 /// 失败返回 diagnostics，成功且带警告时附加 warnings。
 /// 编译在 spawn_blocking 中执行（不阻塞 UI），内部互斥锁串行化。
@@ -70,9 +80,17 @@ pub async fn compile_doc(
     font_families: Option<Vec<String>>,
     font_dirs: Option<Vec<String>>,
     known_pages: Option<Vec<String>>,
+    preview_page: Option<crate::typst_world::PreviewPage>,
 ) -> Result<crate::typst_world::CompileOutput<Option<String>>, String> {
     let out = in_compile_channel(&state, font_families, font_dirs, move |fonts_dir, fonts| {
-        crate::typst_world::compile_incremental(src, document_path, fonts_dir, fonts, known_pages)
+        crate::typst_world::compile_incremental_with_preview(
+            src,
+            document_path,
+            fonts_dir,
+            fonts,
+            known_pages,
+            preview_page,
+        )
     })
     .await
     .unwrap_or_else(|()| crate::typst_world::CompileOutput::internal_error("编译任务异常终止"));

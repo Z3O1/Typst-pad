@@ -1,0 +1,156 @@
+// 浮动公式预览的纯布局模型：输入锚点/视口/公式物理尺寸，输出卡片尺寸、位置、箭头与滚动。
+// 不碰 DOM，与 preview-scale 一样用纯函数计算，便于单测覆盖长行、高矩阵、贴边与窄栏场景。
+//
+// 原则（对应 docs/development/writing-rendering.md 的浮动预览契约）：
+// - 短公式按页面缩放的物理尺寸展示，不无谓拉满；
+// - 长/高公式先缩到可见区（保持比例、仍可读），再超出可读下限时只在卡片内滚动；
+// - 卡片整体不越出预览可见区、不撑出横向滚动条；
+// - 优先放锚点下方，放不下翻到上方；箭头始终指回源码锚点。
+
+/** 卡片内边距（px）：水平与垂直一致 */
+export const FORMULA_PREVIEW_PADDING = 10;
+/** 箭头高度（px）：卡片高度含这段箭头 */
+export const FORMULA_PREVIEW_ARROW = 8;
+/** 卡片距预览可见区边缘的最小留白（px） */
+export const FORMULA_PREVIEW_EDGE_MARGIN = 12;
+/** 锚点（源码范围）与卡片之间的空隙（px） */
+export const FORMULA_PREVIEW_GAP = 9;
+/** 相对页面缩放的最小可读比例：低于它就不再缩小，改为卡片内横向滚动 */
+export const FORMULA_PREVIEW_MIN_READABLE = 0.6;
+/** 卡片内容区最小宽度（px）：窄公式不塌成一根线 */
+export const FORMULA_PREVIEW_MIN_CONTENT_WIDTH = 36;
+
+/** 矩形（任意一致坐标系） */
+export interface FormulaPreviewRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface FormulaPreviewLayoutInput {
+  /** 公式物理宽度（pt），来自 Rust FormulaPreview */
+  widthPt: number;
+  /** 公式物理高度（pt） */
+  heightPt: number;
+  /** 页面显示缩放（px/pt）：页面 host 矩形宽度 / 页面 box 宽度 */
+  scale: number;
+  /** 源码锚点包围盒（与 viewport 同一坐标系） */
+  anchor: FormulaPreviewRect;
+  /** 预览可见区（与 anchor 同一坐标系） */
+  viewport: FormulaPreviewRect;
+}
+
+export interface FormulaPreviewLayout {
+  /** 卡片整体 left（与输入坐标系一致） */
+  left: number;
+  /** 卡片整体 top */
+  top: number;
+  /** 卡片整体宽度（含内边距） */
+  width: number;
+  /** 卡片整体高度（含内边距与箭头） */
+  height: number;
+  /** 内容（SVG）渲染宽度：保持公式比例，可能大于可见窗口 */
+  contentWidth: number;
+  /** 内容（SVG）渲染高度 */
+  contentHeight: number;
+  /** 内容可见窗口宽度（滚动容器尺寸） */
+  viewWidth: number;
+  /** 内容可见窗口高度 */
+  viewHeight: number;
+  /** 箭头相对卡片左边界的偏移（px） */
+  arrowOffset: number;
+  /** 卡片是否翻到锚点上方（箭头在底部指向下方） */
+  flipped: boolean;
+  /** 内容宽度是否超出可见窗口（需要卡片内横向滚动） */
+  scrollX: boolean;
+  /** 内容高度是否超出可见窗口（需要卡片内纵向滚动） */
+  scrollY: boolean;
+}
+
+/**
+ * 计算浮动公式预览卡片布局。输入非法（非正物理尺寸/缩放/视口）返回 null，调用方跳过绘制。
+ */
+export function layoutFormulaPreview(
+  input: FormulaPreviewLayoutInput,
+): FormulaPreviewLayout | null {
+  const { widthPt, heightPt, scale, anchor, viewport } = input;
+  if (![widthPt, heightPt, scale].every((v) => Number.isFinite(v) && v > 0)) return null;
+  const viewportWidth = viewport.right - viewport.left;
+  const viewportHeight = viewport.bottom - viewport.top;
+  if (!(viewportWidth > 0) || !(viewportHeight > 0)) return null;
+
+  const naturalW = widthPt * scale;
+  const naturalH = heightPt * scale;
+  const availW = Math.max(
+    FORMULA_PREVIEW_MIN_CONTENT_WIDTH,
+    viewportWidth - 2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING),
+  );
+  const availH =
+    viewportHeight -
+    2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING) -
+    FORMULA_PREVIEW_ARROW;
+  if (availW <= 0 || availH <= 0) return null;
+
+  // 宽度：自然尺寸 → 缩到可见区（仍可读）→ 保住可读下限并横向滚动。
+  const minReadableW = naturalW * FORMULA_PREVIEW_MIN_READABLE;
+  let contentWidth = naturalW;
+  let scrollX = false;
+  if (naturalW > availW) {
+    if (availW >= minReadableW) {
+      contentWidth = availW;
+    } else {
+      contentWidth = minReadableW;
+      scrollX = true;
+    }
+  }
+  const contentHeight = contentWidth * (heightPt / widthPt);
+  const viewWidth = Math.min(contentWidth, availW);
+  const viewHeight = Math.min(contentHeight, availH);
+  const scrollY = contentHeight > availH;
+
+  const width = viewWidth + 2 * FORMULA_PREVIEW_PADDING;
+  const height = viewHeight + 2 * FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_ARROW;
+
+  // 水平：卡片中心默认对齐锚点中心；贴边时整卡平移，箭头仍指回锚点。
+  const anchorCenterX = (anchor.left + anchor.right) / 2;
+  const minLeft = viewport.left + FORMULA_PREVIEW_EDGE_MARGIN;
+  const maxLeft = viewport.left + viewportWidth - FORMULA_PREVIEW_EDGE_MARGIN - width;
+  const left = Math.max(minLeft, Math.min(anchorCenterX - width / 2, maxLeft));
+  const arrowOffset = Math.max(
+    FORMULA_PREVIEW_MIN_CONTENT_WIDTH / 2,
+    Math.min(anchorCenterX - left, width - FORMULA_PREVIEW_MIN_CONTENT_WIDTH / 2),
+  );
+
+  // 垂直：优先锚点下方；放不下翻到上方；上下都放不下时贴下方并夹在可见区内。
+  const minTop = viewport.top + FORMULA_PREVIEW_EDGE_MARGIN;
+  const maxTop = viewport.top + viewportHeight - FORMULA_PREVIEW_EDGE_MARGIN - height;
+  const belowTop = anchor.bottom + FORMULA_PREVIEW_GAP;
+  const aboveTop = anchor.top - FORMULA_PREVIEW_GAP - height;
+  let top: number;
+  let flipped = false;
+  if (belowTop + height <= viewport.top + viewportHeight - FORMULA_PREVIEW_EDGE_MARGIN) {
+    top = belowTop;
+  } else if (aboveTop >= minTop) {
+    top = aboveTop;
+    flipped = true;
+  } else {
+    top = Math.max(minTop, Math.min(belowTop, maxTop));
+    flipped = top + height / 2 < (anchor.top + anchor.bottom) / 2;
+  }
+
+  return {
+    left,
+    top,
+    width,
+    height,
+    contentWidth,
+    contentHeight,
+    viewWidth,
+    viewHeight,
+    arrowOffset,
+    flipped,
+    scrollX,
+    scrollY,
+  };
+}

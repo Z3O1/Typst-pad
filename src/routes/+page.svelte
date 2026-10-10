@@ -127,7 +127,15 @@
   import { copyPlainText } from "$lib/core/clipboard";
   import { mark, reportStartup } from "$lib/core/startup-timing";
   import { dbg, setCliDebug } from "$lib/core/debug";
-  import { previewCanvasWidth } from "$lib/core/preview-scale";
+  import {
+    isReflowApplied,
+    paperShapeFromPages,
+    previewCanvasWidth,
+    previewPage,
+    reflowCanvasWidth,
+    type PaperShape,
+    type PreviewPage,
+  } from "$lib/core/preview-scale";
   import {
     checkForUpdate,
     downloadAndInstallUpdate,
@@ -244,10 +252,26 @@
     updatePages(pages: string[]): void;
     clearPages(): void;
     pageWidthPt(): number;
+    pageShape(): PaperShape | null;
     revealCaret(caret: DocumentCaret): void;
   } | null>(null);
   let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
   let previewScaleFrame = 0; // 已排队的重算帧号（见 onMount 里的 ResizeObserver）
+  /**
+   * 预览重排（纸张跟着预览栏走）：栏宽是**编译期输入**（Rust 侧注入 `#set page(...)`），
+   * 所以栏宽一变就要重编译 —— 见 `schedulePreviewReflow`。
+   * - `previewPageRequest`：当前想要的重排几何（null = 不重排，走等比缩放）；
+   * - `previewPageUsed`：**已经落地的那次编译**用的是哪份几何（复核产物页宽要看它）；
+   * - `paperShape`：文档**自己的**纸型（从没注入那次编译的产物学来），重排按它等比缩放
+   *   页高/页边距、也只允许缩窄到它以内。不能用当前产物的纸型当基准：重排后的产物就是
+   *   被改窄过的，拿它当基准会在"要重排"与"不用重排"之间来回跳、无限重编译。
+   */
+  let previewPageRequest = $state.raw<PreviewPage | null>(null);
+  let previewPageUsed: PreviewPage | null = null;
+  let paperShape: PaperShape | null = null;
+  // 自然纸型只属于已通过过期检查的源码/前缀上下文；栏宽和展开态不使它失效。
+  let paperShapeInput: string | null = null;
+  let previewReflowTimer: ReturnType<typeof setTimeout> | undefined;
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
   let persistTimer: ReturnType<typeof setTimeout> | undefined;
@@ -376,7 +400,9 @@
 
   const documentHasEmptyParagraphs = $derived(hasEmptyParagraphs(doc));
   // 按输入变化生成一次指纹，而不是在滚动/选区查询里反复序列化全文。
-  const inputFingerprint = $derived(
+  // 预览重排的页宽也是编译输入（Rust 侧据此注入），不进指纹就会出现"栏宽变了、在途结果
+  // 却被当成同一份输入"的漏网。
+  const naturalPaperInput = $derived(
     JSON.stringify([
       documentSession,
       documentRevision,
@@ -385,8 +411,14 @@
       prefixCode,
       filePath,
       fontArgs(),
+    ]),
+  );
+  const inputFingerprint = $derived(
+    JSON.stringify([
+      naturalPaperInput,
       viewMode === "write" ? sourceRange : null,
       viewMode === "write" && documentHasEmptyParagraphs,
+      previewPageRequest,
     ]),
   );
   function currentInput(): string {
@@ -849,8 +881,11 @@
   }
 
   // 缩放变化同时更新预览画布与 webview；ResizeObserver 会在引擎完成缩放后再校正一次。
+  // 界面缩放会改预览栏的 CSS 宽度 → 重排的页宽也跟着变，所以这里要重新排一次
+  //（桩里假缩放不改布局，只靠 ResizeObserver 会漏）。
   $effect(() => {
     applyPreviewScale();
+    schedulePreviewReflow();
     void zoom.apply(uiZoom);
   });
 
@@ -884,6 +919,7 @@
     statusText = viewMode === "write" ? "文档模式" : "源代码模式";
     void tick().then(() => {
       applyPreviewScale();
+      schedulePreviewReflow(); // 分栏宽度变了 → 重排的页宽跟着变
       if (viewMode === "source") editorRef?.focus();
       else {
         void updateDocumentCaret(cursorLine, cursorCol);
@@ -1250,6 +1286,12 @@
     previewPaneRef?.clearPages();
     formulaPreview = null;
     formulaAnchor = [];
+    // 换文档/清空：纸型要重新学（新文档可能是 A5/横向），重排请求跟着作废
+    paperShape = null;
+    paperShapeInput = null;
+    previewPageRequest = null;
+    previewPageUsed = null;
+    clearTimeout(previewReflowTimer);
   }
 
   function fontArgs() {
@@ -1392,23 +1434,80 @@
     showSettings = false;
   }
 
+  /**
+   * 把画布宽度落到预览栏（各页 SVG 是 `width:100%`，跟着宿主宽度一起缩放）。
+   *
+   * 两条路径，**都保证画布 ≤ 栏宽**（这是"预览永不出现横向滚动条"的唯一依仗）：
+   * - 重排生效（产物页宽 = 请求页宽）：画布按 1:1 铺满栏宽，字号恒等于编辑区字号；
+   * - 重排不适用/被文档自己的纸型覆盖：等比缩放，字号不超过编辑区、页宽不超过栏宽。
+   * 测量失败（无产物 / 容器不可测）时清空内联宽度，回退 CSS `width: 100%`。
+   */
   function applyPreviewScale() {
     const body = previewPaneRef?.body();
     const paper = previewPaneRef?.paper();
     if (!body || !paper) return;
-    const actualPageWidthPt = previewPaneRef?.pageWidthPt() ?? 0;
-    if (actualPageWidthPt <= 0) {
-      paper.style.width = "";
-      return;
-    }
     const containerWidth = body.clientWidth;
-    const displayWidth = previewCanvasWidth({
-      containerWidth,
-      pageWidthPt: actualPageWidthPt,
-      uiZoom,
-    });
+    const actualPageWidthPt = previewPaneRef?.pageWidthPt() ?? 0;
+    const used = previewPageUsed;
+    const displayWidth =
+      used && isReflowApplied(actualPageWidthPt, used.widthPt)
+        ? reflowCanvasWidth(containerWidth, actualPageWidthPt)
+        : previewCanvasWidth({ containerWidth, pageWidthPt: actualPageWidthPt });
     const width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
     if (paper.style.width !== width) paper.style.width = width;
+  }
+
+  /** 预览重排的去抖时长（毫秒）：拖窗口会连着触发几十次，页宽是编译期输入，不能每次都重编译 */
+  const PREVIEW_REFLOW_DELAY_MS = 250;
+  /** 页宽变化阈值（pt）：小于它的抖动不值得重编译（像素级变化看不出来） */
+  const PREVIEW_REFLOW_MIN_DELTA_PT = 2;
+
+  /** 重排请求是否有实质变化（页宽差 > 阈值；有/无重排也算变化） */
+  function reflowChanged(next: PreviewPage | null, current: PreviewPage | null): boolean {
+    if (next === null || current === null) return (next === null) !== (current === null);
+    return (
+      Math.abs(next.widthPt - current.widthPt) > PREVIEW_REFLOW_MIN_DELTA_PT ||
+      Math.abs(next.heightPt - current.heightPt) > PREVIEW_REFLOW_MIN_DELTA_PT ||
+      Math.abs(next.marginPt - current.marginPt) > PREVIEW_REFLOW_MIN_DELTA_PT
+    );
+  }
+
+  /**
+   * 栏宽 / 界面缩放变化 → 去抖后按新栏宽重算重排几何；变了就**重编译**（页宽是编译期输入）。
+   *
+   * 还没学到文档纸型时（刚启动/刚换文档）先不重排：`paperShape` 要靠"没注入那次编译"的
+   * 产物学来，拿不到它就无法按文档自己的纸型等比缩放，也不知道该不该缩窄（见其声明处）。
+   * 预览栏不可测（隐藏 / 宽度 0）时不请求 —— 那时也没有横向滚动条的问题。
+   */
+  function schedulePreviewReflow() {
+    clearTimeout(previewReflowTimer);
+    previewReflowTimer = setTimeout(() => {
+      const body = previewPaneRef?.body();
+      if (!body || body.clientWidth <= 0 || !paperShape || paperShapeInput !== naturalPaperInput)
+        return;
+      const next = previewPage(body.clientWidth, paperShape);
+      if (!reflowChanged(next, previewPageRequest)) return;
+      previewPageRequest = next;
+      dbg.log("preview-reflow", next ? `页宽 ${next.widthPt.toFixed(1)}pt` : "关闭（不重排）");
+      void compileNow("preview-reflow");
+    }, PREVIEW_REFLOW_DELAY_MS);
+  }
+
+  /** 只消费同一当前输入的无注入原文成功页；展示的raw/展开/回退页不能成为自然基准。 */
+  function learnPaperShape(input: string, pages: string[]): void {
+    const shape = paperShapeFromPages(pages);
+    if (!shape || shape.widthPt <= 0 || shape.heightPt <= 0) return;
+    const inputChanged = paperShapeInput !== input;
+    paperShapeInput = input;
+    if (
+      !inputChanged &&
+      paperShape &&
+      paperShape.widthPt === shape.widthPt &&
+      paperShape.heightPt === shape.heightPt
+    )
+      return;
+    paperShape = shape;
+    schedulePreviewReflow();
   }
 
   /**
@@ -1432,6 +1531,13 @@
 
   async function runCompile() {
     if (compileSeq === 0) mark("compile-request");
+    const paperInput = naturalPaperInput;
+    const needsNaturalPaper = paperShapeInput !== paperInput;
+    if (needsNaturalPaper) {
+      // 保留旧基准但不绑定新上下文；本轮无注入，原文成功前不学习或请求重排。
+      clearTimeout(previewReflowTimer);
+      previewPageRequest = null;
+    }
     const mySeq = ++compileSeq;
     const input = currentInput();
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
@@ -1442,12 +1548,13 @@
     // 基准只来自已经落地的本会话产物；在途和回退中的临时产物不能成为引用来源。
     const previous = renderedPages;
     const editing = errorEditRange;
+    const previewPageRequested = previewPageRequest;
     const isCurrent = () =>
       mySeq === compileSeq &&
       input === currentInput() &&
       mode === viewMode &&
       editing === errorEditRange;
-    const { result, projection, failure, errorRanges, editingRange, deferred } =
+    const { result, originalResult, projection, failure, errorRanges, editingRange, deferred } =
       await compileDocumentWithFallback({
         source,
         prefixLength,
@@ -1463,7 +1570,10 @@
         emptyParagraphs: mode === "write",
         styleExpansion: mode === "write",
         previewExpansion: mode === "write",
-        compile: (src) => compileToSvg(src, path, fonts, previous),
+        compile: (src) => compileToSvg(src, path, fonts, previous, previewPageRequested),
+        measureOriginal: needsNaturalPaper
+          ? (src) => compileToSvg(src, path, fonts, previous, null)
+          : undefined,
         isCurrent,
         canRetry: () => {
           if (!writeScheduler.stats().composing) return true;
@@ -1478,8 +1588,11 @@
     }
     // 文本、会话、字体和前缀在等待期间变化时，迟到的成功与失败均不能落地。
     if (!isCurrent() || deferred) return;
+    if (needsNaturalPaper && previewPageRequested === null && originalResult?.ok)
+      learnPaperShape(paperInput, originalResult.pages);
     if (result.ok) {
       if (!previewPaneRef?.paper()) return;
+      previewPageUsed = previewPageRequested;
       previewPaneRef.updatePages(result.pages);
       formulaPreview = result.formulaPreview ?? null;
       renderedPages = result;
@@ -1829,6 +1942,7 @@
       previewScaleFrame = requestAnimationFrame(() => {
         previewScaleFrame = 0;
         applyPreviewScale();
+        schedulePreviewReflow();
       });
     });
     const previewBody = previewPaneRef?.body();
@@ -1896,6 +2010,7 @@
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
       previewResizeObserver?.disconnect();
+      clearTimeout(previewReflowTimer);
       if (previewScaleFrame !== 0) cancelAnimationFrame(previewScaleFrame);
       unlisteners.forEach((un) => un());
       clearTimeout(persistTimer);

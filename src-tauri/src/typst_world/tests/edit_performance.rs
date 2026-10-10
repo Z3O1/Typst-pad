@@ -21,6 +21,7 @@ fn document_edit_performance() {
         .parse()
         .unwrap();
     assert!(rounds >= 7, "至少覆盖输入、删除、段落与撤销");
+    let variety = std::env::var_os("PERF_VARIETY").is_some();
     for path in std::env::split_paths(&files) {
         let path = fs::canonicalize(path).unwrap();
         let bytes = fs::read(&path).unwrap();
@@ -50,6 +51,11 @@ fn document_edit_performance() {
                 6 => {
                     source = original.clone();
                     "undo"
+                }
+                _ if variety => {
+                    source = original.clone();
+                    source.insert_str(anchor, &format!("测试{round}"));
+                    "unique"
                 }
                 _ if round % 2 == 1 => {
                     source.insert(anchor, '测');
@@ -98,8 +104,12 @@ fn document_edit_performance() {
             let id = crate::document_geometry::store(items, source.len(), stats.foreign_ink);
             let store_ms = start.elapsed().as_secs_f64() * 1000.0;
             assert_ne!(id, 0);
-            let total_ms = world_ms + compile_ms + geometry_ms + svg_ms + json_ms + store_ms;
-            println!("EDITPERF file={} round={round} edit={edit} pages={} world_ms={world_ms:.2} compile_ms={compile_ms:.2} geometry_ms={geometry_ms:.2} svg_ms={svg_ms:.2} json_ms={json_ms:.2} store_ms={store_ms:.2} total_ms={total_ms:.2} sent_pages={sent} payload_bytes={} warnings={warnings}", path.display(), document.pages().len(), json.len());
+            let start = Instant::now();
+            crate::compile_commands::with_compiler_cache(|| ());
+            let eviction_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let total_ms =
+                world_ms + compile_ms + geometry_ms + svg_ms + json_ms + store_ms + eviction_ms;
+            println!("EDITPERF file={} round={round} edit={edit} pages={} world_ms={world_ms:.2} compile_ms={compile_ms:.2} geometry_ms={geometry_ms:.2} svg_ms={svg_ms:.2} json_ms={json_ms:.2} store_ms={store_ms:.2} eviction_ms={eviction_ms:.2} total_ms={total_ms:.2} sent_pages={sent} payload_bytes={} warnings={warnings}", path.display(), document.pages().len(), json.len());
             let changed = restored
                 .iter()
                 .enumerate()
@@ -108,6 +118,19 @@ fn document_edit_performance() {
             println!(
                 "EDITVISUAL file={} round={round} sent_pages={sent} changed_pages={changed}",
                 path.display()
+            );
+            let rss = fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status.lines().find_map(|line| {
+                        line.strip_prefix("VmRSS:").and_then(|value| {
+                            value.split_whitespace().next()?.parse::<usize>().ok()
+                        })
+                    })
+                });
+            println!(
+                "EDITMEM round={round} rss_kib={}",
+                rss.map_or_else(|| "na".into(), |value| value.to_string())
             );
             known = Some(keys);
             held = restored;
@@ -145,7 +168,11 @@ fn world_component_performance() {
             let _root = resolve_project_root(&src, &path.to_string_lossy());
             let root_ms = start.elapsed().as_secs_f64() * 1000.0;
             let start = Instant::now();
-            let _source = Source::new(_warm.main(), src.clone());
+            let _source = super::super::source_cache::cached_main_source(
+                src.clone(),
+                path.parent(),
+                _warm.main(),
+            );
             let source_ms = start.elapsed().as_secs_f64() * 1000.0;
             println!("WORLDPERF file={} round={round} fonts_ms={font_ms:.2} library_ms={library_ms:.2} root_ms={root_ms:.2} source_ms={source_ms:.2}", path.display());
         }

@@ -303,6 +303,122 @@ describe("文档模式编译错误源码回退", () => {
     expect(output.editingRange).toEqual(editing);
   });
 
+  it("整正文raw展示不覆盖可复用的原文成功产物", async () => {
+    const source = "#set page(width: 480pt, height: 960pt, margin: 20pt)\n正文";
+    const original: CompileResult = {
+      ok: true,
+      pages: ['<svg viewBox="0 0 480 960"/>'],
+      pageCount: 1,
+    };
+    const visible: CompileResult = {
+      ok: true,
+      pages: ['<svg viewBox="0 0 595.28 841.89"/>'],
+      pageCount: 1,
+    };
+    const compile = vi.fn().mockResolvedValueOnce(original).mockResolvedValueOnce(visible);
+    const measureOriginal = vi.fn().mockResolvedValue(original);
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      editing: { from: 0, to: source.length },
+      compile,
+      measureOriginal,
+    });
+    expect(output.result).toBe(visible);
+    expect(output.originalResult).toBe(original);
+    expect(output.projection.source).toBe("```\n" + source + "\n```");
+    expect(measureOriginal).not.toHaveBeenCalled();
+    expect(compile).toHaveBeenCalledTimes(2);
+  });
+
+  it("原文失败、回退成功时只携带原文失败，绝不把raw作为自然成功", async () => {
+    const source = "#missing()";
+    const failed = fail(source, ["missing"]);
+    const compile = vi.fn().mockResolvedValueOnce(failed).mockResolvedValueOnce(ok);
+    const measureOriginal = vi.fn().mockResolvedValue(ok);
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      compile,
+      measureOriginal,
+    });
+    expect(output.result.ok).toBe(true);
+    expect(output.originalResult?.ok).toBe(false);
+    expect(output.failure?.errors).toHaveLength(1);
+    expect(measureOriginal).not.toHaveBeenCalled();
+  });
+
+  it("从展开投影开始时至多测量一次未投影原文，不替换展示或掩盖原文失败", async () => {
+    const source = "正文 #missing()";
+    const failed = fail(source, ["missing"]);
+    const compile = vi.fn().mockResolvedValue(ok);
+    const measureOriginal = vi.fn().mockResolvedValue(failed);
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      reveal: { from: 0, to: source.length },
+      compile,
+      measureOriginal,
+    });
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(measureOriginal).toHaveBeenCalledExactlyOnceWith(source);
+    expect(output.result).toBe(ok);
+    expect(output.originalResult).toBe(failed);
+    expect(output.failure).toBeNull();
+  });
+
+  it("展开投影的自然测量成功单独返回原文页，不猜投影中的页面规则", async () => {
+    const source = "前文\n#set page(width: 480pt, height: 960pt)\n正文";
+    const original: CompileResult = {
+      ok: true,
+      pages: ['<svg viewBox="0 0 480 960"/>'],
+      pageCount: 1,
+    };
+    const compile = vi.fn().mockResolvedValue(ok);
+    const measureOriginal = vi.fn().mockResolvedValue(original);
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      reveal: { from: 0, to: source.length },
+      compile,
+      measureOriginal,
+    });
+    expect(output.result).toBe(ok);
+    expect(output.originalResult).toBe(original);
+    expect(measureOriginal).toHaveBeenCalledExactlyOnceWith(source);
+  });
+
+  it("过期自然测量不可返回为当前基准，合成期间不启动额外测量", async () => {
+    const source = "正文 $x$";
+    let current = true;
+    let finish!: (result: CompileResult) => void;
+    const measureOriginal = vi.fn(
+      () =>
+        new Promise<CompileResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const compile = vi.fn().mockResolvedValue(ok);
+    const request = compileDocumentWithFallback({
+      ...options(source),
+      reveal: { from: 0, to: source.length },
+      compile,
+      measureOriginal,
+      isCurrent: () => current,
+    });
+    await vi.waitFor(() => expect(measureOriginal).toHaveBeenCalledTimes(1));
+    current = false;
+    finish(ok);
+    expect((await request).originalResult).toBeNull();
+    expect(compile).not.toHaveBeenCalled();
+    const paused = await compileDocumentWithFallback({
+      ...options(source),
+      reveal: { from: 0, to: source.length },
+      compile: vi.fn().mockResolvedValue(ok),
+      measureOriginal,
+      canRetry: () => false,
+    });
+    expect(paused.deferred).toBe(true);
+    expect(paused.originalResult).toBeNull();
+    expect(measureOriginal).toHaveBeenCalledTimes(1);
+  });
+
   it("保留源码本身不能排版时，仍使用有效原文且不展示投影专属错误", async () => {
     const source = "#let x = 1\n#x";
     const editing = { from: 0, to: source.indexOf("\n") };

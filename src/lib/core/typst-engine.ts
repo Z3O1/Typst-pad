@@ -5,10 +5,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { savePdfDialog } from "./file-ops";
 import { pdfFileName } from "./pdf-export";
 import { dbg } from "./debug";
+import type { PreviewPage } from "./preview-scale";
 
 // ---------------------------------------------------------------------------
 // 接口契约（Rust 侧实现，见 T1 任务契约）：
-// invoke("compile_doc", { src, documentPath }) → CompileOutput
+// invoke("compile_doc", { src, documentPath, previewPage }) → CompileOutput
 // invoke("export_pdf", { src, documentPath, targetPath }) → { ok, error? }
 //
 // documentPath 语义（T1 联调确认）：已保存文档 → 绝对路径（Rust 以其所在目录为
@@ -187,19 +188,24 @@ export function formatDiagnostic(d: Diagnostic): string {
  * 编译 Typst 源码为 SVG 预览。失败返回错误结果对象（调用方保留上次成功预览），
  * 不抛异常；invoke/IPC 异常也收敛为错误结果（errors 为空，error 带原始消息）。
  *
- * 页面设置只来自文档与编译前缀；显示容器的宽度不进入编译输入。
+ * `previewPage` 为**预览重排**的页面几何（pt，见 `core/preview-scale.ts`）：给了就让 Rust
+ * 把预览的纸张换成它，正文重新排版、字号不变（换来"永不横向滚动条 + 字号与代码一致"，
+ * 代价是预览的分页不再等于导出 PDF —— 用户明确接受）。**它只影响预览**：保存、导出 PDF
+ * 都编译原文。没给（或注入被文档自己的纸型覆盖）时走等比缩放。
  */
 export async function compileToSvg(
   source: string,
   documentPath: string | null,
   fonts?: FontConfigArgs,
   previous?: CompileOk | null,
+  previewPage?: PreviewPage | null,
 ): Promise<CompileResult> {
   try {
     const out = await invoke<CompileOutput>("compile_doc", {
       src: source,
       documentPath,
       knownPages: previous?.pageKeys ?? null,
+      previewPage: previewPage ?? null,
       ...fontArgs(fonts),
     });
     if (out.ok) {

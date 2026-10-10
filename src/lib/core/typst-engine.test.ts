@@ -111,10 +111,18 @@ describe("compileToSvg（invoke 已 mock）", () => {
       src: "#let x = 1",
       documentPath: SAVED_DOC_PATH,
       knownPages: null,
-      // 预览页宽（预览重排）缺省为 null = 不重排（导出 PDF 走 export_pdf，不受它影响）
+      // 预览重排几何：缺省 null = 不重排（导出 PDF 走 export_pdf，不受它影响）
+      previewPage: null,
       fontFamilies: null,
       fontDirs: null,
     });
+  });
+
+  it("预览重排：给的页面几何原样传给 compile_doc", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ok: true, pages: ["<svg>p1</svg>"] });
+    const page = { widthPt: 400, heightPt: 565.7, marginPt: 47.6 };
+    await compileToSvg("x", null, undefined, null, page);
+    expect(vi.mocked(invoke).mock.calls[0][1]).toMatchObject({ previewPage: page });
   });
 
   it("增量响应还原完整页面，按同位置指纹复用，几何与警告仍更新", async () => {
@@ -182,6 +190,7 @@ describe("compileToSvg（invoke 已 mock）", () => {
       src: "x",
       documentPath: null,
       knownPages: null,
+      previewPage: null,
       fontFamilies: null,
       fontDirs: null,
     });

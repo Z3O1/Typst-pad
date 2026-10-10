@@ -16,7 +16,7 @@
   import { createEditorKeymap } from "./editor-keymap";
   import { observeEditorComposition } from "./editor-composition";
   import type { SourceCursorChange } from "$lib/core/document-source-expansion";
-  import { planDollarInput } from "./auto-pair";
+  import { dollarAutoPair } from "./dollar-auto-pair";
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation } from "../core/typst-engine";
@@ -108,31 +108,6 @@
     provide: (field) => EditorView.decorations.from(field),
   });
 
-  /**
-   * 输入 `$` 时自动补出配对的定界符（用户要求「加入功能：自动补全 $$」，判定见 auto-pair.ts）：
-   * 独占一行 → `$  $`（行间公式脚手架，光标在中间）；行内 → `$$`；右侧已有闭合 `$` → 只把光标
-   * 移过去。**只在"当前是空选区 + 输入内容恰好是 `$`"时介入**，其它一律返回 false 交给 CodeMirror
-   * 默认行为（不碰粘贴、不碰 IME 组字、不碰选中替换）。
-   *
-   * 异常兜底：任何抛错都返回 false 退回默认输入 —— 输入链路绝不能因为配对逻辑而吞掉按键
-   * 输入扩展异常不能阻止默认输入。
-   */
-  const dollarAutoPair = EditorView.inputHandler.of((target, from, to, text) => {
-    if (text !== "$" || from !== to) return false;
-    try {
-      const plan = planDollarInput(target.state.doc.toString(), from);
-      if (plan.kind === "none") return false;
-      target.dispatch({
-        changes: plan.kind === "insert" ? { from, to, insert: plan.text } : undefined,
-        selection: { anchor: from + plan.caret },
-      });
-      return true;
-    } catch (err) {
-      dbg.log("editor", "$ 自动配对失败，退回默认输入", err);
-      return false;
-    }
-  });
-
   function buildExtensions() {
     return [
       basicSetup,
@@ -147,7 +122,7 @@
       indentUnit.of(INDENT_UNIT),
       typst_lezer(),
       typstHeadingHighlight, // 压掉默认高亮给标题加的下划线（见 typst-highlight.ts 的根因注释）
-      dollarAutoPair, // `$` 自动配对（空选区输入 `$` 时补出定界符）
+      dollarAutoPair, // `$` 配对、选区包裹和闭合符跳过；支持多光标，粘贴/IME 不介入
       themeCompartment.of(theme === "dark" ? oneDark : []),
       diagnosticsCompartment.of(diagnosticsExtensions()),
       wrapCompartment.of(wrap ? EditorView.lineWrapping : []),

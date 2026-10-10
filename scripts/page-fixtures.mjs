@@ -49,11 +49,18 @@ const expansionFixtures = result.stdout
   .filter((line) => line.startsWith("EXPANSIONFIXTURE:"))
   .map((line) => JSON.parse(line.slice("EXPANSIONFIXTURE:".length)));
 if (
-  expansionFixtures.length !== 24 ||
+  expansionFixtures.length !== 30 ||
   expansionFixtures.some((fixture) => !fixture.pages.length || !fixture.cursorQueries.length)
 )
   throw new Error("光标展开夹具缺失，不能跳过真实重排验证");
 writeFileSync(".browser-check/expansion-fixtures.json", JSON.stringify(expansionFixtures));
+const paperFixtures = result.stdout
+  .split("\n")
+  .filter((line) => line.startsWith("PAPERFIXTURE:"))
+  .map((line) => JSON.parse(line.slice("PAPERFIXTURE:".length)));
+if (paperFixtures.length !== 15 || paperFixtures.some((f) => !f.pages.length || !f.carets.length))
+  throw new Error("原文/整正文raw纸型夹具缺失，不能跳过自然学习隔离验收");
+writeFileSync(".browser-check/preview-paper-fixtures.json", JSON.stringify(paperFixtures));
 console.log(
-  `已导出 ${fixtures.length} 份真实整页夹具、${cursorFixtures.length} 份光标渲染夹具、${expansionFixtures.length} 份展开夹具`,
+  `已导出 ${fixtures.length} 份真实整页夹具、${cursorFixtures.length} 份光标渲染夹具、${expansionFixtures.length} 份展开夹具、${paperFixtures.length} 份原文/raw纸型夹具`,
 );

@@ -1,6 +1,24 @@
 use super::*;
 use crate::document_geometry::{caret_for_item, locate, selection, store};
 
+// 长公式预览：自然宽远超卡片/页面宽（长行）、高矩阵与嵌套分式/根号。
+const LONG_LINE_FORMULA: &str =
+    "$x_1 + x_2 + x_3 + x_4 + x_5 + x_6 + x_7 + x_8 + x_9 + x_10 + x_11 + x_12 + x_13 + x_14 + x_15 + x_16 + x_17 + x_18 + x_19 + x_20 + x_21 + x_22 + x_23 + x_24 + x_25 + x_26$";
+const TALL_MATRIX_FORMULA: &str = "$mat(a_11, a_12; a_21, a_22; a_31, a_32; a_41, a_42; a_51, a_52; a_61, a_62; a_71, a_72; a_81, a_82; a_91, a_92; a_101, a_102)$";
+const NESTED_FRACTION_FORMULA: &str = "$sqrt(frac(1 + x, 2 - y) + frac(3, sqrt(5)))$";
+
+/// 用展开投影编译并把公式帧作为预览抽出，供长公式回归复用。
+fn formula_preview_of(
+    doc: &str,
+    formula: &str,
+) -> Option<super::super::formula_preview::FormulaPreview> {
+    let from = doc.find(formula).unwrap();
+    let src = projected(doc, Some((from, from + formula.len())));
+    let world = TypstWorld::new(src.clone(), None, &fonts_dir(), &FontConfig::default());
+    let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+    super::super::formula_preview::extract(&document).1
+}
+
 fn expansion_sample() -> String {
     "#set page(width: 360pt, height: 260pt, margin: 24pt)\n#set text(size: 12pt)\n正文 $a + b$ 中间 #text(fill: red)[嵌套 $c + d$ 与 #strong[粗体]] 后文。\n\n混合公式 $a + #sym.beta$。\n\n#let formula = $c + d$; 声明输出 #formula。\n\n#let helper = {\n let value = 1\n\n // 代码空白\n value\n};\n\n#block[\n多行脚本正文。\n第二行中文与 😀。\n]\n\n#pagebreak()\n第二页正文。\n".into()
 }
@@ -18,6 +36,9 @@ fn expansion_sources() -> Vec<ExpansionSource> {
     let counter = format!("{base}\n#let c = counter(\"preview-once\")\n{counter_expression}\n#context [COUNT: #c.get().first()]\n");
     let hidden = format!("#show raw: it => []\n{base}\n普通 raw `USER-RAW`。\n");
     let replaced = format!("#show raw: it => [USER-REPLACED]\n{base}\n普通 raw `USER-RAW`。\n");
+    let long_line = base.replace("$a + b$", LONG_LINE_FORMULA);
+    let tall_matrix = base.replace("$a + b$", TALL_MATRIX_FORMULA);
+    let nested_fraction = base.replace("$a + b$", NESTED_FRACTION_FORMULA);
     [
         ("base", base.clone(), None),
         ("math", base.clone(), Some("$a + b$")),
@@ -62,6 +83,16 @@ fn expansion_sources() -> Vec<ExpansionSource> {
             "block-edited",
             block_edited,
             Some("#block[\n多行脚本正文。续\n第二行中文与 😀。\n]"),
+        ),
+        ("long-line-base", long_line.clone(), None),
+        ("long-line", long_line, Some(LONG_LINE_FORMULA)),
+        ("tall-matrix-base", tall_matrix.clone(), None),
+        ("tall-matrix", tall_matrix, Some(TALL_MATRIX_FORMULA)),
+        ("nested-fraction-base", nested_fraction.clone(), None),
+        (
+            "nested-fraction",
+            nested_fraction,
+            Some(NESTED_FRACTION_FORMULA),
         ),
     ]
     .into_iter()
@@ -234,6 +265,36 @@ fn floating_formula_preview_does_not_move_document_content() {
         "浮动预览不能移动正文"
     );
     assert!(b.formula_preview.is_some());
+}
+
+#[test]
+fn long_formula_preview_keeps_full_natural_frame() {
+    // 页面正文宽 = 360 - 2×24 = 312pt；长行预览自然宽远超它，证明未被页面折行截断。
+    let long_line = format!("前文 {LONG_LINE_FORMULA} 后文");
+    let preview = formula_preview_of(&long_line, LONG_LINE_FORMULA).expect("长行公式有预览");
+    assert!(
+        preview.width_pt > 400.0,
+        "长行预览不应被页面宽度截断：{}",
+        preview.width_pt
+    );
+
+    // 高矩阵：多行高度远超单行，证明完整帧（含全部行）而非只取首行。
+    let matrix = format!("前文 {TALL_MATRIX_FORMULA} 后文");
+    let preview = formula_preview_of(&matrix, TALL_MATRIX_FORMULA).expect("矩阵公式有预览");
+    assert!(
+        preview.height_pt > 60.0,
+        "高矩阵预览应含多行：{}",
+        preview.height_pt
+    );
+
+    // 嵌套分式/根号：高度超过单行正文字高，分式线与根号都来自同次完整帧。
+    let fraction = format!("前文 {NESTED_FRACTION_FORMULA} 后文");
+    let preview = formula_preview_of(&fraction, NESTED_FRACTION_FORMULA).expect("嵌套分式有预览");
+    assert!(
+        preview.height_pt > 15.0,
+        "分式/根号预览应高于单行：{}",
+        preview.height_pt
+    );
 }
 
 #[test]

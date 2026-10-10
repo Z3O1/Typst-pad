@@ -20,6 +20,11 @@ struct SyntaxPath {
 /// 只认节点子树里的第一个字符串字面量 —— 那正是 typst 的路径参数位置。**动态路径**
 /// （`#import ("a" + ".typ")`）扫不到，那种情况交给编译期报错 + 越界提示兜住。
 fn syntax_paths(src: &str) -> Vec<SyntaxPath> {
+    // Lexer 只把这两个原样 ASCII 词识别为导入关键词。缺词时不可能有导入 AST；
+    // 命中仍走完整语法分析（注释、字符串和普通正文只是保守的假阳性）。
+    if !src.contains("import") && !src.contains("include") {
+        return Vec::new();
+    }
     let root = typst_syntax::parse(src);
     let mut out = Vec::new();
     // LinkedNode 自带字节偏移（SyntaxNode 不公开 offset）
@@ -262,4 +267,31 @@ pub(crate) fn offset_to_line_column(text: &str, offset: usize) -> (u32, u32) {
         .map_or(prefix.chars().count(), |(_, tail)| tail.chars().count()) as u32
         + 1;
     (line, column)
+}
+
+#[cfg(test)]
+mod scanner_tests {
+    use super::*;
+
+    #[test]
+    fn keyword_prefilter_is_conservative_not_a_path_parser() {
+        for source in [
+            "中文 $x^2$",
+            "// #include \"../a.typ\"\n正文",
+            "include import",
+            "#let word = \"include import\"\n#word",
+        ] {
+            assert!(syntax_paths(source).is_empty());
+        }
+        for source in [
+            "#include \"../a.typ\"",
+            "#{\n include \"../a.typ\"\n}",
+            "#import /* 间隔 */ \"../a.typ\": *",
+        ] {
+            let paths = syntax_paths(source);
+            assert_eq!(paths.len(), 1);
+            assert_eq!(paths[0].path, "../a.typ");
+            assert_eq!(needed_levels(&paths[0].path), 1);
+        }
+    }
 }

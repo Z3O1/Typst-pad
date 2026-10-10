@@ -13,6 +13,7 @@
 // 这些必须回到桌面版（Windows WebView2）验证 —— 见 docs/development/testing.md。
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { Diagnostic } from "../core/typst-engine";
+import type { PreviewPage } from "../core/preview-scale";
 // 假产物生成器按职责分在 `browser-dev-stub/` 下（本文件只留：开关 + 命令路由 + 安装）：
 //   fake-layout —— 假整页 SVG（分页/折行/正文字号）
 import { fakePages, warnFakeRendering } from "./browser-dev-stub/fake-layout";
@@ -233,6 +234,8 @@ interface PageFixture {
   // 显示投影夹具保留原文，同时单独指定实际编译输入。
   source?: string;
   originalPages?: string[] | null;
+  // 显式参数的原生纸型夹具只匹配对应请求；旧夹具未声明时仍作为固定产物使用。
+  previewPage?: PreviewPage | null;
   pages: string[];
   formulaPreview?: import("../core/typst-engine").FormulaPreview | null;
   carets: import("../core/typst-engine").DocumentCaret[];
@@ -272,6 +275,17 @@ function countCall(command: string): void {
   const host = window as unknown as Record<string, Record<string, number>>;
   const counts = (host.__browserDevCallCounts ??= {});
   counts[command] = (counts[command] ?? 0) + 1;
+}
+
+/** `compile_doc` 的预览重排几何（`previewPage`）：脏值当作没请求 */
+function previewPageArg(value: unknown): PreviewPage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const page = value as Record<string, unknown>;
+  const widthPt = Number(page.widthPt);
+  const heightPt = Number(page.heightPt);
+  const marginPt = Number(page.marginPt);
+  if (![widthPt, heightPt, marginPt].every((v) => Number.isFinite(v) && v > 0)) return undefined;
+  return { widthPt, heightPt, marginPt };
 }
 
 async function handleCommand(
@@ -316,6 +330,7 @@ async function handleCommand(
         fontDirs: Array.isArray(a.fontDirs) ? a.fontDirs : null,
         documentPath: typeof a.documentPath === "string" ? a.documentPath : null,
         knownPages: Array.isArray(a.knownPages) ? a.knownPages : null,
+        previewPage: previewPageArg(a.previewPage) ?? null,
       };
       // 恢复夹具的失败诊断与成功 SVG 都来自原生编译，桩不模拟错误范围或排版。
       const brokenFixture = pageFixtures().find(
@@ -358,14 +373,33 @@ async function handleCommand(
         };
       }
       // 返回 Rust 侧契约的 CompileOutput 形状（见 typst-engine.ts）
+      const requested = previewPageArg(a.previewPage);
       const original = pageFixtures().find((f) => f.doc === src && f.originalPages);
       const fixture =
-        pageFixtures().find((f) => (f.source ?? f.doc) === src) ??
+        pageFixtures().find((f) => {
+          if ((f.source ?? f.doc) !== src) return false;
+          if (f.previewPage === undefined) return true;
+          if (!f.previewPage || !requested) return !f.previewPage && !requested;
+          return ["widthPt", "heightPt", "marginPt"].every(
+            (key) =>
+              Math.abs(
+                f.previewPage![key as keyof PreviewPage] - requested[key as keyof PreviewPage],
+              ) < 0.02,
+          );
+        }) ??
         (original?.originalPages
           ? { doc: src, pages: original.originalPages, carets: [] }
           : undefined);
+      if (!fixture && pageFixtures().some((f) => f.doc === src && f.previewPage !== undefined))
+        throw new Error("缺少对应previewPage的真实纸型夹具");
       pageSnapshot = fixture ? { id: ++pageGeometrySeq, fixture } : null;
-      const pages = fixture?.pages ?? fakePages(src);
+      // 预览重排：桩照实按请求的纸型重排假产物（窄页 → 折行更窄、页数更多）。真实夹具
+      // 不重排（它有自己的纸型）—— 那正是前端 `isReflowApplied` 要退回等比缩放的情形。
+      // `&reflowfail=1` 模拟"文档把纸型写在别处、注入被覆盖"：产物仍是默认 A4。
+      const honored = new URLSearchParams(window.location.search).has("reflowfail")
+        ? undefined
+        : requested;
+      const pages = fixture?.pages ?? fakePages(src, honored);
       w.__browserDevLastPages = pages;
       // 仅验证前端差量协议；产品指纹来自 Rust Page，这里的静态夹具使用 WebCrypto。
       const pageKeys = await Promise.all(
