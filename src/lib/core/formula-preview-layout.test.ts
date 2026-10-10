@@ -151,18 +151,87 @@ describe("layoutFormulaPreview", () => {
     expect(box!.viewWidth).toBeCloseTo(box!.contentWidth);
   });
 
-  it("两轴溢出时同时为纵横滚动条留出占位", () => {
+  it.each([
+    { width: 0, height: 0 },
+    { width: 15, height: 15 },
+    { width: 9, height: 21 },
+  ])("两轴溢出时占位与卡片连箭头都在预算内 %j", (scrollbar) => {
     const box = layout({
       widthPt: 800,
       heightPt: 1200,
-      scrollbar: { width: 15, height: 15 },
+      scrollbar,
       viewport: { left: 0, top: 0, right: 400, bottom: 300 },
     });
     expect(box).not.toBeNull();
     expect(box!.scrollX).toBe(true);
     expect(box!.scrollY).toBe(true);
-    expect(box!.containerWidth).toBeCloseTo(box!.viewWidth + 15);
-    expect(box!.containerHeight).toBeCloseTo(box!.viewHeight + 15);
+    expect(box!.containerWidth).toBeCloseTo(box!.viewWidth + scrollbar.width);
+    expect(box!.containerHeight).toBeCloseTo(box!.viewHeight + scrollbar.height);
+    expect(box!.viewWidth).toBeGreaterThan(0);
+    expect(box!.viewHeight).toBeGreaterThan(0);
+    expect(box!.left + box!.width).toBeLessThanOrEqual(388);
+    expect(box!.top - (box!.flipped ? 0 : FORMULA_PREVIEW_ARROW)).toBeGreaterThanOrEqual(0);
+    expect(box!.top + box!.height + (box!.flipped ? FORMULA_PREVIEW_ARROW : 0)).toBeLessThanOrEqual(
+      300,
+    );
+  });
+
+  it.each([0, 15, 21])("窄窗不足时安全跳过，否则保留正 client 区域（占位 %i）", (size) => {
+    for (const width of [30, 46, 70, 100, 160]) {
+      for (const height of [30, 46, 60, 100]) {
+        const box = layout({
+          widthPt: 800,
+          heightPt: 12,
+          viewport: { left: 0, top: 0, right: width, bottom: height },
+          scrollbar: { width: size, height: size },
+        });
+        if (!box) continue;
+        expect(box.viewWidth).toBeGreaterThan(0);
+        expect(box.viewHeight).toBeGreaterThan(0);
+        expect(box.left + box.width).toBeLessThanOrEqual(width - FORMULA_PREVIEW_EDGE_MARGIN);
+        expect(box.top + box.height).toBeLessThanOrEqual(height - FORMULA_PREVIEW_EDGE_MARGIN);
+        if (!box.scrollY) expect(box.viewHeight).toBeCloseTo(box.contentHeight);
+      }
+    }
+    expect(layout({ viewport: { left: 0, top: 0, right: 30, bottom: 100 } })).toBeNull();
+  });
+
+  it("横滚占位触发纵滚，纵滚占位触发横滚时仍有界", () => {
+    for (const [widthPt, heightPt] of [
+      [800, 320],
+      [460, 1200],
+    ]) {
+      const box = layout({
+        widthPt,
+        heightPt,
+        scale: 1,
+        viewport: { left: 0, top: 0, right: 330, bottom: 250 },
+        scrollbar: { width: 15, height: 15 },
+      });
+      expect(box).not.toBeNull();
+      expect(box!.scrollX).toBe(true);
+      expect(box!.scrollY).toBe(true);
+      expect(box!.left + box!.width).toBeLessThanOrEqual(318);
+      expect(box!.top + box!.height).toBeLessThanOrEqual(238);
+    }
+  });
+
+  it("纵滚预留使缩放后高度不再溢出时稳定且不虚报滚动条", () => {
+    const box = layout({
+      widthPt: 500,
+      heightPt: 360,
+      scale: 1,
+      viewport: { left: 0, top: 0, right: 400, bottom: 300 },
+      scrollbar: { width: 15, height: 15 },
+    });
+    expect(box).not.toBeNull();
+    expect(box!.contentWidth).toBe(339);
+    expect(box!.scrollX).toBe(false);
+    expect(box!.scrollY).toBe(false);
+    expect(box!.containerWidth).toBeCloseTo(box!.contentWidth);
+    expect(box!.containerHeight).toBeCloseTo(box!.contentHeight);
+    expect(box!.left + box!.width).toBeLessThanOrEqual(388);
+    expect(box!.top + box!.height).toBeLessThanOrEqual(288);
   });
 
   it("盒外箭头（8px）落在 gap 与 edge margin 内，与 CSS 箭头契约一致", () => {

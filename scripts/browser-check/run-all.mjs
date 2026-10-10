@@ -33,7 +33,7 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 const SUITES = [
   ["document-mode.mjs", 80],
   ["document-cursor.mjs", 36],
-  ["document-expansion.mjs", 70],
+  ["document-expansion.mjs", 72],
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
   ["preview-reflow.mjs", 25],

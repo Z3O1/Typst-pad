@@ -87,8 +87,8 @@ function arrowVisible(dir) {
   })()`);
 }
 /** 卡片（含盒外箭头）整体都落在预览可见区内，且不撑出应用横向滚动条 */
-function cardWithinViewport() {
-  return c.evaluate(`(() => {
+async function cardWithinViewport() {
+  const evidence = await c.evaluate(`(() => {
     const card = document.querySelector('.formula-preview');
     if (!card) return false;
     const r = card.getBoundingClientRect();
@@ -97,10 +97,17 @@ function cardWithinViewport() {
     const arrow = 8;
     const top = r.top - (card.classList.contains('flipped') ? 0 : arrow);
     const bottom = r.bottom + (card.classList.contains('flipped') ? arrow : 0);
-    return top >= br.top - 0.5 && bottom <= br.bottom + 0.5 &&
-      r.left >= br.left - 0.5 && r.right <= br.right + 0.5 &&
-      body.scrollWidth <= body.clientWidth + 1;
+    const right = br.left + body.clientWidth, bottomEdge = br.top + body.clientHeight;
+    return {
+      within: top >= br.top - 0.5 && bottom <= bottomEdge + 0.5 &&
+        r.left >= br.left - 0.5 && r.right <= right + 0.5 &&
+        body.scrollWidth <= body.clientWidth + 1,
+      cardAndArrow: {left:r.left, right:r.right, top, bottom},
+      viewport: {left:br.left, right, top:br.top, bottom:bottomEdge}
+    };
   })()`);
+  console.log(`card bounds: ${JSON.stringify(evidence)}`);
+  return !!evidence?.within;
 }
 /** 内容层可见窗口/滚动尺寸与 SVG 渲染尺寸：验证滚动条占位不把短高内容吃光 */
 function contentView() {
@@ -121,21 +128,56 @@ function contentView() {
     };
   })()`);
 }
-/** 内容可见区内 edge（left/right）处是否命中真实 SVG 字形（elementFromPoint 命中 svg 或其后代） */
-function glyphVisible(edge) {
-  const xExpr = edge === "left" ? "r.left + 10" : "r.right - 10";
-  return c.evaluate(`(() => {
-    const el = document.querySelector('.formula-preview-content');
+/** 首/末实际绘制节点必须有可见几何且命中该节点；根 SVG 与空白容器不是字形。 */
+async function glyphVisible(edge, selector = ".formula-preview-content") {
+  const evidence = await c.evaluate(`(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
     const svg = el && el.querySelector('svg');
-    if (!el || !svg) return false;
+    if (!el || !svg || el.clientWidth <= 0 || el.clientHeight <= 0) return null;
     const r = el.getBoundingClientRect();
-    const ch = el.clientHeight;
-    if (ch <= 0) return false;
-    const y = r.top + Math.min(ch, svg.getBoundingClientRect().height) / 2;
-    const hit = document.elementFromPoint(${xExpr}, y);
-    return !!hit && (hit === svg || svg.contains(hit));
+    const nodes = [...svg.querySelectorAll('use,text,path,rect,circle,ellipse,polygon,polyline,line')]
+      .filter(node => !node.closest('defs,clipPath,mask,symbol') &&
+        getComputedStyle(node).visibility === 'visible' &&
+        getComputedStyle(node).display !== 'none' &&
+        (getComputedStyle(node).fill !== 'none' || getComputedStyle(node).stroke !== 'none'))
+      .map(node => ({node, rect: node.getBoundingClientRect()}))
+      .filter(({rect}) => rect.width > 0 && rect.height > 0)
+      .sort((a, b) => ${edge === "left" ? "a.rect.left - b.rect.left" : "b.rect.right - a.rect.right"});
+    const glyph = nodes[0];
+    if (!glyph) return null;
+    const g = glyph.rect;
+    const left = Math.max(g.left, r.left), right = Math.min(g.right, r.left + el.clientWidth);
+    const top = Math.max(g.top, r.top), bottom = Math.min(g.bottom, r.top + el.clientHeight);
+    if (right <= left || bottom <= top) return null;
+    // 字形包围盒中心可能是空洞；采样只接受所选绘制节点的真实命中。
+    for (let yi = 1; yi < 8; yi++) for (let xi = 1; xi < 8; xi++) {
+      const x = left + (right - left) * xi / 8, y = top + (bottom - top) * yi / 8;
+      const hit = document.elementFromPoint(x, y);
+      if (hit && (hit === glyph.node || glyph.node.contains(hit))) return {
+        tag: glyph.node.tagName, href: glyph.node.getAttribute('href') || glyph.node.getAttribute('xlink:href'),
+        glyph: {left:g.left, top:g.top, right:g.right, bottom:g.bottom},
+        client: {width:el.clientWidth, height:el.clientHeight}, hit: {tag:hit.tagName, x, y}
+      };
+    }
+    return null;
   })()`);
+  console.log(`glyph ${edge} ${selector}: ${JSON.stringify(evidence)}`);
+  return !!evidence;
 }
+// 空白 SVG 的根节点命中不能证明首/末字形可见。
+await c.evaluate(`(() => {
+  const el = document.createElement('div');
+  el.id = 'blank-glyph-probe';
+  el.style.cssText = 'position:fixed;left:0;top:0;width:100px;height:40px;z-index:999999';
+  el.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40"><defs><path d="M0 0h100v40H0z"/></defs><g></g></svg>';
+  document.body.append(el);
+})()`);
+check(
+  "空白 SVG 根命中不是首末绘制字形",
+  !(await glyphVisible("left", "#blank-glyph-probe")) &&
+    !(await glyphVisible("right", "#blank-glyph-probe")),
+);
+await c.evaluate("document.querySelector('#blank-glyph-probe').remove()");
 function query(value, head) {
   let rendered = head;
   if (value.range) {
@@ -627,6 +669,7 @@ await cursor(tallMatrix.range.from + 2);
 await settled(tallMatrix);
 await caretMatches(tallMatrix, tallMatrix.range.from + 2, true);
 await c.waitFor("!!document.querySelector('.formula-preview')", { timeout: 4000 });
+check("高矩阵卡片连同箭头在两轴可见边界内", await cardWithinViewport());
 const tallContent = await contentView();
 check(
   "高矩阵纵滚时可见宽度为正且能放下完整窄公式 SVG",

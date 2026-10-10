@@ -92,33 +92,40 @@ export function layoutFormulaPreview(
     Number.isFinite(scrollbar?.height) && scrollbar!.height > 0 ? scrollbar!.height : 0;
 
   const naturalW = widthPt * scale;
-  const naturalH = heightPt * scale;
-  const availW = Math.max(
-    FORMULA_PREVIEW_MIN_CONTENT_WIDTH,
+  const budgetW =
     viewportWidth -
-      2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER),
-  );
-  const availH =
+    2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
+  const budgetH =
     viewportHeight -
     2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
-  if (availW <= 0 || availH <= 0) return null;
 
-  // 宽度：自然尺寸 → 缩到可见区（仍可读）→ 保住可读下限并横向滚动。
+  // 两轴占位先从总预算扣除。预留标记只增加，最多两次新增轴后稳定；
+  // 避免纵滚使公式缩窄、变矮后反复开关纵滚的循环，不需要 DOM 迭代。
+  // 最后按实际溢出添加占位；保守预留但不再溢出的轴不会产生虚假的滚动条。
   const minReadableW = naturalW * FORMULA_PREVIEW_MIN_READABLE;
+  let reserveX = false;
+  let reserveY = false;
+  let availW = budgetW;
+  let availH = budgetH;
   let contentWidth = naturalW;
-  let scrollX = false;
-  if (naturalW > availW) {
-    if (availW >= minReadableW) {
-      contentWidth = availW;
-    } else {
-      contentWidth = minReadableW;
-      scrollX = true;
-    }
+  let contentHeight = contentWidth * (heightPt / widthPt);
+  for (let pass = 0; pass < 3; pass++) {
+    availW = budgetW - (reserveY ? sbWidth : 0);
+    availH = budgetH - (reserveX ? sbHeight : 0);
+    if (availW < FORMULA_PREVIEW_MIN_CONTENT_WIDTH || availH <= 0) return null;
+    // 自然尺寸 → 缩到可见区（仍可读）→ 保住可读下限并横向滚动。
+    contentWidth = Math.min(naturalW, Math.max(minReadableW, availW));
+    contentHeight = contentWidth * (heightPt / widthPt);
+    const nextX: boolean = reserveX || contentWidth > availW;
+    const nextY: boolean = reserveY || contentHeight > availH;
+    if (nextX === reserveX && nextY === reserveY) break;
+    reserveX = nextX;
+    reserveY = nextY;
   }
-  const contentHeight = contentWidth * (heightPt / widthPt);
   const viewWidth = Math.min(contentWidth, availW);
   const viewHeight = Math.min(contentHeight, availH);
-  const scrollY = contentHeight > availH;
+  const scrollX = contentWidth > viewWidth;
+  const scrollY = contentHeight > viewHeight;
 
   // 滚动容器要为原生滚动条留出占位：横滚时内容层要高出一个横向滚动条，纵滚时宽出一个纵向
   // 滚动条，这样 clientWidth/clientHeight 才等于可见窗口，短高/窄宽内容不会被滚动条吃光。
@@ -146,9 +153,9 @@ export function layoutFormulaPreview(
   const aboveTop = anchor.top - FORMULA_PREVIEW_GAP - height;
   let top: number;
   let flipped = false;
-  if (belowTop + height <= viewport.top + viewportHeight - FORMULA_PREVIEW_EDGE_MARGIN) {
+  if (belowTop >= minTop && belowTop <= maxTop) {
     top = belowTop;
-  } else if (aboveTop >= minTop) {
+  } else if (aboveTop >= minTop && aboveTop <= maxTop) {
     top = aboveTop;
     flipped = true;
   } else {
