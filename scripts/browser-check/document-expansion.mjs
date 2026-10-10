@@ -288,8 +288,8 @@ await c.evaluate(`(() => {
 await cursor(math.range.from + 1);
 await settled(math);
 check(
-  "键盘进入公式一次编译完整展开，源码保持不变",
-  (await count()) === beforeMath + 1 && (await doc()) === base.original && (await pagesMatch(math)),
+  "键盘进入公式验证原文并编译完整展开，源码保持不变",
+  (await count()) === beforeMath + 2 && (await doc()) === base.original && (await pagesMatch(math)),
 );
 console.log(
   "DOCSCHEDULE",
@@ -371,8 +371,8 @@ const beforeSwitch = await count();
 await cursor(outer.range.from + 2);
 await settled(outer);
 check(
-  "直接切换另一完整调用只请求一轮新投影",
-  (await count()) === beforeSwitch + 1 && (await pagesMatch(outer)),
+  "直接切换另一完整调用重新验证原文并请求新投影",
+  (await count()) === beforeSwitch + 2 && (await pagesMatch(outer)),
 );
 const beforeNested = await count();
 await cursor(base.original.indexOf("c + d"));
@@ -405,7 +405,7 @@ await settled(embeddedMath);
 await caretMatches(embeddedMath, embeddedHead, true);
 check(
   "数学模式中的 # 展开整段公式，直接使用新几何而不触发错误回退",
-  (await count()) === beforeEmbedded + 1 && (await pagesMatch(embeddedMath)),
+  (await count()) === beforeEmbedded + 2 && (await pagesMatch(embeddedMath)),
 );
 const declarationHead = declaration.range.from + "#let formula = ".length;
 const beforeDeclaration = await count();
@@ -414,7 +414,7 @@ await settled(declaration);
 await caretMatches(declaration, declarationHead, true);
 check(
   "代码模式中的公式展开完整 # 声明，保留执行和后文输出",
-  (await count()) === beforeDeclaration + 1 && (await pagesMatch(declaration)),
+  (await count()) === beforeDeclaration + 2 && (await pagesMatch(declaration)),
 );
 for (const theme of ["dark", "light"]) {
   await setTheme(theme);
@@ -443,7 +443,7 @@ await cursor(commentHead);
 await caretMatches(codeBlock, commentHead, true);
 check(
   "# 代码块的空白和注释也按语法展开，原文与后续输出不变",
-  (await count()) === beforeCodeBlock + 1 &&
+  (await count()) === beforeCodeBlock + 2 &&
     (await doc()) === base.original &&
     (await pagesMatch(codeBlock)),
 );
@@ -587,8 +587,8 @@ await c.evaluate(
 );
 await settled(outer);
 check(
-  "合成结束先按最终光标切换范围，再恢复一次调度",
-  (await count()) === beforeComposition + 1 && (await pagesMatch(outer)),
+  "合成结束先按最终光标切换范围，再验证原文与编译投影",
+  (await count()) === beforeComposition + 2 && (await pagesMatch(outer)),
 );
 await c.key("e", { keyCode: 69, modifiers: 2 });
 await c.waitFor(compileSettled(base.original));
@@ -686,7 +686,7 @@ for (const prefix of ["raw-hidden", "raw-replaced"]) {
   await caretMatches(expanded, expanded.range.from + 1, true);
   check(
     `${prefix}：用户 show raw 不隐藏或替换展开源码，真实停靠点可见`,
-    (await count()) === before + 1 &&
+    (await count()) === before + 2 &&
       (await doc()) === original.original &&
       (await pagesMatch(expanded)),
   );

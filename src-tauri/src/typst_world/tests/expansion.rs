@@ -368,6 +368,52 @@ fn nested_error_raw_recovers_only_the_markup_child() {
 }
 
 #[test]
+fn changed_read_dependency_can_fail_original_while_raw_expansion_still_renders() {
+    let temp = std::env::temp_dir().join(format!(
+        "typst-pad-expansion-dependency-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp).unwrap();
+    let path = Some(temp.join("main.typ").to_string_lossy().into_owned());
+    let expression = "#assert(read(\"value.txt\") == \"valid\")";
+    let source = format!("BEFORE {expression} AFTER");
+    // 错误回退只显示 raw，不执行失败的表达式或预览；对应前端 preserveDeclaration:false。
+    let raw = format!("BEFORE {} AFTER", styled_raw(&format!("` {expression} `")));
+    let compile = |input: &str| {
+        let world = TypstWorld::new(
+            input.into(),
+            path.clone(),
+            &fonts_dir(),
+            &FontConfig::default(),
+        );
+        typst::compile::<PagedDocument>(&world).output
+    };
+    fs::write(temp.join("value.txt"), "valid").unwrap();
+    assert!(compile(&source).is_ok());
+    assert!(compile(&raw).is_ok());
+    fs::write(temp.join("value.txt"), "changed").unwrap();
+    let errors = compile(&source).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("assertion failed")),
+        "unchanged main source must report the new dependency failure: {errors:?}"
+    );
+    let projected = compile(&raw).unwrap();
+    let mut visible = String::new();
+    for page in projected.pages() {
+        visible_frame_text(&page.frame, &mut visible);
+    }
+    assert!(visible.contains("BEFORE") && visible.contains("AFTER"));
+    assert!(visible.contains(expression), "raw is still editable source");
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
 fn styled_source_lines_wrap_at_spaces_with_original_caret_locations() {
     let line = "parameter_name: value ".repeat(24);
     let text = format!("#block[\n{line}\n]");

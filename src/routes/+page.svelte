@@ -1280,7 +1280,6 @@
     renderedProjection = projectDocument("", null);
     renderedCoordinates = createSourceCoordinates("");
     renderedPages = null;
-    validatedOriginal = null;
     documentErrorRanges = [];
     errorEditRange = null;
     previewStatus = "idle";
@@ -1533,9 +1532,6 @@
     }
   }
 
-  // 仅复用当前修订无页面注入的原文成功验证；导航展开不重复验证同一源码。
-  let validatedOriginal: { input: string; result: CompileOk } | null = null;
-
   async function runCompile() {
     if (compileSeq === 0) mark("compile-request");
     const paperInput = naturalPaperInput;
@@ -1565,8 +1561,6 @@
       await compileDocumentWithFallback({
         source,
         prefixLength,
-        validatedOriginal:
-          validatedOriginal?.input === paperInput ? validatedOriginal.result : null,
         reveal:
           mode === "write" && sourceRange
             ? { from: prefixLength + sourceRange.from, to: prefixLength + sourceRange.to }
@@ -1597,10 +1591,8 @@
     }
     // 文本、会话、字体和前缀在等待期间变化时，迟到的成功与失败均不能落地。
     if (!isCurrent() || deferred) return;
-    if (previewPageRequested === null && originalResult?.ok) {
-      validatedOriginal = { input: paperInput, result: originalResult };
-      if (needsNaturalPaper) learnPaperShape(paperInput, originalResult.pages);
-    }
+    if (needsNaturalPaper && previewPageRequested === null && originalResult?.ok)
+      learnPaperShape(paperInput, originalResult.pages);
     if (result.ok) {
       if (!previewPaneRef?.paper()) return;
       previewPageUsed = previewPageRequested;

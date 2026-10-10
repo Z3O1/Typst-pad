@@ -82,12 +82,12 @@ ONLY=document-performance.mjs npm run verify:browser
 ```bash
 npm test -- src/lib/core/document-compile-scheduler.test.ts src/lib/core/document-error-fallback.test.ts
 CARGO_BUILD_JOBS=2 cargo test --manifest-path src-tauri/Cargo.toml nested_error_raw_recovers_only_the_markup_child
-PORT=1457 CDP_PORT=9357 ONLY=document-mode.mjs,document-expansion.mjs npm run verify:browser
+PORT=1457 CDP_PORT=9357 ONLY=document-mode.mjs,document-expansion.mjs,document-cursor.mjs,preview-reflow.mjs npm run verify:browser
 ```
 
-假时钟单测检验去抖上限、在途剩余预算、取消/合成与单槽；范围测试检验当前错误锁变化、增量树复用、最小内容块恢复及失败后的有界扩大。原生 `nested_error_raw_recovers_only_the_markup_child` 动态编译失败原文与局部 raw 恢复输入，确认正常父内容继续排版且恢复字符有真实停靠点；它不运行前端状态机。
+假时钟单测检验去抖上限、在途剩余预算、取消/合成与单槽；范围测试检验当前错误锁变化、增量树复用、最小内容块恢复及失败后的有界扩大。原生 `nested_error_raw_recovers_only_the_markup_child` 动态编译失败原文与局部 raw 恢复输入，确认正常父内容继续排版且恢复字符有真实停靠点；它不运行前端状态机。核心依赖版本回归保持主源码与上下文不变，改变编译回调的依赖版本，核对原文新失败而 raw 展示成功时仍保留最新诊断；原生 `changed_read_dependency_can_fail_original_while_raw_expansion_still_renders` 和 `main_snapshot_reuse_does_not_cache_dependencies_or_cross_project_roots` 分别证明真实原文/raw反例与依赖快照失效。
 
-浏览器 `DOCSCHEDULE` 记录普通文档/源码输入、光标进入/离开、错误修复及连续输入的首次请求时间与请求数。连续输入测试在输入尚未停止时就要求有请求，并核对最终完整页面；不设固定墙钟 CI 阈值。日志在 `.browser-check/run-all-document-{mode,expansion}.log`。这些请求使用静态真实 Typst 夹具与假 IPC，只证明前端调度/接线，不代表任意源码动态排版、真实 IPC 或 Windows WebView2 反馈时间。原文验证和错误修复仍可能需要两次完整编译；源码模式保留 150ms 去抖，不能将文档模式调度改善宣称为两种模式同速。
+浏览器 `DOCSCHEDULE` 记录普通文档/源码输入、光标进入/离开、错误修复及连续输入的首次请求时间与请求数。连续输入测试在输入尚未停止时就要求有请求，并核对最终完整页面；不设固定墙钟 CI 阈值。日志在 `.browser-check/run-all-document-{mode,expansion}.log`。这些请求使用静态真实 Typst 夹具与假 IPC，只证明前端调度/接线，不代表任意源码动态排版、真实 IPC 或 Windows WebView2 反馈时间。导航展开不跨请求复用原文验证，需要原文验证与展示各一次；仅在同一请求内复用原文结果为自然测量，错误修复也仍可能需要两次完整编译；源码模式保留 150ms 去抖，不能将文档模式调度改善宣称为两种模式同速。
 
 ### 只读外部文档编辑探针
 

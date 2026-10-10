@@ -10,7 +10,7 @@ import {
   type ProjectionRange,
   type SourceRange,
 } from "./document-projection";
-import type { CompileFail, CompileOk, CompileResult } from "./typst-engine";
+import type { CompileFail, CompileResult } from "./typst-engine";
 
 export interface DocumentCompileResult {
   result: CompileResult;
@@ -34,8 +34,6 @@ interface DocumentCompileOptions {
   source: string;
   prefixLength: number;
   reveal: SourceRange | null;
-  // 调用方只可提供同一源码/会话/上下文修订的原文成功结果。
-  validatedOriginal?: CompileOk | null;
   // 已经点击编辑的错误区域：修复后仍排版为源码，直到退出该区域。
   editing?: SourceRange | null;
   recover: boolean;
@@ -43,7 +41,7 @@ interface DocumentCompileOptions {
   styleExpansion?: boolean;
   previewExpansion?: boolean;
   compile: (source: string) => Promise<CompileResult>;
-  // 需要自然纸型时，compile也必须无页面注入；已有原文结果优先复用，否则至多测量一次。
+  // 需要自然纸型时，compile也必须无页面注入；仅复用本轮原文结果，否则至多测量一次。
   measureOriginal?: (source: string) => Promise<CompileResult>;
   isCurrent: () => boolean;
   // 在途编译允许结束，但后续恢复轮次必须尊重调度器的输入法暂停。
@@ -56,7 +54,7 @@ export async function compileDocumentWithFallback(
   let originalResult: CompileResult | null = null;
   let originalAttempted = false;
   let deferred = false;
-  // 展开可能改变 show 上下文或隐藏原文错误；同一修订先验证原文，再排版展示。
+  // 展开可能隐藏原文错误；依赖/动态上下文没有版本戳，每轮都先验证原文再排版展示。
   // 此结果也复用为自然纸型测量，失败直接驱动恢复，不再编译同一坏表达式的预览。
   if (options.reveal && options.isCurrent()) {
     if (options.canRetry && !options.canRetry()) {
@@ -71,9 +69,7 @@ export async function compileDocumentWithFallback(
       };
     } else {
       originalAttempted = true;
-      originalResult =
-        options.validatedOriginal ??
-        (await (options.measureOriginal ?? options.compile)(options.source));
+      originalResult = await (options.measureOriginal ?? options.compile)(options.source);
       if (!options.isCurrent() || (options.canRetry && !options.canRetry())) {
         return {
           result: originalResult,

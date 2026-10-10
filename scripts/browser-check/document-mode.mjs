@@ -444,7 +444,7 @@ const beforeCompile = await count();
 await c.evaluate("window.__unchangedPage=window.__pageSvgs()[1];true");
 const mathCaret = await hitAt("x^2");
 await settled(mathExpanded);
-check("展开公式调用整页编译", (await count()) === beforeCompile + 1);
+check("展开公式先验证原文再调用整页投影编译", (await count()) === beforeCompile + 2);
 check("展开态与真实 Typst 完整产物一致", await compiledPagesMatch(mathExpanded));
 check(
   "单页变化保留未变页面的 SVG 节点与独立引用作用域",
