@@ -76,6 +76,119 @@ describe("createDocumentCompileScheduler", () => {
     await settle();
   });
 
+  it("持续输入有上限，不会被尾随去抖无限饿死", async () => {
+    scheduler.request("edit");
+    for (let i = 0; i < 5; i++) {
+      vi.advanceTimersByTime(50);
+      scheduler.request("edit");
+    }
+    expect(runs).toBe(0);
+    vi.advanceTimersByTime(50);
+    expect(runs).toBe(1); // 首请求 +300ms，即使最后一次输入尚不足150ms
+    await settle();
+  });
+
+  it("在途等待已超过输入期限，结束后立即消费最新需求", async () => {
+    scheduler.requestNow("context");
+    scheduler.request("edit");
+    vi.advanceTimersByTime(1000);
+    expect(runs).toBe(1);
+    await settle();
+    expect(runs).toBe(2); // 不再追加150ms
+    expect(scheduler.stats().pending).toBe(false);
+    await settle();
+  });
+
+  it("慢编译期间持续编辑只消费最终快照，不堆逐键队列或追加去抖", async () => {
+    let revision = 0;
+    let active = 0;
+    let maxActive = 0;
+    let finish!: () => void;
+    const snapshots: number[] = [];
+    const slow = createDocumentCompileScheduler({
+      debounceMs: 30,
+      maxWaitMs: 100,
+      run: () => {
+        snapshots.push(revision);
+        maxActive = Math.max(maxActive, ++active);
+        return new Promise<void>((resolve) => {
+          finish = () => {
+            active--;
+            resolve();
+          };
+        });
+      },
+    });
+    try {
+      const first = slow.requestNow("context");
+      for (revision = 1; revision <= 24; revision++) {
+        slow.request("edit");
+        vi.advanceTimersByTime(20);
+        expect(slow.stats().pending).toBe(true);
+        expect(snapshots).toEqual([0]);
+      }
+      revision = 24;
+      finish();
+      await first;
+      expect(snapshots).toEqual([0, 24]); // 已过首需求100ms，直接接上最后源码
+      expect(maxActive).toBe(1);
+      finish();
+      await Promise.resolve();
+      await Promise.resolve();
+      vi.advanceTimersByTime(1000);
+      expect(snapshots).toEqual([0, 24]);
+      expect(slow.stats().pending).toBe(false);
+      expect(slow.stats().inFlight).toBe(false);
+    } finally {
+      slow.dispose();
+    }
+  });
+
+  it("短在途编译只等待输入去抖的剩余时间", async () => {
+    scheduler.requestNow("context");
+    scheduler.request("edit");
+    vi.advanceTimersByTime(100);
+    await settle();
+    expect(runs).toBe(1);
+    vi.advanceTimersByTime(49);
+    expect(runs).toBe(1);
+    vi.advanceTimersByTime(1);
+    expect(runs).toBe(2);
+    await settle();
+  });
+
+  it("两种模式的输入策略独立，连续编辑仍单槽且合成不抢跑", async () => {
+    let write = true;
+    const starts: number[] = [];
+    const fast = createDocumentCompileScheduler({
+      debounceMs: () => (write ? 30 : 150),
+      maxWaitMs: () => (write ? 100 : 300),
+      run: async () => {
+        starts.push(Date.now());
+      },
+    });
+    try {
+      const start = Date.now();
+      fast.request("edit");
+      await vi.advanceTimersByTimeAsync(30);
+      expect(starts).toEqual([start + 30]);
+      write = false;
+      fast.request("edit");
+      await vi.advanceTimersByTimeAsync(150);
+      expect(starts).toEqual([start + 30, start + 180]);
+      fast.setComposing(true);
+      fast.request("edit");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(starts).toHaveLength(2);
+      write = true;
+      fast.setComposing(false);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(starts).toHaveLength(3);
+    } finally {
+      fast.dispose();
+    }
+  });
+
   it("requestNow：不在途时**立刻**跑，Promise 在这一轮跑完后 resolve", async () => {
     let resolved = false;
     const done = scheduler.requestNow("context").then(() => {

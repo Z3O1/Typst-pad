@@ -3,7 +3,8 @@ import { parser } from "codemirror-lang-typst/lezer";
 
 // 诊断起止点和光标移动复用同一快照；只保留一份树，编辑或换文件自动替换。
 let parsed: { doc: string; tree: ReturnType<typeof parser.parse> } | null = null;
-type SyntaxNode = ReturnType<typeof parser.parse>["topNode"];
+export type SourceSyntaxTree = ReturnType<typeof parser.parse>;
+type SyntaxNode = SourceSyntaxTree["topNode"];
 type RevealRange = { from: number; to: number; kind: "math" | "code" | "text" };
 const trivia = new Set(["Space", "LineComment", "BlockComment"]);
 
@@ -33,12 +34,17 @@ export function sourceRevealRange(
   pos: number,
   outermost = false,
   affinity: -1 | 0 | 1 = 0,
+  syntax?: SourceSyntaxTree | null,
 ): RevealRange {
   const at = Math.max(0, Math.min(pos, doc.length));
   // 复用源码编辑器的无 wasm 语法树，内容块里的文字也能展开完整的外层调用。
   try {
-    if (!parsed || parsed.doc !== doc) parsed = { doc, tree: parser.parse(doc) };
-    const tree = parsed.tree;
+    // 优先使用当前 EditorState 的增量树；不完整树不能确认完整替换边界。
+    if (!syntax || syntax.length !== doc.length) {
+      if (!parsed || parsed.doc !== doc) parsed = { doc, tree: parser.parse(doc) };
+      syntax = parsed.tree;
+    }
+    const tree = syntax;
     let candidate: RevealRange | null = null;
     for (const side of affinity === 0 ? ([-1, 1] as const) : [affinity]) {
       let node = tree.resolveInner(at, side);

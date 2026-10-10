@@ -49,7 +49,7 @@ const expansionFixtures = result.stdout
   .filter((line) => line.startsWith("EXPANSIONFIXTURE:"))
   .map((line) => JSON.parse(line.slice("EXPANSIONFIXTURE:".length)));
 if (
-  expansionFixtures.length !== 32 ||
+  expansionFixtures.length !== 33 ||
   expansionFixtures.some((fixture) => !fixture.pages.length || !fixture.cursorQueries.length)
 )
   throw new Error("光标展开夹具缺失，不能跳过真实重排验证");

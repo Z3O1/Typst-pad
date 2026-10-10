@@ -598,10 +598,28 @@ check(
   ),
 );
 check("点击已经显示的错误源码不重复编译", (await count()) === beforeErrorClick);
+await c.evaluate(`(() => {
+  window.__errorRepairStart=performance.now();
+  window.__errorRepairRequests=[];
+  const internals=window.__TAURI_INTERNALS__,invoke=internals.invoke;
+  internals.invoke=(command,args)=>{
+    if(command==='compile_doc')window.__errorRepairRequests.push(performance.now());
+    return invoke(command,args);
+  };
+  return true;
+})()`);
 await c.evaluate(
   `(() => {const v=window.__typstPadView,doc=v.state.doc.toString(),at=doc.indexOf('unknown');v.dispatch({changes:{from:at,to:at+7,insert:'x^2 + y'}})})()`,
 );
 await settled(mathExpanded);
+console.log(
+  "DOCSCHEDULE",
+  JSON.stringify(
+    await c.evaluate(
+      `({case:'error-repair',requests:window.__errorRepairRequests.length,firstRequestMs:window.__errorRepairRequests[0]-window.__errorRepairStart})`,
+    ),
+  ),
+);
 check(
   "修复后清除诊断但保留正在编辑的源码，原文不含临时围栏",
   (await doc()) === original.doc &&
@@ -773,6 +791,19 @@ check(
   "迟到命中不能展开旧源码",
   await c.evaluate(
     "window.__typstPadView.state.selection.main.head===1 && !window.__browserDevLastCompile.src.includes('`')",
+  ),
+);
+await replace(original.doc);
+await hitAt("x^2");
+const laterHead = original.doc.indexOf("正文");
+if (laterHead < 0) throw new Error("迟到点击测试缺少当前正文光标夹具");
+await c.evaluate(`window.__typstPadView.dispatch({selection:{anchor:${laterHead}}});true`);
+await sleep(500);
+await c.waitFor(COMPILE_IDLE, { timeout: 8000 });
+check(
+  "仅移动光标也作废迟到点击，旧命中不能覆盖后来的活动端",
+  await c.evaluate(
+    `window.__typstPadView.state.selection.main.head===${laterHead}&&!window.__browserDevLastCompile.src.includes('\\u0060')`,
   ),
 );
 await replace(original.doc);

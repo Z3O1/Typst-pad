@@ -104,6 +104,15 @@ describe("光标主导的源码展开", () => {
     );
     expect(resolve(doc, error, at(math.to, math.to - 1), "move")).toEqual(empty);
   });
+  it("错误范围变化时锁采用当前范围，不让修复后的旧边界提前收起", () => {
+    const grown = { from: math.from, to: code.to };
+    const state = { range: null, error: math };
+    const next = resolve(doc, state, at(math.from + 2), "edit", { errors: [grown] });
+    expect(next.error).toEqual(grown);
+    expect(resolve(doc, next, at(code.from + 2), "edit", { errors: [] })).toBe(next);
+    const shrunk = resolve(doc, next, at(math.from + 2), "edit", { errors: [math] });
+    expect(shrunk.error).toEqual(math);
+  });
   it("错误锁退出不被手动展开阻断，错误源优先于手动展开", () => {
     expect(resolve(doc, { range: code, error: math }, at(code.from + 2), "move")).toEqual({
       range: code,

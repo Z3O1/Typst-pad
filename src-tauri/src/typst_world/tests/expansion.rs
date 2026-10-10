@@ -57,6 +57,7 @@ fn expansion_sources() -> Vec<ExpansionSource> {
         ("raw-hidden-math", hidden, Some("$a + b$")),
         ("raw-replaced-base", replaced.clone(), None),
         ("raw-replaced-math", replaced, Some("$a + b$")),
+        ("math-deleted", base.replace("$a + b$", ""), None),
         ("edited-base", edited.clone(), None),
         ("math-edited", edited, Some("$a + b + z$")),
         ("nested-math", base.clone(), Some("$c + d$")),
@@ -324,6 +325,44 @@ fn source_preview_executes_expression_side_effects_exactly_once() {
         assert!(
             visible.contains("RESULT:1"),
             "预览不应丢失或重复原表达式副作用：{visible}"
+        );
+    }
+}
+
+#[test]
+fn nested_error_raw_recovers_only_the_markup_child() {
+    let source = "BEFORE #block[CONTENT #missing()] AFTER";
+    let world = TypstWorld::new(source.into(), None, &fonts_dir(), &FontConfig::default());
+    assert!(typst::compile::<PagedDocument>(&world).output.is_err());
+
+    let recovered = "BEFORE #block[CONTENT ` #missing() `] AFTER";
+    let world = TypstWorld::new(recovered.into(), None, &fonts_dir(), &FontConfig::default());
+    let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+    let mut visible = String::new();
+    for page in document.pages() {
+        visible_frame_text(&page.frame, &mut visible);
+    }
+    assert!(
+        visible.contains("CONTENT"),
+        "normal parent content remains rendered"
+    );
+    assert!(
+        visible.contains("#missing()"),
+        "only the failing child is raw"
+    );
+    assert!(
+        !visible.contains("#block"),
+        "normal outer call is not expanded"
+    );
+    assert!(visible.contains("BEFORE") && visible.contains("AFTER"));
+
+    let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+    let id = store(items, recovered.len(), stats.foreign_ink);
+    let start = recovered.find("#missing()").unwrap();
+    for offset in start..start + "#missing()".len() {
+        assert!(
+            locate(id, offset).is_some(),
+            "recovered child remains editable: {offset}"
         );
     }
 }

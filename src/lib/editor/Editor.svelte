@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { EditorView, Decoration, hoverTooltip } from "@codemirror/view";
   import { EditorState, Compartment, StateField, StateEffect } from "@codemirror/state";
-  import { indentUnit } from "@codemirror/language";
+  import { indentUnit, syntaxTree, syntaxTreeAvailable } from "@codemirror/language";
   import type { DecorationSet } from "@codemirror/view";
   import { basicSetup } from "codemirror";
   // Typst 语言支持走**无 wasm**的 Lezer 入口（2026-09-18）：主入口 `typst()` 的语法高亮是
@@ -385,6 +385,11 @@
     const clamp = (pos: number) => Math.max(0, Math.min(pos, view.state.doc.length));
     view.dispatch({ selection: { anchor: clamp(anchor), head: clamp(head) } });
     view.focus();
+  }
+
+  /** 只交出当前状态已经完成的增量树；不在光标移动时强制全文解析。 */
+  export function sourceSyntaxTree() {
+    return view && syntaxTreeAvailable(view.state) ? syntaxTree(view.state) : null;
   }
 
   export function selection(): { anchor: number; head: number } | null {
