@@ -17,6 +17,159 @@ hello"
     assert!(d.end_line.is_some(), "应给出结束位置");
 }
 
+fn dependency_snapshot_test_dir(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(format!(
+            "dependency-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn dependency_snapshots_revalidate_output_diagnostics_and_read_failures() {
+    let dir = dependency_snapshot_test_dir("revalidate");
+    let main = dir.join("main.typ").to_string_lossy().to_string();
+    let fonts = FontConfig::default();
+    let id = RootedPath::new(VirtualRoot::Project, VirtualPath::new("dep.typ").unwrap()).intern();
+    let load = || {
+        TypstWorld::new(
+            "#include \"dep.typ\"".into(),
+            Some(main.clone()),
+            &fonts_dir(),
+            &fonts,
+        )
+    };
+    fs::write(dir.join("dep.typ"), "中文😀 $x^2$").unwrap();
+    let retained = load();
+    let original = retained.source(id).unwrap();
+    for text in ["中文😀 $x^2$", "修改😀 $y^3$", "中文😀 $x^2$"] {
+        fs::write(dir.join("dep.typ"), text).unwrap();
+        let current = load();
+        let source = current.source(id).unwrap();
+        let fresh = Source::new(id, text.into());
+        assert_eq!(
+            typst::utils::hash128(&source),
+            typst::utils::hash128(&fresh)
+        );
+        fn check_spans(node: LinkedNode<'_>, source: &Source) {
+            assert_eq!(source.find(node.span()).unwrap().range(), node.range());
+            for child in node.children() {
+                check_spans(child, source);
+            }
+        }
+        check_spans(LinkedNode::new(source.root()), &source);
+        let actual = compile(
+            "#include \"dep.typ\"".into(),
+            Some(main.clone()),
+            &fonts_dir(),
+            &fonts,
+        );
+        let expected = compile(text.into(), None, &fonts_dir(), &fonts);
+        assert!(actual.ok && expected.ok);
+        assert_eq!(actual.pages, expected.pages);
+        assert_eq!(retained.source(id).unwrap().text(), original.text());
+    }
+    fs::write(dir.join("dep.typ"), "标题\n#unknown(2)").unwrap();
+    let actual = compile(
+        "#include \"dep.typ\"".into(),
+        Some(main.clone()),
+        &fonts_dir(),
+        &fonts,
+    );
+    let expected = compile("标题\n#unknown(2)".into(), None, &fonts_dir(), &fonts);
+    assert!(!actual.ok && !expected.ok);
+    let mut diagnostics = actual.diagnostics;
+    for diagnostic in &mut diagnostics {
+        assert!(diagnostic.path.as_deref().unwrap().ends_with("dep.typ"));
+        diagnostic.path = None;
+    }
+    assert_eq!(
+        serde_json::to_value(diagnostics).unwrap(),
+        serde_json::to_value(expected.diagnostics).unwrap()
+    );
+    // 同一缓存键的删除、非法 UTF-8 和目录替换必须报本轮读盘错误，不能回退旧快照。
+    fs::remove_file(dir.join("dep.typ")).unwrap();
+    assert!(load().source(id).is_err());
+    fs::write(dir.join("dep.typ"), [0xff]).unwrap();
+    assert!(load().source(id).is_err());
+    fs::remove_file(dir.join("dep.typ")).unwrap();
+    fs::create_dir(dir.join("dep.typ")).unwrap();
+    assert!(load().source(id).is_err());
+    assert_eq!(retained.source(id).unwrap().text(), "中文😀 $x^2$");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn dependency_snapshots_do_not_hide_nested_root_or_binary_changes() {
+    let dir = dependency_snapshot_test_dir("root-binary");
+    let docs = dir.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let main = docs.join("main.typ").to_string_lossy().to_string();
+    let source = "#include \"dep.typ\"";
+    let fonts = FontConfig::default();
+    fs::write(dir.join("shared.typ"), "共享正文").unwrap();
+    fs::write(docs.join("dep.typ"), "初始正文").unwrap();
+    let first = TypstWorld::new(source.into(), Some(main.clone()), &fonts_dir(), &fonts);
+    assert_eq!(first.project_root(), Some(docs.as_path()));
+    assert!(typst::compile::<PagedDocument>(&first).output.is_ok());
+    fs::write(docs.join("dep.typ"), "#include \"../shared.typ\"").unwrap();
+    let second = TypstWorld::new(source.into(), Some(main.clone()), &fonts_dir(), &fonts);
+    assert_eq!(second.project_root(), Some(dir.as_path()));
+    assert!(typst::compile::<PagedDocument>(&second).output.is_ok());
+    fs::write(docs.join("dep.typ"), "#image(\"image.svg\")").unwrap();
+    let image = docs.join("image.svg");
+    let render = || compile(source.into(), Some(main.clone()), &fonts_dir(), &fonts);
+    fs::write(&image, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\" fill=\"red\"/></svg>").unwrap();
+    let red = render();
+    assert!(red.ok);
+    fs::write(&image, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\" fill=\"blue\"/></svg>").unwrap();
+    let blue = render();
+    assert!(blue.ok);
+    assert_ne!(red.pages, blue.pages);
+    assert!(compile_to_pdf_bytes(source.into(), Some(main.clone()), &fonts_dir(), &fonts).is_ok());
+    fs::remove_file(image).unwrap();
+    assert!(!render().ok);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn dependency_snapshots_recheck_local_package_roots_and_capability() {
+    let _guard = crate::packages::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::var_os("TYPST_PACKAGE_PATH");
+    let dir = dependency_snapshot_test_dir("package");
+    let spec: typst::syntax::package::PackageSpec = "@local/snapshot-test:1.0.0".parse().unwrap();
+    let id = RootedPath::new(
+        VirtualRoot::Package(spec),
+        VirtualPath::new("lib.typ").unwrap(),
+    )
+    .intern();
+    let load = || TypstWorld::new("".into(), None, &fonts_dir(), &FontConfig::default());
+    for (root, text) in [("a", "甲 $x^2$"), ("b", "乙 $y^2$"), ("a", "更新😀")] {
+        let package_root = dir.join(root);
+        let package = package_root.join("local/snapshot-test/1.0.0");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("lib.typ"), text).unwrap();
+        std::env::set_var("TYPST_PACKAGE_PATH", &package_root);
+        assert_eq!(load().source(id).unwrap().text(), text);
+    }
+    fs::remove_dir_all(dir.join("a")).unwrap();
+    assert!(load().source(id).is_err(), "失去包能力后不能使用旧 AST");
+    match previous {
+        Some(value) => std::env::set_var("TYPST_PACKAGE_PATH", value),
+        None => std::env::remove_var("TYPST_PACKAGE_PATH"),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// 相对 include：同目录子文档 include 成功
 #[test]
 fn relative_include_ok() {

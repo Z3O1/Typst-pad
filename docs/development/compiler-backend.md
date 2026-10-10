@@ -14,13 +14,36 @@
 
 整页几何每轮按当前 World 收集：主文档 Span 区间一次建索引，字形墨迹按字体、字号和 glyph ID 在同轮复用；不跨 Source 修订缓存源码映射。SVG 指纹以 Typst 0.15.1 默认导出实际使用的字段为依据：保留字体、字形、位置、变换、裁剪、标签、链接、图片和 Paint，忽略不可见的 Span、Tag 和页码元数据；Paint/图片仍完整散列，以保留资源 ID 的输入。`v2:` 指纹不能引用旧 `v1:` 基准；更换 Typst 或导出选项时必须重新审计并更新指纹域。帧摘要 FIFO 最多 4096 项，仅存哈希，不持有 Frame/Source。SVG LRU 最多 256 页、32 MiB 文本，超大单页不缓存。已持有同位置指纹的页不复制 SVG，也不序列化页面内容；服务器缓存淘汰不影响前端引用。几何编号与诊断始终更新，前端基准只在成功结果实际落地时更新。验证与复现见[测试](testing.md#文档模式性能复现)。
 
-每轮仍构建独立 World，但共享不可变字体元数据（最多 4 套目录配置）与标准库（最多 8 种有序字体族配置）。主源缓存按项目根与 FileId 区分，最多 8 份、2 MiB UTF-8 正文；命中后使用字符边界安全差分和 `Source::edit` 增量解析，旧 World 的 COW 快照不变。正文预算不等于 AST/RSS 上限；超预算或淘汰均可重新解析。相对依赖每轮重新读取，不把主源缓存当成依赖缓存。缺少 `import` / `include` 关键词时省去路径 AST 扫描，命中时仍执行完整解析与原有根校验。编译通道任务结束后调用官方 `typst::comemo::evict(10)` 清理冷历史，不作废已持有的页面或几何；这不是热缓存或进程内存的硬上限。
+每轮仍构建独立 World，但共享不可变字体元数据（最多 4 套目录配置）与标准库（最多 8 种有序字体族配置）。主源缓存按项目根与 FileId 区分，最多 8 份、2 MiB UTF-8 正文；命中后使用字符边界安全差分和 `Source::edit` 增量解析，旧 World 的 COW 快照不变。正文预算不等于 AST/RSS 上限；超预算或淘汰均可重新解析。相对依赖每轮重新执行路径/包解析并完整读取；只有读取成功且 UTF-8 正文逐字节相同时，才复用独立的依赖 Source/惰性摘要缓存（按项目根与 FileId 区分，最多 8 份、2 MiB 正文）。正文改变时完整解析；删除、读取失败、非法 UTF-8 或包能力失效不能回退旧快照。磁盘图片/数据不进入该缓存，项目根扫描也不缓存磁盘授权或依赖内容。主源与依赖预算各自独立，旧 World 持有的不可变快照不受淘汰影响。缺少 `import` / `include` 关键词时省去路径 AST 扫描，命中时仍执行完整解析与原有根校验。编译通道任务结束后调用官方 `typst::comemo::evict(10)` 清理冷历史，不作废已持有的页面或几何；这不是热缓存或进程内存的硬上限。
 
 前端会把启用的前缀代码拼在用户正文之前，编译偏移量按 UTF-8 字节长度计算，诊断展示时再映射到正文坐标；前缀自身的错误不应错误地标到正文行。诊断若无可定位 span（例如 detached span）会被 Rust 侧跳过；外部数据文件无法读取源文本时位置退化到起始位置。
 
 `CompileState` 的锁在 `spawn_blocking` 中持有，锁中毒时通过 `into_inner()` 恢复，避免一次 panic 永久阻塞后续编译。任务 panic / runtime 关闭表现为 JoinError，由各命令按各自 IPC 契约转换为内部错误结果；正常 Typst 诊断仍走结构化结果。
 
 PDF 导出由前端选择目标路径，再调用 `export_pdf`；Rust 编译 PDF 字节并通过受约束的写入路径落盘。整页交互由 `document_hit_test` 与 `document_cursor` 读取对应编号的缓存，不重新编译；旧块/公式命令保留为原生探针能力，产品前端不再调用。增加或改名 Tauri 命令时，必须同时更新 `src-tauri/src/lib.rs` 的 `generate_handler!` 列表。
+
+## 依赖解析性能复现
+
+现有主源增量解析、共享标准库和字体集合已经避免了重复构建；新的优化只针对本轮重新读盘确认不变的 include/import Source，保留完整 Typst 编译、同轮几何和增量页还原契约。没有磁盘依赖的正文不经过此缓存。
+
+```bash
+# main.typ 引用同目录 body.typ；探针只读样本，内存中连续编辑 main 正文。
+CARGO_BUILD_JOBS=2 PERF_FILES='/absolute/path/main.typ' PERF_ROUNDS=12 \
+  cargo test --manifest-path src-tauri/Cargo.toml document_edit_performance -- --ignored --nocapture
+# 同样本分离磁盘读取、完整解析+摘要，以及 World.source 的重新校验成本。
+CARGO_BUILD_JOBS=2 PERF_FILES='/absolute/path/main.typ' \
+  cargo test --manifest-path src-tauri/Cargo.toml dependency_source_performance -- --ignored --nocapture
+```
+
+`DEPSOURCEPERF` 的 `fresh_ms` 为直接 `Source::new` 加摘要，`validated_ms` 包含本轮读盘、缓存确认与摘要；`round=0` 是冷快照，热比较排除它。不以 wall-clock 作 CI 阈值。Linux debug 同构建模式对照（基线 `68529f6`）：用 `performance.rs` 同样的中文/英文/公式/表格正文组成 1/10/50 页 `body.typ`，主源只放页面设置、可编辑正文和 include；12 轮覆盖输入、删除、段落与撤销。热轮中位数（ms）：
+
+| body 页数 | 依赖读取/解析/摘要，前 → 后 | 连续编辑 Typst 编译，前 → 后 | 编辑分段总和，前 → 后 |
+| --- | --- | --- | --- |
+| 1 | 0.624 → 0.009 | 3.75 → 3.22 | 8.28 → 7.07 |
+| 10 | 5.815 → 0.056 | 18.86 → 11.60 | 27.95 → 19.76 |
+| 50 | 23.366 → 0.126 | 77.82 → 48.61 | 108.52 → 76.04 |
+
+同进程 50 页直接完整解析/摘要中位数仍为 18.507 ms，缓存确认只省掉解析/散列，不省磁盘读取。全部编辑轮用独立 SVG 导出校验完整差量还原。首次编译、字体扫描、磁盘内容改变或缓存淘汰仍有冷成本；无依赖 1/10/50 页探针也通过，但时间变化不能归因于此优化。数据是绕过 IPC 的 Linux debug 引擎探针，不是 Windows WebView2 端到端输入延迟。
 
 ## 文档路径与项目根
 

@@ -33,6 +33,7 @@
 //!   * `fonts.rs`       字体加载、逐 face 注册、进程内缓存、默认族注入
 //!   * `compile.rs`     整篇编译与增量页输出 + 预览重排的页面几何注入
 //!   * `source_cache.rs` 有界主源快照与 UTF-8 安全增量解析
+//!   * `dependency_cache.rs` 重新读盘校验后的有界依赖语法快照
 //!   * `svg_fingerprint.rs` 默认 SVG 输入指纹与有界帧摘要
 //!   * `svg_cache.rs`   增量传输清单与有界 SVG 缓存
 //!   * `cache.rs`       小容量 LRU / 帧摘要 FIFO 的数量与权重边界
@@ -63,6 +64,7 @@ use typst_svg::SvgOptions;
 
 mod cache;
 mod compile;
+mod dependency_cache;
 mod diagnostics;
 mod fonts;
 mod formula_preview;

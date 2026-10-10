@@ -143,6 +143,42 @@ fn document_edit_performance() {
     }
 }
 
+// 分离磁盘依赖的读取、解析与摘要成本；与编辑探针使用相同本地样本。
+#[test]
+#[ignore]
+fn dependency_source_performance() {
+    let files = std::env::var_os("PERF_FILES").expect("PERF_FILES 指定只读样本路径列表");
+    for path in std::env::split_paths(&files) {
+        let path = fs::canonicalize(path).unwrap();
+        let dependency = path.parent().unwrap().join("body.typ");
+        let original = fs::read(&dependency).unwrap();
+        let id =
+            RootedPath::new(VirtualRoot::Project, VirtualPath::new("body.typ").unwrap()).intern();
+        for round in 0..4 {
+            let world = TypstWorld::new(
+                fs::read_to_string(&path).unwrap(),
+                Some(path.to_string_lossy().into()),
+                &fonts_dir(),
+                &FontConfig::default(),
+            );
+            let start = Instant::now();
+            let text = fs::read_to_string(&dependency).unwrap();
+            let disk_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            let fresh = Source::new(id, text);
+            std::hint::black_box(typst::utils::hash128(&fresh));
+            let fresh_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            let source = world.source(id).unwrap();
+            std::hint::black_box(typst::utils::hash128(&source));
+            let validated_ms = start.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(source.text().as_bytes(), original);
+            println!("DEPSOURCEPERF file={} round={round} disk_ms={disk_ms:.3} fresh_ms={fresh_ms:.3} validated_ms={validated_ms:.3} bytes={}", path.display(), original.len());
+        }
+        assert_eq!(fs::read(dependency).unwrap(), original);
+    }
+}
+
 #[test]
 #[ignore]
 fn world_component_performance() {
