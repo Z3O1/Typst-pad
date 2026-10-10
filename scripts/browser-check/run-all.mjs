@@ -37,6 +37,7 @@ const SUITES = [
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
   ["preview-reflow.mjs", 25],
+  ["zoom-stability.mjs", 22],
   ["source-workflows.mjs", 18],
   ["dollar-completion.mjs", 24],
 ];
@@ -50,6 +51,7 @@ const SUITE_FIXTURES = {
   "document-performance.mjs": ["pages"],
   "computed-style.mjs": [],
   "preview-reflow.mjs": ["pages"],
+  "zoom-stability.mjs": ["pages"],
   "source-workflows.mjs": [],
   "dollar-completion.mjs": [],
 };

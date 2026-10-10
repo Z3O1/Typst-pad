@@ -12,12 +12,11 @@
 //    （用户第五次反馈「界面缩放未生效」的根因）。
 // 3. **代次令牌**：新复核一开始旧复核立刻作废，否则旧读数会把新档位拉回引擎的旧值。
 //
-// 另外两条实现契约：`apply` 只在**用户操作**时调（页面 `$effect` 里 uiZoom 变化那条路）；
-// 浏览器开发桩的假 `setZoom` 不做复核（`isFakeZoom`），但 `zoomsim=1` 的模拟引擎照常复核。
+// 引擎写入只来自用户改档、启动恢复与重新聚焦时重申当前档；环境观察不写引擎。
+// 浏览器开发桩的假 `setZoom` 不做复核（`isFakeZoom`），有模拟引擎时照常复核。
 
 import {
   ZOOM_CONFIRM_DELAY_MS,
-  ZOOM_DEFAULT,
   ZOOM_MEASURE_SETTLE_MS,
   ZOOM_SETTLE_MAX_MS,
   ZOOM_VERIFY_WAITS_MS,
@@ -62,7 +61,7 @@ export interface ZoomControllerHooks {
 }
 
 export interface ZoomController {
-  /** 档位变化 → 交给引擎（页面在 `$effect` 里调；只在用户操作时触发） */
+  /** 偏好恢复后，用户档位变化 → 交给引擎；不写入校准档或诊断推定值。 */
   apply(level: number): Promise<void>;
   /** 窗口/分栏尺寸变化（页面 resize 监听里调）：该重校基准时重校 */
   onResize(): void;
@@ -77,7 +76,7 @@ export interface ZoomController {
   reapply(): void;
   /** 丢掉滚轮余量（重置缩放等整档操作） */
   resetWheel(): void;
-  /** 组件销毁：取消还没落地的"再确认一次"（别在窗口关掉之后再去动引擎） */
+  /** 组件销毁：取消待执行目标与观察；无法取消的在途引擎写入不再安排后续工作。 */
   dispose(): void;
   /** 仅供诊断与单测：读内部状态（页面不渲染它） */
   debugState(): {
@@ -105,8 +104,12 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
   let verifySeq = 0;
   /** "设完再确认一次"的定时器句柄 */
   let confirmTimer: number | null = null;
-  /** 校准只做一次；并发调用共用同一个 promise */
-  let calibration: Promise<void> | null = null;
+  /** 基准从当前请求档位的稳定读数建立，不向引擎写入校准档位。 */
+  let calibrated = false;
+  let disposed = false;
+  let applySeq = 0;
+  let pending: { target: number; seq: number } | null = null;
+  let applying: Promise<void> | null = null;
   /** 本会话收到的带 Ctrl 的滚轮事件次数（只用于诊断文案） */
   let wheelEvents = 0;
   /** 滚轮位移的未走完余量（见 zoom.ts 的 accumulateWheelSteps） */
@@ -119,7 +122,9 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
   /** 按"当前档位 × 当前宽度"重校基准：缩放与用户拖窗口之后都要校，否则判据会失真 */
   function rebaseline() {
     const width = hooks.layoutWidth();
-    if (width > 0 && appliedZoom > 0) baseline100 = width * appliedZoom;
+    if (Number.isFinite(width) && width > 0 && appliedZoom > 0) baseline100 = width * appliedZoom;
+    const dpr = hooks.devicePixelRatio();
+    if (Number.isFinite(dpr) && dpr > 0) dprAt100 = dpr / appliedZoom;
   }
 
   /** 引擎**实际接受**的档位（读 CSS 布局宽度；量不到时 null = 本次不判定） */
@@ -141,74 +146,78 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
     return engineZoomNow();
   }
 
-  /**
-   * 启动后校准一次：先把引擎设到 100%（顺便排掉 WebView2"记住上次站点缩放"的干扰），记下此时的
-   * CSS 布局宽度作为基准。100% 是恒等档，任何引擎都会接受，所以这个基准可靠。
-   */
-  function ensureCalibration(): Promise<void> {
-    if (calibration === null) {
-      calibration = (async () => {
-        try {
-          markSettling(); // 校准本身也是一次改档（这一步引发的 resize 同样不该改基准）
-          await hooks.setWebviewZoom(ZOOM_DEFAULT);
-          await hooks.sleep(90);
-          const width = hooks.layoutWidth();
-          if (width > 0) {
-            baseline100 = width;
-            appliedZoom = ZOOM_DEFAULT;
-          }
-          const dpr = hooks.devicePixelRatio();
-          if (Number.isFinite(dpr) && dpr > 0) dprAt100 = dpr;
-          hooks.log(`校准：100% 布局宽度 ${width}px，dpr ${dpr}`);
-        } catch (e) {
-          hooks.log(`缩放校准失败（本次不判定引擎档位）：${String(e)}`);
-        }
-      })();
-    }
-    return calibration;
-  }
-
-  /** 手势/连续调档停止后再确认一次缩放；重复调用只保留最后一次 */
-  function scheduleConfirm() {
+  /** 确认只读；新请求立即取消旧观察和确认，不再额外回写引擎。 */
+  function scheduleConfirm(target: number, seq: number) {
     if (confirmTimer !== null) hooks.clearTimer(confirmTimer);
     confirmTimer = hooks.setTimer(() => {
       confirmTimer = null;
-      const target = clampZoom(hooks.getLevel());
-      markSettling();
-      void hooks
-        .setWebviewZoom(target)
-        .then(() => {
-          hooks.log(`confirm ${zoomLabel(target)}`);
-          void observe(target);
-        })
-        // 这次是兜底重试，失败只记日志（首次调用已经把失败报过了）
-        .catch((e) => hooks.log(`confirm failed：${String(e)}`));
+      if (disposed || seq !== applySeq) return;
+      void observe(target);
     }, ZOOM_CONFIRM_DELAY_MS);
   }
 
-  async function apply(zoom: number): Promise<void> {
-    if (!hooks.enabled()) return;
-    const target = clampZoom(zoom);
-    // 先校准 100% 基线（只做一次），后面才能把视口宽度换算成"引擎实际接受的档位"
-    await ensureCalibration();
-    // 改档前若处于"已沉降"状态，先把基准按**当前档位**校一遍：沉降窗口里被跳过的 resize
-    // （用户拖了窗口）在这里自愈。连滚多档时不校 —— 那时的档位估计可能还没跟上真实值。
-    const settled = shouldRebaselineZoom({
-      now: hooks.now(),
-      settlingUntil,
-      verifyInFlight: stepInFlight,
-    });
-    if (settled) rebaseline();
-    markSettling();
-    try {
-      await hooks.setWebviewZoom(target);
+  async function drainApplies(): Promise<void> {
+    while (pending && !disposed) {
+      const { target, seq } = pending;
+      pending = null;
+      markSettling();
+      try {
+        await hooks.setWebviewZoom(target);
+      } catch (e) {
+        hooks.log(`setZoom failed：${String(e)}`);
+        continue;
+      }
+      if (disposed || seq !== applySeq) continue;
       appliedZoom = target;
       hooks.log(`set ${zoomLabel(target)}`);
-    } catch (e) {
-      hooks.log(`setZoom failed：${String(e)}`);
-      return;
+      if (!calibrated) {
+        // 首次启动无法独立读取 WebView 的站点缩放。以请求档位建立推定基准，
+        // 不宣称首次请求已被引擎接受；后续请求可用宽度与 DPR 的变化交叉观察。
+        await hooks.nextFrame();
+        await hooks.sleep(ZOOM_MEASURE_SETTLE_MS);
+        if (disposed || seq !== applySeq) continue;
+        const width = hooks.layoutWidth();
+        const dpr = hooks.devicePixelRatio();
+        if (Number.isFinite(width) && width > 0) baseline100 = width * target;
+        if (Number.isFinite(dpr) && dpr > 0) dprAt100 = dpr / target;
+        calibrated = true;
+        hooks.log(`当前档位基准（推定）：${zoomLabel(target)}，布局宽度 ${width}px`);
+      }
+      scheduleConfirm(target, seq);
     }
-    scheduleConfirm();
+  }
+
+  function startApplies(): Promise<void> {
+    const task = drainApplies().finally(() => {
+      applying = null;
+      // drain结束到finally之间仍可能收到新目标；该目标不能遗留在无人处理的pending里。
+      if (pending && !disposed) return startApplies();
+    });
+    applying = task;
+    return task;
+  }
+
+  async function apply(zoom: number): Promise<void> {
+    if (!hooks.enabled() || disposed) return;
+    const target = clampZoom(zoom);
+    if (
+      calibrated &&
+      shouldRebaselineZoom({
+        now: hooks.now(),
+        settlingUntil,
+        verifyInFlight: stepInFlight || applying !== null,
+      })
+    )
+      rebaseline();
+    ++verifySeq;
+    stepInFlight = false;
+    if (confirmTimer !== null) hooks.clearTimer(confirmTimer);
+    confirmTimer = null;
+    pending = { target, seq: ++applySeq };
+    markSettling();
+    // 引擎写入串行；等待中的中间档合并，只让最新目标继续落地。
+    if (!applying) startApplies();
+    await applying;
   }
 
   /**
@@ -218,7 +227,7 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
    */
   async function observe(target: number): Promise<void> {
     if (hooks.isFakeZoom()) return;
-    if (calibration === null) return; // 还没校准过（正常路径一定先经过 apply）
+    if (!calibrated) return; // 还没校准过（正常路径一定先经过 apply）
     const mySeq = ++verifySeq;
     let observed: number | null = null;
     let observedDpr: number | null = null;
@@ -266,7 +275,7 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
       const allowed = shouldRebaselineZoom({
         now: hooks.now(),
         settlingUntil,
-        verifyInFlight: stepInFlight,
+        verifyInFlight: stepInFlight || applying !== null,
       });
       if (!allowed) {
         hooks.log("resize（缩放沉降窗口内，跳过基准重校）");
@@ -302,6 +311,10 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
     },
 
     dispose() {
+      disposed = true;
+      pending = null;
+      ++applySeq;
+      ++verifySeq;
       if (confirmTimer !== null) {
         hooks.clearTimer(confirmTimer);
         confirmTimer = null;

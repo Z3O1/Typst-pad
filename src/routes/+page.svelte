@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import Editor from "$lib/editor/Editor.svelte";
   import {
     compileToSvg,
@@ -133,6 +133,7 @@
     previewCanvasWidth,
     previewPage,
     reflowCanvasWidth,
+    usesDefaultPageLayout,
     type PaperShape,
     type PreviewPage,
   } from "$lib/core/preview-scale";
@@ -341,9 +342,10 @@
    * webview 缩放发生在 CSS 层之下，所有这些单位都不动。
    */
   let uiZoom = $state(ZOOM_DEFAULT);
+  let zoomReady = $state(false);
   /**
    * 缩放编排（引擎改档 / 100% 基准 / 沉降窗口 / 复核代次 / 滚轮余量）在 zoom-controller.ts：
-   * 那边依赖全部由 hooks 注入，24 项单测把三条红线钉住了 —— ① 只观察、绝不改档（用户 2026-09-16
+   * 那边依赖全部由 hooks 注入，单测把三条红线钉住了 —— ① 只观察、绝不改档（用户 2026-09-16
    * 的取舍）；② 沉降窗口内 resize 不重校 100% 基准；③ 新复核一开始旧复核立刻作废。
    * 这里只提供页面这一侧的东西：档位状态、状态栏反馈、真正的引擎 setZoom。
    */
@@ -884,9 +886,14 @@
   // 界面缩放会改预览栏的 CSS 宽度 → 重排的页宽也跟着变，所以这里要重新排一次
   //（桩里假缩放不改布局，只靠 ResizeObserver 会漏）。
   $effect(() => {
-    applyPreviewScale();
-    schedulePreviewReflow();
-    void zoom.apply(uiZoom);
+    // 首次引擎写入必须等待偏好恢复；模式/纸型改变不能冒充用户改档。
+    if (!zoomReady) return;
+    const target = uiZoom;
+    untrack(() => {
+      applyPreviewScale();
+      schedulePreviewReflow();
+      void zoom.apply(target);
+    });
   });
 
   /** 模式切换保留编辑器；离开展开态时恢复原文的编译输入。 */
@@ -1479,13 +1486,18 @@
    * 产物学来，拿不到它就无法按文档自己的纸型等比缩放，也不知道该不该缩窄（见其声明处）。
    * 预览栏不可测（隐藏 / 宽度 0）时不请求 —— 那时也没有横向滚动条的问题。
    */
+  function desiredPreviewPage(width: number, shape: PaperShape): PreviewPage | null {
+    const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
+    return previewPage(width, shape, viewMode === "write" && usesDefaultPageLayout(source, shape));
+  }
+
   function schedulePreviewReflow() {
     clearTimeout(previewReflowTimer);
     previewReflowTimer = setTimeout(() => {
       const body = previewPaneRef?.body();
       if (!body || body.clientWidth <= 0 || !paperShape || paperShapeInput !== naturalPaperInput)
         return;
-      const next = previewPage(body.clientWidth, paperShape);
+      const next = desiredPreviewPage(body.clientWidth, paperShape);
       if (!reflowChanged(next, previewPageRequest)) return;
       previewPageRequest = next;
       dbg.log("preview-reflow", next ? `页宽 ${next.widthPt.toFixed(1)}pt` : "关闭（不重排）");
@@ -1591,9 +1603,22 @@
     if (needsNaturalPaper && previewPageRequested === null && originalResult?.ok)
       learnPaperShape(paperInput, originalResult.pages);
     if (result.ok) {
+      const body = previewPaneRef?.body();
+      if (body && body.clientWidth > 0 && paperShape && paperShapeInput === paperInput) {
+        const next = desiredPreviewPage(body.clientWidth, paperShape);
+        if (reflowChanged(next, previewPageRequested)) {
+          // 无注入产物只用于测量；迟到的旧栏宽也不得短暂替换可见页与命中几何。
+          // 保留上一轮完整展示，最终纸型与 SVG/几何在同一次成功落地。
+          clearTimeout(previewReflowTimer);
+          previewPageRequest = next;
+          void compileNow("preview-reflow");
+          return;
+        }
+      }
       if (!previewPaneRef?.paper()) return;
       previewPageUsed = previewPageRequested;
       previewPaneRef.updatePages(result.pages);
+      applyPreviewScale(); // 与产物同步提交宽度，不让新 viewBox 先套上一轮宿主尺寸绘制。
       formulaPreview = result.formulaPreview ?? null;
       renderedPages = result;
       documentGeometryId = result.geometryId ?? 0;
@@ -1860,6 +1885,7 @@
     showPreview = plan.showPreview;
     editorWrap = plan.editorWrap;
     uiZoom = plan.uiZoom;
+    zoomReady = true;
     lastUpdateCheckAt = plan.lastUpdateCheckAt;
     updateDismissedAt = plan.updateDismissedAt;
     if (plan.content) {

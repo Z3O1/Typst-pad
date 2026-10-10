@@ -166,7 +166,7 @@ const stableCount = await settledCompiles();
 await sleep(800);
 check(
   "变宽恢复自然纸型且没有重排编译循环",
-  restored.requestedWidthPt === null &&
+  Math.abs(restored.requestedWidthPt - 595.28) <= 1 &&
     Math.abs(restored.pageWidthPt - 595.28) <= 1 &&
     Math.abs(restored.fontPx - 14) <= 0.1 &&
     (await c.evaluate("window.__browserDevCompileCount")) === stableCount,
@@ -241,7 +241,10 @@ async function observeSinglePageUpdates() {
     const hosts=[...document.querySelectorAll('#preview-host .document-page')];
     if(hosts.length!==1)throw Error('迟到场景必须从单页开始');
     window.__reflowPageHost=hosts[0];
-    window.__reflowUpdates=[];
+    // 记录初始可见页；自然测量不再落地，最终SVG完全相同时应复用而不是制造DOM更新。
+    const initial=hosts[0].shadowRoot.querySelector('svg');
+    if(!initial)throw Error('迟到场景缺少初始SVG');
+    window.__reflowUpdates=[{width:initial.viewBox.baseVal.width,text:initial.textContent,pages:hosts.length}];
     window.__lightDomReflowUpdates=0;
     new MutationObserver(() => { window.__lightDomReflowUpdates++; })
       .observe(document.querySelector('#preview-host'),{childList:true,subtree:true});
@@ -271,7 +274,7 @@ await settledCompiles();
 const late = await measured();
 check(
   "迟到窄栏结果不回写已恢复的宽栏文档模式",
-  late.requestedWidthPt === null &&
+  Math.abs(late.requestedWidthPt - 595.28) <= 1 &&
     Math.abs(late.pageWidthPt - 595.28) <= 1 &&
     (await c.evaluate(`window.__reflowUpdates.length>0 &&
       window.__reflowUpdates.some(update=>update.text.includes('迟到单页更新')) &&

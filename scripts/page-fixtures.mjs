@@ -61,6 +61,13 @@ const paperFixtures = result.stdout
 if (paperFixtures.length !== 15 || paperFixtures.some((f) => !f.pages.length || !f.carets.length))
   throw new Error("原文/整正文raw纸型夹具缺失，不能跳过自然学习隔离验收");
 writeFileSync(".browser-check/preview-paper-fixtures.json", JSON.stringify(paperFixtures));
+const zoomFixtures = result.stdout
+  .split("\n")
+  .filter((line) => line.startsWith("ZOOMFIXTURE:"))
+  .map((line) => JSON.parse(line.slice("ZOOMFIXTURE:".length)));
+if (zoomFixtures.length !== 11 || zoomFixtures.some((f) => !f.pages.length || !f.carets.length))
+  throw new Error("缩放/边距真实夹具缺失");
+writeFileSync(".browser-check/zoom-fixtures.json", JSON.stringify(zoomFixtures));
 console.log(
-  `已导出 ${fixtures.length} 份真实整页夹具、${cursorFixtures.length} 份光标渲染夹具、${expansionFixtures.length} 份展开夹具、${paperFixtures.length} 份原文/raw纸型夹具`,
+  `已导出 ${fixtures.length} 份真实整页夹具、${cursorFixtures.length} 份光标渲染夹具、${expansionFixtures.length} 份展开夹具、${paperFixtures.length} 份原文/raw纸型夹具、${zoomFixtures.length} 份缩放/边距夹具`,
 );

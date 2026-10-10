@@ -16,6 +16,8 @@
 //
 // 独立模块以便单元测试（纯函数，不依赖 DOM）。
 
+import { parser } from "codemirror-lang-typst/lezer";
+
 /** Typst 默认正文字号（pt）——重排页宽与兜底字号的换算锚点 */
 export const TYPST_DEFAULT_TEXT_PT = 11;
 
@@ -24,6 +26,9 @@ export const EDITOR_FONT_PX = 14;
 
 /** Typst 默认页边距（pt）＝2.5cm：文档自己的页边距拿不到，重排按同比例缩放它 */
 export const TYPST_DEFAULT_MARGIN_PT = 70.87;
+
+/** 文档模式默认纸型的临时紧凑页边距；不作用于明确页面布局或导出。 */
+export const DOCUMENT_PREVIEW_MARGIN_PT = 24;
 
 /** 预览重排的页宽下限（pt）：再窄正文会被边距挤成碎字 */
 export const PREVIEW_PAGE_MIN_PT = 180;
@@ -78,7 +83,8 @@ export function previewCanvasWidth(input: PreviewScaleInput): number {
 }
 
 /**
- * 预览栏可用宽度（CSS px）→ 重排要用的页面几何（pt）；**不需要缩窄时返回 null**。
+ * 预览栏可用宽度（CSS px）→ 重排页面几何（pt）；普通策略不需要缩窄时返回null，
+ * 紧凑策略在宽栏也返回自然纸型及临时边距，以便Typst完整编译。
  *
  * 换算依据：重排后画布按 1:1 铺满预览栏（`px/pt = pane/width`），于是
  * `widthPt = pane × 11/14` 时正文正好渲成 14px。页高与页边距按文档**自己的纸型**
@@ -90,18 +96,43 @@ export function previewCanvasWidth(input: PreviewScaleInput): number {
 export function previewPage(
   paneWidthPx: number,
   shape: PaperShape = DEFAULT_PAPER,
+  compact = false,
 ): PreviewPage | null {
   if (!(paneWidthPx > 0)) return null;
   const paper = shape.widthPt > 0 && shape.heightPt > 0 ? shape : DEFAULT_PAPER;
   const wanted = (paneWidthPx * TYPST_DEFAULT_TEXT_PT) / EDITOR_FONT_PX;
-  if (wanted >= paper.widthPt) return null;
-  const widthPt = Math.max(wanted, Math.min(PREVIEW_PAGE_MIN_PT, paper.widthPt));
+  if (wanted >= paper.widthPt && !compact) return null;
+  const widthPt = Math.min(
+    paper.widthPt,
+    Math.max(wanted, Math.min(PREVIEW_PAGE_MIN_PT, paper.widthPt)),
+  );
   const factor = widthPt / paper.widthPt;
   return {
     widthPt,
     heightPt: paper.heightPt * factor,
-    marginPt: TYPST_DEFAULT_MARGIN_PT * factor,
+    marginPt: (compact ? DOCUMENT_PREVIEW_MARGIN_PT : TYPST_DEFAULT_MARGIN_PT) * factor,
   };
+}
+
+/** 明确布局（包括导入的潜在页面规则）保持原来的页面策略，不猜测用户版心。 */
+export function usesDefaultPageLayout(source: string, shape: PaperShape): boolean {
+  if (
+    Math.abs(shape.widthPt - DEFAULT_PAPER.widthPt) >= 1 ||
+    Math.abs(shape.heightPt - DEFAULT_PAPER.heightPt) >= 1
+  )
+    return false;
+  let explicit = false;
+  parser.parse(source).iterate({
+    enter(node) {
+      if (
+        node.name === "Import" ||
+        node.name === "Include" ||
+        (node.name === "Ident" && /^(page|eval)$/.test(source.slice(node.from, node.to)))
+      )
+        explicit = true;
+    },
+  });
+  return !explicit;
 }
 
 /**

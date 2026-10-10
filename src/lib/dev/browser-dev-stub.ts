@@ -705,9 +705,22 @@ export function installBrowserDevStub(): void {
   const callbacks = new Map<number, (payload: unknown) => void>();
   let nextCallbackId = 1;
 
+  // 验收可注入 CDP 引擎与逐请求观测；只存在于 dev 桩，不改变生产 IPC。
+  const interceptor = (
+    window as unknown as {
+      __browserDevInvoke?: (
+        command: string,
+        args: Record<string, unknown> | undefined,
+        invoke: () => Promise<unknown>,
+      ) => Promise<unknown>;
+    }
+  ).__browserDevInvoke;
   const internals = {
     // Tauri 2 的 JS API 走这个入口（见 node_modules/@tauri-apps/api/core.js）
-    invoke: (command: string, args?: Record<string, unknown>) => handleCommand(command, args),
+    invoke: (command: string, args?: Record<string, unknown>) =>
+      interceptor
+        ? interceptor(command, args, () => handleCommand(command, args))
+        : handleCommand(command, args),
     // 事件系统（@tauri-apps/api/event）依赖的方法：注册回调并返回 id
     transformCallback: (callback?: (payload: unknown) => void, once = false): number => {
       const id = nextCallbackId++;
@@ -735,7 +748,7 @@ export function installBrowserDevStub(): void {
   // 否则会误报"缩放未生效"）；开了 zoomsim（假 dpr）时副作用是模拟出来的，复核要照常跑。
   // 用标记而不是 import：桩是 dev-only 模块，页面 import 它会把桩打进生产包。
   (window as unknown as Record<string, unknown>).__browserDevStub = {
-    fakeZoom: !zoomSimEnabled,
+    fakeZoom: !zoomSimEnabled && !interceptor,
   };
 
   installFakeClipboard();

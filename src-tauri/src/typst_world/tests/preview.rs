@@ -397,6 +397,79 @@ fn dump_page_fixtures_preview_paper() {
     }
 }
 
+/// 紧凑文档预览仍由 Typst 完整编译；夹具只覆盖预览，不改变源文档/PDF。
+#[test]
+#[ignore]
+fn dump_page_fixtures_zoom_margins() {
+    let body = "紧凑预览中文与 English，公式 $x^2$。\n\n"
+        .repeat(32)
+        .trim_end()
+        .to_owned();
+    let before = format!("#set page(margin: 70.87pt)\n{body}");
+    let fonts = FontConfig::default();
+    let original_pdf = compile_to_pdf_bytes(body.clone(), None, &fonts_dir(), &fonts).unwrap();
+    for (name, doc, page_widths) in [
+        ("before", before, vec![None, Some(620.0 * 11.0 / 14.0)]),
+        (
+            "compact",
+            body.clone(),
+            vec![
+                None,
+                Some(595.2755905511812),
+                Some(400.0 * 11.0 / 14.0),
+                Some(620.0 * 11.0 / 14.0),
+                Some(180.0),
+            ],
+        ),
+    ] {
+        for width in page_widths {
+            for margin in if width.is_some() && name == "before" {
+                vec![70.87]
+            } else if width.is_some() {
+                vec![24.0, 70.87]
+            } else {
+                vec![24.0]
+            } {
+                let preview = width.map(|width_pt| PreviewPage {
+                    width_pt,
+                    height_pt: width_pt * 841.8897637795276 / 595.2755905511812,
+                    margin_pt: margin * width_pt / 595.2755905511812,
+                });
+                let out = compile_incremental_with_preview(
+                    doc.clone(),
+                    None,
+                    &fonts_dir(),
+                    &fonts,
+                    None,
+                    preview,
+                );
+                assert!(out.ok, "{name}: {:?}", out.diagnostics);
+                if let Some(preview) = preview {
+                    assert!(widths(&out.pages)
+                        .iter()
+                        .all(|width| (width - preview.width_pt).abs() < 0.01));
+                }
+                let id = out.geometry_id.unwrap();
+                let carets: Vec<_> = doc
+                    .char_indices()
+                    .filter_map(|(at, _)| locate(id, at))
+                    .collect();
+                assert!(!carets.is_empty());
+                let pages: Vec<_> = out.pages.into_iter().map(Option::unwrap).collect();
+                let preview_json = preview.map(|p| serde_json::json!({"widthPt":p.width_pt,"heightPt":p.height_pt,"marginPt":p.margin_pt}));
+                println!(
+                    "ZOOMFIXTURE:{}",
+                    serde_json::json!({"name":name,"doc":doc,"pages":pages,"carets":carets,"previewPage":preview_json})
+                );
+            }
+        }
+    }
+    assert_eq!(
+        compile_to_pdf_bytes(body, None, &fonts_dir(), &fonts).unwrap(),
+        original_pdf
+    );
+}
+
 /// 脏输入不注入（不因为一个坏数字把编译弄挂）
 #[test]
 fn preview_reflow_ignores_invalid_geometry() {
