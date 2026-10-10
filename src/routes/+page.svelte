@@ -128,11 +128,9 @@
   import { mark, reportStartup } from "$lib/core/startup-timing";
   import { dbg, setCliDebug } from "$lib/core/debug";
   import {
-    isReflowApplied,
+    naturalScale,
     paperShapeFromPages,
-    previewCanvasWidth,
     previewPage,
-    reflowCanvasWidth,
     usesDefaultPageLayout,
     type PaperShape,
     type PreviewPage,
@@ -262,13 +260,11 @@
    * 预览重排（纸张跟着预览栏走）：栏宽是**编译期输入**（Rust 侧注入 `#set page(...)`），
    * 所以栏宽一变就要重编译 —— 见 `schedulePreviewReflow`。
    * - `previewPageRequest`：当前想要的重排几何（null = 不重排，走等比缩放）；
-   * - `previewPageUsed`：**已经落地的那次编译**用的是哪份几何（复核产物页宽要看它）；
    * - `paperShape`：文档**自己的**纸型（从没注入那次编译的产物学来），重排按它等比缩放
    *   页高/页边距、也只允许缩窄到它以内。不能用当前产物的纸型当基准：重排后的产物就是
    *   被改窄过的，拿它当基准会在"要重排"与"不用重排"之间来回跳、无限重编译。
    */
   let previewPageRequest = $state.raw<PreviewPage | null>(null);
-  let previewPageUsed: PreviewPage | null = null;
   let paperShape: PaperShape | null = null;
   // 自然纸型只属于已通过过期检查的源码/前缀上下文；栏宽和展开态不使它失效。
   let paperShapeInput: string | null = null;
@@ -1297,7 +1293,6 @@
     paperShape = null;
     paperShapeInput = null;
     previewPageRequest = null;
-    previewPageUsed = null;
     clearTimeout(previewReflowTimer);
   }
 
@@ -1447,20 +1442,17 @@
    * 两条路径，**都保证画布 ≤ 栏宽**（这是"预览永不出现横向滚动条"的唯一依仗）：
    * - 重排生效（产物页宽 = 请求页宽）：画布按 1:1 铺满栏宽，字号恒等于编辑区字号；
    * - 重排不适用/被文档自己的纸型覆盖：等比缩放，字号不超过编辑区、页宽不超过栏宽。
-   * 测量失败（无产物 / 容器不可测）时清空内联宽度，回退 CSS `width: 100%`。
+   * 写入产物的自然宽度上限，CSS max-width 当帧随容器收窄和放宽；不能把当前
+   * 已收窄的容器宽度写成固定上限，否则下一次缩小引擎时旧窄宽度会先让字号闪缩。
+   * 无产物时清空内联宽度，回退 CSS `width: 100%`。
    */
   function applyPreviewScale() {
     const body = previewPaneRef?.body();
     const paper = previewPaneRef?.paper();
     if (!body || !paper) return;
-    const containerWidth = body.clientWidth;
     const actualPageWidthPt = previewPaneRef?.pageWidthPt() ?? 0;
-    const used = previewPageUsed;
-    const displayWidth =
-      used && isReflowApplied(actualPageWidthPt, used.widthPt)
-        ? reflowCanvasWidth(containerWidth, actualPageWidthPt)
-        : previewCanvasWidth({ containerWidth, pageWidthPt: actualPageWidthPt });
-    const width = Number.isNaN(displayWidth) ? "" : `${displayWidth}px`;
+    const displayWidth = actualPageWidthPt * naturalScale();
+    const width = displayWidth > 0 && Number.isFinite(displayWidth) ? `${displayWidth}px` : "";
     if (paper.style.width !== width) paper.style.width = width;
   }
 
@@ -1616,7 +1608,6 @@
         }
       }
       if (!previewPaneRef?.paper()) return;
-      previewPageUsed = previewPageRequested;
       previewPaneRef.updatePages(result.pages);
       applyPreviewScale(); // 与产物同步提交宽度，不让新 viewBox 先套上一轮宿主尺寸绘制。
       formulaPreview = result.formulaPreview ?? null;

@@ -14,7 +14,7 @@ import {
 } from "./harness.mjs";
 
 const { check, state } = createChecker();
-const fixtures = loadFixtures("zoom-fixtures.json", { predicate: (f) => f.length === 11 });
+const fixtures = loadFixtures("zoom-fixtures.json", { predicate: (f) => f.length === 37 });
 const doc = fixtures.find((f) => f.name === "compact").doc;
 const beforeDoc = fixtures.find((f) => f.name === "before").doc;
 const c = await connect();
@@ -87,16 +87,19 @@ async function start({ mode = "write", level = 1.5, pane = 620, source = doc, sl
       if(!installWidth())new MutationObserver((_,observer)=>{if(installWidth())observer.disconnect()})
         .observe(document,{childList:true});
     }
-    let sized=false;
-    new MutationObserver(()=>{
-      const body=document.querySelector('.preview-body');
-      if(body&&!sized) {sized=true;body.style.width=(${pane}+body.offsetWidth-body.clientWidth)+'px';body.style.maxWidth='100%';}
-    }).observe(document,{childList:true,subtree:true});
+    if(${pane !== null}) {
+      let sized=false;
+      new MutationObserver(()=>{
+        const body=document.querySelector('.preview-body');
+        if(body&&!sized) {sized=true;body.style.width=(${pane}+body.offsetWidth-body.clientWidth)+'px';body.style.maxWidth='100%';}
+      }).observe(document,{childList:true,subtree:true});
+    }
     function sample(t) {
       const body=document.querySelector('.preview-body'), paper=document.querySelector('.preview-paper');
       const host=document.querySelector('#preview-host .document-page'), svg=host?.shadowRoot?.querySelector('svg');
       if(body&&paper) {
         const w=svg?.viewBox.baseVal.width??0, paperWidth=paper.getBoundingClientRect().width;
+        const glyph=svg?.querySelector('use')?.getBoundingClientRect();
         const cm=document.querySelector('.cm-editor');
         audit.frames.push({t,phase:audit.phase,pane:body.clientWidth,paper:paperWidth,
           widthPt:w,heightPt:svg?.viewBox.baseVal.height??0,font:w?11*paperWidth/w:0,
@@ -105,6 +108,9 @@ async function start({ mode = "write", level = 1.5, pane = 620, source = doc, sl
           physicalFont:w?11*paperWidth/w*devicePixelRatio:0,
           text:svg?.textContent??'',pages:document.querySelectorAll('#preview-host .document-page').length,
           request:window.__browserDevLastCompile?.previewPage??null,
+          inlinePaneWidth:body.style.width, viewport:innerWidth,
+          glyphWidth:glyph?.width??0,glyphHeight:glyph?.height??0,
+          paperStyleWidth:paper.style.width, paperMaxWidth:getComputedStyle(paper).maxWidth,
           level:document.querySelector('.status-bar')?.textContent??''});
       }
       requestAnimationFrame(sample);
@@ -162,6 +168,20 @@ function noNaturalFlash(a, width) {
     visible.length > 5 &&
     visible.every((f) => Math.abs(f.widthPt - width) < 1 && Math.abs(f.font - 14) < 0.15)
   );
+}
+async function nativeRound() {
+  return c.evaluate(`(async () => {
+    const r=window.__zoomAudit.requests.at(-1);
+    const f=window.__typstPageFixtures.find(f=>f.doc===r.src&&f.previewPage&&r.preview&&
+      ['widthPt','heightPt','marginPt'].every(k=>Math.abs(f.previewPage[k]-r.preview[k])<0.02));
+    if(!f||!f.carets.length)return false;
+    const hosts=[...document.querySelectorAll('#preview-host .document-page')];
+    const canonical=src=>{const e=document.createElement('div');e.innerHTML=src;return e.querySelector('svg').outerHTML};
+    if(hosts.length!==f.pages.length||!hosts.every((h,i)=>h.shadowRoot.querySelector('svg').outerHTML===canonical(f.pages[i])))return false;
+    const caret=f.carets[0];
+    const actual=await window.__TAURI_INTERNALS__.invoke('document_cursor',{geometryId:r.geometryId,offset:caret.offset});
+    return JSON.stringify(actual)===JSON.stringify(caret);
+  })()`);
 }
 async function menu(label) {
   await c.evaluate(
@@ -436,6 +456,117 @@ check(
   a.sets.map((x) => x.target).join(",") === "0.8,0.9,0.8" && noNaturalFlash(a, (400 * 11) / 14),
 );
 await archive("saved-small-startup");
+
+// 不覆盖预览栏宽：让实际父布局随引擎缩放改变，覆盖真正的重排路径。
+for (const mode of ["write", "source"]) {
+  for (const width of [1400, 1100]) {
+    physicalWidth = width;
+    const level = width === 1400 ? 2 : 1.5;
+    await start({ mode, level, pane: null });
+    await archive(`fluid-${mode}-${width}-startup`);
+    // 逐档落地，覆盖实际不同栏宽的真实Typst产物，而非只在去抖内回到原档。
+    for (const up of [true, true, false, false]) {
+      await phase(`fluid-step-${engineCalls.length}`);
+      await menu(up ? "放大" : "缩小");
+      await settle();
+      const sameRound = await nativeRound();
+      await c.evaluate(`(() => {
+        const a=window.__zoomAudit, f=a.frames.at(-1), r=a.requests.at(-1);
+        (a.settled??=[]).push({phase:a.phase,target:a.sets.at(-1).target,geometryId:r.geometryId,
+          request:r.preview,pane:f.pane,paper:f.paper,widthPt:f.widthPt,font:f.font,sameRound:${sameRound}});
+        return true;
+      })()`);
+    }
+    for (const [name, input] of [
+      [
+        "key",
+        async (up) =>
+          c.key(up ? "=" : "-", {
+            code: up ? "Equal" : "Minus",
+            keyCode: up ? 187 : 189,
+            modifiers: 10,
+          }),
+      ],
+      [
+        "wheel",
+        async (up) =>
+          c.evaluate(
+            `window.dispatchEvent(new WheelEvent('wheel',{deltaY:${up ? -100 : 100},ctrlKey:true,bubbles:true,cancelable:true}));true`,
+          ),
+      ],
+      ["menu", async (up) => menu(up ? "放大" : "缩小")],
+    ]) {
+      await phase(`fluid-${name}`);
+      for (const up of [true, true, false, false]) {
+        await input(up);
+        await sleep(35);
+      }
+      await settle();
+      await archive(`fluid-${mode}-${width}-${name}`);
+    }
+    a = await audit();
+    check(
+      `正常布局 ${mode}/${width}：栏宽随缩放变化，全部帧无横滚`,
+      fitted(a) &&
+        a.frames.every((f) => f.inlinePaneWidth === "") &&
+        new Set(a.frames.map((f) => f.pane)).size >= 3,
+      JSON.stringify(a.requests.map((r) => r.preview)),
+    );
+    const visible = a.frames.filter((f) => f.widthPt > 0);
+    // SVG宽度保留两位小数；源码栏本身还有半像素边框。容许<1px舍入，不容许旧窄宿主。
+    const staleHosts = visible.filter(
+      (f) => Math.abs(f.paper - Math.min(f.pane, (f.widthPt * 14) / 11)) > 0.8,
+    );
+    check(
+      `正常布局 ${mode}/${width}：逐rAF旧完整页立即适配收窄/放宽，不先闪缩`,
+      visible.length > 30 &&
+        staleHosts.length === 0 &&
+        visible.every((f) => f.font <= 14.05 && f.glyphHeight > 0 && f.paperMaxWidth === "100%"),
+      JSON.stringify(staleHosts.slice(0, 3)),
+    );
+    const dips = visible.filter((f) => {
+      const step = /^fluid-step-(\d+)$/.exec(f.phase);
+      const calls = a.sets;
+      const low = step ? Math.min(calls[+step[1] - 1].target, calls[+step[1]].target) : level;
+      return f.phase !== "startup" && f.physicalFont < 14 * low - 0.25;
+    });
+    check(
+      `正常布局 ${mode}/${width}：单档/连续wheel-key-menu物理字号不低于用户端点`,
+      dips.length === 0 &&
+        a.sets.length === 17 &&
+        a.sets.map((s) => s.target).join(",") ===
+          [
+            level,
+            ...Array.from({ length: 4 }, () => [
+              +(level + 0.1).toFixed(1),
+              +(level + 0.2).toFixed(1),
+              +(level + 0.1).toFixed(1),
+              level,
+            ]).flat(),
+          ].join(","),
+      JSON.stringify(dips.slice(0, 3)),
+    );
+    check(
+      `正常布局 ${mode}/${width}：实际请求几何均有真实夹具，最终完整SVG/caret同轮`,
+      a.requests.every(
+        (r) =>
+          r.geometryId > 0 &&
+          r.widths?.length &&
+          (!r.preview || r.widths.every((w) => Math.abs(w - r.preview.widthPt) < 0.02)),
+      ) &&
+        a.settled?.length === 4 &&
+        a.settled.every(
+          (s) =>
+            s.sameRound &&
+            Math.abs(s.font - 14) < 0.05 &&
+            Math.abs(s.request.widthPt - (s.pane * 11) / 14) < 0.02 &&
+            Math.abs(s.widthPt - s.request.widthPt) < 0.02,
+        ) &&
+        (await nativeRound()),
+    );
+    await c.screenshot(shotPath(`zoom-fluid-${mode}-${width}`));
+  }
+}
 await c.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: injection });
 await c.send("Page.navigate", { url: "about:blank" });
 console.log(

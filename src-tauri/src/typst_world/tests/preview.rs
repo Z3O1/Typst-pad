@@ -408,19 +408,26 @@ fn dump_page_fixtures_zoom_margins() {
     let before = format!("#set page(margin: 70.87pt)\n{body}");
     let fonts = FontConfig::default();
     let original_pdf = compile_to_pdf_bytes(body.clone(), None, &fonts_dir(), &fonts).unwrap();
+    let mut compact_widths = vec![
+        None,
+        Some(595.2755905511812),
+        Some(400.0 * 11.0 / 14.0),
+        Some(620.0 * 11.0 / 14.0),
+        Some(180.0),
+    ];
+    // 正常布局：CDP 物理宽1400/1100，存档200%/150%及两次10%改档；
+    // 含引擎首次写入前的源码栏宽，扣除真实15px稳定滚动槽，不固定预览栏。
+    compact_widths.extend(
+        [
+            685.0, 652.0, 621.0, 718.0, 673.0, 632.0, 335.0, 318.0, 303.0, 351.0, 329.0, 308.0,
+            535.0,
+        ]
+        .into_iter()
+        .map(|pane_px| Some(pane_px * 11.0 / 14.0)),
+    );
     for (name, doc, page_widths) in [
         ("before", before, vec![None, Some(620.0 * 11.0 / 14.0)]),
-        (
-            "compact",
-            body.clone(),
-            vec![
-                None,
-                Some(595.2755905511812),
-                Some(400.0 * 11.0 / 14.0),
-                Some(620.0 * 11.0 / 14.0),
-                Some(180.0),
-            ],
-        ),
+        ("compact", body.clone(), compact_widths),
     ] {
         for width in page_widths {
             for margin in if width.is_some() && name == "before" {

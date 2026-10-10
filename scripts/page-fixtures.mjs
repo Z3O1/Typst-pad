@@ -65,7 +65,7 @@ const zoomFixtures = result.stdout
   .split("\n")
   .filter((line) => line.startsWith("ZOOMFIXTURE:"))
   .map((line) => JSON.parse(line.slice("ZOOMFIXTURE:".length)));
-if (zoomFixtures.length !== 11 || zoomFixtures.some((f) => !f.pages.length || !f.carets.length))
+if (zoomFixtures.length !== 37 || zoomFixtures.some((f) => !f.pages.length || !f.carets.length))
   throw new Error("缩放/边距真实夹具缺失");
 writeFileSync(".browser-check/zoom-fixtures.json", JSON.stringify(zoomFixtures));
 console.log(

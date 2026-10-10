@@ -37,7 +37,7 @@ const SUITES = [
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
   ["preview-reflow.mjs", 25],
-  ["zoom-stability.mjs", 22],
+  ["zoom-stability.mjs", 38],
   ["source-workflows.mjs", 18],
   ["dollar-completion.mjs", 24],
 ];
