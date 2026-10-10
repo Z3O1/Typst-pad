@@ -58,6 +58,22 @@
   let selectionPath = $state("");
   let formulaStyle = $state("");
   let formulaFlipped = $state(false);
+
+  // 原生滚动条占位：一次测量缓存（overlay 平台为 0，经典平台约 15-17px）。
+  let scrollbarSizeCache: { width: number; height: number } | null = null;
+  function scrollbarSize(): { width: number; height: number } {
+    if (scrollbarSizeCache) return scrollbarSizeCache;
+    const probe = document.createElement("div");
+    probe.style.cssText =
+      "position:absolute;left:-9999px;top:-9999px;visibility:hidden;overflow:scroll;width:100px;height:100px";
+    document.body.appendChild(probe);
+    scrollbarSizeCache = {
+      width: probe.offsetWidth - probe.clientWidth,
+      height: probe.offsetHeight - probe.clientHeight,
+    };
+    probe.remove();
+    return scrollbarSizeCache;
+  }
   let measureFrame = 0;
   let scrollFrame = 0;
   let pointerStart: {
@@ -156,13 +172,14 @@
               right: body.left + bodyEl.clientWidth,
               bottom: body.top + bodyEl.clientHeight,
             },
+            scrollbar: scrollbarSize(),
           });
           if (box) {
             formulaFlipped = box.flipped;
             formulaStyle =
               `left:${box.left - root.left}px;top:${box.top - root.top}px;` +
               `--formula-content-width:${box.contentWidth}px;--formula-content-height:${box.contentHeight}px;` +
-              `--formula-view-width:${box.viewWidth}px;--formula-view-height:${box.viewHeight}px;` +
+              `--formula-container-width:${box.containerWidth}px;--formula-container-height:${box.containerHeight}px;` +
               `--formula-arrow:${box.arrowOffset}px`;
           }
         }
@@ -475,8 +492,8 @@
     border-top: 8px solid #111;
   }
   .formula-preview-content {
-    width: var(--formula-view-width);
-    height: var(--formula-view-height);
+    width: var(--formula-container-width);
+    height: var(--formula-container-height);
     overflow: auto;
   }
   .formula-preview-content :global(svg) {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  FORMULA_PREVIEW_ARROW,
   FORMULA_PREVIEW_BORDER,
   FORMULA_PREVIEW_EDGE_MARGIN,
   FORMULA_PREVIEW_GAP,
@@ -19,6 +20,7 @@ function layout(
     scale?: number;
     anchor?: FormulaPreviewRect;
     viewport?: FormulaPreviewRect;
+    scrollbar?: { width: number; height: number };
   } = {},
 ) {
   return layoutFormulaPreview({
@@ -27,6 +29,7 @@ function layout(
     scale: overrides.scale ?? 1.27,
     anchor: overrides.anchor ?? centerAnchor,
     viewport: overrides.viewport ?? viewport,
+    scrollbar: overrides.scrollbar,
   });
 }
 
@@ -113,11 +116,59 @@ describe("layoutFormulaPreview", () => {
     const box = layout();
     expect(box).not.toBeNull();
     expect(box!.height).toBeCloseTo(
-      box!.viewHeight + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER),
+      box!.containerHeight + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER),
     );
     expect(box!.width).toBeCloseTo(
-      box!.viewWidth + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER),
+      box!.containerWidth + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER),
     );
+  });
+
+  it("横滚短公式时为横向滚动条留出高度，clientHeight 能放下完整 SVG", () => {
+    const box = layout({
+      widthPt: 800,
+      heightPt: 12,
+      scrollbar: { width: 15, height: 15 },
+    });
+    expect(box).not.toBeNull();
+    expect(box!.scrollX).toBe(true);
+    expect(box!.scrollY).toBe(false);
+    // 内容层高度 = 可见高度 + 横向滚动条占位，保证 clientHeight = viewHeight。
+    expect(box!.containerHeight).toBeCloseTo(box!.viewHeight + 15);
+    // 短公式无纵滚：viewHeight 就是完整内容高度，不被滚动条吃光。
+    expect(box!.viewHeight).toBeCloseTo(box!.contentHeight);
+  });
+
+  it("纵滚窄公式时为纵向滚动条留出宽度，clientWidth 能放下完整 SVG", () => {
+    const box = layout({
+      widthPt: 40,
+      heightPt: 2000,
+      scrollbar: { width: 15, height: 15 },
+    });
+    expect(box).not.toBeNull();
+    expect(box!.scrollY).toBe(true);
+    expect(box!.scrollX).toBe(false);
+    expect(box!.containerWidth).toBeCloseTo(box!.viewWidth + 15);
+    expect(box!.viewWidth).toBeCloseTo(box!.contentWidth);
+  });
+
+  it("两轴溢出时同时为纵横滚动条留出占位", () => {
+    const box = layout({
+      widthPt: 800,
+      heightPt: 1200,
+      scrollbar: { width: 15, height: 15 },
+      viewport: { left: 0, top: 0, right: 400, bottom: 300 },
+    });
+    expect(box).not.toBeNull();
+    expect(box!.scrollX).toBe(true);
+    expect(box!.scrollY).toBe(true);
+    expect(box!.containerWidth).toBeCloseTo(box!.viewWidth + 15);
+    expect(box!.containerHeight).toBeCloseTo(box!.viewHeight + 15);
+  });
+
+  it("盒外箭头（8px）落在 gap 与 edge margin 内，与 CSS 箭头契约一致", () => {
+    expect(FORMULA_PREVIEW_ARROW).toBe(8);
+    expect(FORMULA_PREVIEW_ARROW).toBeLessThanOrEqual(FORMULA_PREVIEW_GAP);
+    expect(FORMULA_PREVIEW_ARROW).toBeLessThan(FORMULA_PREVIEW_EDGE_MARGIN);
   });
 
   it("非法输入返回 null", () => {

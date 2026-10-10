@@ -41,6 +41,8 @@ export interface FormulaPreviewLayoutInput {
   anchor: FormulaPreviewRect;
   /** 预览可见区（与 anchor 同一坐标系） */
   viewport: FormulaPreviewRect;
+  /** 原生滚动条占位（px）：一次测量缓存，overlay 平台为 0 */
+  scrollbar?: { width: number; height: number };
 }
 
 export interface FormulaPreviewLayout {
@@ -48,18 +50,22 @@ export interface FormulaPreviewLayout {
   left: number;
   /** 卡片整体 top */
   top: number;
-  /** 卡片整体宽度（含内边距） */
+  /** 卡片整体宽度（含内边距与边框，箭头在盒外） */
   width: number;
-  /** 卡片整体高度（含内边距与箭头） */
+  /** 卡片整体高度（含内边距与边框，箭头在盒外） */
   height: number;
   /** 内容（SVG）渲染宽度：保持公式比例，可能大于可见窗口 */
   contentWidth: number;
   /** 内容（SVG）渲染高度 */
   contentHeight: number;
-  /** 内容可见窗口宽度（滚动容器尺寸） */
+  /** 内容可见窗口宽度（滚动容器 clientWidth） */
   viewWidth: number;
-  /** 内容可见窗口高度 */
+  /** 内容可见窗口高度（滚动容器 clientHeight） */
   viewHeight: number;
+  /** 滚动容器 CSS 宽度（viewWidth + 纵滚滚动条占位） */
+  containerWidth: number;
+  /** 滚动容器 CSS 高度（viewHeight + 横滚滚动条占位） */
+  containerHeight: number;
   /** 箭头相对卡片左边界的偏移（px） */
   arrowOffset: number;
   /** 卡片是否翻到锚点上方（箭头在底部指向下方） */
@@ -76,11 +82,14 @@ export interface FormulaPreviewLayout {
 export function layoutFormulaPreview(
   input: FormulaPreviewLayoutInput,
 ): FormulaPreviewLayout | null {
-  const { widthPt, heightPt, scale, anchor, viewport } = input;
+  const { widthPt, heightPt, scale, anchor, viewport, scrollbar } = input;
   if (![widthPt, heightPt, scale].every((v) => Number.isFinite(v) && v > 0)) return null;
   const viewportWidth = viewport.right - viewport.left;
   const viewportHeight = viewport.bottom - viewport.top;
   if (!(viewportWidth > 0) || !(viewportHeight > 0)) return null;
+  const sbWidth = Number.isFinite(scrollbar?.width) && scrollbar!.width > 0 ? scrollbar!.width : 0;
+  const sbHeight =
+    Number.isFinite(scrollbar?.height) && scrollbar!.height > 0 ? scrollbar!.height : 0;
 
   const naturalW = widthPt * scale;
   const naturalH = heightPt * scale;
@@ -111,9 +120,14 @@ export function layoutFormulaPreview(
   const viewHeight = Math.min(contentHeight, availH);
   const scrollY = contentHeight > availH;
 
-  // 卡片是 border-box：宽高 = 内容可见窗口 + 2×(内边距 + 边框)。箭头在盒外，不占这里。
-  const width = viewWidth + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
-  const height = viewHeight + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
+  // 滚动容器要为原生滚动条留出占位：横滚时内容层要高出一个横向滚动条，纵滚时宽出一个纵向
+  // 滚动条，这样 clientWidth/clientHeight 才等于可见窗口，短高/窄宽内容不会被滚动条吃光。
+  const containerWidth = viewWidth + (scrollY ? sbWidth : 0);
+  const containerHeight = viewHeight + (scrollX ? sbHeight : 0);
+
+  // 卡片是 border-box：宽高 = 滚动容器 + 2×(内边距 + 边框)。箭头在盒外，不占这里。
+  const width = containerWidth + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
+  const height = containerHeight + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
 
   // 水平：卡片中心默认对齐锚点中心；贴边时整卡平移，箭头仍指回锚点。
   const anchorCenterX = (anchor.left + anchor.right) / 2;
@@ -151,6 +165,8 @@ export function layoutFormulaPreview(
     contentHeight,
     viewWidth,
     viewHeight,
+    containerWidth,
+    containerHeight,
     arrowOffset,
     flipped,
     scrollX,

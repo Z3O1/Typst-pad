@@ -102,6 +102,40 @@ function cardWithinViewport() {
       body.scrollWidth <= body.clientWidth + 1;
   })()`);
 }
+/** 内容层可见窗口/滚动尺寸与 SVG 渲染尺寸：验证滚动条占位不把短高内容吃光 */
+function contentView() {
+  return c.evaluate(`(() => {
+    const el = document.querySelector('.formula-preview-content');
+    if (!el) return null;
+    const svg = el.querySelector('svg');
+    const r = el.getBoundingClientRect();
+    return {
+      clientWidth: el.clientWidth,
+      clientHeight: el.clientHeight,
+      scrollWidth: el.scrollWidth,
+      scrollHeight: el.scrollHeight,
+      svgWidth: svg ? svg.getBoundingClientRect().width : 0,
+      svgHeight: svg ? svg.getBoundingClientRect().height : 0,
+      rectWidth: r.width,
+      rectHeight: r.height,
+    };
+  })()`);
+}
+/** 内容可见区内 edge（left/right）处是否命中真实 SVG 字形（elementFromPoint 命中 svg 或其后代） */
+function glyphVisible(edge) {
+  const xExpr = edge === "left" ? "r.left + 10" : "r.right - 10";
+  return c.evaluate(`(() => {
+    const el = document.querySelector('.formula-preview-content');
+    const svg = el && el.querySelector('svg');
+    if (!el || !svg) return false;
+    const r = el.getBoundingClientRect();
+    const ch = el.clientHeight;
+    if (ch <= 0) return false;
+    const y = r.top + Math.min(ch, svg.getBoundingClientRect().height) / 2;
+    const hit = document.elementFromPoint(${xExpr}, y);
+    return !!hit && (hit === svg || svg.contains(hit));
+  })()`);
+}
 function query(value, head) {
   let rendered = head;
   if (value.range) {
@@ -507,6 +541,13 @@ await settled(longLine);
 await caretMatches(longLine, longLine.range.from + 2, true);
 await c.waitFor("!!document.querySelector('.formula-preview')", { timeout: 4000 });
 check("窄窗长行展开且气泡不越出可见区", await cardWithinViewport());
+const narrowContent = await contentView();
+check(
+  "窄窗长行横滚时可见高度为正且能放下完整短公式 SVG",
+  narrowContent.clientHeight > 0 && narrowContent.clientHeight >= narrowContent.svgHeight - 0.5,
+  JSON.stringify(narrowContent),
+);
+check("滚首（scrollLeft=0）有真实字形可见", await glyphVisible("left"));
 const narrowScroll = await c.evaluate(`(() => {
   const el=document.querySelector('.formula-preview-content');
   const card=document.querySelector('.formula-preview').getBoundingClientRect();
@@ -535,6 +576,7 @@ check(
   scrollEnd.scrollLeft >= scrollEnd.max - 1,
   JSON.stringify(scrollEnd),
 );
+check("滚末（scrollLeft=max）有真实字形可见", await glyphVisible("right"));
 check(
   "滚动条拖动不误定位、不额外编译、不丢展开",
   scrollEnd.cardLeft === narrowScroll.cardLeft &&
@@ -573,6 +615,32 @@ await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
 await sleep(150);
 await c.key("Escape", { keyCode: 27 });
 await settled(longLineBase);
+await viewport(1400, 900);
+
+// 高矩阵纵滚：纵向滚动条占位不裁剪窄公式内容宽度。
+await viewport(520, 220);
+const tallMatrix = f("tall-matrix"),
+  tallMatrixBase = f("tall-matrix-base");
+await replace(tallMatrixBase);
+await compileQuiesce();
+await cursor(tallMatrix.range.from + 2);
+await settled(tallMatrix);
+await caretMatches(tallMatrix, tallMatrix.range.from + 2, true);
+await c.waitFor("!!document.querySelector('.formula-preview')", { timeout: 4000 });
+const tallContent = await contentView();
+check(
+  "高矩阵纵滚时可见宽度为正且能放下完整窄公式 SVG",
+  tallContent.clientWidth > 0 && tallContent.clientWidth >= tallContent.svgWidth - 0.5,
+  JSON.stringify(tallContent),
+);
+check(
+  "高矩阵纵滚时内容层确实纵向溢出（scrollHeight > clientHeight）",
+  tallContent.scrollHeight > tallContent.clientHeight + 1,
+  JSON.stringify(tallContent),
+);
+await c.screenshot(shotPath("document-expansion-tall-matrix-scroll"));
+await c.key("Escape", { keyCode: 27 });
+await settled(tallMatrixBase);
 await viewport(1400, 900);
 
 // 靠底公式：气泡翻到源码上方，向下箭头（::after）真实可见且不越出可见区。
