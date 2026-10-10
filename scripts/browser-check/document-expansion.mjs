@@ -199,6 +199,62 @@ async function caretMatches(value, head, visible = false) {
   await c.waitFor(expression, { timeout: 4000, interval: 16 });
   return true;
 }
+// 字形是 Typst SVG 路径而非 CSS text；用原生光标高度与实际背景盒验证样式。
+async function sourceStyleMatches(value, { formula, panel }) {
+  const first = query(value, value.range.from);
+  const last = query(value, value.range.to - 1);
+  const result = await c.evaluate(`(() => {
+    const first=${JSON.stringify(first)},last=${JSON.stringify(last)};
+    const host=document.querySelectorAll('#preview-host>.document-page')[first.page-1];
+    const svg=host.shadowRoot.querySelector('svg'),view=svg.viewBox.baseVal;
+    const scale=host.getBoundingClientRect().width/view.width;
+    const fill=${JSON.stringify(formula ? "#f4f1f8" : panel ? "#f3f5f8" : "#eef1f5")};
+    const ink=${JSON.stringify(formula ? "#65458b" : "#273449")};
+    const background=svg.querySelector('path[fill="'+fill+'"]');
+    const glyph=svg.querySelector('use[fill="'+ink+'"]');
+    if(!background||!glyph||first.page!==last.page) return false;
+    const filter=getComputedStyle(host).filter;
+    if(filter!=='none'&&filter!=='invert(1) contrast(0.71)') return false;
+    const luminance=(color) => {
+      const channels=color.match(/[0-9.]+/g).slice(0,3).map(Number).map(c=>c/255)
+        .map(c=>filter==='none'?c:(1-c)*.71+.145)
+        .map(c=>c<=.04045?c/12.92:((c+.055)/1.055)**2.4);
+      return channels[0]*.2126+channels[1]*.7152+channels[2]*.0722;
+    };
+    const a=luminance(getComputedStyle(glyph).fill),b=luminance(getComputedStyle(background).fill);
+    const contrast=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+    const readable=first.heightPt>=10&&first.heightPt<=14&&first.heightPt*scale>=12;
+    if(!${panel}) return readable&&contrast>=4.5;
+    const rect=background.getBoundingClientRect(),page=host.getBoundingClientRect();
+    const x=p=>page.left+(p.xPt-view.x)*scale;
+    const y=p=>page.top+(p.yPt-view.y)*scale;
+    const outline=background.parentElement.querySelector('path[stroke]');
+    if(!outline) return false;
+    const border=getComputedStyle(outline);
+    const glyphs=[...svg.querySelectorAll('use[fill="'+ink+'"]')].map(el=>el.getBoundingClientRect());
+    const inkTop=Math.min(...glyphs.map(r=>r.top)),inkBottom=Math.max(...glyphs.map(r=>r.bottom));
+    // Typst 默认末行按 baseline 排版，descender 会进入 7pt inset；实际墨迹仍须留出 5pt。
+    // 光标使用 em 高度，不等于墨迹盒，完整光标也须留在面板内。
+    const valid=readable&&contrast>=4.5&&border.stroke!=='none'&&parseFloat(border.strokeWidth)>=.5
+      &&/[Cc]/.test(background.getAttribute('d'))
+      &&Math.abs(rect.width/scale-312)<1
+      &&x(first)-rect.left>=8*scale&&rect.right-x(last)>=8*scale
+      &&inkTop-rect.top>=6.5*scale&&rect.bottom-inkBottom>=5*scale
+      &&y(first)>=rect.top&&y(last)+last.heightPt*scale<=rect.bottom;
+    return {valid,readable,contrast,stroke:border.stroke,strokeWidth:border.strokeWidth,width:rect.width/scale,left:(x(first)-rect.left)/scale,right:(rect.right-x(last))/scale,top:(inkTop-rect.top)/scale,bottom:(rect.bottom-inkBottom)/scale,caretBottom:(rect.bottom-y(last)-last.heightPt*scale)/scale};
+  })()`);
+  if (typeof result === "boolean") return result;
+  if (!result.valid) console.error("展开样式测量", JSON.stringify(result));
+  return result.valid;
+}
+async function setTheme(theme) {
+  await c.send("Emulation.setEmulatedMedia", {
+    features: [{ name: "prefers-color-scheme", value: theme }],
+  });
+  await c.waitFor(
+    `document.querySelector('.app').classList.contains('light')===${theme === "light"}`,
+  );
+}
 async function replace(value = base) {
   if (await c.evaluate("!!document.querySelector('.document-pane')"))
     await c.key("e", { keyCode: 69, modifiers: 2 });
@@ -255,6 +311,14 @@ check(
   (await count()) === beforePreviewClick && (await doc()) === base.original,
 );
 await c.screenshot(shotPath("document-expansion-inline-preview"));
+for (const theme of ["dark", "light"]) {
+  await setTheme(theme);
+  check(
+    `行内公式 ${theme}：真实字号可读，滤镜后前景/浅底对比度至少 4.5`,
+    await sourceStyleMatches(math, { formula: true, panel: false }),
+  );
+  await c.screenshot(shotPath(`document-expansion-inline-${theme}`));
+}
 const stable = await count();
 await c.key("ArrowRight", { keyCode: 39 });
 await caretMatches(math, math.range.from + 2);
@@ -323,6 +387,14 @@ check(
   "代码模式中的公式展开完整 # 声明，保留执行和后文输出",
   (await count()) === beforeDeclaration + 1 && (await pagesMatch(declaration)),
 );
+for (const theme of ["dark", "light"]) {
+  await setTheme(theme);
+  check(
+    `行内脚本 ${theme}：中性前景与浅底可读，和公式使用相同字号`,
+    await sourceStyleMatches(declaration, { formula: false, panel: false }),
+  );
+  await c.screenshot(shotPath(`document-expansion-script-inline-${theme}`));
+}
 const declarationStable = await count();
 await cursor(declaration.range.to - 1);
 await caretMatches(declaration, declaration.range.to - 1);
@@ -355,12 +427,14 @@ check("多行展开首行标点有真实字素停靠点，不沿用函数名几�
 await c.screenshot(shotPath("document-expansion-multiline"));
 const beforeTheme = await count();
 for (const theme of ["dark", "light"]) {
-  await c.send("Emulation.setEmulatedMedia", {
-    features: [{ name: "prefers-color-scheme", value: theme }],
-  });
-  await c.waitFor(
-    `document.querySelector('.app').classList.contains('light')===${theme === "light"}`,
+  await setTheme(theme);
+  check(
+    `多行脚本 ${theme}：实际圆角面板、边界内距、可读字号与滤镜后对比度`,
+    await sourceStyleMatches(block, { formula: false, panel: true }),
   );
+  await cursor(block.range.to - 1);
+  await caretMatches(block, block.range.to - 1, true);
+  await cursor(bracket);
   await caretMatches(block, bracket, true);
   if (!(await pagesMatch(block))) throw Error("主题切换不能改写展开的真实 SVG");
   await c.screenshot(shotPath(`document-expansion-${theme}`));
@@ -500,6 +574,18 @@ check(
     (await doc()) === display.original,
 );
 await c.screenshot(shotPath("document-expansion-display-preview"));
+for (const theme of ["dark", "light"]) {
+  await setTheme(theme);
+  check(
+    `多行公式 ${theme}：与脚本统一的圆角/内距，保留低饱和紫色与可读对比度`,
+    await sourceStyleMatches(display, { formula: true, panel: true }),
+  );
+  await cursor(display.range.from + 1);
+  await caretMatches(display, display.range.from + 1, true);
+  await cursor(display.range.to - 1);
+  await caretMatches(display, display.range.to - 1, true);
+  await c.screenshot(shotPath(`document-expansion-formula-panel-${theme}`));
+}
 const counter = f("counter");
 await replace(f("counter-base"));
 await cursor(counter.range.from + 2);

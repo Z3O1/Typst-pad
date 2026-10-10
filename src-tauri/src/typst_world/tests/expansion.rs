@@ -31,7 +31,7 @@ fn expansion_sources() -> Vec<ExpansionSource> {
     let base = expansion_sample();
     let edited = base.replace("$a + b$", "$a + b + z$");
     let block_edited = base.replace("多行脚本正文。", "多行脚本正文。续");
-    let display = base.replace("$a + b$", "$ a + b $");
+    let display = base.replace("$a + b$", "$ \na + b\n $");
     let number = base.replace("$a + b$", "$998244353$");
     let fraction = base.replace("$a + b$", "$frac(1, sqrt(2))$");
     let counter_expression = "#context { c.step(); [SEEN] }";
@@ -50,7 +50,7 @@ fn expansion_sources() -> Vec<ExpansionSource> {
         ("fraction-base", fraction.clone(), None),
         ("fraction", fraction, Some("$frac(1, sqrt(2))$")),
         ("display-base", display.clone(), None),
-        ("display-math", display, Some("$ a + b $")),
+        ("display-math", display, Some("$ \na + b\n $")),
         ("counter-base", counter.clone(), None),
         ("counter", counter, Some(counter_expression)),
         ("raw-hidden-base", hidden.clone(), None),
@@ -359,6 +359,86 @@ fn styled_source_lines_wrap_at_spaces_with_original_caret_locations() {
             locate(id, start + offset).is_some(),
             "折行后仍须保留原始字符停靠点：{offset}"
         );
+    }
+}
+
+#[test]
+fn expansion_panel_has_readable_type_spacing_and_cross_page_carets() {
+    fn check_type(frame: &Frame) {
+        for (_, item) in frame.items() {
+            match item {
+                FrameItem::Text(text) => {
+                    assert_eq!(text.size.to_pt(), 11.0, "展开字号不继承用户正文");
+                    assert!(
+                        matches!(
+                            text.font.info().family.as_str(),
+                            "DejaVu Sans Mono" | "Noto Serif CJK SC"
+                        ),
+                        "展开使用固定字体：{}",
+                        text.font.info().family
+                    );
+                }
+                FrameItem::Group(group) => check_type(&group.frame),
+                _ => {}
+            }
+        }
+    }
+    for formula in [false, true] {
+        let line = if formula {
+            "a + b + c"
+        } else {
+            "// 源码 source"
+        };
+        let text = format!(
+            "{}\n{}{}",
+            if formula { "$" } else { "#block[" },
+            format!("{line}\n").repeat(24),
+            if formula { "$" } else { "]" }
+        );
+        let source = format!(
+            "#set page(width: 240pt, height: 180pt, margin: 24pt)\n#set text(size: 40pt)\n{}",
+            styled_raw_kind(&format!("```\n{text}\n```"), formula)
+        );
+        let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
+        let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+        assert!(document.pages().len() > 1, "面板必须可跨页");
+        for page in document.pages() {
+            check_type(&page.frame);
+        }
+        let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+        let start = source.find(&text).unwrap();
+        let end = start + text.len();
+        let visible: Vec<_> = items
+            .iter()
+            .filter(|item| item.range.start >= start && item.range.end <= end)
+            .collect();
+        assert!(
+            visible
+                .iter()
+                .all(|item| item.rect.min.x.to_pt() >= 32.9 && item.rect.max.x.to_pt() <= 207.1),
+            "字形保留面板左右内距"
+        );
+        let mut rows: Vec<_> = visible
+            .iter()
+            .map(|item| (item.page, item.baseline_pt))
+            .collect();
+        rows.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        rows.dedup();
+        for pair in rows.windows(2).filter(|pair| pair[0].0 == pair[1].0) {
+            let gap = pair[1].1 - pair[0].1;
+            assert!((15.0..19.0).contains(&gap), "真实行距应舒展但不松散：{gap}");
+        }
+        let id = store(items, source.len(), stats.foreign_ink);
+        for (offset, ch) in text.char_indices().filter(|(_, ch)| !ch.is_whitespace()) {
+            let caret = locate(id, start + offset).expect("跨页面板每个原始字符必须可停靠");
+            assert!(
+                (10.0..14.0).contains(&caret.height_pt),
+                "可读光标高度：{ch}"
+            );
+        }
+        let first = locate(id, start).unwrap();
+        let last = locate(id, end - 1).unwrap();
+        assert!(last.page > first.page, "首行与末行使用各自页面的真实几何");
     }
 }
 
