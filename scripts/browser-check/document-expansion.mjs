@@ -5,12 +5,13 @@ import {
   loadFixtures,
   createChecker,
   compileSettled,
+  COMPILE_IDLE,
   sleep,
   finish,
   shotPath,
 } from "./harness.mjs";
 const expansion = loadFixtures("expansion-fixtures.json", {
-  predicate: (fs) => fs.length === 30 && fs.every((f) => f.pages.length && f.cursorQueries.length),
+  predicate: (fs) => fs.length === 32 && fs.every((f) => f.pages.length && f.cursorQueries.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const fixtures = [...loadFixtures("page-fixtures.json"), ...expansion];
@@ -44,6 +45,62 @@ async function bubbleMatches(value) {
   return c.evaluate(
     `(() => {const div=document.createElement('div');div.innerHTML=${JSON.stringify(value.formulaPreview?.svg)};return document.querySelector('.formula-preview-content svg').isEqualNode(div.firstElementChild)})()`,
   );
+}
+/** 设置视口尺寸（长公式窄窗/靠底翻转需要不同窗口） */
+async function viewport(width, height = 900) {
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width,
+    height,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await sleep(150);
+}
+/** 等编译调度彻底稳定（覆盖预览重排的 250ms 去抖与自然纸型学习） */
+async function compileQuiesce(timeoutMs = 6000) {
+  const started = Date.now();
+  let last = -1;
+  let stableSince = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const n = await c.evaluate("window.__browserDevCompileCount ?? 0");
+    if (n !== last) stableSince = Date.now();
+    if (n > 0 && Date.now() - stableSince >= 600 && (await c.evaluate(COMPILE_IDLE))) return n;
+    last = n;
+    await sleep(100);
+  }
+  throw new Error("编译未在超时内稳定");
+}
+/** 盒外箭头真实可见：外层不裁剪（overflow=visible），且箭头三角形中部的 hit-test 命中卡片本身 */
+function arrowVisible(dir) {
+  return c.evaluate(`(() => {
+    const card = document.querySelector('.formula-preview');
+    if (!card) return false;
+    const cs = getComputedStyle(card);
+    if (cs.overflow !== 'visible') return false;
+    const arrow = parseFloat(cs.getPropertyValue('--formula-arrow'));
+    if (!Number.isFinite(arrow)) return false;
+    const r = card.getBoundingClientRect();
+    const x = r.left + arrow;
+    const y = ${dir === "up" ? "r.top - 4" : "r.bottom + 4"};
+    const hit = document.elementFromPoint(x, y);
+    return !!hit && (hit === card || card.contains(hit));
+  })()`);
+}
+/** 卡片（含盒外箭头）整体都落在预览可见区内，且不撑出应用横向滚动条 */
+function cardWithinViewport() {
+  return c.evaluate(`(() => {
+    const card = document.querySelector('.formula-preview');
+    if (!card) return false;
+    const r = card.getBoundingClientRect();
+    const body = document.querySelector('.preview-body');
+    const br = body.getBoundingClientRect();
+    const arrow = 8;
+    const top = r.top - (card.classList.contains('flipped') ? 0 : arrow);
+    const bottom = r.bottom + (card.classList.contains('flipped') ? arrow : 0);
+    return top >= br.top - 0.5 && bottom <= br.bottom + 0.5 &&
+      r.left >= br.left - 0.5 && r.right <= br.right + 0.5 &&
+      body.scrollWidth <= body.clientWidth + 1;
+  })()`);
 }
 function query(value, head) {
   let rendered = head;
@@ -101,6 +158,15 @@ check(
       "document.querySelector('.formula-preview').getBoundingClientRect().top > document.querySelector('.document-caret').getBoundingClientRect().bottom && getComputedStyle(document.querySelector('.formula-preview')).backgroundColor === 'rgb(17, 17, 17)'",
     )),
 );
+check(
+  "向上箭头真实可见且指向源码（外层不裁剪）",
+  (await arrowVisible("up")) &&
+    (await c.evaluate(
+      `(() => {const el=document.querySelector('.formula-preview');const cs=getComputedStyle(el,'::before');return cs.borderBottomWidth==='8px'&&cs.borderBottomColor==='rgb(17, 17, 17)'&&cs.borderBottomStyle==='solid'})()`,
+    )),
+);
+check("向上箭头连同卡片都落在预览可见区内", await cardWithinViewport());
+await c.screenshot(shotPath("document-expansion-arrow-up"));
 const beforePreviewClick = await count();
 const previewPoint = await c.evaluate(
   "(() => {const r=document.querySelector('.formula-preview').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()",
@@ -429,9 +495,110 @@ for (const name of ["long-line", "tall-matrix", "nested-fraction"]) {
       (await c.evaluate("!document.querySelector('.formula-preview')")),
   );
 }
+
+// 窄窗长行：真实触发卡片内横向滚动，滚动条/wheel/点击不误定位、不额外编译、不丢展开与焦点。
+await viewport(520, 900);
+const longLine = f("long-line"),
+  longLineBase = f("long-line-base");
+await replace(longLineBase);
+await compileQuiesce();
+await cursor(longLine.range.from + 2);
+await settled(longLine);
+await caretMatches(longLine, longLine.range.from + 2, true);
+await c.waitFor("!!document.querySelector('.formula-preview')", { timeout: 4000 });
+check("窄窗长行展开且气泡不越出可见区", await cardWithinViewport());
+const narrowScroll = await c.evaluate(`(() => {
+  const el=document.querySelector('.formula-preview-content');
+  const card=document.querySelector('.formula-preview').getBoundingClientRect();
+  return {scrollWidth:el.scrollWidth,clientWidth:el.clientWidth,cardLeft:card.left,cardTop:card.top};
+})()`);
+check(
+  "窄窗长行触发卡片内横向滚动",
+  narrowScroll.scrollWidth > narrowScroll.clientWidth + 1,
+  JSON.stringify(narrowScroll),
+);
+const beforeScroll = await count();
+// 拖横向滚动条到末尾：点在滚动条槽（内容区底部），drag 到最右。
+const scrollbar = await c.evaluate(`(() => {
+  const el=document.querySelector('.formula-preview-content').getBoundingClientRect();
+  return {x:el.left+el.width/2,y:el.bottom-7};
+})()`);
+await c.drag(scrollbar.x, scrollbar.y, scrollbar.x + 400, scrollbar.y);
+await sleep(80);
+const scrollEnd = await c.evaluate(`(() => {
+  const el=document.querySelector('.formula-preview-content');
+  const card=document.querySelector('.formula-preview').getBoundingClientRect();
+  return {scrollLeft:el.scrollLeft,max:el.scrollWidth-el.clientWidth,cardLeft:card.left,cardTop:card.top};
+})()`);
+check(
+  "拖动滚动条能滚到横向末尾",
+  scrollEnd.scrollLeft >= scrollEnd.max - 1,
+  JSON.stringify(scrollEnd),
+);
+check(
+  "滚动条拖动不误定位、不额外编译、不丢展开",
+  scrollEnd.cardLeft === narrowScroll.cardLeft &&
+    scrollEnd.cardTop === narrowScroll.cardTop &&
+    (await count()) === beforeScroll &&
+    (await c.evaluate("!!document.querySelector('.formula-preview')")) &&
+    (await doc()) === longLine.original,
+);
+// wheel 横向滚动（shift+wheel）也不触发点击/重编译。
+const wheelAt = await c.evaluate(`(() => {
+  const el=document.querySelector('.formula-preview-content').getBoundingClientRect();
+  return {x:el.left+el.width/2,y:el.top+10};
+})()`);
+await c.wheel(wheelAt.x, wheelAt.y, 0, { deltaX: -120, modifiers: 8 });
+await sleep(80);
+check(
+  "wheel 滚动不误定位、不额外编译、不丢展开",
+  (await count()) === beforeScroll &&
+    (await c.evaluate("!!document.querySelector('.formula-preview')")) &&
+    (await doc()) === longLine.original,
+);
+await c.screenshot(shotPath("document-expansion-long-line-narrow-scroll"));
+// 更窄 + 界面缩放后仍不横滚、气泡有界。
+await viewport(360, 900);
+await compileQuiesce();
+await settled(longLine);
+await c.waitFor("!!document.querySelector('.formula-preview')", { timeout: 4000 });
+check("更窄窗口后气泡仍有界且应用不横滚", await cardWithinViewport());
+await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
+await compileQuiesce();
+await settled(longLine);
+await c.waitFor("!!document.querySelector('.formula-preview')", { timeout: 4000 });
+check("界面缩放后气泡仍有界且应用不横滚", await cardWithinViewport());
+await c.screenshot(shotPath("document-expansion-long-line-zoom"));
+await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
+await sleep(150);
+await c.key("Escape", { keyCode: 27 });
+await settled(longLineBase);
+await viewport(1400, 900);
+
+// 靠底公式：气泡翻到源码上方，向下箭头（::after）真实可见且不越出可见区。
+const bottomFormula = f("bottom-formula"),
+  bottomBase = f("bottom-formula-base");
+await replace(bottomBase);
+await viewport(1200, 320);
+await settled(bottomBase);
+await cursor(bottomFormula.range.from + 1);
+await settled(bottomFormula);
+await caretMatches(bottomFormula, bottomFormula.range.from + 1, true);
+check(
+  "靠底公式展开且气泡翻到源码上方",
+  (await bubbleMatches(bottomFormula)) &&
+    (await c.evaluate("!!document.querySelector('.formula-preview.flipped')")),
+);
+check("向下箭头真实可见且指向源码", await arrowVisible("down"));
+check("翻转后卡片连同箭头仍落在预览可见区内", await cardWithinViewport());
+await c.screenshot(shotPath("document-expansion-arrow-down"));
+await c.key("Escape", { keyCode: 27 });
+await settled(bottomBase);
+await viewport(1400, 900);
+
 check(
   "展开流程没有隐式写盘或脚本异常",
   await c.evaluate("!window.__browserDevWrites?.length&&!window.__browserDevErrors?.length"),
 );
 await c.close();
-finish(`通过 ${state.passed} 项检查；光标主导展开 + 30 份真实 Typst 产物`);
+finish(`通过 ${state.passed} 项检查；光标主导展开 + 32 份真实 Typst 产物`);

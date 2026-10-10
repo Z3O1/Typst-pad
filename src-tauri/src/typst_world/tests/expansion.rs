@@ -6,6 +6,8 @@ const LONG_LINE_FORMULA: &str =
     "$x_1 + x_2 + x_3 + x_4 + x_5 + x_6 + x_7 + x_8 + x_9 + x_10 + x_11 + x_12 + x_13 + x_14 + x_15 + x_16 + x_17 + x_18 + x_19 + x_20 + x_21 + x_22 + x_23 + x_24 + x_25 + x_26$";
 const TALL_MATRIX_FORMULA: &str = "$mat(a_11, a_12; a_21, a_22; a_31, a_32; a_41, a_42; a_51, a_52; a_61, a_62; a_71, a_72; a_81, a_82; a_91, a_92; a_101, a_102)$";
 const NESTED_FRACTION_FORMULA: &str = "$sqrt(frac(1 + x, 2 - y) + frac(3, sqrt(5)))$";
+// 靠底公式：把公式源码推到页面底部，展开后气泡必须翻到源码上方（flip）。
+const BOTTOM_FORMULA: &str = "$y + z$";
 
 /// 用展开投影编译并把公式帧作为预览抽出，供长公式回归复用。
 fn formula_preview_of(
@@ -39,6 +41,7 @@ fn expansion_sources() -> Vec<ExpansionSource> {
     let long_line = base.replace("$a + b$", LONG_LINE_FORMULA);
     let tall_matrix = base.replace("$a + b$", TALL_MATRIX_FORMULA);
     let nested_fraction = base.replace("$a + b$", NESTED_FRACTION_FORMULA);
+    let bottom = "#set page(width: 360pt, height: 260pt, margin: 24pt)\n#set text(size: 12pt)\n#v(160pt)\n正文 $y + z$ 结束。\n\n#pagebreak()\n第二页。".to_string();
     [
         ("base", base.clone(), None),
         ("math", base.clone(), Some("$a + b$")),
@@ -94,6 +97,8 @@ fn expansion_sources() -> Vec<ExpansionSource> {
             nested_fraction,
             Some(NESTED_FRACTION_FORMULA),
         ),
+        ("bottom-formula-base", bottom.clone(), None),
+        ("bottom-formula", bottom, Some(BOTTOM_FORMULA)),
     ]
     .into_iter()
     .map(|(name, doc, text)| {

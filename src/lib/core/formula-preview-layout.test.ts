@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  FORMULA_PREVIEW_ARROW,
+  FORMULA_PREVIEW_BORDER,
   FORMULA_PREVIEW_EDGE_MARGIN,
   FORMULA_PREVIEW_GAP,
   FORMULA_PREVIEW_MIN_READABLE,
@@ -36,7 +36,9 @@ describe("layoutFormulaPreview", () => {
     expect(box).not.toBeNull();
     expect(box!.contentWidth).toBeCloseTo(40 * 1.27);
     expect(box!.contentHeight).toBeCloseTo(20 * 1.27);
-    expect(box!.width).toBeCloseTo(40 * 1.27 + 2 * FORMULA_PREVIEW_PADDING);
+    expect(box!.width).toBeCloseTo(
+      40 * 1.27 + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER),
+    );
     expect(box!.scrollX).toBe(false);
     expect(box!.scrollY).toBe(false);
   });
@@ -55,7 +57,9 @@ describe("layoutFormulaPreview", () => {
     const box = layout({ widthPt: 500, heightPt: 40 });
     expect(box).not.toBeNull();
     const availW =
-      viewport.right - viewport.left - 2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING);
+      viewport.right -
+      viewport.left -
+      2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
     expect(box!.contentWidth).toBeCloseTo(availW);
     expect(box!.scrollX).toBe(false);
     expect(box!.width).toBeLessThanOrEqual(viewport.right - viewport.left);
@@ -105,11 +109,14 @@ describe("layoutFormulaPreview", () => {
     expect(box!.top).toBeGreaterThanOrEqual(FORMULA_PREVIEW_EDGE_MARGIN - 0.01);
   });
 
-  it("卡片高度含箭头", () => {
+  it("卡片尺寸含内边距与边框，箭头在盒外不计入", () => {
     const box = layout();
     expect(box).not.toBeNull();
     expect(box!.height).toBeCloseTo(
-      box!.viewHeight + 2 * FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_ARROW,
+      box!.viewHeight + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER),
+    );
+    expect(box!.width).toBeCloseTo(
+      box!.viewWidth + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER),
     );
   });
 

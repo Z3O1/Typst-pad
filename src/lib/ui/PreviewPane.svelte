@@ -150,7 +150,12 @@
               right: rect.left + (Math.max(...xs) - page.box.x) * scale,
               bottom: rect.top + (Math.max(...ys) - page.box.y) * scale,
             },
-            viewport: { left: body.left, top: body.top, right: body.right, bottom: body.bottom },
+            viewport: {
+              left: body.left,
+              top: body.top,
+              right: body.left + bodyEl.clientWidth,
+              bottom: body.top + bodyEl.clientHeight,
+            },
           });
           if (box) {
             formulaFlipped = box.flipped;
@@ -337,8 +342,10 @@
 
   function handleClick(event: MouseEvent): void {
     if (event.target instanceof Element && event.target.closest(".formula-preview")) {
+      // 卡片只消费点击：滚动条/内边距不把点击漏给页面定位，也不切换源码焦点；
+      // 只有点击 SVG 内容才恢复源码编辑（不重新编译、不丢展开）。
       event.preventDefault();
-      onFormulaClick?.();
+      if (event.target.closest(".formula-preview-content svg")) onFormulaClick?.();
       return;
     }
     const moved =
@@ -442,7 +449,7 @@
     box-shadow: 0 6px 20px #0006;
     user-select: none;
     cursor: text;
-    overflow: hidden;
+    /* 不裁外层的箭头：::before/::after 都画在盒外（top/bottom: -8px），SVG 裁剪与框内滚动交给 .formula-preview-content。 */
   }
   .formula-preview::before {
     content: "";

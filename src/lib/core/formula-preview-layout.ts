@@ -9,11 +9,13 @@
 
 /** 卡片内边距（px）：水平与垂直一致 */
 export const FORMULA_PREVIEW_PADDING = 10;
-/** 箭头高度（px）：卡片高度含这段箭头 */
+/** 卡片边框（px）：模型把 border-box 宽高与 CSS 对齐，箭头不占盒内空间 */
+export const FORMULA_PREVIEW_BORDER = 1;
+/** 箭头高度（px）：绘制在卡片盒外、gap 内，因此不计入 height；必须小于 EDGE_MARGIN */
 export const FORMULA_PREVIEW_ARROW = 8;
-/** 卡片距预览可见区边缘的最小留白（px） */
+/** 卡片距预览可见区边缘的最小留白（px）：大于 ARROW，保证盒外箭头不越出可见区 */
 export const FORMULA_PREVIEW_EDGE_MARGIN = 12;
-/** 锚点（源码范围）与卡片之间的空隙（px） */
+/** 锚点（源码范围）与卡片之间的空隙（px）：盒外箭头（8px）落在这个间隙里 */
 export const FORMULA_PREVIEW_GAP = 9;
 /** 相对页面缩放的最小可读比例：低于它就不再缩小，改为卡片内横向滚动 */
 export const FORMULA_PREVIEW_MIN_READABLE = 0.6;
@@ -84,12 +86,12 @@ export function layoutFormulaPreview(
   const naturalH = heightPt * scale;
   const availW = Math.max(
     FORMULA_PREVIEW_MIN_CONTENT_WIDTH,
-    viewportWidth - 2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING),
+    viewportWidth -
+      2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER),
   );
   const availH =
     viewportHeight -
-    2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING) -
-    FORMULA_PREVIEW_ARROW;
+    2 * (FORMULA_PREVIEW_EDGE_MARGIN + FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
   if (availW <= 0 || availH <= 0) return null;
 
   // 宽度：自然尺寸 → 缩到可见区（仍可读）→ 保住可读下限并横向滚动。
@@ -109,8 +111,9 @@ export function layoutFormulaPreview(
   const viewHeight = Math.min(contentHeight, availH);
   const scrollY = contentHeight > availH;
 
-  const width = viewWidth + 2 * FORMULA_PREVIEW_PADDING;
-  const height = viewHeight + 2 * FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_ARROW;
+  // 卡片是 border-box：宽高 = 内容可见窗口 + 2×(内边距 + 边框)。箭头在盒外，不占这里。
+  const width = viewWidth + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
+  const height = viewHeight + 2 * (FORMULA_PREVIEW_PADDING + FORMULA_PREVIEW_BORDER);
 
   // 水平：卡片中心默认对齐锚点中心；贴边时整卡平移，箭头仍指回锚点。
   const anchorCenterX = (anchor.left + anchor.right) / 2;
