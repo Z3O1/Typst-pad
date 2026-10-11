@@ -564,6 +564,55 @@ fn expansion_is_scoped_away_from_user_show_raw_rules() {
     }
 }
 
+/// 同请求原文测量/最终展示的浏览器事务夹具；不改编译器或文件权限路径。
+#[test]
+#[ignore]
+fn dump_page_fixtures_document_transaction() {
+    for original in ["Result #(1 + 2) after", "Result #(1 + 3) after"] {
+        let from = original.find('#').unwrap();
+        let to = original.find(" after").unwrap();
+        let expanded = projected(original, Some((from, to)));
+        for src in [original.to_string(), expanded] {
+            for geometry in [
+                None,
+                Some((595.2755905511812, 24.0)),
+                Some((685.0 * 11.0 / 14.0, 70.87)),
+                Some((535.0 * 11.0 / 14.0, 70.87)),
+            ] {
+                let preview = geometry.map(|(width_pt, margin)| PreviewPage {
+                    width_pt,
+                    height_pt: width_pt * 841.8897637795276 / 595.2755905511812,
+                    margin_pt: margin * width_pt / 595.2755905511812,
+                });
+                let out = compile_incremental_with_preview(
+                    src.clone(),
+                    None,
+                    &fonts_dir(),
+                    &FontConfig::default(),
+                    None,
+                    preview,
+                );
+                assert!(out.ok, "{:?}", out.diagnostics);
+                let id = out.geometry_id.unwrap();
+                let carets: Vec<_> = src
+                    .char_indices()
+                    .filter_map(|(at, _)| locate(id, at))
+                    .collect();
+                assert!(!carets.is_empty());
+                println!(
+                    "TRANSACTIONFIXTURE:{}",
+                    serde_json::json!({
+                        "doc":src, "original":original,
+                        "pages":out.pages.into_iter().map(Option::unwrap).collect::<Vec<_>>(),
+                        "carets":carets,
+                        "previewPage":preview.map(|p| serde_json::json!({"widthPt":p.width_pt,"heightPt":p.height_pt,"marginPt":p.margin_pt})),
+                    })
+                );
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn dump_page_fixtures_expansion() {

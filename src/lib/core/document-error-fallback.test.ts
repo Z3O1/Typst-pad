@@ -117,6 +117,29 @@ describe("文档模式编译错误源码回退", () => {
     expect(output.errorRanges).toEqual([{ from: 2, to: 11, preserveDeclaration: false }]);
   });
 
+  it("自然原文失败跳过已知无效的空段投影，诊断保持原文坐标", async () => {
+    const source = "\n\n$unknown$\n\n";
+    const measureOriginal = vi.fn(async () => fail(source, ["unknown"]));
+    const compile = vi.fn(async (input: string) =>
+      input.includes("` $unknown$ `") ? ok : fail(input, ["unknown"]),
+    );
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      emptyParagraphs: true,
+      measureOriginal,
+      compile,
+    });
+    expect(measureOriginal).toHaveBeenCalledExactlyOnceWith(source);
+    expect(compile.mock.calls.map(([input]) => input)).toEqual([
+      "\u00a0\n\n` $unknown$ `\n\n\u00a0",
+    ]);
+    expect(output.failure?.errors[0]).toMatchObject({ line: 3, col: 2 });
+    expect(output.errorRanges).toEqual([{ from: 2, to: 11, preserveDeclaration: false }]);
+    expect(output.projection.original).toBe(source);
+    const rendered = output.projection.source.indexOf("unknown");
+    expect(output.projection.renderedToSource(rendered)).toBe(source.indexOf("unknown"));
+  });
+
   it("多个错误只展开对应表达式，保留前缀、正常正文和错误诊断", async () => {
     const prefix = "#set page(width: 300pt)\n";
     const source = prefix + "中文🙂 $unknown$，正文 #missing()\n后文";
@@ -343,15 +366,15 @@ describe("文档模式编译错误源码回退", () => {
     expect(output.result).toBe(visible);
     expect(output.originalResult).toBe(original);
     expect(output.projection.source).toBe("```\n" + source + "\n```");
-    expect(measureOriginal).not.toHaveBeenCalled();
+    expect(measureOriginal).toHaveBeenCalledExactlyOnceWith(source);
     expect(compile).toHaveBeenCalledTimes(2);
   });
 
   it("原文失败、回退成功时只携带原文失败，绝不把raw作为自然成功", async () => {
     const source = "#missing()";
     const failed = fail(source, ["missing"]);
-    const compile = vi.fn().mockResolvedValueOnce(failed).mockResolvedValueOnce(ok);
-    const measureOriginal = vi.fn().mockResolvedValue(ok);
+    const compile = vi.fn().mockResolvedValue(ok);
+    const measureOriginal = vi.fn().mockResolvedValue(failed);
     const output = await compileDocumentWithFallback({
       ...options(source),
       compile,
@@ -360,7 +383,8 @@ describe("文档模式编译错误源码回退", () => {
     expect(output.result.ok).toBe(true);
     expect(output.originalResult?.ok).toBe(false);
     expect(output.failure?.errors).toHaveLength(1);
-    expect(measureOriginal).not.toHaveBeenCalled();
+    expect(measureOriginal).toHaveBeenCalledExactlyOnceWith(source);
+    expect(compile).toHaveBeenCalledTimes(1);
   });
 
   it("从展开投影开始时至多测量一次未投影原文，不替换展示或掩盖原文失败", async () => {
@@ -502,6 +526,60 @@ describe("文档模式编译错误源码回退", () => {
     expect(paused.deferred).toBe(true);
     expect(paused.originalResult).toBeNull();
     expect(measureOriginal).toHaveBeenCalledTimes(1);
+  });
+
+  it("无展开的原文测量成功先决定展示上下文，展示页不覆盖自然页", async () => {
+    const source = "普通正文";
+    const natural: CompileResult = { ok: true, pages: ["自然页"], pageCount: 1 };
+    let measured = false;
+    const measureOriginal = vi.fn(async () => {
+      measured = true;
+      return natural;
+    });
+    const compile = vi.fn(async () => {
+      expect(measured).toBe(true);
+      return ok;
+    });
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      measureOriginal,
+      compile,
+    });
+    expect(output.originalResult).toBe(natural);
+    expect(output.result).toBe(ok);
+    expect(compile).toHaveBeenCalledExactlyOnceWith(source);
+  });
+
+  it("无展开的空段自然测量过期或合成暂停后不启动投影和恢复", async () => {
+    const source = "\n\n$unknown$\n\n";
+    for (const paused of [false, true]) {
+      let current = true;
+      let composing = false;
+      let finish!: (result: CompileResult) => void;
+      const compile = vi.fn().mockResolvedValue(ok);
+      const measureOriginal = vi.fn(
+        () =>
+          new Promise<CompileResult>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const request = compileDocumentWithFallback({
+        ...options(source),
+        emptyParagraphs: true,
+        measureOriginal,
+        compile,
+        isCurrent: () => current,
+        canRetry: () => !composing,
+      });
+      await vi.waitFor(() => expect(measureOriginal).toHaveBeenCalledTimes(1));
+      if (paused) composing = true;
+      else current = false;
+      finish(fail(source, ["unknown"]));
+      const output = await request;
+      expect(output.deferred).toBe(true);
+      expect(output.originalResult).toBeNull();
+      expect(compile).not.toHaveBeenCalled();
+    }
   });
 
   it("保留源码本身不能排版时，仍使用有效原文且不展示投影专属错误", async () => {

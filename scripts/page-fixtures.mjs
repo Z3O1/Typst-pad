@@ -68,6 +68,19 @@ const zoomFixtures = result.stdout
 if (zoomFixtures.length !== 37 || zoomFixtures.some((f) => !f.pages.length || !f.carets.length))
   throw new Error("缩放/边距真实夹具缺失");
 writeFileSync(".browser-check/zoom-fixtures.json", JSON.stringify(zoomFixtures));
+const transactionFixtures = result.stdout
+  .split("\n")
+  .filter((line) => line.startsWith("TRANSACTIONFIXTURE:"))
+  .map((line) => JSON.parse(line.slice("TRANSACTIONFIXTURE:".length)));
+if (
+  transactionFixtures.length !== 16 ||
+  transactionFixtures.some((f) => !f.pages.length || !f.carets.length)
+)
+  throw new Error("原文测量/展示事务真实夹具缺失");
+writeFileSync(
+  ".browser-check/document-transaction-fixtures.json",
+  JSON.stringify(transactionFixtures),
+);
 console.log(
   `已导出 ${fixtures.length} 份真实整页夹具、${cursorFixtures.length} 份光标渲染夹具、${expansionFixtures.length} 份展开夹具、${paperFixtures.length} 份原文/raw纸型夹具、${zoomFixtures.length} 份缩放/边距夹具`,
 );
