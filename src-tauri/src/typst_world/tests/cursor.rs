@@ -60,6 +60,60 @@ fn laid_out(source: &str) -> (PagedDocument, Vec<PlacedItem>, u64) {
 }
 
 #[test]
+fn fully_clipped_text_has_no_document_cursor_or_selection() {
+    let source = "#set page(width: 300pt, height: 300pt, margin: 20pt)\n#box(width: 20pt, height: 20pt, clip: true)[#move(dx: 100pt)[HIDDEN]]";
+    let unclipped = source.replace("clip: true", "clip: false");
+    let old = compile(
+        unclipped.clone(),
+        None,
+        &fonts_dir(),
+        &FontConfig::default(),
+    );
+    assert!(old.ok);
+    let old_id = old.geometry_id.unwrap();
+    let old_start = unclipped.find("HIDDEN").unwrap();
+    assert!(locate(old_id, old_start).is_some());
+    let output = compile(source.into(), None, &fonts_dir(), &FontConfig::default());
+    assert!(output.ok);
+    assert!(output.pages[0].contains("clip-path"));
+    let start = source.find("HIDDEN").unwrap();
+    let id = output.geometry_id.unwrap();
+    assert!(
+        locate(id, start).is_none(),
+        "fully clipped ink must not create a caret"
+    );
+    assert!(selection(id, start, start + "HIDDEN".len()).is_empty());
+    assert!(
+        locate(old_id, old_start).is_some(),
+        "old unclipped snapshot stays usable"
+    );
+}
+
+#[test]
+fn nested_clips_follow_affine_transforms_and_keep_visible_unicode() {
+    let source = "#set page(width: 300pt, height: 300pt, margin: 20pt)\n#rotate(25deg, reflow: true)[#scale(x: 150%, y: 75%)[#box(width: 40pt, height: 35pt, clip: true)[#box(width: 35pt, height: 30pt, clip: true)[中😀 #move(dx: 100pt)[HIDDEN中文 $x^2$ #rect(width: 10pt, height: 10pt)]]]]]";
+    let (document, _, _) = laid_out(source);
+    assert_eq!(document.pages()[0].frame.width().to_pt(), 300.0);
+    assert_eq!(document.pages()[0].frame.height().to_pt(), 300.0);
+    let output = compile(source.into(), None, &fonts_dir(), &FontConfig::default());
+    assert!(output.ok);
+    assert_eq!(
+        output.pages[0],
+        typst_svg::svg(&document.pages()[0], &typst_svg::SvgOptions::default())
+    );
+    let id = output.geometry_id.unwrap();
+    assert!(locate(id, source.find("[中😀").unwrap() + 1).is_some());
+    for needle in ["HIDDEN", "中文", "x^2", "#rect"] {
+        let start = source.find(needle).unwrap();
+        assert!(locate(id, start).is_none(), "{needle}");
+        assert!(
+            selection(id, start, start + needle.len()).is_empty(),
+            "{needle}"
+        );
+    }
+}
+
+#[test]
 fn text_cursor_height_is_not_the_ink_of_punctuation_or_lowercase_letters() {
     let source = mixed_source();
     let (_, items, _) = laid_out(&source);

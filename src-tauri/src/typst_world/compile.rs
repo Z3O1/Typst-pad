@@ -250,11 +250,12 @@ fn compile_with_renderer<P>(
             warnings,
         } => {
             let (document, formula_preview) = super::formula_preview::extract(&document);
-            let (mut items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+            let (mut items, foreign_ink) =
+                crate::block_geometry::collect_document_geometry(&world, &document);
             if let Some(mapping) = &mapping {
                 remap_geometry(&mut items, mapping);
             }
-            let geometry_id = crate::document_geometry::store(items, source_len, stats.foreign_ink);
+            let geometry_id = crate::document_geometry::store(items, source_len, foreign_ink);
             let (pages, page_keys) = render(document.pages());
             CompileOutput {
                 ok: true,
