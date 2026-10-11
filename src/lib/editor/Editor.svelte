@@ -5,6 +5,7 @@
     Compartment,
     StateField,
     StateEffect,
+    Transaction,
     type Extension,
     type EditorState,
   } from "@codemirror/state";
@@ -209,14 +210,18 @@
     if (session !== appliedSession) {
       appliedSession = session;
       appliedExternalDoc = doc;
-      const previousHead = view.state.selection.main.head;
       caretAnchorEpoch += 1;
       caretAnchor = null;
       applyingExternal = true;
       try {
+        // setState 保留输入上下文但不推送文本/选区；先经公开事务同步（等长/同文本也一样），
+        // 再清空历史与文档字段。此事务的 updateListener 同步页面光标，但不回写正文。
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: doc },
+          selection: { anchor: 0 },
+          annotations: Transaction.addToHistory.of(false),
+        });
         view.setState(createDocumentState(doc));
-        // setState 不派发 updateListener；仍需把新文档的起始选区同步给页面。
-        onCursor?.(1, 1, { anchor: 0, head: 0, previousHead, reason: "restore" });
       } finally {
         applyingExternal = false;
       }
