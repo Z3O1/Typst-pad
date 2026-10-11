@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PAPER,
+  DOCUMENT_PREVIEW_MARGIN_PT,
+  usesDefaultPageLayout,
   EDITOR_FONT_PX,
   PREVIEW_PAGE_MIN_PT,
   TYPST_DEFAULT_TEXT_PT,
@@ -30,6 +32,35 @@ describe("paperShapeFromPages", () => {
     expect(
       paperShapeFromPages(['<svg viewBox="0 0 480 960"/>', '<svg viewBox="0 0 0 5"/>']),
     ).toBeNull();
+  });
+});
+
+describe("文档模式紧凑默认页面", () => {
+  it("宽栏保持自然纸型但减少真实编译内边距，窄栏同比例缩小", () => {
+    const wide = previewPage(1400, DEFAULT_PAPER, true)!;
+    expect(wide).toEqual({ ...DEFAULT_PAPER, marginPt: DOCUMENT_PREVIEW_MARGIN_PT });
+    const narrow = previewPage(400, DEFAULT_PAPER, true)!;
+    expect(narrow.marginPt).toBeCloseTo((24 * narrow.widthPt) / DEFAULT_PAPER.widthPt);
+    expect(narrow.widthPt).toBeCloseTo((400 * 11) / 14);
+    expect(wide.widthPt - 2 * wide.marginPt).toBeGreaterThan(DEFAULT_PAPER.widthPt - 2 * 70.87);
+  });
+  it("明确页面规则、导入和非默认纸型保持原策略", () => {
+    expect(usesDefaultPageLayout("正文", DEFAULT_PAPER)).toBe(true);
+    expect(usesDefaultPageLayout("// #set page(margin: 2cm)\n正文", DEFAULT_PAPER)).toBe(true);
+    expect(usesDefaultPageLayout("`#set page(margin: 2cm)`", DEFAULT_PAPER)).toBe(true);
+    for (const source of [
+      "#set page(margin: 2cm)\n正文",
+      "#show page: it => it",
+      '#import "layout.typ": *',
+      '#include "part.typ"',
+      "#{set page(margin: 2cm); [正文]}",
+      "#page(margin: 2cm)[正文]",
+      "#let layout = page\n#layout[正文]",
+      '#eval("set page(margin: 2cm)")',
+    ]) {
+      expect(usesDefaultPageLayout(source, DEFAULT_PAPER)).toBe(false);
+    }
+    expect(usesDefaultPageLayout("正文", { widthPt: 480, heightPt: 960 })).toBe(false);
   });
 });
 

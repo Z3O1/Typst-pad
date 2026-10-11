@@ -62,6 +62,8 @@ function harness(over: Partial<ZoomControllerHooks> = {}, manualSleep = false): 
     },
     setWebviewZoom: async (z) => {
       calls.sets.push(z);
+      width = 1000 / z;
+      dpr = 2 * z;
     },
     layoutWidth: () => width,
     devicePixelRatio: () => dpr,
@@ -135,15 +137,15 @@ describe("apply：校准 + 确认 + 收敛", () => {
     expect(h.calls.levels).toEqual([]);
   });
 
-  it("第一次 apply 先校准到 100%（只做一次），再设目标档位", async () => {
+  it("初次存档缩放直接请求目标档位，基准不写入100%", async () => {
     const h = harness();
     h.setLevel(1.5);
     await h.c.apply(1.5);
-    expect(h.calls.sets).toEqual([1, 1.5]);
+    expect(h.calls.sets).toEqual([1.5]);
     expect(h.c.debugState()).toMatchObject({ baseline100: 1000, dprAt100: 2, appliedZoom: 1.5 });
     h.setLevel(1.3);
     await h.c.apply(1.3);
-    expect(h.calls.sets).toEqual([1, 1.5, 1.3]); // 校准不再重复
+    expect(h.calls.sets).toEqual([1.5, 1.3]); // 校准不再写引擎
   });
 
   it("目标档位由 clampZoom 收敛到 0.5 ~ 2.5", async () => {
@@ -156,7 +158,7 @@ describe("apply：校准 + 确认 + 收敛", () => {
     expect(h.calls.sets.at(-1)).toBe(0.5);
   });
 
-  it("设完再确认一次：定时器到期后用**当前档位**再设一遍并开始复核", async () => {
+  it("确认只观察，不再次写引擎", async () => {
     const h = harness();
     h.setLevel(1.5);
     await h.c.apply(1.5);
@@ -164,7 +166,7 @@ describe("apply：校准 + 确认 + 收敛", () => {
     h.advance(ZOOM_CONFIRM_DELAY_MS);
     h.runTimers();
     await h.flush();
-    expect(h.calls.sets).toEqual([1, 1.5, 1.5]);
+    expect(h.calls.sets).toEqual([1.5]);
   });
 
   it("连续调档只保留最后一次确认（重复调用只留一个定时器）", async () => {
@@ -177,7 +179,7 @@ describe("apply：校准 + 确认 + 收敛", () => {
     h.advance(ZOOM_CONFIRM_DELAY_MS);
     h.runTimers();
     await h.flush();
-    expect(h.calls.sets).toEqual([1, 1.1, 1.2, 1.2]);
+    expect(h.calls.sets).toEqual([1.1, 1.2]);
   });
 
   it("校准失败不影响后续（记日志、不抛）", async () => {
@@ -195,7 +197,8 @@ describe("apply：校准 + 确认 + 收敛", () => {
 
 describe("红线①：只观察、绝不改档", () => {
   it("引擎没接受（布局宽度不变）：只写一句状态栏说明，档位一动不动", async () => {
-    const h = harness();
+    const h = harness({ setWebviewZoom: async () => {} });
+    await h.c.apply(1); // 已知当前读数基准；下一请求被拒绝。
     h.setLevel(1.5);
     await h.c.apply(1.5);
     h.advance(ZOOM_CONFIRM_DELAY_MS);
@@ -204,7 +207,7 @@ describe("红线①：只观察、绝不改档", () => {
     expect(h.calls.status).toHaveLength(1);
     expect(h.calls.status[0]).toContain("150%");
     expect(h.calls.levels).toEqual([]); // 没有写回档位（这就是"软件别自己动"）
-    expect([...new Set(h.calls.sets)]).toEqual([1, 1.5]); // 也没有偷偷回改引擎
+    expect(h.calls.sets).toEqual([]); // 覆盖的拒绝引擎不记录；档位不被回改
   });
 
   it("引擎接受（布局宽度按档位变化）：什么都不说", async () => {
@@ -278,7 +281,7 @@ describe("红线②：沉降窗口内 resize 不重校 100% 基准", () => {
     expect(h.pendingTimers()).toBe(1);
     h.advance(ZOOM_CONFIRM_DELAY_MS);
     h.runTimers();
-    await h.flushOnce(); // 复核开始并卡在测量（stepInFlight = true）
+    await h.drain(); // 不放行测量，复核仍在跑
     expect(h.c.debugState().verifyInFlight).toBe(true);
 
     h.advance(ZOOM_SETTLE_MAX_MS + 1); // 沉降窗口已过，但复核还在跑
@@ -297,9 +300,11 @@ describe("红线③：新复核一开始，旧复核立刻作废", () => {
     const p1 = h.c.apply(1.5);
     await h.flushOnce();
     expect(h.pendingTimers()).toBe(1);
+    h.setWidth(1000);
+    h.setDpr(2); // 模拟引擎随后回到旧读数
     h.advance(ZOOM_CONFIRM_DELAY_MS);
     h.runTimers();
-    await h.flushOnce(); // 复核 #1 开始（卡在测量，尚未发现"引擎没动"）
+    await h.drain(); // 复核 #1 卡在测量
     expect(h.c.debugState().verifyInFlight).toBe(true);
 
     h.setLevel(2);
@@ -316,6 +321,135 @@ describe("红线③：新复核一开始，旧复核立刻作废", () => {
     // #1 的读数（宽度没变 → 本该写"未生效"）被作废，#2 观察成功也没写 → 状态栏一句话都没有
     expect(h.calls.status).toEqual([]);
     expect(h.calls.levels).toEqual([]);
+  });
+});
+
+describe("最新目标与异步校准", () => {
+  it("校准等待期间连续改档没有100%或旧目标回写", async () => {
+    const h = harness({}, true);
+    h.setLevel(1.5);
+    const first = h.c.apply(1.5);
+    await h.drain();
+    h.setLevel(1.6);
+    const second = h.c.apply(1.6);
+    h.setLevel(1.7);
+    const last = h.c.apply(1.7);
+    await h.flush();
+    await Promise.all([first, second, last]);
+    h.runTimers();
+    await h.flush();
+    expect(h.calls.sets).toEqual([1.5, 1.7]);
+    expect(h.c.debugState()).toMatchObject({ appliedZoom: 1.7, baseline100: 1000 });
+    expect(h.calls.levels).toEqual([]);
+  });
+
+  it("延迟引擎写入串行，中间目标合并且最后请求落地", async () => {
+    const calls: number[] = [];
+    const gates: (() => void)[] = [];
+    const h = harness({
+      setWebviewZoom: (z) => {
+        calls.push(z);
+        return new Promise<void>((resolve) => gates.push(resolve));
+      },
+    });
+    h.setLevel(1.2);
+    const first = h.c.apply(1.2);
+    h.setLevel(1.3);
+    const second = h.c.apply(1.3);
+    h.setLevel(1.4);
+    const last = h.c.apply(1.4);
+    expect(calls).toEqual([1.2]);
+    gates.shift()!();
+    await h.drain();
+    expect(calls).toEqual([1.2, 1.4]);
+    gates.shift()!();
+    await Promise.all([first, second, last]);
+    h.runTimers();
+    await h.flush();
+    expect(calls).toEqual([1.2, 1.4]);
+    expect(h.c.debugState().appliedZoom).toBe(1.4);
+  });
+
+  it("排空引擎队列与finally之间收到的目标仍会执行", async () => {
+    let trigger = false;
+    let h: Harness;
+    h = harness({
+      setTimer: () => {
+        if (trigger) {
+          trigger = false;
+          queueMicrotask(() => {
+            void h.c.apply(1.8);
+          });
+        }
+        return 1;
+      },
+    });
+    await h.c.apply(1.5);
+    trigger = true;
+    await h.c.apply(1.7);
+    await h.flush();
+    expect(h.calls.sets).toEqual([1.5, 1.7, 1.8]);
+    expect(h.c.debugState().appliedZoom).toBe(1.8);
+    h.c.dispose();
+  });
+
+  it("超过沉降上限仍在等待引擎时，真实resize不污染旧基准", async () => {
+    let release: (() => void) | undefined;
+    let delayed = false;
+    const h = harness({
+      setWebviewZoom: () =>
+        delayed
+          ? new Promise<void>((resolve) => {
+              release = resolve;
+            })
+          : Promise.resolve(),
+    });
+    await h.c.apply(1);
+    const baseline = h.c.debugState().baseline100;
+    delayed = true;
+    const apply = h.c.apply(1.5);
+    h.advance(ZOOM_SETTLE_MAX_MS + 100);
+    h.setWidth(700);
+    h.c.onResize();
+    expect(h.c.debugState().baseline100).toBe(baseline);
+    release!();
+    await apply;
+    h.c.dispose();
+  });
+
+  it("拒绝写入后可重新请求当前档，确认不会偷偷重试", async () => {
+    const sets: number[] = [];
+    let rejected = true;
+    const h = harness({
+      setWebviewZoom: async (z) => {
+        sets.push(z);
+        if (rejected) throw Error("拒绝");
+      },
+    });
+    h.setLevel(1.7);
+    await h.c.apply(1.7);
+    h.runTimers();
+    await h.flush();
+    expect(sets).toEqual([1.7]);
+    rejected = false;
+    h.c.reapply();
+    await h.flush();
+    h.runTimers();
+    await h.flush();
+    expect(sets).toEqual([1.7, 1.7]);
+    expect(h.calls.levels).toEqual([]);
+  });
+
+  it("销毁使等待中的校准/确认作废", async () => {
+    const h = harness({}, true);
+    const applied = h.c.apply(1.8);
+    await h.drain();
+    h.c.dispose();
+    await h.flush();
+    await applied;
+    await h.c.apply(1.9);
+    expect(h.calls.sets).toEqual([1.8]);
+    expect(h.pendingTimers()).toBe(0);
   });
 });
 
