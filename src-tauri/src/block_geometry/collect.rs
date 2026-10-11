@@ -309,6 +309,7 @@ fn collect_with_lookups<const AUXILIARY: bool>(
             &page.frame,
             i + 1,
             Transform::identity(),
+            true,
             None,
             &mut items,
             &mut links,
@@ -332,6 +333,7 @@ fn walk_frame<const AUXILIARY: bool>(
     frame: &Frame,
     page: usize,
     ts: Transform,
+    soft_clip_is_translation: bool,
     clip: Option<Rect>,
     out: &mut Vec<PlacedItem>,
     links: &mut Vec<PlacedLink>,
@@ -448,7 +450,18 @@ fn walk_frame<const AUXILIARY: bool>(
                     }
                 }
                 let child_ts = item_ts.pre_concat(group.transform);
+                // typst-svg 在 Hard 组输出完整 transform 并重置内部状态；Soft
+                // 组的 clip 只使用最近 Hard 坐标系中的平移，不应用线性变换。
+                // 只有这段 Soft 链全为平移时，child_ts 才能正确映射 clip。
+                // 无法证明一致时不收紧祖先边界，避免剔除仍可见的 cover 图片。
+                let child_soft_clip_is_translation = group.frame.kind() == FrameKind::Hard
+                    || (soft_clip_is_translation
+                        && group.transform
+                            == Transform::translate(group.transform.tx, group.transform.ty));
                 let child_clip = group.clip.as_ref().map_or(clip, |curve| {
+                    if !child_soft_clip_is_translation {
+                        return clip;
+                    }
                     let bounds = transformed_rect(curve.bbox(None), child_ts);
                     if !finite_rect(bounds) {
                         return clip;
@@ -466,6 +479,7 @@ fn walk_frame<const AUXILIARY: bool>(
                     &group.frame,
                     page,
                     child_ts,
+                    child_soft_clip_is_translation,
                     child_clip,
                     out,
                     links,
@@ -1007,6 +1021,99 @@ mod lookup_tests {
     }
 
     #[test]
+    fn scaled_cover_image_inside_nested_clips_keeps_visible_geometry() {
+        let image = r#"#image(bytes("<svg xmlns='http://www.w3.org/2000/svg' width='200' height='20'><rect width='200' height='20' fill='red'/></svg>"), format: "svg", width: 20pt, height: 20pt, fit: "cover")"#;
+        let dir = std::env::temp_dir().join(format!("typst-cover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cover.typ"), image).unwrap();
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        let mut old_visible = None;
+        for outer_affine in [false, true] {
+            for imported in [false, true] {
+                for (dx, visible) in [(-10, true), (-30, false)] {
+                    let body = if imported {
+                        "#include \"cover.typ\""
+                    } else {
+                        image
+                    };
+                    let body = format!("#box(width: 20pt, height: 20pt, clip: true)[#box(width: 20pt, height: 20pt, clip: true)[#move(dx: {dx}pt)[#scale(x: 10%, y: 100%, origin: top + left)[{body}]]]]");
+                    let body = if outer_affine {
+                        format!("#rotate(25deg, origin: top + left)[#scale(x: 150%, y: 75%, origin: top + left)[{body}]]")
+                    } else {
+                        body
+                    };
+                    let source =
+                        format!("#set page(width: 300pt, height: 300pt, margin: 0pt)\n{body}");
+                    let path = Some(dir.join("main.typ").to_string_lossy().into_owned());
+                    let world = TypstWorld::new(
+                        source.clone(),
+                        path.clone(),
+                        &fonts,
+                        &FontConfig::default(),
+                    );
+                    let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+                    let svg =
+                        typst_svg::svg(&document.pages()[0], &typst_svg::SvgOptions::default());
+                    if !outer_affine && visible {
+                        // SVG's image occupies [-19, 1] × [0, 20], its Soft clip
+                        // [-10, 10] × [0, 20], and both Hard clips [0, 20]².
+                        // Their intersection has positive area: [0, 1] × [0, 20].
+                        assert!(svg.contains("<image transform=\"matrix(0.1 0 0 1 -19 0)\""));
+                        assert!(svg.contains("d=\"M -10 0h 20v 20h -20Z \""));
+                        assert!(svg.contains("d=\"M 0 0h 20v 20h -20Z \""));
+                        assert_eq!(svg.matches("clip-path=").count(), 3);
+                        println!("COVER_SVG imported={imported} {svg}");
+                    }
+                    let ((full_items, stats), _) = collect_geometry_with_links(&world, &document);
+                    let (items, foreign) = collect_document_geometry(&world, &document);
+                    assert_eq!(format!("{full_items:?}"), format!("{items:?}"));
+                    assert_eq!(stats.foreign_ink, foreign);
+                    assert_eq!(
+                        items
+                            .iter()
+                            .filter(|item| item.kind == PlacedItemKind::Image)
+                            .count(),
+                        usize::from(visible && !imported)
+                    );
+                    assert_eq!(foreign.len(), usize::from(visible && imported));
+                    if !imported {
+                        let output = crate::typst_world::compile(
+                            source.clone(),
+                            path,
+                            &fonts,
+                            &FontConfig::default(),
+                        );
+                        assert!(output.ok);
+                        assert_eq!(output.pages, vec![svg]);
+                        let from = source.find("#image").unwrap();
+                        let id = output.geometry_id.unwrap();
+                        assert_eq!(
+                            !crate::document_geometry::selection(id, from, from + image.len())
+                                .is_empty(),
+                            visible
+                        );
+                        if let Some((old_id, old_from)) = old_visible {
+                            assert!(
+                                !crate::document_geometry::selection(
+                                    old_id,
+                                    old_from,
+                                    old_from + image.len()
+                                )
+                                .is_empty(),
+                                "later compilation must not alter the visible snapshot"
+                            );
+                        }
+                        if visible {
+                            old_visible = Some((id, from));
+                        }
+                    }
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn clipped_italic_ink_overhang_is_not_culled_using_advance_bounds() {
         fn find_italic(frame: &Frame) -> Option<typst::text::TextItem> {
             frame.items().find_map(|(_, item)| match item {
@@ -1058,6 +1165,7 @@ mod lookup_tests {
                 &frame,
                 1,
                 ts,
+                true,
                 Some(transformed_rect(local_clip, ts)),
                 &mut items,
                 &mut Vec::new(),
