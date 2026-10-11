@@ -186,7 +186,9 @@ impl TypstWorld {
         }
         let path = self.realize(id)?;
         let text = fs::read_to_string(&path).map_err(|e| FileError::from_io(e, &path))?;
-        let source = Source::new(id, text);
+        // 跨轮只复用本轮已完整读盘确认相同的 AST/惰性摘要，不复用路径或读取能力。
+        let source =
+            super::dependency_cache::validated_dependency_source(text, self.root.as_deref(), id);
         if let Ok(mut s) = self.sources.lock() {
             s.insert(id, source.clone());
         }
