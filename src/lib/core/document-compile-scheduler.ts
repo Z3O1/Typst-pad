@@ -1,12 +1,14 @@
-// 整页编译调度：尾随去抖、至多一个在途与一份待执行，合成期间暂停启动。
+// 整页编译调度：有界尾随去抖、至多一个在途与一份待执行，合成期间暂停启动。
 /** 这次编译是**为什么**排的。合并时取并集（诊断用；真正跑的时候并不区分） */
 export type CompileReason = "edit" | "context" | "mode" | "composing-end" | "preview-reflow";
 
 export interface DocumentCompileSchedulerHooks {
   /** 真正跑一次编译（页面的 `runCompile`）。异常由它自己处理，这里只保证 `inFlight` 会复位 */
   run: () => Promise<void>;
-  /** 整页编译的尾随去抖（缺省 150ms） */
-  debounceMs?: number;
+  /** 整页编译的尾随去抖（缺省 150ms）；getter 允许模式独立策略。 */
+  debounceMs?: number | (() => number);
+  /** 首份需求到启动的等待上限（缺省 300ms）；在途时间消耗预算，合成时间不计入。 */
+  maxWaitMs?: number | (() => number);
   /** 诊断日志（页面的 `dbg.log`） */
   log?: (message: string) => void;
 }
@@ -25,7 +27,7 @@ export interface DocumentCompileSchedulerStats {
 }
 
 export interface DocumentCompileScheduler {
-  /** 请求一次编译（理由取并集；同一时刻最多一份待执行）。`edit` 会**重置**尾随去抖 */
+  /** 请求一次编译（理由取并集；同一时刻最多一份待执行）。`edit` 续期但不超过首请求期限。 */
   request(reason: CompileReason): void;
   /**
    * **立即**跑一次（不等去抖），返回的 Promise 在**覆盖这次请求的那一轮编译跑完**后 resolve。
@@ -47,7 +49,10 @@ export interface DocumentCompileScheduler {
 export function createDocumentCompileScheduler(
   hooks: DocumentCompileSchedulerHooks,
 ): DocumentCompileScheduler {
-  const debounceMs = hooks.debounceMs ?? 150;
+  const value = (option: number | (() => number) | undefined, fallback: number) =>
+    typeof option === "function" ? option() : (option ?? fallback);
+  let pendingSince: number | null = null;
+  let dueAt = 0;
   const log = hooks.log ?? (() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
   let inFlight = false;
@@ -75,7 +80,7 @@ export function createDocumentCompileScheduler(
     timer = undefined;
   }
 
-  function schedule(delay = debounceMs): void {
+  function schedule(): void {
     if (disposed) return;
     if (composing) {
       // 合成期间**不启动**：理由留着，`setComposing(false)` 时再排
@@ -86,13 +91,13 @@ export function createDocumentCompileScheduler(
     // 立即请求（`requestNow`）不走定时器：它自己（或 `scheduleNext`）直接叫 `pump`
     if (pendingImmediate) return;
     if (timer !== undefined) return; // 已经有一份在等：不重复挂定时器
-    arm(delay);
+    arm(Math.max(0, dueAt - Date.now()));
   }
 
-  /** 在途那次跑完之后怎么接上攒下的那一份：立即请求不走去抖，其余按去抖排 */
+  /** 在途时间已计入等待：期限已到就立即接上，不再追加完整去抖。 */
   function scheduleNext(): void {
     if (disposed || pending.size === 0) return;
-    if (!pendingImmediate) {
+    if (!pendingImmediate && dueAt > Date.now()) {
       schedule();
       return;
     }
@@ -108,7 +113,9 @@ export function createDocumentCompileScheduler(
     if (disposed || inFlight || composing || pending.size === 0) return;
     const reasons = [...pending];
     pending.clear();
+    pendingSince = null;
     pendingImmediate = false;
+    clearTimer();
     // 这一轮**覆盖**的等待者：本轮开始时已经在等的人（他们的理由就在刚清掉的那份里）。
     // 本轮进行期间新登记的等待者留到下一轮 —— 否则它们的请求还没跑就被告知"跑完了"。
     const covered = waiters;
@@ -132,20 +139,24 @@ export function createDocumentCompileScheduler(
 
   function request(reason: CompileReason): void {
     if (disposed) return;
+    const first = pending.size === 0;
     pending.add(reason);
-    // **尾随去抖**：`edit` 重置还没到点的那次计时（"打字停顿 150ms 才编译"）。
-    // 在途/合成中不重置 —— 那时手里这份反正要等下一轮（`pump` 的校验会挡住）。
-    if (reason === "edit" && !inFlight && !composing && timer !== undefined) {
+    pendingSince ??= Date.now();
+    if (first || reason === "edit") {
+      dueAt = Math.min(
+        Date.now() + value(hooks.debounceMs, 150),
+        pendingSince + value(hooks.maxWaitMs, 300),
+      );
       clearTimer();
-      arm(debounceMs);
     }
-    schedule();
+    if (!inFlight) schedule();
   }
 
   function requestNow(reason: CompileReason): Promise<void> {
     if (disposed) return Promise.resolve();
     const done = new Promise<void>((resolve) => waiters.push(resolve));
     pending.add(reason);
+    pendingSince ??= Date.now();
     pendingImmediate = true;
     clearTimer();
     // 在途/合成中就不抢跑：`pump` 的 finally 会立刻接上（`scheduleNext` 认 pendingImmediate）
@@ -161,14 +172,18 @@ export function createDocumentCompileScheduler(
       clearTimer();
       return;
     }
-    // 合成结束：**读取最终文档快照之后再排**（调用方负责刷新 editorDoc，
-    // 这里重新排上合成期间攒下的需求）
+    // 合成时间不计入普通输入期限；调用方已先提交最终文本与光标。
+    if (pending.size) {
+      pendingSince = Date.now();
+      dueAt = pendingSince + value(hooks.debounceMs, 150);
+    }
     scheduleNext();
   }
 
   function cancelPending(): void {
     clearTimer();
     pending.clear();
+    pendingSince = null;
     pendingImmediate = false;
     // 作废就不再有"覆盖它的那一轮"：立刻放行等待者，别让 `requestNow` 的 Promise 悬空
     // （调用方在 `.finally` 里写状态栏文案，悬空就等于那段永远不执行）

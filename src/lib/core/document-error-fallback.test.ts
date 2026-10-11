@@ -39,7 +39,7 @@ describe("文档模式编译错误源码回退", () => {
     const source = "正文 $unknown$";
     const from = source.indexOf("$");
     const compile = vi.fn(async (input: string): Promise<CompileResult> => {
-      if (!input.includes(expansionStyle.previewInlineHead)) return ok;
+      if (input !== source && !input.includes(expansionStyle.previewInlineHead)) return ok;
       const at = input.lastIndexOf("unknown");
       const before = input.slice(0, at);
       return {
@@ -158,14 +158,31 @@ describe("文档模式编译错误源码回退", () => {
     ]);
   });
 
-  it("嵌套代码整体回退为外层表达式，而不向代码上下文插入 raw", async () => {
+  it("内容块中的错误只展开最小安全表达式，不吞掉正常外层正文", async () => {
     const source = "前文 #block[内容 #missing()] 后文";
     const compile = vi
       .fn()
       .mockResolvedValueOnce(fail(source, ["missing"]))
       .mockResolvedValueOnce(ok);
     const output = await compileDocumentWithFallback({ ...options(source), compile });
+    expect(output.projection.source).toBe("前文 #block[内容 ` #missing() `] 后文");
+    expect(output.errorRanges).toEqual([
+      { from: source.indexOf("#missing"), to: source.indexOf("]"), preserveDeclaration: false },
+    ]);
+  });
+
+  it("最小内容块恢复仍失败时才扩大到外层调用", async () => {
+    const source = "前文 #block[内容 #missing()] 后文";
+    const local = "前文 #block[内容 ` #missing() `] 后文";
+    const compile = vi
+      .fn()
+      .mockResolvedValueOnce(fail(source, ["missing"]))
+      .mockResolvedValueOnce(fail(local, ["missing"]))
+      .mockResolvedValueOnce(ok);
+    const output = await compileDocumentWithFallback({ ...options(source), compile });
+    expect(compile).toHaveBeenCalledTimes(3);
     expect(output.projection.source).toBe("前文 ` #block[内容 #missing()] ` 后文");
+    expect(output.failure?.errors).toHaveLength(1);
   });
 
   it("手动展开与错误区域重叠时，不重复执行错误声明", async () => {
@@ -361,7 +378,75 @@ describe("文档模式编译错误源码回退", () => {
     expect(measureOriginal).toHaveBeenCalledExactlyOnceWith(source);
     expect(output.result).toBe(ok);
     expect(output.originalResult).toBe(failed);
-    expect(output.failure).toBeNull();
+    expect(output.failure?.errors[0]).toMatchObject({ line: 1, col: 5 });
+  });
+
+  it("每轮展开重新验证原文，同轮验证结果仍复用为自然测量", async () => {
+    const source = "正文 $x$";
+    const compile = vi.fn().mockResolvedValue(ok);
+    const measureOriginal = vi.fn().mockResolvedValue(ok);
+    for (let request = 0; request < 2; request++) {
+      const output = await compileDocumentWithFallback({
+        ...options(source),
+        reveal: { from: 3, to: source.length },
+        compile,
+        measureOriginal,
+      });
+      expect(output.originalResult).toBe(ok);
+    }
+    expect(compile).toHaveBeenCalledTimes(2); // 每轮只排版一次投影
+    expect(measureOriginal.mock.calls).toEqual([[source], [source]]); // 每轮只验证一次原文
+  });
+
+  it("主源码与上下文不变但依赖版本变化时，旧成功不能遮蔽当前原文诊断", async () => {
+    const source = '正文 #read("value.txt") 后文';
+    const reveal = { from: source.indexOf("#"), to: source.indexOf(" 后文") };
+    let dependencyVersion = 0;
+    const latestFailure = fail(source, ["read"]);
+    if (latestFailure.ok) throw new Error("缺少依赖失败诊断");
+    latestFailure.errors[0].message = "依赖 value.txt 已不可读";
+    const compile = vi.fn(async (input: string) =>
+      input === source && dependencyVersion === 1 ? latestFailure : ok,
+    );
+    const unchangedContext = { ...options(source), compile };
+    const first = await compileDocumentWithFallback(unchangedContext);
+    expect(first.originalResult).toBe(ok);
+    dependencyVersion = 1; // 不改变主源码、会话、路径、字体或选区范围
+    // 复现旧页面传入的上一轮缓存；该额外字段不属于当前API，不能代替本轮原文验证。
+    const legacyRequest = { ...unchangedContext, reveal, validatedOriginal: first.originalResult };
+    const second = await compileDocumentWithFallback(legacyRequest);
+    expect(second.result.ok).toBe(true); // raw 展示仍有效，不能据此推断原文有效
+    expect(second.failure?.errors[0]).toMatchObject({
+      message: "依赖 value.txt 已不可读",
+      line: 1,
+      col: source.indexOf("read") + 1,
+    });
+    expect(second.originalResult?.ok).toBe(false);
+    expect(compile.mock.calls.map(([input]) => input)).toEqual([
+      source,
+      source,
+      '正文 ` #read("value.txt") ` 后文',
+    ]);
+    expect(second.projection.original).toBe(source);
+    expect(second.errorRanges).toEqual([{ ...reveal, preserveDeclaration: false }]);
+  });
+
+  it("原文验证发现投影隐藏的错误，保留当前诊断并跳过无效预览", async () => {
+    const source = "正文 $unknown$";
+    const compile = vi.fn(async (input: string) =>
+      input === source ? fail(source, ["unknown"]) : ok,
+    );
+    const output = await compileDocumentWithFallback({
+      ...options(source),
+      reveal: { from: 3, to: source.length },
+      styleExpansion: true,
+      previewExpansion: true,
+      compile,
+    });
+    expect(compile).toHaveBeenCalledTimes(2);
+    expect(output.failure?.errors[0]).toMatchObject({ line: 1, col: 5 });
+    expect(output.projection.source).not.toContain(expansionStyle.previewInlineHead);
+    expect(output.errorRanges).toHaveLength(1);
   });
 
   it("展开投影的自然测量成功单独返回原文页，不猜投影中的页面规则", async () => {

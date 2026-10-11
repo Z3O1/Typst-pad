@@ -31,9 +31,9 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 
 // 套件清单（期望项数写在这里，跑完直接对账；改套件计数时**两处一起改**）
 const SUITES = [
-  ["document-mode.mjs", 80],
+  ["document-mode.mjs", 81],
   ["document-cursor.mjs", 36],
-  ["document-expansion.mjs", 80],
+  ["document-expansion.mjs", 86],
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
   ["preview-reflow.mjs", 25],

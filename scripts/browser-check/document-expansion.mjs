@@ -11,7 +11,7 @@ import {
   shotPath,
 } from "./harness.mjs";
 const expansion = loadFixtures("expansion-fixtures.json", {
-  predicate: (fs) => fs.length === 32 && fs.every((f) => f.pages.length && f.cursorQueries.length),
+  predicate: (fs) => fs.length === 33 && fs.every((f) => f.pages.length && f.cursorQueries.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const fixtures = [...loadFixtures("page-fixtures.json"), ...expansion];
@@ -275,11 +275,29 @@ async function replace(value = base) {
 await replace();
 check("正文保持完整原生页面，激活输入不展开普通文字", await pagesMatch(base));
 const beforeMath = await count();
+await c.evaluate(`(() => {
+  window.__expansionScheduleTrace=[];
+  const internals=window.__TAURI_INTERNALS__,invoke=internals.invoke;
+  internals.invoke=(command,args)=>{
+    if(command==='compile_doc')window.__expansionScheduleTrace.push({at:performance.now(),src:args.src});
+    return invoke(command,args);
+  };
+  window.__expansionScheduleStart=performance.now();
+  return true;
+})()`);
 await cursor(math.range.from + 1);
 await settled(math);
 check(
-  "键盘进入公式一次编译完整展开，源码保持不变",
-  (await count()) === beforeMath + 1 && (await doc()) === base.original && (await pagesMatch(math)),
+  "键盘进入公式验证原文并编译完整展开，源码保持不变",
+  (await count()) === beforeMath + 2 && (await doc()) === base.original && (await pagesMatch(math)),
+);
+console.log(
+  "DOCSCHEDULE",
+  JSON.stringify(
+    await c.evaluate(
+      `({case:'cursor-enter',requests:window.__expansionScheduleTrace.length,firstRequestMs:window.__expansionScheduleTrace[0].at-window.__expansionScheduleStart})`,
+    ),
+  ),
 );
 await caretMatches(math, math.range.from + 1, true);
 check("展开后的插入点来自新原生几何且位于视口内", true);
@@ -325,8 +343,19 @@ await caretMatches(math, math.range.from + 2);
 check("表达式内部逐字移动不重编译、不收起", (await count()) === stable);
 await cursor(math.range.to - 1);
 await settled(math);
+await c.evaluate(
+  "window.__expansionScheduleTrace=[];window.__expansionScheduleStart=performance.now();true",
+);
 await c.key("ArrowRight", { keyCode: 39 });
 await settled(base);
+console.log(
+  "DOCSCHEDULE",
+  JSON.stringify(
+    await c.evaluate(
+      `({case:'cursor-leave',requests:window.__expansionScheduleTrace.length,firstRequestMs:window.__expansionScheduleTrace[0]?.at-window.__expansionScheduleStart})`,
+    ),
+  ),
+);
 check("向右跨过关闭边界恢复正常排版", await pagesMatch(base));
 await cursor(math.range.to + 1);
 await c.key("ArrowLeft", { keyCode: 37 });
@@ -342,8 +371,8 @@ const beforeSwitch = await count();
 await cursor(outer.range.from + 2);
 await settled(outer);
 check(
-  "直接切换另一完整调用只请求一轮新投影",
-  (await count()) === beforeSwitch + 1 && (await pagesMatch(outer)),
+  "直接切换另一完整调用重新验证原文并请求新投影",
+  (await count()) === beforeSwitch + 2 && (await pagesMatch(outer)),
 );
 const beforeNested = await count();
 await cursor(base.original.indexOf("c + d"));
@@ -376,7 +405,7 @@ await settled(embeddedMath);
 await caretMatches(embeddedMath, embeddedHead, true);
 check(
   "数学模式中的 # 展开整段公式，直接使用新几何而不触发错误回退",
-  (await count()) === beforeEmbedded + 1 && (await pagesMatch(embeddedMath)),
+  (await count()) === beforeEmbedded + 2 && (await pagesMatch(embeddedMath)),
 );
 const declarationHead = declaration.range.from + "#let formula = ".length;
 const beforeDeclaration = await count();
@@ -385,7 +414,7 @@ await settled(declaration);
 await caretMatches(declaration, declarationHead, true);
 check(
   "代码模式中的公式展开完整 # 声明，保留执行和后文输出",
-  (await count()) === beforeDeclaration + 1 && (await pagesMatch(declaration)),
+  (await count()) === beforeDeclaration + 2 && (await pagesMatch(declaration)),
 );
 for (const theme of ["dark", "light"]) {
   await setTheme(theme);
@@ -414,7 +443,7 @@ await cursor(commentHead);
 await caretMatches(codeBlock, commentHead, true);
 check(
   "# 代码块的空白和注释也按语法展开，原文与后续输出不变",
-  (await count()) === beforeCodeBlock + 1 &&
+  (await count()) === beforeCodeBlock + 2 &&
     (await doc()) === base.original &&
     (await pagesMatch(codeBlock)),
 );
@@ -470,13 +499,19 @@ await c.evaluate(`(() => {
   };
   return true;
 })()`);
-await c.type(" + ");
-await c.type("z");
-const immediateTypingCount = await count();
+// 两次真实 CM 输入事务放在同一任务中，避免用 CDP 往返必须快于30ms作为门禁。
+const typingDeferred = await c.evaluate(`(() => {
+  const v=window.__typstPadView;
+  for(const insert of [' + ','z']){
+    const at=v.state.selection.main.head;
+    v.dispatch({changes:{from:at,insert},selection:{anchor:at+insert.length},userEvent:'input.type'});
+  }
+  return (window.__browserDevCallCounts.compile_doc??0)===${beforeTyping};
+})()`);
 await settled(edited);
 check(
   "逐键输入共用编辑去抖，最终仅原文测量及展示各一次",
-  immediateTypingCount === beforeTyping &&
+  typingDeferred &&
     (await count()) === beforeTyping + 2 &&
     (await c.evaluate(
       `JSON.stringify(window.__expansionTypingInputs)===${JSON.stringify(JSON.stringify([edited.original, edited.doc]))}`,
@@ -501,6 +536,39 @@ check(
     (await pagesMatch(f("edited-base"))) &&
     (await c.evaluate("!window.__browserDevWrites?.length")),
 );
+// 删除整个已展开表达式（含两侧源码边界）不能留下空展开锁；Undo 恢复真实选区。
+await replace();
+await cursor(math.range.from + 2);
+await settled(math);
+await cursor(math.range.to, math.range.from);
+await c.key("Backspace", { keyCode: 8 });
+await settled(f("math-deleted"));
+check(
+  "删除展开表达式的完整边界后清除空范围，产物与活动端均来自当前源码",
+  (await doc()) === f("math-deleted").original &&
+    (await pagesMatch(f("math-deleted"))) &&
+    (await c.evaluate(
+      `window.__typstPadView.state.selection.main.empty&&window.__typstPadView.state.selection.main.head===${math.range.from}`,
+    )),
+);
+await c.key("z", { keyCode: 90, modifiers: 2 });
+await settled(base);
+check(
+  "撤销边界删除恢复原文和非空选区，不凭旧范围重开源码",
+  (await doc()) === base.original &&
+    (await pagesMatch(base)) &&
+    (await c.evaluate(
+      `window.__typstPadView.state.selection.main.from===${math.range.from}&&window.__typstPadView.state.selection.main.to===${math.range.to}`,
+    )),
+);
+await cursor(math.range.from + 2);
+await settled(math);
+await c.key("y", { keyCode: 89, modifiers: 2 });
+await settled(f("math-deleted"));
+check(
+  "收拢选区再展开后重做边界删除，源码与完整原生产物再次一致",
+  (await doc()) === f("math-deleted").original && (await pagesMatch(f("math-deleted"))),
+);
 await replace();
 await cursor(math.range.from + 2);
 await settled(math);
@@ -519,8 +587,8 @@ await c.evaluate(
 );
 await settled(outer);
 check(
-  "合成结束先按最终光标切换范围，再恢复一次调度",
-  (await count()) === beforeComposition + 1 && (await pagesMatch(outer)),
+  "合成结束先按最终光标切换范围，再验证原文与编译投影",
+  (await count()) === beforeComposition + 2 && (await pagesMatch(outer)),
 );
 await c.key("e", { keyCode: 69, modifiers: 2 });
 await c.waitFor(compileSettled(base.original));
@@ -532,6 +600,70 @@ check(
 await c.key("e", { keyCode: 69, modifiers: 2 });
 await settled(base);
 check("返回文档不凭旧展开锁抢占当前光标", await pagesMatch(base));
+
+// 实际 CM 事务连续输入：只使用已有真实原文夹具，不猜版面或等待停止输入才断言。
+// 时间包含浏览器前端接线，不是原生动态编译/IPC延迟；请求数与单槽才是门禁。
+await replace();
+await cursor(base.original.length);
+async function timedNormalEdit(label) {
+  await c.evaluate(`(() => {
+    window.__expansionScheduleTrace=[];
+    window.__expansionScheduleStart=performance.now();
+    const text=${JSON.stringify(f("edited-base").original)},v=window.__typstPadView;
+    v.dispatch({changes:{from:0,to:v.state.doc.length,insert:text},selection:{anchor:text.length}});
+    return true;
+  })()`);
+  await settled(f("edited-base"));
+  const trace = await c.evaluate(
+    `({case:${JSON.stringify(label)},requests:window.__expansionScheduleTrace.length,firstRequestMs:window.__expansionScheduleTrace[0]?.at-window.__expansionScheduleStart})`,
+  );
+  console.log("DOCSCHEDULE", JSON.stringify(trace));
+  return trace;
+}
+const normalTrace = await timedNormalEdit("normal-document-input");
+check(
+  "文档模式普通输入只调度一次当前原文",
+  normalTrace.requests === 1 && (await pagesMatch(f("edited-base"))),
+);
+await replace();
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await c.waitFor(COMPILE_IDLE);
+const sourceTrace = await timedNormalEdit("normal-source-input");
+check(
+  "源码模式仍保留单次去抖，不额外诊断或投影",
+  sourceTrace.requests === 1 && (await doc()) === f("edited-base").original,
+);
+await replace();
+await cursor(base.original.length);
+await c.evaluate(`(() => {
+  window.__expansionScheduleTrace=[];
+  window.__expansionScheduleStart=performance.now();
+  return true;
+})()`);
+const stream = await c.evaluate(`(async () => {
+  const docs=${JSON.stringify([base.original, f("edited-base").original])};
+  const v=window.__typstPadView;
+  let maxPending=0;
+  for(let i=0;i<24;i++){
+    const text=docs[i%2];
+    v.dispatch({changes:{from:0,to:v.state.doc.length,insert:text},selection:{anchor:text.length}});
+    maxPending=Math.max(maxPending,Number(window.__typstPadScheduleStats().pending));
+    await new Promise(resolve=>setTimeout(resolve,20));
+  }
+  return {during:window.__expansionScheduleTrace.length,maxPending};
+})()`);
+await settled(f("edited-base"));
+const streamTrace = await c.evaluate(
+  `({case:'continuous-normal-input',requests:window.__expansionScheduleTrace.length,firstRequestMs:window.__expansionScheduleTrace[0]?.at-window.__expansionScheduleStart})`,
+);
+console.log("DOCSCHEDULE", JSON.stringify(streamTrace));
+check(
+  "持续输入期间有界启动且只保留最新需求，最终落地真实原文夹具",
+  stream.during > 0 &&
+    stream.maxPending === 1 &&
+    streamTrace.requests < 24 &&
+    (await pagesMatch(f("edited-base"))),
+);
 
 await boot(c, `${DEV_URL}&compileslow=1`, { pageFixtures: fixtures });
 await replace();
@@ -554,7 +686,7 @@ for (const prefix of ["raw-hidden", "raw-replaced"]) {
   await caretMatches(expanded, expanded.range.from + 1, true);
   check(
     `${prefix}：用户 show raw 不隐藏或替换展开源码，真实停靠点可见`,
-    (await count()) === before + 1 &&
+    (await count()) === before + 2 &&
       (await doc()) === original.original &&
       (await pagesMatch(expanded)),
   );
@@ -798,4 +930,4 @@ check(
   await c.evaluate("!window.__browserDevWrites?.length&&!window.__browserDevErrors?.length"),
 );
 await c.close();
-finish(`通过 ${state.passed} 项检查；光标主导展开 + 32 份真实 Typst 产物`);
+finish(`通过 ${state.passed} 项检查；光标主导展开 + 33 份真实 Typst 产物`);

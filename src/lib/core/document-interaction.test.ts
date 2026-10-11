@@ -81,6 +81,20 @@ describe("整页交互", () => {
       parse.mockRestore();
     }
   });
+  it("编辑器提供当前增量树时，跨修订定位不再次全文解析", () => {
+    const docs = ["增量 $a$", "增量 $ab$", "增量 $abc$"];
+    const trees = docs.map((doc) => parser.parse(doc));
+    const parse = vi.spyOn(parser, "parse");
+    try {
+      docs.forEach((doc, i) => {
+        const range = sourceRevealRange(doc, doc.indexOf("$") + 1, false, 1, trees[i]);
+        expect(doc.slice(range.from, range.to)).toBe(doc.slice(doc.indexOf("$")));
+      });
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+  });
   it("公式末尾和多行脚本内容展开完整源码", () => {
     const math = "正文 $x^2 + y$";
     expect(sourceRevealRange(math, math.length)).toEqual({

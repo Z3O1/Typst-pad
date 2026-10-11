@@ -203,6 +203,7 @@
     revealAt(pos: number, range?: { from: number; to: number }): void;
     selectRange(anchor: number, head: number): void;
     selection(): { anchor: number; head: number } | null;
+    sourceSyntaxTree(): import("$lib/core/document-interaction").SourceSyntaxTree | null;
     focus(): void;
   }
 
@@ -953,6 +954,7 @@
         errors: documentErrorRanges,
         whitespace,
         composing: inputComposing,
+        syntax: editorRef?.sourceSyntaxTree(),
       },
     );
     if (sameSourceRange(next.range, sourceRange) && sameSourceRange(next.error, errorEditRange))
@@ -1334,7 +1336,8 @@
 
   const writeScheduler = createDocumentCompileScheduler({
     run: () => runCompile(),
-    debounceMs: 150,
+    debounceMs: () => (viewMode === "write" ? 30 : 150),
+    maxWaitMs: () => (viewMode === "write" ? 100 : 300),
     log: (message) => dbg.log("compile-schedule", message),
   });
   // 浏览器验收的只读计数钩子（`?browserdev=1` 才挂；桌面版空操作）

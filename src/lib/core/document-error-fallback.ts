@@ -41,7 +41,7 @@ interface DocumentCompileOptions {
   styleExpansion?: boolean;
   previewExpansion?: boolean;
   compile: (source: string) => Promise<CompileResult>;
-  // 需要自然纸型时，compile也必须无页面注入；已有原文结果优先复用，否则至多测量一次。
+  // 需要自然纸型时，compile也必须无页面注入；仅复用本轮原文结果，否则至多测量一次。
   measureOriginal?: (source: string) => Promise<CompileResult>;
   isCurrent: () => boolean;
   // 在途编译允许结束，但后续恢复轮次必须尊重调度器的输入法暂停。
@@ -54,8 +54,38 @@ export async function compileDocumentWithFallback(
   let originalResult: CompileResult | null = null;
   let originalAttempted = false;
   let deferred = false;
+  // 展开可能隐藏原文错误；依赖/动态上下文没有版本戳，每轮都先验证原文再排版展示。
+  // 此结果也复用为自然纸型测量，失败直接驱动恢复，不再编译同一坏表达式的预览。
+  if (options.reveal && options.isCurrent()) {
+    if (options.canRetry && !options.canRetry()) {
+      return {
+        result: { ok: false, error: "编译已暂停", errors: [] },
+        originalResult: null,
+        projection: projectDocumentRanges(options.source, []),
+        failure: null,
+        errorRanges: [],
+        editingRange: options.editing ?? null,
+        deferred: true,
+      };
+    } else {
+      originalAttempted = true;
+      originalResult = await (options.measureOriginal ?? options.compile)(options.source);
+      if (!options.isCurrent() || (options.canRetry && !options.canRetry())) {
+        return {
+          result: originalResult,
+          originalResult: null,
+          projection: projectDocumentRanges(options.source, []),
+          failure: originalResult.ok ? null : originalResult,
+          errorRanges: [],
+          editingRange: options.editing ?? null,
+          deferred: true,
+        };
+      }
+    }
+  }
   const output = await compileProjectedDocument({
     ...options,
+    initialFailure: originalResult && !originalResult.ok ? originalResult : null,
     compile: async (source) => {
       if (
         source !== options.source &&
@@ -91,7 +121,7 @@ export async function compileDocumentWithFallback(
 }
 
 async function compileProjectedDocument(
-  options: DocumentCompileOptions,
+  options: DocumentCompileOptions & { initialFailure?: CompileFail | null },
 ): Promise<Omit<DocumentCompileResult, "originalResult">> {
   const { source, prefixLength, reveal, recover, compile, isCurrent } = options;
   const editing =
@@ -117,8 +147,9 @@ async function compileProjectedDocument(
     return options.emptyParagraphs ? projectEmptyParagraphs(projection, prefixLength) : projection;
   };
   for (let attempt = 0; ; attempt++) {
-    const projection = project(ranges);
-    const result = await compile(projection.source);
+    const seeded = attempt === 0 ? options.initialFailure : null;
+    const projection = seeded ? projectDocumentRanges(source, []) : project(ranges);
+    const result = seeded ?? (await compile(projection.source));
     if (result.ok) {
       if (result.warnings) result.warnings = sourceDiagnostics(projection, result.warnings);
       if (editing && editingProjection) {
@@ -174,8 +205,11 @@ async function compileProjectedDocument(
       const from = position(sourceText, error.line, error.col);
       const to = position(sourceText, error.endLine, error.endCol);
       if (from === null || to === null || from < prefixLength) continue;
-      const start = sourceRevealRange(doc, from - prefixLength, true);
-      const end = sourceRevealRange(doc, Math.max(from, to - 1) - prefixLength, true);
+      // 内容块中的局部表达式可以安全 raw，不把正常外层正文也展开。
+      // 局部恢复仍失败时才扩大到外层；最终整正文回退仍有严格轮数上限。
+      const outermost = attempt > 0;
+      const start = sourceRevealRange(doc, from - prefixLength, outermost);
+      const end = sourceRevealRange(doc, Math.max(from, to - 1) - prefixLength, outermost);
       const range = {
         from: prefixLength + Math.min(start.from, end.from),
         to: prefixLength + Math.max(start.to, end.to),
