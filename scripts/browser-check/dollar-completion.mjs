@@ -207,6 +207,64 @@ check(
   JSON.stringify({ doc: await doc(), head: await head() }),
 );
 
+await c.key("Enter", { keyCode: 13 });
+check(
+  "文档模式跨出最后闭合 $ 后 Enter 写 markup 段落，光标不滞留公式",
+  (await doc()) === "前 $x$\n\n" && (await head()) === 7,
+);
+await c.key("z", { keyCode: 90, modifiers: 2 });
+const closedUndo = (await doc()) === "前 $x$" && (await head()) === 5;
+await c.key("y", { keyCode: 89, modifiers: 2 });
+check(
+  "闭合公式后的分段可独立撤销/重做并恢复落点",
+  closedUndo && (await doc()) === "前 $x$\n\n" && (await head()) === 7,
+);
+
+await replace("$ x ` y $");
+await c.key("Enter", { keyCode: 13 });
+check(
+  "数学中的反引号不是 raw，不把闭合 $ 后的 Enter 困在词法 raw 范围中",
+  (await doc()) === "$ x ` y $\n\n" && (await head()) === 11,
+);
+
+// 真实配对 → 三行 → 键入闭合符跨空白 → Enter，而非仅直接设末端光标。
+await replace("");
+await c.send("Input.dispatchKeyEvent", { type: "char", text: "$", key: "$" });
+await c.key("Enter", { keyCode: 13 });
+for (const text of ["x", "$"])
+  await c.send("Input.dispatchKeyEvent", { type: "char", text, key: text });
+const exited = (await doc()) === "$\n  x\n$" && (await head()) === 7;
+await c.key("Enter", { keyCode: 13 });
+check(
+  "三行配对闭合 $ 后 Enter 真正退出公式并创建新段落",
+  exited && (await doc()) === "$\n  x\n$\n\n" && (await head()) === 9,
+);
+
+const prefix = "\t\\ =&  ",
+  formula = `$\n a\n${prefix}b + c\n$`,
+  pos = formula.indexOf("b") + 1;
+await replace(formula, pos);
+await c.key("Enter", { keyCode: 13 });
+const continued = formula.slice(0, pos) + "\n" + prefix + formula.slice(pos);
+check(
+  "文档模式多行数学行中 Enter 仅复制行首标记和空白，不吞数学内容",
+  (await doc()) === continued && (await head()) === pos + 1 + prefix.length,
+);
+await c.key("z", { keyCode: 90, modifiers: 2 });
+const prefixUndo = (await doc()) === formula && (await head()) === pos;
+await c.key("y", { keyCode: 89, modifiers: 2 });
+check(
+  "数学前缀延续是单步源码撤销/重做",
+  prefixUndo && (await doc()) === continued && (await head()) === pos + 1 + prefix.length,
+);
+await replace(formula, pos);
+await c.key("Enter", { keyCode: 13, modifiers: 8 });
+check(
+  "数学前缀不接管 Shift+Enter",
+  (await doc()) === formula.slice(0, pos) + "\n\t" + formula.slice(pos),
+);
+check("公式换行与前缀延续均无隐式写盘", await c.evaluate("!window.__browserDevWrites?.length"));
+
 const originalAgent = await c.evaluate(
   "({userAgent:navigator.userAgent,platform:navigator.platform})",
 );

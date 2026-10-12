@@ -252,7 +252,11 @@ describe("文档模式编译错误源码回退", () => {
       })
       .mockResolvedValueOnce(ok);
     const output = await compileDocumentWithFallback({ ...options(source), compile });
-    expect(output.projection.source).toBe("````\n" + source + "\n````");
+    expect(output.projection.source).toBe("````\n" + source + "\u00a0\n````");
+    expect(output.projection.original).toBe(source);
+    expect(output.projection.source[output.projection.sourceToCaret!(source.length)]).toBe(
+      "\u00a0",
+    );
   });
 
   it("不可恢复的前缀、外部文件、无位置错误及源码模式不重试", async () => {

@@ -33,14 +33,15 @@ const SKIP_FIXTURES = process.env.SKIP_FIXTURES === "1";
 const SUITES = [
   ["document-mode.mjs", 81],
   ["document-cursor.mjs", 36],
-  ["document-expansion.mjs", 86],
+  ["document-expansion.mjs", 89],
   ["document-transaction.mjs", 6],
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
   ["preview-reflow.mjs", 25],
   ["zoom-stability.mjs", 38],
-  ["source-workflows.mjs", 56],
-  ["dollar-completion.mjs", 24],
+  ["source-workflows.mjs", 59],
+  ["dollar-completion.mjs", 32],
+  ["document-completion.mjs", 21],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
 
@@ -56,6 +57,7 @@ const SUITE_FIXTURES = {
   "zoom-stability.mjs": ["pages"],
   "source-workflows.mjs": [],
   "dollar-completion.mjs": [],
+  "document-completion.mjs": ["pages"],
 };
 const FIXTURE_STEPS = { pages: ["fixtures-pages", ["run", "fixtures:pages"]] };
 

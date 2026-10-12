@@ -1,6 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { EditorView, Decoration, hoverTooltip } from "@codemirror/view";
+  import {
+    EditorView,
+    Decoration,
+    hoverTooltip,
+    tooltips,
+    repositionTooltips,
+  } from "@codemirror/view";
+  import {
+    anchorCompletionTooltips,
+    documentCompletionTooltips,
+    type DocumentInputAnchor,
+  } from "./document-completion-tooltip";
   import {
     Compartment,
     StateField,
@@ -13,6 +24,7 @@
   import { indentUnit, syntaxTree, syntaxTreeAvailable } from "@codemirror/language";
   import type { DecorationSet } from "@codemirror/view";
   import { basicSetup } from "codemirror";
+  import { closeCompletion } from "@codemirror/autocomplete";
   // Typst 语言支持走**无 wasm**的 Lezer 入口（2026-09-18）：主入口 `typst()` 的语法高亮是
   // wasm-bindgen 产物，它把同一个 wasm 解析器对象同时用于"文档变更时 edit()"与"lezer 解析时 tree()"，
   // 两者重叠就抛 `recursive use of an object detected which would lead to unsafe aliasing in rust`，
@@ -56,6 +68,9 @@
     /** 文档模式源码层保留段落/列表输入语义；源码模式直接编辑 Typst 原文。 */
     mode?: "write" | "source";
     revealRange?: { from: number; to: number } | null;
+    /** 文档模式补全脱离透明输入层，但仍使用同一 CodeMirror 候选视图。 */
+    tooltipParent?: HTMLElement;
+    inputAnchor?: DocumentInputAnchor | null;
     /** 合成期间暂停后台整页编译，源码镜像仍实时更新。 */
     onComposition?: (active: boolean) => void;
     /**
@@ -81,6 +96,8 @@
     jumpTo = null,
     mode = "source",
     revealRange = null,
+    tooltipParent,
+    inputAnchor = null,
     onComposition,
     wrap = false,
     tabSpaces = defaultSettings().tabSpaces,
@@ -91,6 +108,7 @@
   let themeCompartment = new Compartment();
   let diagnosticsCompartment = new Compartment();
   let wrapCompartment = new Compartment();
+  const tooltipCompartment = new Compartment();
   // 已应用的换行开关：初值在 onMount 里跟 buildExtensions 一起写入（见两处注释），
   // 避免 wrap 的 $effect 首跑再做一次等价重配。不在此处读 prop：顶层读 prop 会被
   // svelte-check 判为"只捕获初值"的误用告警（state_referenced_locally）。
@@ -104,6 +122,7 @@
       themeCompartment,
       diagnosticsCompartment,
       wrapCompartment,
+      tooltipCompartment,
     ]);
   }
   // 当前生效的编译错误与前缀代码（由 diagnostics/prefixCode prop 驱动；供波浪线与 hover 提示读取）
@@ -132,6 +151,8 @@
   function buildExtensions() {
     return [
       basicSetup,
+      tooltipCompartment.of(tooltips(tooltipParent ? { parent: tooltipParent } : {})),
+      documentCompletionTooltips(() => (mode === "write" ? inputAnchor : null)),
       // 自定义编辑快捷键（Prec.high，优先于 basicSetup 默认键位）。**模式感知**：
       // 写作模式先把 Enter 交给 typst 的列表命令（续项 / 空项退出），它不认才沿用上一行缩进；
       // tabSpaces 用 getter 传，设置改了不重建键位、下一次 Tab 生效（见 editor-keymap.ts）
@@ -195,6 +216,24 @@
       unregisterEditorView(view);
       view.destroy();
     };
+  });
+
+  $effect(() => {
+    const parent = tooltipParent;
+    if (!view) return;
+    view.dispatch({
+      effects: tooltipCompartment.reconfigure(tooltips(parent ? { parent } : {})),
+    });
+  });
+
+  let completionMode: "write" | "source" | undefined;
+  $effect(() => {
+    void inputAnchor;
+    if (!view) return;
+    if (completionMode !== undefined && completionMode !== mode) closeCompletion(view);
+    completionMode = mode;
+    anchorCompletionTooltips(view, () => (mode === "write" ? inputAnchor : null));
+    repositionTooltips(view);
   });
 
   // 外部 doc 变化（如打开文件）时替换编辑器全文。

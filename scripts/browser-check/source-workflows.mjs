@@ -153,6 +153,32 @@ await c.evaluate(
 await c.key("Enter", { code: "Enter", keyCode: 13 });
 check("光标不在脚手架中间 → 不接管（行首回车仍是普通换行）", (await doc()).startsWith("\n$\n"));
 
+const replaceMath = async (text, anchor = text.length) => {
+  await c.evaluate(`(() => {
+    const view = window.__typstPadView;
+    view.dispatch({changes:{from:0,to:view.state.doc.length,insert:${JSON.stringify(text)}},selection:{anchor:${anchor}}});
+    view.focus();return true;
+  })()`);
+};
+let sourcePrefixes = true;
+for (const prefix of ["  \\ =& ", "\t\\\t&=\t"]) {
+  const text = `$\n a\n${prefix}b\n$`,
+    pos = text.indexOf("b") + 1;
+  await replaceMath(text, pos);
+  await c.key("Enter", { keyCode: 13 });
+  sourcePrefixes &&=
+    (await doc()) === text.slice(0, pos) + "\n" + prefix + text.slice(pos) &&
+    (await c.evaluate("window.__typstPadView.state.selection.main.head")) ===
+      pos + 1 + prefix.length;
+}
+check("源码模式多行数学 Enter 原样延续换行/对齐前缀", sourcePrefixes);
+await replaceMath("$\n  a\n$", 5);
+await c.key("Enter", { keyCode: 13 });
+check("无前缀公式保留既有单换行和缩进", (await doc()) === "$\n  a\n  \n$");
+await replaceMath("$x$");
+await c.key("Enter", { keyCode: 13 });
+check("源码模式闭合 $ 后仍只插入一个源码换行", (await doc()) === "$x$\n");
+
 // 点击错误条目后输入：jumpTo 的 $effect 必须按 seq 幂等（回归：曾因对象 prop 每次重渲染
 // 都被判"已变化"，输入一个字符就把光标反复拉回错误行）。
 // DIAG-ERROR-MARKER 是桩内建的主源造错标记（行 1 列 1，无需页面夹具）。

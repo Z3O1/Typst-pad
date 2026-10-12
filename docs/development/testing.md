@@ -45,6 +45,7 @@ ONLY=document-cursor.mjs npm run verify:browser
 ONLY=zoom-stability.mjs npm run verify:browser
 ONLY=document-expansion.mjs npm run verify:browser
 ONLY=dollar-completion.mjs npm run verify:browser
+ONLY=document-completion.mjs npm run verify:browser
 CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 ```
 
@@ -56,8 +57,9 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 | `document-cursor.mjs` | 真实 Typst 字素停靠点与 Chromium 变换后盒模型逐个对照；中英、标点、空格、emoji/组合字符、连字、标题/混合字号、换行、公式/表格、raw、旋转/缩放、分页、重复输出；空文档/连续空段/缩进空段的真实占位几何、点击与输入/撤销/模式往返；多视口/DPR、明暗主题、焦点/选区、闪烁实际像素、合成中实际修改源码与候选锚点、DOM/EditContext 两条事件路径、减少动态效果、异步作废与编辑/撤销/重做 |
 | `document-expansion.mjs` | 33 份真实 Typst 展开产物：光标进入/内部保持/左右跨出边界、直接切换、最小与嵌套归属、代码/数学嵌套的安全边界、结束分号与代码空白/注释、声明保留执行及其可见源码停靠点、仅公式的下方浮动气泡、长行/高矩阵/嵌套分式根号的长公式预览不越出可见区、横滚/纵滚时滚动条占位不裁剪内容且滚首/末真实字形可见、靠底公式翻到源码上方、数字/分式中心真实鼠标点击展开、原生 SVG 帧一致、气泡点击恢复源码焦点、普通脚本无预览、counter 副作用仅执行一次及明暗主题、用户 show raw 隐藏/替换隔离和普通 raw 规则保留、选区冻结/收拢、多行首/末行真实停靠点、行内与多行公式/脚本在明暗主题下的实际 SVG 背景边界、圆角和内距、原生字号及滤镜后文字对比度（至少 4.5），重排后可见插入点、编辑去抖、连续输入期间有界启动及单槽合并、源码模式独立去抖、映射/撤销/重做、完整边界删除及撤销选区恢复、合成结束最终光标、模式切换与迟到展开作废 |
 | `document-performance.mjs` | 重复真实 SVG 组成 100 页 DOM 隔离探针：完整节点、引用作用域、单页更新复用、离屏尺寸与末页命中；直接 SVG 与 Shadow DOM 首屏像素一致，输出初始化及更新耗时，不设固定时间阈值 |
-| `source-workflows.mjs` | 输入无隐式写盘，取消保存/新建，显式保存、路径变化重编译、打开文件、会话恢复与字体配置、Tab 档宽（tabSpaces）设置恢复后按键生效、空行 `$` 脚手架与其 Enter 展开 |
-| `dollar-completion.mjs` | `$` 与原生 `(` 的词中输入/闭合符对照、默认紧凑配对、空格与 Enter 行间手势、未闭合上下文、原样选区与反向选区、多光标、缩进三行脚手架、两级退格与撤销、粘贴及 DOM/EditContext（含空格）合成护栏、两种模式共用输入且无隐式写盘 |
+| `source-workflows.mjs` | 输入无隐式写盘，取消保存/新建，显式保存、路径变化重编译、打开文件、会话恢复与字体配置、Tab 档宽（tabSpaces）设置恢复后按键生效、空行 `$` 脚手架与其 Enter 展开；闭合 `$` 后 Enter 退出公式并生成段落分隔 |
+| `dollar-completion.mjs` | `$` 与原生 `(` 的词中输入/闭合符对照、默认紧凑配对、空格与 Enter 行间手势、未闭合上下文、原样选区与反向选区、多光标、缩进三行脚手架、两级退格与撤销、粘贴及 DOM/EditContext（含空格）合成护栏、两种模式共用输入且无隐式写盘；多行公式行首 `\ =&` / `\ &=` 对齐标记在 Enter 时延续 |
+| `document-completion.mjs` | 文档模式与源码模式共用 CodeMirror/typst_lezer 补全候选；候选浮层脱离透明输入层并以页面真实光标为锚点，Enter/Tab/方向键/鼠标接受、Esc/失焦/模式切换/滚动缩放/底边翻转行为与源码模式一致（21 项断言，依赖 `fixtures:pages`） |
 | `computed-style.mjs` | 弹窗和窄窗口的 box-sizing、主题颜色及溢出边界；设置弹窗含 Tab 档宽输入 |
 | `zoom-stability.mjs` | 37份真实Typst缩放/边距夹具，保留固定栏宽隔离测试并增加1400/1100物理视口下不覆盖栏宽的write/source场景，逐档落地与连续wheel/key/menu均检查真实请求几何、完整SVG/同轮caret、逐帧自适应宿主及物理字号端点；全部引擎IPC序列和逐rAF栏宽/纸宽/字号/真实字形盒/DPR/请求采样（`zoom-frames.json`），存档150%/80%启动、write/source连续wheel/key/menu、reapply、迟到目标与模式、自然测量隔离、真实resize/DPR、延迟/拒绝/不可观测引擎；边距前后computedstyle/字形盒及截图（`zoom-margins.json`、`zoom-margin-before/after.png`），完整SVG与同轮caret身份。引擎通过CDP布局/DPR模拟，不用CSS zoom；不能替代Windows WebView2真实IPC/IME验收 |
 | `preview-reflow.mjs` | 预览重排（纸张跟着预览栏走）：文档模式停在自然尺寸、源码模式按栏宽重排、请求页宽 = 栏宽 × 11/14、极窄栏的页宽下限、字号不超过编辑区且不横滚；连续缩窄去抖、变宽恢复自然纸型与编译稳定、单页 ShadowRoot 实际更新中的迟到窄栏结果作废；同会话纸型编辑（缩小、反向、页高变化）、前缀变更、快速编辑与过期自然学习隔离；真实多纸型夹具的自然比例学习、原文480×960与整正文raw的真实A4产物隔离、错误编辑锁修复/收起及迟到原文测量，以及「注入被文档自己的纸型覆盖」时退回等比缩放 |

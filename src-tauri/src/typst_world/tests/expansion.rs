@@ -22,7 +22,7 @@ fn formula_preview_of(
 }
 
 fn expansion_sample() -> String {
-    "#set page(width: 360pt, height: 260pt, margin: 24pt)\n#set text(size: 12pt)\n正文 $a + b$ 中间 #text(fill: red)[嵌套 $c + d$ 与 #strong[粗体]] 后文。\n\n混合公式 $a + #sym.beta$。\n\n#let formula = $c + d$; 声明输出 #formula。\n\n#let helper = {\n let value = 1\n\n // 代码空白\n value\n};\n\n#block[\n多行脚本正文。\n第二行中文与 😀。\n]\n\n#pagebreak()\n第二页正文。\n".into()
+    "#set page(width: 360pt, height: 260pt, margin: 24pt)\n#set text(size: 12pt)\n正文 $a + b$ 中间 #text(fill: red)[嵌套 $c + d$ 与 #strong[粗体]] 后文。\n\n混合公式 $a + #sym.beta$。\n\n#let formula = $c + d$; 声明输出 #formula。\n\n#let helper = {\n let value = 1\n\n // 代码空白 中文🙂\n \t\n\t \n\n value\n\n};\n\n#block[\n多行脚本正文。\n第二行中文与 😀。\n]\n\n#pagebreak()\n第二页正文。\n".into()
 }
 
 type ExpansionSource = (&'static str, String, Option<(usize, usize)>);
@@ -76,7 +76,9 @@ fn expansion_sources() -> Vec<ExpansionSource> {
         (
             "code-block",
             base.clone(),
-            Some("#let helper = {\n let value = 1\n\n // 代码空白\n value\n};"),
+            Some(
+                "#let helper = {\n let value = 1\n\n // 代码空白 中文🙂\n \t\n\t \n\n value\n\n};",
+            ),
         ),
         (
             "block",
@@ -118,7 +120,7 @@ fn projected(doc: &str, range: Option<(usize, usize)>) -> String {
     };
     let text = &doc[from..to];
     let raw = if expanded_block(text) {
-        format!("```\n{text}\n```")
+        format!("```\n{}\n```", raw_blank_placeholders(text))
     } else {
         format!("` {text} `")
     };
@@ -126,6 +128,20 @@ fn projected(doc: &str, range: Option<(usize, usize)>) -> String {
     let raw = styled_raw_kind(&raw, text.starts_with('$') && text.ends_with('$'));
     let preview = expansion_preview(text, expanded_block(text), true);
     format!("{}{declaration}{raw}{preview}{}", &doc[..from], &doc[to..])
+}
+
+// 与 document-projection.ts 一致：占位只在 raw 展示副本，执行/预览仍使用原表达式。
+fn raw_blank_placeholders(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            if line.chars().all(|ch| ch == ' ' || ch == '\t') {
+                format!("{}\u{a0}", line.replace('\t', " "))
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn expanded_block(text: &str) -> bool {
@@ -146,7 +162,11 @@ pub(super) fn declaration_prefix(text: &str) -> String {
 fn preview_start(doc: &str, from: usize, to: usize) -> usize {
     let text = &doc[from..to];
     visible_start(doc, from, to)
-        + text.len()
+        + if expanded_block(text) {
+            raw_blank_placeholders(text).len()
+        } else {
+            text.len()
+        }
         + if expanded_block(text) { 4 } else { 2 }
         + expansion_style()["tail"].as_str().unwrap().len()
         + expansion_style()[if expanded_block(text) {
@@ -197,7 +217,15 @@ fn cursor_expansion_preserves_full_output_and_raw_character_locations() {
                 "只有公式有预览：{name}"
             );
             // raw 中的中文/emoji 和多行都必须有真实源码光标，不能只成功导出一张页图。
-            for (offset, ch) in text.char_indices().filter(|(_, ch)| !ch.is_whitespace()) {
+            let raw_text = if expanded_block(text) {
+                raw_blank_placeholders(text)
+            } else {
+                text.to_owned()
+            };
+            for (offset, ch) in raw_text
+                .char_indices()
+                .filter(|(_, ch)| !ch.is_whitespace() || *ch == '\u{a0}')
+            {
                 assert!(
                     locate(id, start + offset).is_some(),
                     "{name}: {ch} at {offset}"
@@ -411,6 +439,88 @@ fn changed_read_dependency_can_fail_original_while_raw_expansion_still_renders()
     assert!(visible.contains("BEFORE") && visible.contains("AFTER"));
     assert!(visible.contains(expression), "raw is still editable source");
     fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn expanded_raw_blank_lines_have_real_source_glyphs_and_click_targets() {
+    // 原生 raw 的空白行没有 glyph span。新增占位后必须由同一引擎提供几何，不能借邻行。
+    let text = "\n \t\n中文🙂\n\n\t \n";
+    for formula in [false, true] {
+        for placeholders in [false, true] {
+            let raw_text = if placeholders {
+                raw_blank_placeholders(text)
+            } else {
+                // 对照无 tab 的普通 raw：隔离空行本身没有字形的根因。
+                text.replace('\t', " ")
+            };
+            let source = styled_raw_kind(&format!("```\n{raw_text}\n```"), formula);
+            let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
+            let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+            let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+            let start = source.find("```\n").unwrap() + 4;
+            let mut line_start = start;
+            let mut previous_row = None;
+            for line in raw_text.split('\n') {
+                let blank = line
+                    .chars()
+                    .all(|ch| ch == ' ' || ch == '\t' || ch == '\u{a0}');
+                if blank && !placeholders {
+                    if line.is_empty() {
+                        assert!(items.iter().all(|item| item.range.start != line_start));
+                    }
+                } else {
+                    let at = if blank {
+                        line_start + line.len() - '\u{a0}'.len_utf8()
+                    } else {
+                        line_start
+                    };
+                    let item = items
+                        .iter()
+                        .find(|item| item.range.start == at)
+                        .expect("每行必须有真实带来源的字形");
+                    let caret = caret_for_item(item, at);
+                    assert!(caret.height_pt > 10.0 && caret.height_pt < 15.0);
+                    if let Some(y) = previous_row {
+                        assert!(caret.y_pt > y, "不能停靠到上一行");
+                    }
+                    previous_row = Some(caret.y_pt);
+                }
+                line_start += line.len() + 1;
+            }
+            let id = store(items, source.len(), stats.foreign_ink);
+            if !placeholders {
+                let mut offset = start;
+                for line in raw_text.split('\n') {
+                    if line.is_empty() {
+                        assert!(locate(id, offset).is_none(), "普通 raw 的完全空行无法停靠");
+                    }
+                    offset += line.len() + 1;
+                }
+            }
+            for (offset, ch) in raw_text
+                .char_indices()
+                .filter(|(_, ch)| !ch.is_whitespace() || *ch == '\u{a0}')
+            {
+                let caret = locate(id, start + offset).unwrap();
+                if ch == '\u{a0}' {
+                    let hit = crate::document_geometry::hit_test(
+                        id,
+                        caret.page,
+                        caret.x_pt + 0.1,
+                        caret.y_pt + caret.height_pt / 2.0,
+                    )
+                    .unwrap();
+                    assert!(
+                        hit.offset >= start + offset
+                            && hit.offset <= start + offset + ch.len_utf8()
+                    );
+                }
+            }
+            if placeholders {
+                assert!(!selection(id, start, start + raw_text.len()).is_empty());
+            }
+        }
+    }
 }
 
 #[test]
@@ -645,7 +755,17 @@ fn dump_page_fixtures_expansion() {
             .chain(std::iter::once(src.len()))
             .map(|offset| serde_json::json!({ "offset": offset, "caret": locate(id, offset) }))
             .collect();
-        let range = range.map(|(from, to)| serde_json::json!({ "from": original[..from].encode_utf16().count(), "to": original[..to].encode_utf16().count(), "renderedFrom": src[..visible_start(&original, from, to)].encode_utf16().count(), "previewFrom": if original[from..to].starts_with('$') { Some(src[..preview_start(&original, from, to)].encode_utf16().count()) } else { None } }));
+        let range = range.map(|(from, to)| {
+            let mut offset = 0;
+            let blank_lines: Vec<_> = if expanded_block(&original[from..to]) {
+                original[from..to].split('\n').filter_map(|line| {
+                    let start = offset;
+                    offset += line.encode_utf16().count() + 1;
+                    line.chars().all(|ch| ch == ' ' || ch == '\t').then(|| serde_json::json!({ "from": start, "at": offset - 1 }))
+                }).collect()
+            } else { Vec::new() };
+            serde_json::json!({ "from": original[..from].encode_utf16().count(), "to": original[..to].encode_utf16().count(), "renderedFrom": src[..visible_start(&original, from, to)].encode_utf16().count(), "blankLines": blank_lines, "previewFrom": if original[from..to].starts_with('$') { Some(src[..preview_start(&original, from, to)].encode_utf16().count()) } else { None } })
+        });
         let pages: Vec<_> = document.pages().iter().map(svg_for_page).collect();
         let mut visible_text = String::new();
         for page in document.pages() {
