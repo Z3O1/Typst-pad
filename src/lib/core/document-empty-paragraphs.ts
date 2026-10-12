@@ -127,7 +127,7 @@ export function projectEmptyParagraphs(
         (rendered < paragraph.to ||
           (rendered === paragraph.to && paragraph.to === projection.source.length))
         ? paragraph.at + index
-        : forward(rendered);
+        : forward(projection.sourceToCaret?.(pos) ?? rendered);
     },
     renderedToSource(pos) {
       return projection.renderedToSource(backward(pos));
