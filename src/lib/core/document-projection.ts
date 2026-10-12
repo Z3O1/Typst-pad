@@ -1,6 +1,7 @@
 // 源码展开仅改变本轮排版输入；保存、撤销和编辑器始终持有原文档。
 import { Text } from "@codemirror/state";
 import expansionStyle from "./document-expansion-style.json";
+import { EMPTY_PARAGRAPH_SPACE } from "./document-empty-paragraphs";
 import { sourceRevealRange } from "./document-interaction";
 import type { CompileErrorLocation, Diagnostic } from "./typst-engine";
 export interface SourceRange {
@@ -61,6 +62,32 @@ export function projectDocumentRanges(
     const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
     const block =
       text.includes("\n") || longest >= 2 || (options.preview && /^\$\s[\s\S]*\s\$$/.test(text));
+    // raw 空行没有带来源的字形；仅在展示副本的缩进之后加入真实 Typst 占位。
+    const blankLines = block
+      ? [...text.matchAll(/^[ \t]*(?=\r?$)/gm)].map((match) => ({
+          from: match.index,
+          at: match.index + match[0].length,
+        }))
+      : [];
+    const rawText = blankLines.reduceRight(
+      // Typst 的 raw tab 预处理会丢弃各行 span；空白行缩进中的 tab 仅在展示副本换为空格。
+      (body, { from, at }) =>
+        body.slice(0, from) +
+        body.slice(from, at).replace(/\t/g, " ") +
+        EMPTY_PARAGRAPH_SPACE +
+        body.slice(at),
+      text,
+    );
+    const rawForward = (pos: number) => pos + blankLines.filter(({ at }) => at < pos).length;
+    const rawBackward = (pos: number) => {
+      let delta = 0;
+      for (const { at } of blankLines) {
+        if (pos <= at + delta) break;
+        if (pos <= at + delta + 1) return at;
+        delta++;
+      }
+      return pos - delta;
+    };
     const fence = "`".repeat(Math.max(block ? 3 : 1, longest + 1));
     const isDeclaration = /^#(?:let|set|show|import)\b/.test(text);
     const declaration = preserveDeclaration !== false && isDeclaration ? `${text}\n` : "";
@@ -79,7 +106,7 @@ export function projectDocumentRanges(
     const tail = (block ? `\n${fence}` : ` ${fence}`) + style.tail;
     const start = from + offset;
     const textStart = start + head.length;
-    const textEnd = textStart + text.length;
+    const textEnd = textStart + rawText.length;
     const previewLive = !!options.preview && preserveDeclaration !== false && !isDeclaration;
     const previewHead = previewLive
       ? formula
@@ -94,8 +121,8 @@ export function projectDocumentRanges(
     const previewFrom = textEnd + tail.length;
     const previewTextStart = previewFrom + previewHead.length;
     const previewTextEnd = previewTextStart + previewBody.length;
-    const added = head.length + tail.length + preview.length;
-    rendered += source.slice(previousEnd, from) + head + text + tail + preview;
+    const added = head.length + blankLines.length + tail.length + preview.length;
+    rendered += source.slice(previousEnd, from) + head + rawText + tail + preview;
     previousEnd = to;
     offset += added;
     return {
@@ -110,26 +137,43 @@ export function projectDocumentRanges(
       previewLive,
       end: to + offset,
       added,
+      blankLines,
+      rawForward,
+      rawBackward,
     };
   });
+  const sourceToRendered = (pos: number) => {
+    let delta = 0;
+    for (const segment of segments) {
+      if (pos < segment.from) break;
+      if (pos <= segment.to) return segment.textStart + segment.rawForward(pos - segment.from);
+      delta += segment.added;
+    }
+    return pos + delta;
+  };
   return {
     source: rendered + source.slice(previousEnd),
     original: source,
-    sourceToRendered(pos) {
-      let delta = 0;
+    sourceToRendered,
+    sourceToCaret(pos) {
       for (const segment of segments) {
         if (pos < segment.from) break;
-        if (pos <= segment.to) return segment.textStart + pos - segment.from;
-        delta += segment.added;
+        if (pos > segment.to) continue;
+        const relative = pos - segment.from;
+        const index = segment.blankLines.findIndex(
+          ({ from, at }) => relative >= from && relative <= at,
+        );
+        if (index >= 0) return segment.textStart + segment.blankLines[index].at + index;
       }
-      return pos + delta;
+      return sourceToRendered(pos);
     },
     renderedToSource(pos) {
       let delta = 0;
       for (const segment of segments) {
         if (pos < segment.start) break;
         if (pos < segment.textStart) return segment.from;
-        if (pos <= segment.textEnd) return segment.from + pos - segment.textStart;
+        if (pos <= segment.textEnd)
+          return segment.from + segment.rawBackward(pos - segment.textStart);
         if (pos < segment.end) {
           if (pos >= segment.previewFrom) {
             if (

@@ -4,6 +4,73 @@ import expansionStyle from "./document-expansion-style.json";
 import { projectEmptyParagraphs } from "./document-empty-paragraphs";
 
 describe("Typst 原地源码展开", () => {
+  it("展开 raw 的空行与缩进只在投影中占位，边界/中文/emoji/多范围映射可往返", () => {
+    const text = "\n \t\n中文🙂\n\n\t \n";
+    const source = `前🙂 ${text} 后 $x$\n\n`;
+    const from = source.indexOf(text),
+      to = from + text.length;
+    const mathFrom = source.indexOf("$x$");
+    const p = projectEmptyParagraphs(
+      projectDocumentRanges(
+        source,
+        [
+          { from, to },
+          { from: mathFrom, to: mathFrom + 3 },
+        ],
+        { styled: true, preview: true },
+      ),
+    );
+    expect(p.original).toBe(source);
+    for (let pos = 0; pos <= source.length; pos++)
+      expect(p.renderedToSource(p.sourceToRendered(pos)), `原文 ${pos}`).toBe(pos);
+    let lineFrom = from;
+    for (const line of text.split("\n")) {
+      if (/^[ \t]*$/.test(line)) {
+        const at = lineFrom + line.length;
+        for (let pos = lineFrom; pos <= at; pos++) {
+          const caret = p.sourceToCaret!(pos);
+          expect(p.source[caret]).toBe("\u00a0");
+          expect(p.renderedToSource(caret)).toBe(at);
+          expect(p.renderedToSource(caret + 1)).toBe(at);
+        }
+      } else expect(p.source[p.sourceToCaret!(lineFrom)]).toBe("中");
+      lineFrom += line.length + 1;
+    }
+    const preview = p.source.lastIndexOf(text);
+    expect(preview).toBeGreaterThan(p.sourceToRendered(to));
+    for (let i = 0; i <= text.length; i++) {
+      expect(p.renderedToSource(preview + i)).toBe(from + i);
+      expect(p.isPreview!(preview + i)).toBe(true);
+    }
+    const rendered = p.sourceToRendered(source.indexOf("中"));
+    const before = p.source.slice(0, rendered);
+    const [diagnostic] = sourceDiagnostics(p, [
+      {
+        message: "range",
+        line: before.split("\n").length,
+        col: 1,
+        endLine: before.split("\n").length,
+        endCol: 3,
+      },
+    ]);
+    expect(diagnostic).toMatchObject({ line: 3, col: 1, endLine: 3, endCol: 3 });
+  });
+  it("闭合公式后空段定位不落回展开围栏或预览，空行源码仍不变", () => {
+    const source = "$x$\n\n \t\n\n";
+    const p = projectEmptyParagraphs(
+      projectDocumentRanges(source, [{ from: 0, to: 3 }], {
+        styled: true,
+        preview: true,
+      }),
+    );
+    for (const pos of [5, 6, 7, source.length]) {
+      const caret = p.sourceToCaret!(pos);
+      expect(p.source[caret]).toBe("\u00a0");
+      expect(p.isPreview!(caret)).toBe(false);
+    }
+    for (let pos = 0; pos <= source.length; pos++)
+      expect(p.renderedToSource(p.sourceToRendered(pos))).toBe(pos);
+  });
   it("源码旁预览保留原表达式一次，编辑始终定位到 raw 而非预览副本", () => {
     const source = "正文 $a + β$ 后文";
     const from = source.indexOf("$"),

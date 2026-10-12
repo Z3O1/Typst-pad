@@ -182,8 +182,16 @@ function query(value, head) {
   let rendered = head;
   if (value.range) {
     const { from, to } = value.range;
-    if (head >= from && head <= to) rendered = value.range.renderedFrom + head - from;
-    else if (head > to) rendered += value.doc.length - value.original.length;
+    if (head >= from && head <= to) {
+      const relative = head - from;
+      const blanks = value.range.blankLines ?? [];
+      const index = blanks.findIndex((line) => relative >= line.from && relative <= line.at);
+      rendered =
+        value.range.renderedFrom +
+        (index >= 0
+          ? blanks[index].at + index
+          : relative + blanks.filter((line) => line.at < relative).length);
+    } else if (head > to) rendered += value.doc.length - value.original.length;
   }
   return renderedQuery(value, rendered);
 }
@@ -438,6 +446,33 @@ const blankCodeHead = codeBlock.original.indexOf("\n\n // 代码空白") + 1;
 const beforeCodeBlock = await count();
 await cursor(blankCodeHead);
 await settled(codeBlock);
+await caretMatches(codeBlock, blankCodeHead, true);
+check("展开的完全空行使用真实 Typst 占位停靠点，光标保持可见", await pagesMatch(codeBlock));
+const blankStable = await count();
+let blankCaretsMatch = true;
+for (const line of codeBlock.range.blankLines) {
+  for (let pos = line.from; pos <= line.at; pos++) {
+    const head = codeBlock.range.from + pos;
+    await cursor(head);
+    blankCaretsMatch &&= await caretMatches(codeBlock, head, true);
+  }
+}
+check(
+  "空格/tab/连续空行共用各自引擎字形，移动不重排且不改原文",
+  blankCaretsMatch && (await count()) === blankStable && (await doc()) === codeBlock.original,
+);
+const blankAt = codeBlock.range.from + codeBlock.range.blankLines[1].at;
+const nativeBlank = query(codeBlock, blankAt);
+await c.evaluate(
+  `(() => {const p=${JSON.stringify(nativeBlank)},host=document.querySelectorAll('#preview-host>.document-page')[p.page-1],r=host.getBoundingClientRect(),v=host.shadowRoot.querySelector('svg').viewBox.baseVal;window.__blankClick={x:r.left+(p.xPt-v.x+.1)*r.width/v.width,y:r.top+(p.yPt-v.y+p.heightPt/2)*r.height/v.height}})()`,
+);
+const blankClick = await c.evaluate("window.__blankClick");
+await c.click(blankClick.x, blankClick.y);
+await caretMatches(codeBlock, blankAt, true);
+check(
+  "点击展开空行回到缩进末尾，不落到邻行且原文映射不漂移",
+  await c.evaluate(`window.__typstPadView.state.selection.main.head===${blankAt}`),
+);
 const commentHead = codeBlock.original.indexOf("代码空白");
 await cursor(commentHead);
 await caretMatches(codeBlock, commentHead, true);
