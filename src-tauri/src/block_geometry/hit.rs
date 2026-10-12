@@ -31,6 +31,11 @@ pub fn store_hit_geometry(items: Vec<PlacedItem>, doc_start: usize) -> u64 {
         .map(|mut i| {
             i.range.start -= doc_start;
             i.range.end -= doc_start;
+            if let Some(stops) = &mut i.caret_stops {
+                for stop in stops.iter_mut() {
+                    *stop -= doc_start;
+                }
+            }
             i
         })
         .collect();
