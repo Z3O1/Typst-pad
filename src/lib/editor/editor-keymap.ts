@@ -1,17 +1,17 @@
 // 自定义编辑快捷键绑定：在 basicSetup 默认键位之外补充的编辑器快捷键
 import { keymap } from "@codemirror/view";
 import type { EditorView } from "@codemirror/view";
-import { EditorSelection, Prec } from "@codemirror/state";
+import { EditorSelection, EditorState, Prec } from "@codemirror/state";
 import { acceptCompletion } from "@codemirror/autocomplete";
 import { ensureSyntaxTree, language } from "@codemirror/language";
 import {
   indentLess,
   indentMore,
   deleteLine,
-  copyLineDown,
   toggleBlockComment,
   toggleComment,
 } from "@codemirror/commands";
+import { selectNextOccurrence } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
 import { insertNewTypstListItem, insertTypstListContinuation } from "codemirror-lang-typst/lezer";
 import { emptyPairBackspace, planScaffoldExpand } from "./auto-pair";
@@ -491,48 +491,56 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
     expandMathScaffold(view, tabSpaces()) ||
     continueMathPrefix(view) ||
     listAwareEnter(isWriteMode, insertNewTypstListItem, false)(view);
-  return Prec.high(
-    keymap.of([
-      // **Tab / Shift+Tab**（2026-09-28 接管普通 Tab；2026-10-07 档宽改为设置项 tabSpaces）：
-      // - 补全候选开着 → 先接受所选候选（公式里的 `typstMathCompletions` 等，见 insertTabOrIndentLines）；
-      // - 有选区 → 给选区触碰的每一行行首各加一档（indentLinesWithTab；一档 = tabSpaces 个空格，0 = 制表符）；
-      // - 无选区 → 直接插入一档（tabUnit）。
-      // Shift+Tab 是 Tab 的逆操作（dedentTabUnit：删行首一档），按 tabSpaces 而非 indentUnit 退，
-      // 保证按几下 Tab 就能按几下 Shift+Tab 原路退回。
-      // `preventDefault: true` 与本文件其它自定义键位同款：命令返回 false（只读文档）时也吃掉按键。
-      {
-        key: "Tab",
-        run: (v) => insertTabOrIndentLines(v, tabUnit(tabSpaces())),
-        preventDefault: true,
-      },
-      { key: "Shift-Tab", run: (v) => dedentTabUnit(v, tabSpaces()), preventDefault: true },
-      // 缩进 / 反缩进（按 indentUnit = 4 个空格的一档）仍是 **Ctrl+Tab / Ctrl+Shift+Tab**
-      // （2026-09-28 上午从 Tab 改到 Ctrl+Tab；同日普通 Tab 又按新需求接管，见上）。
-      //
-      // 为什么写 `Ctrl-` 而不是本文件其它键位用的 `Mod-`：macOS 上 Mod = Cmd，而 Cmd+Tab 是系统
-      // 切换应用、根本到不了页面（Ctrl+Tab 在 Windows / macOS 两边都空着）。桌面版能收到它是因为
-      // 浏览器加速键已在 Rust 侧关掉（见 src-tauri/src/lib.rs 的 DisableBrowserAccelerators）；
-      // **真实浏览器里 Ctrl+Tab 是浏览器级手势、页面收不到**，所以这条只能在桌面版与浏览器验收的
-      // 注入事件（CDP）里验，别指望在 Chrome 里手按。
-      { key: "Ctrl-Tab", run: indentMore, preventDefault: true },
-      { key: "Ctrl-Shift-Tab", run: indentLess, preventDefault: true },
-      {
-        key: "Enter",
-        run: enterWithScaffold,
-        preventDefault: true,
-      },
-      {
-        key: "Shift-Enter",
-        run: listAwareEnter(isWriteMode, insertTypstListContinuation, true),
-        preventDefault: true,
-      },
-      { key: "Backspace", run: deleteEmptyDollarPair, preventDefault: true }, // 空配对整对删
-      { key: "Mod-Shift-d", run: copyLineDown, preventDefault: true }, // 复制当前行到下方（VS Code 语义）
-      { key: "Mod-d", run: deleteLine, preventDefault: true }, // 删除当前行（有意覆盖 searchKeymap 的"选中下一处"）
-      { key: "Mod-Shift-/", run: toggleBlockComment, preventDefault: true }, // 块注释
-      { key: "Mod-/", run: toggleComment, preventDefault: true }, // 行注释（Ctrl+/ 切换）
-    ]),
-  );
+  return [
+    Prec.high(
+      keymap.of([
+        // **Tab / Shift+Tab**（2026-09-28 接管普通 Tab；2026-10-07 档宽改为设置项 tabSpaces）：
+        // - 补全候选开着 → 先接受所选候选（公式里的 `typstMathCompletions` 等，见 insertTabOrIndentLines）；
+        // - 有选区 → 给选区触碰的每一行行首各加一档（indentLinesWithTab；一档 = tabSpaces 个空格，0 = 制表符）；
+        // - 无选区 → 直接插入一档（tabUnit）。
+        // Shift+Tab 是 Tab 的逆操作（dedentTabUnit：删行首一档），按 tabSpaces 而非 indentUnit 退，
+        // 保证按几下 Tab 就能按几下 Shift+Tab 原路退回。
+        // `preventDefault: true` 与本文件其它自定义键位同款：命令返回 false（只读文档）时也吃掉按键。
+        {
+          key: "Tab",
+          run: (v) => insertTabOrIndentLines(v, tabUnit(tabSpaces())),
+          preventDefault: true,
+        },
+        { key: "Shift-Tab", run: (v) => dedentTabUnit(v, tabSpaces()), preventDefault: true },
+        // 缩进 / 反缩进（按 indentUnit = 4 个空格的一档）仍是 **Ctrl+Tab / Ctrl+Shift+Tab**
+        // （2026-09-28 上午从 Tab 改到 Ctrl+Tab；同日普通 Tab 又按新需求接管，见上）。
+        //
+        // 为什么写 `Ctrl-` 而不是本文件其它键位用的 `Mod-`：macOS 上 Mod = Cmd，而 Cmd+Tab 是系统
+        // 切换应用、根本到不了页面（Ctrl+Tab 在 Windows / macOS 两边都空着）。桌面版能收到它是因为
+        // 浏览器加速键已在 Rust 侧关掉（见 src-tauri/src/lib.rs 的 DisableBrowserAccelerators）；
+        // **真实浏览器里 Ctrl+Tab 是浏览器级手势、页面收不到**，所以这条只能在桌面版与浏览器验收的
+        // 注入事件（CDP）里验，别指望在 Chrome 里手按。
+        { key: "Ctrl-Tab", run: indentMore, preventDefault: true },
+        { key: "Ctrl-Shift-Tab", run: indentLess, preventDefault: true },
+        {
+          key: "Enter",
+          run: enterWithScaffold,
+          preventDefault: true,
+        },
+        {
+          key: "Shift-Enter",
+          run: listAwareEnter(isWriteMode, insertTypstListContinuation, true),
+          preventDefault: true,
+        },
+        { key: "Backspace", run: deleteEmptyDollarPair, preventDefault: true }, // 空配对整对删
+        // Ctrl+Shift+D / Cmd+Shift+D = VS Code 的 Ctrl+D：空选区先选中当前词，
+        // 再次按下追加下一个相同文本的选区/多光标；已选文本同样追加下一处。
+        // 复用 @codemirror/search 的 selectNextOccurrence，不自己实现匹配算法。
+        { key: "Mod-Shift-d", run: selectNextOccurrence, preventDefault: true },
+        { key: "Mod-d", run: deleteLine, preventDefault: true }, // 删除当前行（有意覆盖 searchKeymap 的"选中下一处"）
+        { key: "Mod-Shift-/", run: toggleBlockComment, preventDefault: true }, // 块注释
+        { key: "Mod-/", run: toggleComment, preventDefault: true }, // 行注释（Ctrl+/ 切换）
+      ]),
+    ),
+    // 开启多选区：selectNextOccurrence 追加下一个匹配需要多个选区才能同时生效；
+    // 其它命令（如 Esc 的 simplifySelection）会按 CodeMirror 默认行为收拢到主选区。
+    EditorState.allowMultipleSelections.of(true),
+  ];
 }
 
 /** 源码模式（不碰列表语义）的键位；写作模式用 `createEditorKeymap({ isWriteMode })` */

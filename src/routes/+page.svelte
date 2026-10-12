@@ -54,7 +54,15 @@
   import { createDocumentCompileScheduler } from "$lib/core/document-compile-scheduler";
   import type { CompileReason } from "$lib/core/document-compile-scheduler";
   import type { WriteCommand } from "$lib/core/write-commands";
-  import { openTypFile, saveTypFile, readTypFile, pickFontDir, isTauri } from "$lib/core/file-ops";
+  import {
+    openTypFile,
+    saveTypFile,
+    readTypFile,
+    startFileWatch,
+    stopFileWatch,
+    pickFontDir,
+    isTauri,
+  } from "$lib/core/file-ops";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
@@ -75,6 +83,7 @@
   } from "$lib/core/document-session";
   import type { DocumentState } from "$lib/core/document-session";
   import { failureStatus } from "$lib/core/failure-text";
+  import { createExternalFileChange } from "$lib/core/external-file-change";
   import MenuBar from "$lib/ui/MenuBar.svelte";
   import type { MenuGroup } from "$lib/ui/MenuBar.svelte";
   import { buildMenuGroups } from "$lib/ui/menu-model";
@@ -763,7 +772,7 @@
   /** 关闭弹窗：保存后关闭 */
   async function onClosePromptSave() {
     showClosePrompt = false;
-    const saved = await docSession.save();
+    const saved = await saveDocument();
     if (saved) getCurrentWindow().destroy(); // destroy 不再次触发 close-requested
   }
 
@@ -1063,8 +1072,17 @@
     filePath: () => filePath,
     fileTitle: () => fileTitle,
     baseline: () => baseline,
+    currentSession: () => documentSession,
+    currentRevision: () => documentRevision,
     applyLoaded: (content, path) => applyDocState(loadedState(content, path)),
-    applySaved: (path) => applyDocState(savedState(path, doc)),
+    applySaved: (path, content) => {
+      // 保存只更新元数据；await 期间的正文、选区和撤销历史均不动。
+      const saved = savedState(path, content);
+      filePath = saved.filePath;
+      fileTitle = saved.fileTitle;
+      baseline = saved.baseline;
+      externalFileChange.acknowledgeSave(path, content);
+    },
     applyNew: () => applyDocState(newState()),
     afterLoad: () => {
       resetDocumentRender();
@@ -1094,6 +1112,57 @@
     writeFile: saveTypFile,
     pickFile: openTypFile,
   });
+
+  // ---------------------------------------------------------------------------
+  // 外部文件变更监控
+  // ---------------------------------------------------------------------------
+  // 只监控当前主文件；切文件/新建/关闭时通过 watchPath 解绑。Rust 侧用 notify 8.2.0
+  // 监听父目录并过滤文件名，能捕获原子替换（rename 覆盖）和常规写入。
+  const externalFileChange = createExternalFileChange({
+    currentPath: () => filePath,
+    currentDoc: () => doc,
+    currentBaseline: () => baseline,
+    currentSession: () => documentSession,
+    currentRevision: () => documentRevision,
+    applyReload: (path, content) => {
+      applyDocState(loadedState(content, path));
+      resetDocumentRender();
+      scheduleCompile();
+      schedulePersist();
+    },
+    promptReloadOrKeep: (message, title) => confirm(message, { title, kind: "warning" }),
+    setStatus: (text) => {
+      statusText = text;
+    },
+    readFile: readTypFile,
+    startWatch: startFileWatch,
+    stopWatch: stopFileWatch,
+  });
+
+  // 先注册 listener，再启动监控；同路径新会话也作废旧检查。
+  let fileChangeListenerReady = $state(false);
+  $effect(() => {
+    const path = filePath;
+    const session = documentSession;
+    if (fileChangeListenerReady) {
+      untrack(() => void externalFileChange.watchPath(path, session));
+    }
+  });
+
+  /** 同身份保存串行化；暂停检查直到 write 回复并应用实际快照基线。 */
+  async function saveDocument(): Promise<string | null> {
+    const token = externalFileChange.beginSave();
+    if (!token) return null;
+    const session = documentSession;
+    const path = filePath;
+    try {
+      if (!(await externalFileChange.confirmSaveIfConflict(token))) return null;
+      if (documentSession !== session || filePath !== path) return null;
+      return await docSession.save();
+    } finally {
+      externalFileChange.endSave(token);
+    }
+  }
 
   /**
    * 窗口级右键处理：
@@ -1157,7 +1226,7 @@
           },
         };
       case "save":
-        return { type: "item", label, disabled, onClick: () => void docSession.save() };
+        return { type: "item", label, disabled, onClick: () => void saveDocument() };
       case "export-pdf":
         return { type: "item", label, disabled, onClick: () => handleExportPdf() };
       case "settings":
@@ -1195,7 +1264,7 @@
       onNew: () => void docSession.createNew(),
       onNewWindow: () => newWindow.open(),
       onOpen: () => void docSession.open(),
-      onSave: () => void docSession.save(),
+      onSave: () => void saveDocument(),
       onOpenSettings: openSettings,
       onExportPdf: handleExportPdf,
       runFormat,
@@ -2029,6 +2098,14 @@
         if (e.payload) void openFileClaim.onBroadcast(e.payload);
       });
       keepUnlisten(unlistenOpen);
+      // 外部程序修改当前文件：Rust 侧通知后，由 externalFileChange 决定自动重读或提示
+      const unlistenFileChanged = getCurrentWindow().listen<{ path: string }>("file-changed", (e) =>
+        externalFileChange.onFileChanged(e.payload),
+      );
+      keepUnlisten(unlistenFileChanged);
+      unlistenFileChanged.then(() => {
+        if (!disposed) fileChangeListenerReady = true;
+      });
       unlistenOpen.then(() => {
         // 首次启动/跨实例转发的待打开文件（关联双击）：就绪后取走（取最后一个，即最新请求）。
         // **只由主窗口取**：副窗口是草稿窗口，不该被启动参数里带的文件顶掉内容。
@@ -2051,6 +2128,7 @@
 
     return () => {
       disposed = true;
+      documentSession++; // 卸载同时作废在途打开/重读/保存结果
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("contextmenu", handleContextMenu);
@@ -2066,6 +2144,7 @@
       clearTimeout(previewReflowTimer);
       if (previewScaleFrame !== 0) cancelAnimationFrame(previewScaleFrame);
       unlisteners.forEach((un) => un());
+      void externalFileChange.dispose();
       clearTimeout(persistTimer);
       clearTimeout(startupCheckTimer); // 关窗时取消还没发起的自动更新检查
       // 取消待执行编译，并用请求代次作废在途结果。
