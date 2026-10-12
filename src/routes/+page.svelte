@@ -1073,6 +1073,7 @@
     fileTitle: () => fileTitle,
     baseline: () => baseline,
     currentSession: () => documentSession,
+    currentRevision: () => documentRevision,
     applyLoaded: (content, path) => applyDocState(loadedState(content, path)),
     applySaved: (path, content) => {
       // 保存只更新元数据；await 期间的正文、选区和撤销历史均不动。
@@ -1080,6 +1081,7 @@
       filePath = saved.filePath;
       fileTitle = saved.fileTitle;
       baseline = saved.baseline;
+      externalFileChange.acknowledgeSave(path, content);
     },
     applyNew: () => applyDocState(newState()),
     afterLoad: () => {
@@ -1121,6 +1123,7 @@
     currentDoc: () => doc,
     currentBaseline: () => baseline,
     currentSession: () => documentSession,
+    currentRevision: () => documentRevision,
     applyReload: (path, content) => {
       applyDocState(loadedState(content, path));
       resetDocumentRender();

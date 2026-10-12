@@ -455,6 +455,41 @@ describe("createExternalFileChange", () => {
     expect(m.hasConflict()).toBe(true);
   });
 
+  it("保存结果不盲清保存期间出现的新冲突", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("saved");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "external-during-save");
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    hooks.setBaseline("saved");
+    m.acknowledgeSave("/a.typ", "saved");
+    expect(m.hasConflict()).toBe(true);
+    hooks.setPromptResults([false]);
+    expect(await m.confirmSaveIfConflict()).toBe(false);
+  });
+
+  it("正文输入再撤销回原值也让旧确认作废", async () => {
+    const hooks = createHooks();
+    let revision = 0;
+    hooks.currentRevision = () => revision;
+    hooks.setPath("/a.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "disk");
+    let release!: (value: boolean) => void;
+    hooks.promptReloadOrKeep = () => new Promise<boolean>((r) => (release = r));
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    revision += 2;
+    release(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.calls.applyReload).toHaveLength(0);
+  });
+
   it.each(["session", "path", "disk", "doc"])(
     "保存确认绑定原快照：%s 变化则拒绝",
     async (change) => {

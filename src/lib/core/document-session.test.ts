@@ -146,6 +146,29 @@ describe("createDocumentSession", () => {
     vi.restoreAllMocks();
   });
 
+  it("打开读取期间的新会话让旧结果和状态提示作废", async () => {
+    let release!: (value: { path: string; content: string }) => void;
+    const s = make({ readFile: () => new Promise((r) => (release = r)) });
+    const opening = s.openPath("/tmp/a.typ");
+    session++;
+    release({ path: "/tmp/a.typ", content: "old" });
+    expect(await opening).toBe(false);
+    expect(calls).toEqual([]);
+    expect(state.doc).toBe("正文");
+  });
+
+  it("新建确认期间的输入不得被迟到同意丢弃", async () => {
+    state.baseline = "base";
+    let release!: (value: boolean) => void;
+    const s = make({ confirmNative: () => new Promise((r) => (release = r)) });
+    const creating = s.createNew();
+    state.doc = "new-input";
+    release(true);
+    await creating;
+    expect(calls).toEqual([]);
+    expect(state.doc).toBe("new-input");
+  });
+
   it("不脏：不问、直接读，落文档 + 后继动作 + 「已打开」", async () => {
     const s = make();
     // 刻意换一个文件名：夹具初始标题是 a.typ，若这里还开 a.typ，"标题有没有被落下来"就测不出来了

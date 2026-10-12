@@ -26,6 +26,8 @@ export interface ExternalFileChangeHooks {
   currentBaseline(): string | null;
   /** 可选：会话/版本标识；提供时参与过期判定 */
   currentSession?(): number | string;
+  /** 正文事务版本，包含输入后撤销回相同内容的情况 */
+  currentRevision?(): number;
   /** 应用磁盘内容：建立新会话、清撤销、重编译、持久化 */
   applyReload(path: string, content: string): void;
   /** 提示用户选择；返回 true 表示「重读磁盘」，false 表示「保留当前内容」 */
@@ -45,7 +47,8 @@ export interface ExternalFileChange {
   hasConflict(): boolean;
   /** 保存前调用；返回 true 表示可以继续保存 */
   confirmSaveIfConflict(): Promise<boolean>;
-  /** 保存成功后清除冲突标记 */
+  /** 保存成功后核对实际写入快照；不能清掉期间出现的另一磁盘版本冲突 */
+  acknowledgeSave(path: string, content: string): void;
   clearConflict(): void;
   /** 卸载时解绑 */
   dispose(): Promise<void>;
@@ -91,6 +94,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
       doc: hooks.currentDoc(),
       baseline: hooks.currentBaseline(),
       session: hooks.currentSession?.(),
+      revision: hooks.currentRevision?.(),
       generation,
     };
   }
@@ -102,6 +106,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
       hooks.currentPath() !== snapshot.path ||
       hooks.currentDoc() !== snapshot.doc ||
       hooks.currentBaseline() !== snapshot.baseline ||
+      hooks.currentRevision?.() !== snapshot.revision ||
       (hooks.currentSession !== undefined && hooks.currentSession() !== snapshot.session)
     );
   }
@@ -150,10 +155,15 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     if (activeCheck || debounceTimer || !pendingPath) return;
     const path = pendingPath;
     pendingPath = null;
-    activeCheck = runCheck(path).finally(() => {
-      activeCheck = null;
-      scheduleCheck();
-    });
+    const snapshot = captureSnapshot(path);
+    activeCheck = runCheck(path)
+      .catch((error) => {
+        if (!isStale(snapshot)) hooks.setStatus(`外部修改检测失败：${error}`);
+      })
+      .finally(() => {
+        activeCheck = null;
+        scheduleCheck();
+      });
   }
 
   async function runCheck(path: string): Promise<void> {
@@ -303,6 +313,17 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     }
   }
 
+  function acknowledgeSave(path: string, content: string): void {
+    if (!conflictSnapshot || conflictSnapshot.path !== path) return;
+    if (hooks.currentSession?.() !== conflictSnapshot.sessionAtStart) return;
+    if (conflictSnapshot.content === content) {
+      clearConflict();
+    } else {
+      conflictSnapshot.baselineAtStart = content;
+      if (lastIgnored) lastIgnored.baselineAtStart = content;
+    }
+  }
+
   function clearConflict(): void {
     pendingConflict = false;
     conflictSnapshot = null;
@@ -331,6 +352,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     onFileChanged,
     hasConflict,
     confirmSaveIfConflict,
+    acknowledgeSave,
     clearConflict,
     dispose,
   };
