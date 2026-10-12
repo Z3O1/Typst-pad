@@ -54,15 +54,15 @@ export async function saveTypFile(path: string | null, content: string): Promise
  * 启动对指定 .typ 文件的监控；同一窗口再次调用会先停止旧 watch。
  * 浏览器环境为空操作（无真实文件访问）。
  */
-export async function startFileWatch(path: string, windowLabel: string): Promise<void> {
+export async function startFileWatch(path: string): Promise<void> {
   if (!isTauri()) return;
-  await invoke("start_file_watch", { path, windowLabel });
+  await invoke("start_file_watch", { path });
 }
 
 /** 停止当前窗口的文件监控；浏览器环境为空操作。 */
-export async function stopFileWatch(windowLabel: string): Promise<void> {
+export async function stopFileWatch(): Promise<void> {
   if (!isTauri()) return;
-  await invoke("stop_file_watch", { windowLabel });
+  await invoke("stop_file_watch");
 }
 
 /**

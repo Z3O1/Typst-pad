@@ -5,8 +5,10 @@
 // - 当前编辑器**有**未保存修改时，弹出确认框让用户选择「重读磁盘」或「保留当前内容」；
 // - 绝不静默覆盖当前内容，也不自动写盘。
 //
-// 与 `document-session.ts` 的分工：那边管显式打开/保存/新建/重读；这里管**被动**的外部变更。
-// 所有写盘仍走 document-session.save() → file-ops.saveTypFile() → Rust write_file。
+// 异步安全：每个文件变更事件都会绑定「路径 + 正文 + 基线 + 会话」快照；
+// 所有 await（读盘、提示）之后重新核对快照，路径切换 / 同路径新会话 / dispose
+// 都会让旧结果作废。同一时刻只跑一次检查，新事件排成 latest-demand，
+// 防止重叠 prompt、乱序 read 把旧版本写回当前编辑器。
 
 import { isDocModified } from "./doc-utils";
 import type { OpenedFile } from "./file-ops";
@@ -22,6 +24,8 @@ export interface ExternalFileChangeHooks {
   currentDoc(): string;
   /** 当前基线（用于判断是否有未保存修改） */
   currentBaseline(): string | null;
+  /** 可选：会话/版本标识；提供时参与过期判定 */
+  currentSession?(): number | string;
   /** 应用磁盘内容：建立新会话、清撤销、重编译、持久化 */
   applyReload(path: string, content: string): void;
   /** 提示用户选择；返回 true 表示「重读磁盘」，false 表示「保留当前内容」 */
@@ -34,7 +38,7 @@ export interface ExternalFileChangeHooks {
 
 export interface ExternalFileChange {
   /** 切换要监控的文件；传 null 表示停止监控 */
-  watchPath(path: string | null): Promise<void>;
+  watchPath(path: string | null, session?: number | string): Promise<void>;
   /** 收到 Rust 发来的 file-changed 事件 */
   onFileChanged(payload: { path: string }): void;
   /** 是否存在已知的外部变更冲突（用于保存前确认） */
@@ -49,16 +53,30 @@ export interface ExternalFileChange {
 
 export function createExternalFileChange(hooks: ExternalFileChangeHooks): ExternalFileChange {
   let watchedPath: string | null = null;
-  let pendingConflict = false;
-  /** 用户选择「保留当前内容」的那份磁盘内容；同一版本不再重复打扰 */
-  let lastIgnoredDiskContent: string | null = null;
-  let lastIgnoredPath: string | null = null;
+  let watchedSession: number | string | undefined;
+  let generation = 0;
+  let watchQueue: Promise<void> = Promise.resolve();
+  /** 最新到达但尚未开始检查的路径 */
+  let pendingPath: string | null = null;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 当前正在执行的检查（读盘或提示） */
+  let activeCheck: Promise<void> | null = null;
   let disposed = false;
-
-  function isDirty(): boolean {
-    return isDocModified(hooks.currentDoc(), hooks.currentBaseline());
-  }
+  let pendingConflict = false;
+  let conflictSnapshot: {
+    path: string;
+    content: string;
+    pathAtStart: string | null;
+    baselineAtStart: string | null;
+    sessionAtStart: number | string | undefined;
+  } | null = null;
+  /** 用户选择「保留」的磁盘版本，同一版本不再重复打扰 */
+  let lastIgnored: {
+    path: string;
+    content: string;
+    baselineAtStart: string | null;
+    sessionAtStart: number | string | undefined;
+  } | null = null;
 
   function clearTimer(): void {
     if (debounceTimer) {
@@ -67,73 +85,123 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     }
   }
 
-  async function watchPath(path: string | null): Promise<void> {
-    if (disposed) return;
-    clearTimer();
-    // 同路径不必重启 watch（保存/外部重读后仍监控同一个文件），只清冲突状态。
-    if (path === watchedPath) {
-      pendingConflict = false;
-      lastIgnoredDiskContent = null;
-      lastIgnoredPath = null;
-      return;
-    }
+  function captureSnapshot(path: string | null) {
+    return {
+      path,
+      doc: hooks.currentDoc(),
+      baseline: hooks.currentBaseline(),
+      session: hooks.currentSession?.(),
+      generation,
+    };
+  }
+
+  function isStale(snapshot: ReturnType<typeof captureSnapshot>): boolean {
+    return (
+      disposed ||
+      generation !== snapshot.generation ||
+      hooks.currentPath() !== snapshot.path ||
+      hooks.currentDoc() !== snapshot.doc ||
+      hooks.currentBaseline() !== snapshot.baseline ||
+      (hooks.currentSession !== undefined && hooks.currentSession() !== snapshot.session)
+    );
+  }
+
+  function isContentUnchanged(content: string, baseline: string | null): boolean {
+    // 与自己的 save 一致，或外部改回了基线，都不算「外部新版本」
+    return content === hooks.currentDoc() || (baseline !== null && content === baseline);
+  }
+
+  function watchPath(path: string | null, session = hooks.currentSession?.()): Promise<void> {
+    if (disposed) return Promise.resolve();
+    if (path === watchedPath && session === watchedSession) return watchQueue;
     watchedPath = path;
-    pendingConflict = false;
-    lastIgnoredDiskContent = null;
-    lastIgnoredPath = null;
-    try {
-      if (path) {
+    watchedSession = session;
+    const request = ++generation;
+    clearTimer();
+    pendingPath = null;
+    clearConflict();
+    watchQueue = watchQueue.then(async () => {
+      if (disposed || request !== generation) return;
+      try {
         await hooks.stopWatch();
-        await hooks.startWatch(path);
-      } else {
-        await hooks.stopWatch();
+        if (disposed || request !== generation) return;
+        if (path) await hooks.startWatch(path);
+        // listener 已注册；补读启动间隙的磁盘变化（仍走串行检查）。
+        if (!disposed && request === generation && path) onFileChanged({ path });
+      } catch (e) {
+        if (!disposed && request === generation) hooks.setStatus(`文件监控失败：${e}`);
       }
-    } catch (e) {
-      hooks.setStatus(`文件监控失败：${e}`);
-    }
+    });
+    return watchQueue;
   }
 
   function onFileChanged(payload: { path: string }): void {
     if (disposed) return;
     if (payload.path !== watchedPath) return; // 旧路径事件作废
     clearTimer();
+    pendingPath = payload.path;
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
-      void checkDisk(payload.path);
+      scheduleCheck();
     }, DEBOUNCE_MS);
   }
 
-  async function checkDisk(path: string): Promise<void> {
-    if (disposed || path !== watchedPath) return;
+  function scheduleCheck(): void {
+    if (activeCheck || debounceTimer || !pendingPath) return;
+    const path = pendingPath;
+    pendingPath = null;
+    activeCheck = runCheck(path).finally(() => {
+      activeCheck = null;
+      scheduleCheck();
+    });
+  }
+
+  async function runCheck(path: string): Promise<void> {
+    const snapshot = captureSnapshot(path);
+    if (isStale(snapshot)) return;
 
     let content: string;
     try {
       content = (await hooks.readFile(path)).content;
     } catch (e) {
+      if (isStale(snapshot)) return;
       handleUnreadable();
       return;
     }
 
-    const doc = hooks.currentDoc();
-    if (content === doc) {
-      // 自己的 save 或同内容变更：不需要任何动作
-      pendingConflict = false;
+    if (isStale(snapshot)) return;
+
+    if (isContentUnchanged(content, snapshot.baseline)) {
+      // 自己的 save / 同内容 / 外部改回基线：不提示，但清掉已解决的冲突
+      if (
+        pendingConflict &&
+        conflictSnapshot &&
+        conflictSnapshot.path === snapshot.path &&
+        conflictSnapshot.pathAtStart === snapshot.path &&
+        conflictSnapshot.baselineAtStart === snapshot.baseline &&
+        conflictSnapshot.sessionAtStart === snapshot.session
+      ) {
+        clearConflict();
+      }
       return;
     }
 
-    if (!isDirty()) {
-      // 干净文档自动重读
+    // 干净文档（且磁盘确实偏离基线）才自动重读
+    if (snapshot.baseline !== null && snapshot.doc === snapshot.baseline) {
       hooks.applyReload(path, content);
-      pendingConflict = false;
-      lastIgnoredDiskContent = null;
-      lastIgnoredPath = null;
       hooks.setStatus("已自动重新读取外部修改");
+      clearConflict();
       return;
     }
 
     // 有未保存修改：询问用户
-    if (content === lastIgnoredDiskContent && path === lastIgnoredPath) {
-      // 同一磁盘版本已经选择过保留，不再重复弹窗
+    if (
+      lastIgnored &&
+      lastIgnored.path === path &&
+      lastIgnored.content === content &&
+      lastIgnored.baselineAtStart === snapshot.baseline &&
+      lastIgnored.sessionAtStart === snapshot.session
+    ) {
       return;
     }
 
@@ -142,25 +210,49 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
       DIALOG_TITLE,
     );
 
-    // 弹窗期间用户不能编辑（原生/系统确认框阻塞），但仍要防止会话已切换
-    if (disposed || path !== watchedPath) return;
+    if (isStale(snapshot) || hooks.currentDoc() !== snapshot.doc) {
+      // 提示期间路径/会话/正文变化：旧选择不得覆盖新状态
+      return;
+    }
+
+    // 确认只授权刚才看到的磁盘版本；提示期间的新版本重新排队。
+    try {
+      const latest = (await hooks.readFile(path)).content;
+      if (isStale(snapshot)) return;
+      if (latest !== content) {
+        pendingPath = path;
+        return;
+      }
+    } catch {
+      if (!isStale(snapshot)) handleUnreadable();
+      return;
+    }
 
     if (reload) {
       hooks.applyReload(path, content);
-      pendingConflict = false;
-      lastIgnoredDiskContent = null;
-      lastIgnoredPath = null;
       hooks.setStatus("已重新读取磁盘内容");
+      clearConflict();
     } else {
-      lastIgnoredDiskContent = content;
-      lastIgnoredPath = path;
+      lastIgnored = {
+        path,
+        content,
+        baselineAtStart: snapshot.baseline,
+        sessionAtStart: snapshot.session,
+      };
       pendingConflict = true;
+      conflictSnapshot = {
+        path,
+        content,
+        pathAtStart: snapshot.path,
+        baselineAtStart: snapshot.baseline,
+        sessionAtStart: snapshot.session,
+      };
       hooks.setStatus("已保留当前内容（磁盘版本已变更）");
     }
   }
 
   function handleUnreadable(): void {
-    if (isDirty()) {
+    if (isDocModified(hooks.currentDoc(), hooks.currentBaseline())) {
       hooks.setStatus("文件已删除或暂时无法读取，已保留当前未保存内容");
     } else {
       hooks.setStatus("外部修改检测：文件已删除或暂时无法读取");
@@ -169,29 +261,64 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
   }
 
   function hasConflict(): boolean {
-    return pendingConflict;
+    if (!pendingConflict || !conflictSnapshot) return false;
+    return (
+      hooks.currentPath() === conflictSnapshot.path &&
+      hooks.currentBaseline() === conflictSnapshot.baselineAtStart &&
+      (hooks.currentSession === undefined ||
+        hooks.currentSession() === conflictSnapshot.sessionAtStart)
+    );
   }
 
   async function confirmSaveIfConflict(): Promise<boolean> {
-    if (!pendingConflict) return true;
+    if (!hasConflict()) return true;
+    const snap = conflictSnapshot!;
+    const snapshot = captureSnapshot(hooks.currentPath());
     const proceed = await hooks.promptReloadOrKeep(
       "磁盘上的文件已被外部程序修改，保存会覆盖这些修改。仍要保存吗？",
       SAVE_CONFLICT_TITLE,
     );
-    return proceed;
+    // 确认期间若会话/路径/冲突版本变化，这次确认无效，禁止保存
+    if (
+      isStale(snapshot) ||
+      hooks.currentPath() !== snap.path ||
+      hooks.currentBaseline() !== snap.baselineAtStart ||
+      (hooks.currentSession && hooks.currentSession() !== snap.sessionAtStart) ||
+      !pendingConflict ||
+      conflictSnapshot?.content !== snap.content
+    ) {
+      return false;
+    }
+    if (!proceed) return false;
+    try {
+      const disk = (await hooks.readFile(snap.path)).content;
+      if (isStale(snapshot) || conflictSnapshot !== snap) return false;
+      if (disk !== snap.content) {
+        onFileChanged({ path: snap.path });
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function clearConflict(): void {
     pendingConflict = false;
-    lastIgnoredDiskContent = null;
-    lastIgnoredPath = null;
+    conflictSnapshot = null;
+    lastIgnored = null;
   }
 
   async function dispose(): Promise<void> {
     disposed = true;
+    generation++;
     clearTimer();
+    pendingPath = null;
     watchedPath = null;
     pendingConflict = false;
+    conflictSnapshot = null;
+    lastIgnored = null;
+    await watchQueue;
     try {
       await hooks.stopWatch();
     } catch {

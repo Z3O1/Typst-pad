@@ -1072,8 +1072,15 @@
     filePath: () => filePath,
     fileTitle: () => fileTitle,
     baseline: () => baseline,
+    currentSession: () => documentSession,
     applyLoaded: (content, path) => applyDocState(loadedState(content, path)),
-    applySaved: (path) => applyDocState(savedState(path, doc)),
+    applySaved: (path, content) => {
+      // 保存只更新元数据；await 期间的正文、选区和撤销历史均不动。
+      const saved = savedState(path, content);
+      filePath = saved.filePath;
+      fileTitle = saved.fileTitle;
+      baseline = saved.baseline;
+    },
     applyNew: () => applyDocState(newState()),
     afterLoad: () => {
       resetDocumentRender();
@@ -1113,6 +1120,7 @@
     currentPath: () => filePath,
     currentDoc: () => doc,
     currentBaseline: () => baseline,
+    currentSession: () => documentSession,
     applyReload: (path, content) => {
       applyDocState(loadedState(content, path));
       resetDocumentRender();
@@ -1124,21 +1132,34 @@
       statusText = text;
     },
     readFile: readTypFile,
-    startWatch: (path) => startFileWatch(path, getCurrentWindow().label),
-    stopWatch: () => stopFileWatch(getCurrentWindow().label),
+    startWatch: startFileWatch,
+    stopWatch: stopFileWatch,
   });
 
-  // filePath 变化时自动切换 watch；卸载时 dispose() 会停止。
+  // 先注册 listener，再启动监控；同路径新会话也作废旧检查。
+  let fileChangeListenerReady = $state(false);
   $effect(() => {
-    void externalFileChange.watchPath(filePath);
+    const path = filePath;
+    const session = documentSession;
+    if (fileChangeListenerReady) {
+      untrack(() => void externalFileChange.watchPath(path, session));
+    }
   });
 
-  /** 保存的统一入口：先处理已知的外部变更冲突，成功后再清冲突标记 */
+  /** 保存串行化；外部冲突确认与写盘均绑定发起时的路径/会话。 */
+  let saving = false;
   async function saveDocument(): Promise<string | null> {
-    if (!(await externalFileChange.confirmSaveIfConflict())) return null;
-    const saved = await docSession.save();
-    if (saved) externalFileChange.clearConflict();
-    return saved;
+    if (saving) return null;
+    saving = true;
+    const session = documentSession;
+    const path = filePath;
+    try {
+      if (!(await externalFileChange.confirmSaveIfConflict())) return null;
+      if (documentSession !== session || filePath !== path) return null;
+      return await docSession.save();
+    } finally {
+      saving = false;
+    }
   }
 
   /**
@@ -2080,6 +2101,9 @@
         externalFileChange.onFileChanged(e.payload);
       });
       keepUnlisten(unlistenFileChanged);
+      unlistenFileChanged.then(() => {
+        if (!disposed) fileChangeListenerReady = true;
+      });
       unlistenOpen.then(() => {
         // 首次启动/跨实例转发的待打开文件（关联双击）：就绪后取走（取最后一个，即最新请求）。
         // **只由主窗口取**：副窗口是草稿窗口，不该被启动参数里带的文件顶掉内容。

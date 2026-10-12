@@ -64,6 +64,7 @@ describe("createDocumentSession", () => {
   let readPathOverride: string | null;
   let readError: unknown;
   let writeError: unknown;
+  let session: number;
 
   /** 只记"发生了什么"的最小页面替身：每个 hook 对应一条记录，断言直接看这些记录 */
   function make(overrides: Partial<DocumentSessionHooks> = {}) {
@@ -72,6 +73,7 @@ describe("createDocumentSession", () => {
       filePath: () => state.filePath,
       fileTitle: () => state.fileTitle,
       baseline: () => state.baseline,
+      currentSession: () => session,
       applyLoaded: (content, path) => {
         calls.push(`applyLoaded:${path}`);
         state.doc = content;
@@ -79,11 +81,11 @@ describe("createDocumentSession", () => {
         state.fileTitle = fileNameOf(path);
         state.baseline = content;
       },
-      applySaved: (path) => {
-        calls.push(`applySaved:${path}`);
+      applySaved: (path, content) => {
+        calls.push(`applySaved:${path}:${content}`);
         state.filePath = path;
         state.fileTitle = fileNameOf(path);
-        state.baseline = state.doc;
+        state.baseline = content;
       },
       applyNew: () => {
         calls.push("applyNew");
@@ -137,6 +139,7 @@ describe("createDocumentSession", () => {
     readPathOverride = null;
     readError = undefined;
     writeError = undefined;
+    session = 1;
   });
 
   afterEach(() => {
@@ -258,7 +261,7 @@ describe("createDocumentSession", () => {
     state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const s = make();
     await expect(s.save()).resolves.toBe("/tmp/a.typ");
-    expect(calls).toEqual(["write:/tmp/a.typ:正文", "applySaved:/tmp/a.typ", "afterSave"]);
+    expect(calls).toEqual(["write:/tmp/a.typ:正文", "applySaved:/tmp/a.typ:正文", "afterSave"]);
     expect(state.doc).toBe("正文"); // 保存不改内容
     expect(state.baseline).toBe("正文"); // 基线推到刚写下去的那份 ⇒ 圆点灭
   });
@@ -269,7 +272,7 @@ describe("createDocumentSession", () => {
     state.baseline = "磁盘上的正文"; // 正文与基线不同 = 有未保存修改
     const s = make();
     await expect(s.save()).resolves.toBe("/tmp/另存为.typ");
-    expect(calls).toEqual(["write:<null>:正文", "applySaved:/tmp/另存为.typ", "afterSave"]);
+    expect(calls).toEqual(["write:<null>:正文", "applySaved:/tmp/另存为.typ:正文", "afterSave"]);
     expect(state.filePath).toBe("/tmp/另存为.typ");
     expect(state.fileTitle).toBe("另存为.typ");
     expect(state.baseline).toBe("正文"); // 保存成功 ⇒ 基线推到刚写下去的正文
@@ -297,6 +300,44 @@ describe("createDocumentSession", () => {
     await expect(s.save()).resolves.toBeNull();
     expect(state.status).toBe("保存失败：没有写入权限");
     expect(calls).not.toContain("afterSave");
+  });
+
+  it("save：等待写盘期间用户继续输入，基线仍绑到真正落盘的内容", async () => {
+    state.baseline = "磁盘上的正文";
+    const s = make({
+      writeFile: async (path, content) => {
+        calls.push(`write:${path}:${content}`);
+        // 模拟异步：等待期间“用户”继续输入
+        await new Promise((r) => setTimeout(r, 10));
+        state.doc = "写盘期间输入的新正文";
+        return path;
+      },
+    });
+    await expect(s.save()).resolves.toBe("/tmp/a.typ");
+    expect(state.baseline).toBe("正文"); // 基线必须是落盘的旧内容，不是 await 后的新输入
+    expect(state.doc).toBe("写盘期间输入的新正文"); // 当前正文不动
+  });
+
+  it("save：保存等待期间切到新会话，迟到结果不得写入新会话", async () => {
+    state.baseline = "磁盘上的正文";
+    let finishWrite: (() => void) | null = null;
+    const s = make({
+      writeFile: async (path, content) => {
+        calls.push(`write:${path}:${content}`);
+        await new Promise<void>((r) => {
+          finishWrite = r;
+        });
+        return path;
+      },
+    });
+    const savePromise = s.save();
+    // 模拟切到新会话（会话标识变化）
+    session = 2;
+    finishWrite!();
+    await savePromise;
+    expect(calls).toEqual(["write:/tmp/a.typ:正文"]);
+    expect(state.filePath).toBe("/tmp/a.typ");
+    expect(state.baseline).toBe("磁盘上的正文"); // 新会话基线不被覆盖
   });
 
   it("reload：未命名文档直接忽略（连确认框都不问）", async () => {

@@ -78,10 +78,16 @@ export interface DocumentSessionHooks {
   fileTitle: () => string;
   /** 未保存修改的判据基线（`null` = 未知，见 `isDocModified`）：与 `doc` 一起决定"要不要问" */
   baseline: () => string | null;
+  /** 当前会话标识；防止迟到保存覆盖新会话 */
+  currentSession?: () => number | string;
   /** 把磁盘内容落到页面状态：`doc` / `editorDoc` / `filePath` / `fileTitle` / `baseline`（契约 3） */
   applyLoaded: (content: string, path: string) => void;
-  /** 保存成功后只动路径 / 标题 / 基线 —— **不碰 `doc` 与 `editorDoc`**（保存不改内容） */
-  applySaved: (path: string) => void;
+  /**
+   * 保存成功后只动路径 / 标题 / 基线 —— **不碰 `doc` 与 `editorDoc`**（保存不改内容）。
+   * `content` 是实际提交给 `writeFile` 的那份正文快照，基线必须绑到它而不是 await 后的当前 doc，
+   * 否则保存等待期间用户的后续输入会被错误地当成已保存版本。
+   */
+  applySaved: (path: string, content: string) => void;
   /** 新建：清空文档、路径置空、标题回到「未命名.typ」、基线回到空串 */
   applyNew: () => void;
   /** 载入（打开 / 重新读取）之后统一的后继动作：作废整页产物与交互 → 重编译 → 存会话 */
@@ -160,14 +166,23 @@ export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSess
     // 2026-09-18 用户要求删掉「保存空文档」那个确认窗：空文档保存进已有文件时**直接写**，不再问。
     // 前提没变：全工程只有 `writeFile`（页面侧 `saveTypFile`）一个 .typ 写入口，只挂在显式保存上 ——
     // 不按保存，磁盘上的文件一个字节也不会动。
+    // 先快照要写入的正文和会话：writeFile 是异步的，等待期间用户可能继续输入或切会话，
+    // 基线必须绑到真正落盘的内容，且不能把结果写入已经离开的会话。
+    const content = hooks.doc();
+    const sessionBefore = hooks.currentSession?.();
+    const pathBefore = hooks.filePath();
+    const stale = () =>
+      hooks.filePath() !== pathBefore ||
+      (hooks.currentSession && hooks.currentSession() !== sessionBefore);
     try {
-      const saved = await hooks.writeFile(hooks.filePath(), hooks.doc());
+      const saved = await hooks.writeFile(pathBefore, content);
       if (!saved) return null; // 另存为对话框里取消了：路径 / 基线都不许动（正文照旧算未保存修改）
-      hooks.applySaved(saved);
+      if (stale()) return null;
+      hooks.applySaved(saved, content);
       hooks.afterSave();
       return saved;
     } catch (e) {
-      hooks.setStatus(failureStatus("保存失败", e));
+      if (!stale()) hooks.setStatus(failureStatus("保存失败", e));
       return null;
     }
   }
