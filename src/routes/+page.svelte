@@ -2100,9 +2100,9 @@
       });
       keepUnlisten(unlistenOpen);
       // 外部程序修改当前文件：Rust 侧通知后，由 externalFileChange 决定自动重读或提示
-      const unlistenFileChanged = listen<{ path: string }>("file-changed", (e) => {
-        externalFileChange.onFileChanged(e.payload);
-      });
+      const unlistenFileChanged = getCurrentWindow().listen<{ path: string }>("file-changed", (e) =>
+        externalFileChange.onFileChanged(e.payload),
+      );
       keepUnlisten(unlistenFileChanged);
       unlistenFileChanged.then(() => {
         if (!disposed) fileChangeListenerReady = true;

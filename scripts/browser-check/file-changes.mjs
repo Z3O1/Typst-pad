@@ -1,5 +1,5 @@
 // 页面文件变更接线验收；假磁盘/事件/延迟 IPC，仅证明前端，不代表原生 watcher 或 WebView2。
-// 无真实排版夹具依赖（只核对编译入参与编辑会话），独立运行 21 项断言。
+// 无真实排版夹具依赖（只核对编译入参与编辑会话），独立运行 22 项断言。
 import { connect, DEV_URL } from "./cdp.mjs";
 import { boot, createChecker, finish, sleep, compileSettled, flushStateSeed } from "./harness.mjs";
 const c = await connect();
@@ -32,11 +32,21 @@ await boot(c, DEV_URL, { runtime: true });
 await c.key("e", { keyCode: 69, modifiers: 2 });
 check(
   "未命名不启动 watch，listener 先就绪",
-  await c.evaluate(`${fs}.listenerReady && !${fs}.starts.length`),
+  await c.evaluate(
+    `${fs}.listenerReady && ${fs}.listenerTarget.kind === 'Window' && ${fs}.listenerTarget.label === 'main' && !${fs}.starts.length`,
+  ),
 );
 await open("/fake/a.typ", "base-a");
 check("打开后启动当前路径观察", await c.evaluate(`${fs}.watchedPath === '/fake/a.typ'`));
 const initialWrites = await writes();
+await c.evaluate(
+  `${fs}.setDisk('/fake/a.typ','other-window-change');${fs}.emit('/fake/a.typ','secondary')`,
+);
+await sleep(350);
+check(
+  "其他窗口的定向事件不触发当前窗口重读",
+  (await doc()) === "base-a" && (await writes()) === initialWrites,
+);
 await external("/fake/a.typ", "external-a");
 await c.waitFor(compileSettled("external-a"));
 check(

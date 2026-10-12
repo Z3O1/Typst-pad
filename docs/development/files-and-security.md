@@ -45,4 +45,4 @@ Tauri 权限由 `src-tauri/capabilities/default.json` 控制。窗口标签必�
 - 读盘与提示串行合并最新事件；每个异步结果核对路径、会话和正文修订。新建、同路径重开、输入/撤销或卸载使旧结果作废。先注册事件监听，再启动观察并补读磁盘，避免启动间隙漏变更。
 - 保存时若已知存在外部新版本冲突，会先确认再核对磁盘版本；确认期间切会话或磁盘变更则拒绝这次保存。保存结果不能盲清期间出现的新冲突。写盘仍走唯一 `write_file` 入口，不自动写盘。
 - 原生命令以 Tauri 注入的调用窗口隔离，不接受前端提供的窗口标签；窗口销毁时 backend 清理 watcher，即使 JS 未卸载。
-- 浏览器开发模式无真实文件监控。`external-file-change.test.ts` 覆盖异步状态机；`scripts/browser-check/file-changes.mjs` 用 dev-only 假事件、磁盘版本和延迟响应验证真实页面接线（21 项，无真实排版夹具依赖）。原生 `file_watcher` 测试通过命令共用的状态/发射回调验证临时文件写入、同长度变更、原子替换后继续编辑、窗口隔离和清理。两层都不替代 Windows WebView2 实机验证。
+- 浏览器开发模式无真实文件监控。`external-file-change.test.ts` 覆盖异步状态机；`scripts/browser-check/file-changes.mjs` 用 dev-only 假事件、磁盘版本和延迟响应验证真实页面接线（22 项，无真实排版夹具依赖）。原生 `file_watcher` 测试通过命令共用的状态/发射回调验证临时文件写入、同长度变更、原子替换后继续编辑、窗口隔离和清理。两层都不替代 Windows WebView2 实机验证。

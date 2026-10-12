@@ -124,8 +124,9 @@ pub fn start_file_watch(
     state: tauri::State<'_, FileWatcherState>,
 ) -> Result<(), String> {
     let label = window.label().to_owned();
+    let target = label.clone();
     state.start_for(&label, &path, move |path| {
-        let _ = window.emit("file-changed", FileChangedPayload { path });
+        let _ = window.emit_to(&target, "file-changed", FileChangedPayload { path });
     })
 }
 

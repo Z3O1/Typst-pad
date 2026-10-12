@@ -754,7 +754,14 @@ export function installBrowserDevStub(): void {
 
   const callbacks = new Map<number, (payload: unknown) => void>();
   let nextCallbackId = 1;
-  const listeners = new Map<number, { event: string; handler: number }>();
+  const listeners = new Map<
+    number,
+    {
+      event: string;
+      handler: number;
+      target: { kind?: string; label?: string };
+    }
+  >();
   let nextListenerId = 1;
   const host = window as unknown as Record<string, unknown>;
   host.__browserDevFileChanges = {
@@ -765,15 +772,21 @@ export function installBrowserDevStub(): void {
     get stops() {
       return fileChangeStub.stops;
     },
-    emit(path: string) {
+    emit(path: string, windowLabel = "main") {
       for (const [id, listener] of listeners) {
-        if (listener.event === "file-changed") {
+        if (
+          listener.event === "file-changed" &&
+          (!listener.target.label || listener.target.label === windowLabel)
+        ) {
           callbacks.get(listener.handler)?.({ event: "file-changed", id, payload: { path } });
         }
       }
     },
     get listenerReady() {
       return [...listeners.values()].some((l) => l.event === "file-changed");
+    },
+    get listenerTarget() {
+      return [...listeners.values()].find((l) => l.event === "file-changed")?.target;
     },
   };
   host.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
@@ -797,7 +810,11 @@ export function installBrowserDevStub(): void {
     invoke: (command: string, args?: Record<string, unknown>) => {
       if (command === "plugin:event|listen") {
         const id = nextListenerId++;
-        listeners.set(id, { event: String(args?.event), handler: Number(args?.handler) });
+        listeners.set(id, {
+          event: String(args?.event),
+          handler: Number(args?.handler),
+          target: (args?.target ?? {}) as { kind?: string; label?: string },
+        });
         return Promise.resolve(id);
       }
       if (command === "plugin:event|unlisten") {
