@@ -382,6 +382,7 @@
   let renderedCoordinates = createSourceCoordinates("");
   const documentCoordinates = $derived(createSourceCoordinates(doc));
   let inputPosition = $state<{ left: number; top: number; height: number } | null>(null);
+  let documentTooltipParent = $state<HTMLElement>();
   let documentCaret = $state<DocumentCaret | null>(null);
   let documentSelection = $state<DocumentSelectionQuad[]>([]);
   let formulaPreview = $state<FormulaPreview | null>(null);
@@ -2081,6 +2082,7 @@
 
 {#if isDesktopApp}
   <div class="app" class:light={resolvedTheme === "light"}>
+    <div class="document-tooltips" bind:this={documentTooltipParent}></div>
     <header class="toolbar">
       <MenuBar
         bind:this={menuBarRef}
@@ -2118,6 +2120,8 @@
             }}
             onDocChange={handleDocChange}
             mode={viewMode}
+            tooltipParent={viewMode === "write" ? documentTooltipParent : undefined}
+            inputAnchor={inputPosition}
             revealRange={viewMode === "write" ? (sourceRange ?? errorEditRange) : null}
             wrap={viewMode === "source" ? editorWrap : false}
             {tabSpaces}
@@ -2246,15 +2250,37 @@
   }
   .panes.document-mode .editor-pane.input-proxy {
     position: fixed;
-    width: 1px;
+    width: 2px;
+    border: 0;
     opacity: 0;
     pointer-events: none;
     overflow: hidden;
     z-index: 5;
   }
+  .document-tooltips {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 20;
+    font-size: 14px;
+  }
+  .document-tooltips :global(.cm-tooltip) {
+    pointer-events: auto;
+  }
   .input-proxy .pane-body {
     padding: 0;
     height: 100%;
+  }
+  /* CM 的可见区域必须包含输入光标，否则它也会裁掉外置候选。 */
+  .input-proxy :global(.cm-gutters) {
+    display: none;
+  }
+  .input-proxy :global(.cm-content) {
+    padding: 0;
+    min-height: 0;
+  }
+  .input-proxy :global(.cm-scroller) {
+    scrollbar-gutter: auto;
   }
 
   :root {
