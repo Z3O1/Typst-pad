@@ -280,10 +280,20 @@ pub fn collect_geometry_with_links(
     world: &dyn World,
     document: &PagedDocument,
 ) -> ((Vec<PlacedItem>, FrameStats), Vec<PlacedLink>) {
-    collect_with_lookups(world, document, SpanRanges::for_world(world))
+    collect_with_lookups::<true>(world, document, SpanRanges::for_world(world))
 }
 
-fn collect_with_lookups(
+/// 整页只消费主源项与外源墨迹；块编译/探针仍走完整辅助收集。
+pub(crate) fn collect_document_geometry(
+    world: &dyn World,
+    document: &PagedDocument,
+) -> (Vec<PlacedItem>, Vec<(usize, Rect)>) {
+    let ((items, stats), _) =
+        collect_with_lookups::<false>(world, document, SpanRanges::for_world(world));
+    (items, stats.foreign_ink)
+}
+
+fn collect_with_lookups<const AUXILIARY: bool>(
     world: &dyn World,
     document: &PagedDocument,
     mut ranges: SpanRanges,
@@ -293,12 +303,14 @@ fn collect_with_lookups(
     let mut stats = FrameStats::default();
     let main_id = world.main();
     for (i, page) in document.pages().iter().enumerate() {
-        walk_frame(
+        walk_frame::<AUXILIARY>(
             world,
             main_id,
             &page.frame,
             i + 1,
             Transform::identity(),
+            true,
+            None,
             &mut items,
             &mut links,
             &mut stats,
@@ -315,12 +327,14 @@ fn collect_with_lookups(
 /// 命中都建立在"主文档字节偏移"上）；属于别的文件（`#include`）或解析不出区间的项进
 /// `stats.foreign_ink`，供文字对应证明判断"带内有没有外来墨迹"。
 #[allow(clippy::too_many_arguments)]
-fn walk_frame(
+fn walk_frame<const AUXILIARY: bool>(
     world: &dyn World,
     main_id: typst::syntax::FileId,
     frame: &Frame,
     page: usize,
     ts: Transform,
+    soft_clip_is_translation: bool,
+    clip: Option<Rect>,
     out: &mut Vec<PlacedItem>,
     links: &mut Vec<PlacedLink>,
     stats: &mut FrameStats,
@@ -358,11 +372,19 @@ fn walk_frame(
         let origin = Point::zero().transform(item_ts);
         match item {
             FrameItem::Text(text) => {
-                stats.text_items += 1;
-                stats.glyphs_total += text.glyphs.len();
-                // 按字符数给字号投票（正文量最大，标题/代码只是少数）
-                let key = (text.size.to_pt() * 100.0).round().max(0.0) as u32;
-                *stats.size_weights.entry(key).or_insert(0) += text.text.chars().count().max(1);
+                if clip.is_some()
+                    && text_ink_bounds(text)
+                        .is_some_and(|bb| outside_clip(transformed_rect(bb, item_ts), clip))
+                {
+                    continue;
+                }
+                if AUXILIARY {
+                    stats.text_items += 1;
+                    stats.glyphs_total += text.glyphs.len();
+                    // 按字符数给字号投票（正文量最大，标题/代码只是少数）
+                    let key = (text.size.to_pt() * 100.0).round().max(0.0) as u32;
+                    *stats.size_weights.entry(key).or_insert(0) += text.text.chars().count().max(1);
+                }
                 let mut x = Abs::zero();
                 let font_size = typst::utils::hash128(&(&text.font, text.size));
                 for glyph in &text.glyphs {
@@ -391,13 +413,15 @@ fn walk_frame(
                                     )
                                     .text_caret(text, glyph, x, item_ts),
                                 );
-                                stats.glyphs_mapped += 1;
+                                if AUXILIARY {
+                                    stats.glyphs_mapped += 1;
+                                }
                             }
                         }
                         Some(_) => stats
                             .foreign_ink
                             .push((page, transformed_rect(local, item_ts))),
-                        None => {
+                        None if AUXILIARY => {
                             // typst 合成的字形：列表符号要用它的可见文字，别的只是占位
                             if let Some(visible) = text.text.get(glyph.range()) {
                                 if !visible.is_empty() {
@@ -410,25 +434,53 @@ fn walk_frame(
                                 }
                             }
                         }
+                        None => {}
                     }
                     x += advance;
                 }
             }
             FrameItem::Group(group) => {
-                stats.groups += 1;
-                let identity = group.transform == Transform::identity();
-                if !identity {
-                    stats.transformed_groups += 1;
+                if AUXILIARY {
+                    stats.groups += 1;
+                    if group.transform != Transform::identity() {
+                        stats.transformed_groups += 1;
+                    }
+                    if group.clip.is_some() {
+                        stats.clipped_groups += 1;
+                    }
                 }
-                if group.clip.is_some() {
-                    stats.clipped_groups += 1;
-                }
-                walk_frame(
+                let child_ts = item_ts.pre_concat(group.transform);
+                // typst-svg 在 Hard 组输出完整 transform 并重置内部状态；Soft
+                // 组的 clip 只使用最近 Hard 坐标系中的平移，不应用线性变换。
+                // 只有这段 Soft 链全为平移时，child_ts 才能正确映射 clip。
+                // 无法证明一致时不收紧祖先边界，避免剔除仍可见的 cover 图片。
+                let child_soft_clip_is_translation = group.frame.kind() == FrameKind::Hard
+                    || (soft_clip_is_translation
+                        && group.transform
+                            == Transform::translate(group.transform.tx, group.transform.ty));
+                let child_clip = group.clip.as_ref().map_or(clip, |curve| {
+                    if !child_soft_clip_is_translation {
+                        return clip;
+                    }
+                    let bounds = transformed_rect(curve.bbox(None), child_ts);
+                    if !finite_rect(bounds) {
+                        return clip;
+                    }
+                    Some(match clip {
+                        Some(parent) => {
+                            Rect::new(parent.min.max(bounds.min), parent.max.min(bounds.max))
+                        }
+                        None => bounds,
+                    })
+                });
+                walk_frame::<AUXILIARY>(
                     world,
                     main_id,
                     &group.frame,
                     page,
-                    item_ts.pre_concat(group.transform),
+                    child_ts,
+                    child_soft_clip_is_translation,
+                    child_clip,
                     out,
                     links,
                     stats,
@@ -436,9 +488,14 @@ fn walk_frame(
                 );
             }
             FrameItem::Shape(shape, span) => {
-                stats.shapes += 1;
+                if AUXILIARY {
+                    stats.shapes += 1;
+                }
                 let bb = shape.bbox(true);
                 let rect = transformed_rect(bb, item_ts);
+                if outside_clip(rect, clip) {
+                    continue;
+                }
                 match span.id() {
                     Some(id) if id == main_id => {
                         if let Some(range) = ranges.get(world, *span) {
@@ -458,9 +515,14 @@ fn walk_frame(
                 }
             }
             FrameItem::Image(_, size, span) => {
-                stats.images += 1;
+                if AUXILIARY {
+                    stats.images += 1;
+                }
                 let local = Rect::from_pos_size(Point::zero(), *size);
                 let rect = transformed_rect(local, item_ts);
+                if outside_clip(rect, clip) {
+                    continue;
+                }
                 match span.id() {
                     Some(id) if id == main_id => {
                         if let Some(range) = ranges.get(world, *span) {
@@ -478,16 +540,16 @@ fn walk_frame(
                     None => {}
                 }
             }
-            FrameItem::Link(dest, size) => {
+            FrameItem::Link(dest, size) if AUXILIARY => {
                 // 链接没有源位置，但有目标与方框：收下来给"切片上可点"用
-                if let Some(href) = link_href(dest) {
-                    links.push(PlacedLink {
-                        page,
-                        rect: transformed_rect(Rect::from_pos_size(Point::zero(), *size), item_ts),
-                        href,
-                    });
+                let rect = transformed_rect(Rect::from_pos_size(Point::zero(), *size), item_ts);
+                if !outside_clip(rect, clip) {
+                    if let Some(href) = link_href(dest) {
+                        links.push(PlacedLink { page, rect, href });
+                    }
                 }
             }
+            FrameItem::Link(_, _) => {}
             // Tag 有 Location 但没有 Span（元素级定位另走 introspector，阶段 1 再说）
             FrameItem::Tag(_) => {}
         }
@@ -509,6 +571,44 @@ fn walk_frame(
             }
         }
     }
+}
+
+fn finite_rect(rect: Rect) -> bool {
+    [rect.min.x, rect.min.y, rect.max.x, rect.max.y]
+        .iter()
+        .all(|v| v.to_pt().is_finite())
+}
+
+// 只证明完全在有效裁剪包围盒之外；不判断任意曲线内部，也不收缩部分可见项。
+fn outside_clip(rect: Rect, clip: Option<Rect>) -> bool {
+    clip.is_some_and(|clip| {
+        finite_rect(rect)
+            && (clip.min.x > clip.max.x
+                || clip.min.y > clip.max.y
+                || rect.max.x < clip.min.x
+                || rect.min.x > clip.max.x
+                || rect.max.y < clip.min.y
+                || rect.min.y > clip.max.y)
+    })
+}
+
+fn text_ink_bounds(text: &typst::text::TextItem) -> Option<Rect> {
+    let tables = text.font.ttf().tables();
+    // TextItem::bbox 包含字号、字形偏移/垂直 advance 和斜体 overhang，
+    // 不是 advance box。整段排除避免为逐字形 bbox 克隆 TextItem/分配。
+    // 彩色/位图/SVG 字形与描边不能由 outline bbox 保守界定，保留它们。
+    if text.stroke.is_some()
+        || tables.colr.is_some()
+        || tables.svg.is_some()
+        || tables.sbix.is_some()
+        || tables.cbdt.is_some()
+        || tables.ebdt.is_some()
+        || tables.bdat.is_some()
+    {
+        return None;
+    }
+    let bb = text.bbox();
+    finite_rect(bb).then_some(bb)
 }
 
 /// 链接目标 → 可点的 URL（页内跳转 / 位置型目标暂时不收：那要映射回源码位置，属后续工作）
@@ -867,6 +967,262 @@ mod lookup_tests {
     use super::*;
 
     #[test]
+    #[ignore]
+    fn geometry_auxiliary_performance() {
+        let source = format!(
+            "#set page(width: 300pt, height: 400pt, margin: 20pt)\n{}",
+            "- #link(\"https://typst.app\")[条目 office 😀 é]\n".repeat(300)
+        );
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        let world = TypstWorld::new(source, None, &fonts, &FontConfig::default());
+        let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+        for round in 0..13 {
+            let mut full = None;
+            let mut lean = None;
+            // 热轮交替次序，避免总让候选受益于紧邻的完整收集。
+            for auxiliary in if round % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            } {
+                let start = Instant::now();
+                let result = if auxiliary {
+                    collect_with_lookups::<true>(&world, &document, SpanRanges::for_world(&world))
+                } else {
+                    collect_with_lookups::<false>(&world, &document, SpanRanges::for_world(&world))
+                };
+                let elapsed = start.elapsed();
+                let ((items, stats), links) = &result;
+                // 每个非空 href/text 对应实际执行的一次 String 构造；不是总分配/RSS。
+                let strings = links.len() + stats.detached_ink.len();
+                let bytes: usize = links.iter().map(|l| l.href.len()).sum::<usize>()
+                    + stats
+                        .detached_ink
+                        .iter()
+                        .map(|i| i.text.len())
+                        .sum::<usize>();
+                let mode = if auxiliary { "full" } else { "lean" };
+                println!("GEOMAUX mode={mode} round={round} pages={} items={} foreign={} string_allocations={strings} string_bytes={bytes} histogram_updates={} geometry_us={}", document.pages().len(), items.len(), stats.foreign_ink.len(), stats.text_items, elapsed.as_micros());
+                if auxiliary {
+                    assert!(strings >= 600);
+                    full = Some(result);
+                } else {
+                    assert_eq!(strings, 0);
+                    assert_eq!(stats.text_items, 0);
+                    assert!(stats.size_weights.is_empty());
+                    lean = Some(result);
+                }
+            }
+            let ((full_items, full_stats), _) = full.unwrap();
+            let ((lean_items, lean_stats), _) = lean.unwrap();
+            assert_eq!(format!("{full_items:?}"), format!("{lean_items:?}"));
+            assert_eq!(full_stats.foreign_ink, lean_stats.foreign_ink);
+        }
+    }
+
+    #[test]
+    fn scaled_cover_image_inside_nested_clips_keeps_visible_geometry() {
+        let image = r#"#image(bytes("<svg xmlns='http://www.w3.org/2000/svg' width='200' height='20'><rect width='200' height='20' fill='red'/></svg>"), format: "svg", width: 20pt, height: 20pt, fit: "cover")"#;
+        let dir = std::env::temp_dir().join(format!("typst-cover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cover.typ"), image).unwrap();
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        let mut old_visible = None;
+        for outer_affine in [false, true] {
+            for imported in [false, true] {
+                for (dx, visible) in [(-10, true), (-30, false)] {
+                    let body = if imported {
+                        "#include \"cover.typ\""
+                    } else {
+                        image
+                    };
+                    let body = format!("#box(width: 20pt, height: 20pt, clip: true)[#box(width: 20pt, height: 20pt, clip: true)[#move(dx: {dx}pt)[#scale(x: 10%, y: 100%, origin: top + left)[{body}]]]]");
+                    let body = if outer_affine {
+                        format!("#rotate(25deg, origin: top + left)[#scale(x: 150%, y: 75%, origin: top + left)[{body}]]")
+                    } else {
+                        body
+                    };
+                    let source =
+                        format!("#set page(width: 300pt, height: 300pt, margin: 0pt)\n{body}");
+                    let path = Some(dir.join("main.typ").to_string_lossy().into_owned());
+                    let world = TypstWorld::new(
+                        source.clone(),
+                        path.clone(),
+                        &fonts,
+                        &FontConfig::default(),
+                    );
+                    let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+                    let svg =
+                        typst_svg::svg(&document.pages()[0], &typst_svg::SvgOptions::default());
+                    if !outer_affine && visible {
+                        // SVG's image occupies [-19, 1] × [0, 20], its Soft clip
+                        // [-10, 10] × [0, 20], and both Hard clips [0, 20]².
+                        // Their intersection has positive area: [0, 1] × [0, 20].
+                        assert!(svg.contains("<image transform=\"matrix(0.1 0 0 1 -19 0)\""));
+                        assert!(svg.contains("d=\"M -10 0h 20v 20h -20Z \""));
+                        assert!(svg.contains("d=\"M 0 0h 20v 20h -20Z \""));
+                        assert_eq!(svg.matches("clip-path=").count(), 3);
+                        println!("COVER_SVG imported={imported} {svg}");
+                    }
+                    let ((full_items, stats), _) = collect_geometry_with_links(&world, &document);
+                    let (items, foreign) = collect_document_geometry(&world, &document);
+                    assert_eq!(format!("{full_items:?}"), format!("{items:?}"));
+                    assert_eq!(stats.foreign_ink, foreign);
+                    assert_eq!(
+                        items
+                            .iter()
+                            .filter(|item| item.kind == PlacedItemKind::Image)
+                            .count(),
+                        usize::from(visible && !imported)
+                    );
+                    assert_eq!(foreign.len(), usize::from(visible && imported));
+                    if !imported {
+                        let output = crate::typst_world::compile(
+                            source.clone(),
+                            path,
+                            &fonts,
+                            &FontConfig::default(),
+                        );
+                        assert!(output.ok);
+                        assert_eq!(output.pages, vec![svg]);
+                        let from = source.find("#image").unwrap();
+                        let id = output.geometry_id.unwrap();
+                        assert_eq!(
+                            !crate::document_geometry::selection(id, from, from + image.len())
+                                .is_empty(),
+                            visible
+                        );
+                        if let Some((old_id, old_from)) = old_visible {
+                            assert!(
+                                !crate::document_geometry::selection(
+                                    old_id,
+                                    old_from,
+                                    old_from + image.len()
+                                )
+                                .is_empty(),
+                                "later compilation must not alter the visible snapshot"
+                            );
+                        }
+                        if visible {
+                            old_visible = Some((id, from));
+                        }
+                    }
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn clipped_italic_ink_overhang_is_not_culled_using_advance_bounds() {
+        fn find_italic(frame: &Frame) -> Option<typst::text::TextItem> {
+            frame.items().find_map(|(_, item)| match item {
+                FrameItem::Text(text) if text.glyphs.len() == 1 => Some(text.clone()),
+                FrameItem::Group(group) => find_italic(&group.frame),
+                _ => None,
+            })
+        }
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        let world = TypstWorld::new(
+            "#set text(size: 40pt)\n$italic(j)$".into(),
+            None,
+            &fonts,
+            &FontConfig::default(),
+        );
+        let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+        let text = find_italic(&document.pages()[0].frame).unwrap();
+        let bb = text_ink_bounds(&text).unwrap();
+        let right_overhang = bb.max.x - text.width();
+        let left_overhang = -bb.min.x;
+        assert!(
+            right_overhang > Abs::zero() || left_overhang > Abs::zero(),
+            "bundled math italic j must overhang its advance: {bb:?}, width={:?}",
+            text.width()
+        );
+        let x = if right_overhang > Abs::zero() {
+            -text.width() - right_overhang / 2.0
+        } else {
+            Abs::pt(20.0) + left_overhang / 2.0
+        };
+        let mut frame = Frame::soft(Size::new(Abs::pt(20.0), Abs::pt(60.0)));
+        frame.push(Point::new(x, Abs::pt(40.0)), FrameItem::Text(text));
+        let local_clip = Rect::from_pos_size(Point::zero(), frame.size());
+        for ts in [
+            Transform::identity(),
+            Transform {
+                sx: typst::layout::Ratio::new(1.5),
+                sy: typst::layout::Ratio::new(0.75),
+                kx: typst::layout::Ratio::new(0.3),
+                ky: typst::layout::Ratio::new(-0.2),
+                tx: Abs::pt(35.0),
+                ty: Abs::pt(20.0),
+            },
+        ] {
+            let mut items = Vec::new();
+            walk_frame::<true>(
+                &world,
+                world.main(),
+                &frame,
+                1,
+                ts,
+                true,
+                Some(transformed_rect(local_clip, ts)),
+                &mut items,
+                &mut Vec::new(),
+                &mut FrameStats::default(),
+                &mut SpanRanges::for_world(&world),
+            );
+            assert!(
+                !items.is_empty(),
+                "visible overhang must survive even when the advance box is wholly outside"
+            );
+        }
+    }
+
+    #[test]
+    fn document_collection_matches_full_items_and_foreign_ink_across_edits() {
+        let dir = std::env::temp_dir().join(format!("typst-collector-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("body.typ"), "外源 office").unwrap();
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        for body in ["中文 office 😀 é", "改后的中文 office 😀 é"] {
+            let source = format!("#set page(width: 300pt, height: 400pt)\n{body}\n- #link(\"https://typst.app\")[列表]\n$frac(x^2, y)$\n#include \"body.typ\"\n#box(width: 20pt, height: 20pt, clip: true)[#move(dx: 100pt)[#include \"body.typ\"]]\n#rotate(25deg)[旋转]\n#image(bytes(\"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10'/></svg>\"), format: \"svg\")\n#pagebreak()\n#table(columns: 2, [甲], [乙])");
+            let document_path = Some(dir.join("main.typ").to_string_lossy().into_owned());
+            let world = TypstWorld::new(
+                source.clone(),
+                document_path.clone(),
+                &fonts,
+                &FontConfig::default(),
+            );
+            let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+            let ((full_items, full_stats), links) = collect_geometry_with_links(&world, &document);
+            let (lean_items, lean_foreign) = collect_document_geometry(&world, &document);
+            assert_eq!(format!("{full_items:?}"), format!("{lean_items:?}"));
+            assert_eq!(full_stats.foreign_ink, lean_foreign);
+            assert!(!lean_foreign.is_empty());
+            let unclipped_world = TypstWorld::new(
+                source.replace("clip: true", "clip: false"),
+                document_path,
+                &fonts,
+                &FontConfig::default(),
+            );
+            let unclipped_document = typst::compile::<PagedDocument>(&unclipped_world)
+                .output
+                .unwrap();
+            let (_, unclipped_foreign) =
+                collect_document_geometry(&unclipped_world, &unclipped_document);
+            assert!(
+                unclipped_foreign.len() > lean_foreign.len(),
+                "fully hidden included text must not contribute foreign ink"
+            );
+            assert!(!links.is_empty());
+            assert!(!full_stats.detached_ink.is_empty());
+            assert!(!full_stats.size_weights.is_empty());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn axis_aligned_bounds_match_four_corner_reference_including_mirrors() {
         use typst::layout::Ratio;
         let rect = Rect::new(
@@ -916,8 +1272,8 @@ mod lookup_tests {
             for (&span, range) in &lookup.spans {
                 assert_eq!(*range, world.range(span), "Span 索引必须与 World 相同");
             }
-            let cached = collect_with_lookups(&world, &document, lookup);
-            let original = collect_with_lookups(
+            let cached = collect_with_lookups::<true>(&world, &document, lookup);
+            let original = collect_with_lookups::<true>(
                 &world,
                 &document,
                 SpanRanges {
