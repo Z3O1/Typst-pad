@@ -15,12 +15,12 @@ import {
   indentLess,
   indentMore,
   deleteLine,
-  copyLineDown,
   toggleBlockComment,
   toggleComment,
   undo,
   redo,
 } from "@codemirror/commands";
+import { selectNextOccurrence } from "@codemirror/search";
 import { autocompletion, completionStatus, startCompletion } from "@codemirror/autocomplete";
 import { indentUnit } from "@codemirror/language";
 import { basicSetup } from "codemirror";
@@ -91,7 +91,7 @@ describe("editorKeymap 导出与绑定", () => {
     expect(typeof bindings.find((b) => b.key === "Tab")?.run).toBe("function");
     expect(typeof bindings.find((b) => b.key === "Shift-Tab")?.run).toBe("function");
     expect(bindings.find((b) => b.key === "Mod-d")?.run).toBe(deleteLine);
-    expect(bindings.find((b) => b.key === "Mod-Shift-d")?.run).toBe(copyLineDown);
+    expect(bindings.find((b) => b.key === "Mod-Shift-d")?.run).toBe(selectNextOccurrence);
     expect(bindings.find((b) => b.key === "Mod-Shift-/")?.run).toBe(toggleBlockComment);
     expect(bindings.find((b) => b.key === "Mod-/")?.run).toBe(toggleComment);
     // Enter 必须换成我们那条：CM 默认的 insertNewlineAndIndent 拿语言服务的缩进，
@@ -727,11 +727,121 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     view.destroy();
   });
 
-  it("Ctrl+Shift+D 复制当前行到下方", () => {
-    const view = makeView("aaa\nbbb\n");
+  it("Ctrl+Shift+D 空选区选中当前词（不修改文档）", () => {
+    const view = makeView("foo bar foo");
+    view.dispatch({ selection: { anchor: 1 } }); // 光标在第一个 foo 内
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("foo bar foo");
+    expect(view.state.selection.main.from).toBe(0);
+    expect(view.state.selection.main.to).toBe(3);
+    view.destroy();
+  });
+
+  it("Ctrl+Shift+D 连续追加下一个匹配形成多选区", () => {
+    const view = makeView("foo bar foo");
+    view.dispatch({ selection: { anchor: 1 } });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    // 第一次：选中第一个 foo
+    expect(view.state.selection.ranges.length).toBe(1);
+    expect(view.state.selection.main.from).toBe(0);
+    expect(view.state.selection.main.to).toBe(3);
+
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    // 第二次：追加第二个 foo
+    expect(view.state.doc.toString()).toBe("foo bar foo");
+    expect(view.state.selection.ranges.length).toBe(2);
+    expect(view.state.selection.ranges[0].from).toBe(0);
+    expect(view.state.selection.ranges[0].to).toBe(3);
+    expect(view.state.selection.ranges[1].from).toBe(8);
+    expect(view.state.selection.ranges[1].to).toBe(11);
+    view.destroy();
+  });
+
+  it("Ctrl+Shift+D 已选文本追加下一处", () => {
+    const view = makeView("abc abc abc");
+    view.dispatch({ selection: { anchor: 0, head: 3 } }); // 选中第一个 abc
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    expect(view.state.selection.ranges.length).toBe(2);
+    expect(view.state.selection.ranges[1].from).toBe(4);
+    expect(view.state.selection.ranges[1].to).toBe(7);
+    view.destroy();
+  });
+
+  it("Ctrl+Shift+D 无下一匹配时保持当前选区（不环回）", () => {
+    const view = makeView("xyz");
+    view.dispatch({ selection: { anchor: 0, head: 3 } });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("xyz");
+    expect(view.state.selection.ranges.length).toBe(1);
+    expect(view.state.selection.main.from).toBe(0);
+    expect(view.state.selection.main.to).toBe(3);
+    view.destroy();
+  });
+
+  it("Ctrl+Shift+D 多选区同时输入", () => {
+    const view = makeView("foo bar foo");
+    view.dispatch({ selection: { anchor: 1 } });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    expect(view.state.selection.ranges.length).toBe(2);
+    view.dispatch(view.state.update(view.state.replaceSelection("X"), { userEvent: "input" }));
+    expect(view.state.doc.toString()).toBe("X bar X");
+    view.destroy();
+  });
+
+  it("Ctrl+Shift+D 多选区后可撤销/重做", () => {
+    const view = makeView("foo bar foo");
+    view.dispatch({ selection: { anchor: 1 } });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    view.dispatch(view.state.update(view.state.replaceSelection("X"), { userEvent: "input" }));
+    expect(view.state.doc.toString()).toBe("X bar X");
+
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("foo bar foo");
+    expect(view.state.selection.ranges.length).toBe(2);
+
+    expect(redo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("X bar X");
+    view.destroy();
+  });
+
+  it("Esc 将多选区收拢到主选区", () => {
+    const view = makeView("foo bar foo");
+    view.dispatch({ selection: { anchor: 1 } });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    expect(view.state.selection.ranges.length).toBe(2);
+    press(view, { key: "Escape", code: "Escape", keyCode: 27 });
+    expect(view.state.selection.ranges.length).toBe(1);
+    expect(view.state.selection.main.from).toBe(0);
+    expect(view.state.selection.main.to).toBe(3);
+    view.destroy();
+  });
+
+  it("Ctrl+Shift+D 在只读文档上仍可选择下一处", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const view = new EditorView({
+      doc: "foo bar foo",
+      parent: host,
+      extensions: [basicSetup, editorKeymap, EditorState.readOnly.of(true)],
+    });
+    view.dispatch({ selection: { anchor: 1 } });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
+    expect(view.state.doc.toString()).toBe("foo bar foo");
+    expect(view.state.selection.ranges.length).toBe(2);
+    view.destroy();
+  });
+
+  it("Ctrl+Shift+D 在写作模式下不复制当前行、改为选中当前词", () => {
+    const view = makeWriteView("aaa\nbbb\n");
     view.dispatch({ selection: { anchor: 4 } }); // 光标在 "bbb" 行
     press(view, { key: "D", code: "KeyD", keyCode: 68, ctrlKey: true, shiftKey: true });
-    expect(view.state.doc.toString()).toBe("aaa\nbbb\nbbb\n");
+    expect(view.state.doc.toString()).toBe("aaa\nbbb\n");
+    expect(view.state.selection.main.from).toBe(4);
+    expect(view.state.selection.main.to).toBe(7);
     view.destroy();
   });
 
