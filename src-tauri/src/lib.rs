@@ -133,6 +133,16 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app, event| {
+        // 即使 WebView 未执行 JS 卸载回调，原生窗口销毁也必须释放 watcher。
+        if let tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
+        } = &event
+        {
+            app.state::<file_watcher::FileWatcherState>()
+                .stop_for(label);
+        }
         // 打点：前端页面加载完成（RunEvent::Ready = 事件循环首次迭代）；
         // 以引用匹配避免消耗 event（后续 macOS 分支仍需要它）
         #[cfg(debug_assertions)]
