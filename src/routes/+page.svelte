@@ -54,7 +54,15 @@
   import { createDocumentCompileScheduler } from "$lib/core/document-compile-scheduler";
   import type { CompileReason } from "$lib/core/document-compile-scheduler";
   import type { WriteCommand } from "$lib/core/write-commands";
-  import { openTypFile, saveTypFile, readTypFile, pickFontDir, isTauri } from "$lib/core/file-ops";
+  import {
+    openTypFile,
+    saveTypFile,
+    readTypFile,
+    startFileWatch,
+    stopFileWatch,
+    pickFontDir,
+    isTauri,
+  } from "$lib/core/file-ops";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
@@ -75,6 +83,7 @@
   } from "$lib/core/document-session";
   import type { DocumentState } from "$lib/core/document-session";
   import { failureStatus } from "$lib/core/failure-text";
+  import { createExternalFileChange } from "$lib/core/external-file-change";
   import MenuBar from "$lib/ui/MenuBar.svelte";
   import type { MenuGroup } from "$lib/ui/MenuBar.svelte";
   import { buildMenuGroups } from "$lib/ui/menu-model";
@@ -763,7 +772,7 @@
   /** 关闭弹窗：保存后关闭 */
   async function onClosePromptSave() {
     showClosePrompt = false;
-    const saved = await docSession.save();
+    const saved = await saveDocument();
     if (saved) getCurrentWindow().destroy(); // destroy 不再次触发 close-requested
   }
 
@@ -1095,6 +1104,43 @@
     pickFile: openTypFile,
   });
 
+  // ---------------------------------------------------------------------------
+  // 外部文件变更监控
+  // ---------------------------------------------------------------------------
+  // 只监控当前主文件；切文件/新建/关闭时通过 watchPath 解绑。Rust 侧用 notify 8.2.0
+  // 监听父目录并过滤文件名，能捕获原子替换（rename 覆盖）和常规写入。
+  const externalFileChange = createExternalFileChange({
+    currentPath: () => filePath,
+    currentDoc: () => doc,
+    currentBaseline: () => baseline,
+    applyReload: (path, content) => {
+      applyDocState(loadedState(content, path));
+      resetDocumentRender();
+      scheduleCompile();
+      schedulePersist();
+    },
+    promptReloadOrKeep: (message, title) => confirm(message, { title, kind: "warning" }),
+    setStatus: (text) => {
+      statusText = text;
+    },
+    readFile: readTypFile,
+    startWatch: (path) => startFileWatch(path, getCurrentWindow().label),
+    stopWatch: () => stopFileWatch(getCurrentWindow().label),
+  });
+
+  // filePath 变化时自动切换 watch；卸载时 dispose() 会停止。
+  $effect(() => {
+    void externalFileChange.watchPath(filePath);
+  });
+
+  /** 保存的统一入口：先处理已知的外部变更冲突，成功后再清冲突标记 */
+  async function saveDocument(): Promise<string | null> {
+    if (!(await externalFileChange.confirmSaveIfConflict())) return null;
+    const saved = await docSession.save();
+    if (saved) externalFileChange.clearConflict();
+    return saved;
+  }
+
   /**
    * 窗口级右键处理：
    * - 编辑器/预览区：替换原生菜单为自定义菜单；打开前联动收起 MenuBar 下拉/选中态
@@ -1157,7 +1203,7 @@
           },
         };
       case "save":
-        return { type: "item", label, disabled, onClick: () => void docSession.save() };
+        return { type: "item", label, disabled, onClick: () => void saveDocument() };
       case "export-pdf":
         return { type: "item", label, disabled, onClick: () => handleExportPdf() };
       case "settings":
@@ -1195,7 +1241,7 @@
       onNew: () => void docSession.createNew(),
       onNewWindow: () => newWindow.open(),
       onOpen: () => void docSession.open(),
-      onSave: () => void docSession.save(),
+      onSave: () => void saveDocument(),
       onOpenSettings: openSettings,
       onExportPdf: handleExportPdf,
       runFormat,
@@ -2029,6 +2075,11 @@
         if (e.payload) void openFileClaim.onBroadcast(e.payload);
       });
       keepUnlisten(unlistenOpen);
+      // 外部程序修改当前文件：Rust 侧通知后，由 externalFileChange 决定自动重读或提示
+      const unlistenFileChanged = listen<{ path: string }>("file-changed", (e) => {
+        externalFileChange.onFileChanged(e.payload);
+      });
+      keepUnlisten(unlistenFileChanged);
       unlistenOpen.then(() => {
         // 首次启动/跨实例转发的待打开文件（关联双击）：就绪后取走（取最后一个，即最新请求）。
         // **只由主窗口取**：副窗口是草稿窗口，不该被启动参数里带的文件顶掉内容。
@@ -2066,6 +2117,7 @@
       clearTimeout(previewReflowTimer);
       if (previewScaleFrame !== 0) cancelAnimationFrame(previewScaleFrame);
       unlisteners.forEach((un) => un());
+      void externalFileChange.dispose();
       clearTimeout(persistTimer);
       clearTimeout(startupCheckTimer); // 关窗时取消还没发起的自动更新检查
       // 取消待执行编译，并用请求代次作废在途结果。

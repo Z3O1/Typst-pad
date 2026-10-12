@@ -21,6 +21,7 @@ mod document_geometry;
 mod compile_commands;
 mod dir_listing;
 mod file_commands;
+mod file_watcher;
 mod font_commands;
 mod paths;
 
@@ -97,6 +98,8 @@ pub fn run() {
             app.manage(CliDebugFlag(cli_debug));
             // 首次启动：从命令行参数解析待打开的 .typ 文件
             app.manage(file_commands::initial_pending_files());
+            // 当前编辑文件的外部变更监控状态（按窗口隔离）
+            app.manage(file_watcher::FileWatcherState::new());
             // 内嵌编译状态：字体目录（打包后为 resource_dir/fonts，开发回退 src-tauri/fonts）
             app.manage(compile_commands::CompileState::new(
                 typst_world::resolve_fonts_dir(app.handle()),
@@ -110,6 +113,8 @@ pub fn run() {
             file_commands::write_file,
             file_commands::take_pending_files,
             file_commands::write_binary,
+            file_watcher::start_file_watch,
+            file_watcher::stop_file_watch,
             dir_listing::list_dir_typ,
             get_debug_flag,
             compile_commands::compile_doc,

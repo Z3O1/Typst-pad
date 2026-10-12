@@ -51,6 +51,21 @@ export async function saveTypFile(path: string | null, content: string): Promise
 }
 
 /**
+ * 启动对指定 .typ 文件的监控；同一窗口再次调用会先停止旧 watch。
+ * 浏览器环境为空操作（无真实文件访问）。
+ */
+export async function startFileWatch(path: string, windowLabel: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("start_file_watch", { path, windowLabel });
+}
+
+/** 停止当前窗口的文件监控；浏览器环境为空操作。 */
+export async function stopFileWatch(windowLabel: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("stop_file_watch", { windowLabel });
+}
+
+/**
  * 选择字体目录（设置 → 额外字体目录）：把字体文件丢进该目录即可被 typst 使用，
  * 等价于 typst CLI 的 `--font-path`。取消返回 null；浏览器环境返回 null。
  */

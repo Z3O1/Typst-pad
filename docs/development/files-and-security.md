@@ -27,3 +27,20 @@ Tauri 文件 IPC 实现在 `src-tauri/src/file_commands.rs`、`dir_listing.rs`�
 Tauri 权限由 `src-tauri/capabilities/default.json` 控制。窗口标签必须与 capability 的 `windows` 模式匹配；新窗口能力还需包含 `core:webview:allow-create-webview-window`。新增窗口或插件功能时同步审查 capability，并运行 `scripts/capabilities.test.mjs` 所覆盖的权限检查。
 
 `src-tauri/tauri.conf.json` 的 CSP 当前为 `null`。若改变 CSP，需经过生产桌面构建和实际 WebView 验证；浏览器开发模式不能代表 Tauri CSP 行为。更新器权限也由 capability 明确授予。
+
+## 外部文件变更
+
+当前窗口只监控**当前主文件**（`src-tauri/src/file_watcher.rs`）。外部程序修改磁盘后：
+
+- 若编辑器**没有未保存修改**，自动重读磁盘内容并建立新会话（清撤销历史）。
+- 若编辑器**有未保存修改**，弹出原生确认框让用户选择「重读磁盘」或「保留当前内容」；
+  选择保留后，同一磁盘版本不会重复打扰，但新的外部版本仍会再次提示。
+- 文件删除或短暂不可读时给出非破坏性状态提示，保留当前内容。
+
+实现边界：
+
+- 监控随 `filePath` 变化自动切换/解绑；新建、另存为、关闭都会停止旧 watch。
+- 监听文件所在**父目录**并过滤文件名，能捕获原子替换（`rename` 覆盖）。
+- 事件经 `notify-debouncer-mini` 去抖（150ms），自己的 `write_file` 触发的事件若内容一致会被忽略。
+- 保存时若已知存在外部新版本冲突，会先确认再写盘；写盘仍走唯一 `write_file` 入口，不自动写盘。
+- 浏览器开发模式无真实文件监控，相关逻辑由 `src/lib/core/external-file-change.ts` 单测覆盖。
