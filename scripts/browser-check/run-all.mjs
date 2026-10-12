@@ -42,6 +42,8 @@ const SUITES = [
   ["source-workflows.mjs", 59],
   ["dollar-completion.mjs", 32],
   ["document-completion.mjs", 21],
+  ["editor-shortcuts.mjs", 22],
+  ["file-changes.mjs", 31],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
 
@@ -58,6 +60,8 @@ const SUITE_FIXTURES = {
   "source-workflows.mjs": [],
   "dollar-completion.mjs": [],
   "document-completion.mjs": ["pages"],
+  "editor-shortcuts.mjs": [],
+  "file-changes.mjs": [],
 };
 const FIXTURE_STEPS = { pages: ["fixtures-pages", ["run", "fixtures:pages"]] };
 
