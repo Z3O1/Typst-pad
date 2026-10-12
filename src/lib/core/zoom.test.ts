@@ -105,6 +105,47 @@ describe("accumulateWheelSteps（不足一档的位移要攒起来）", () => {
     expect(acc.remainder).toBeCloseTo(-0.2, 6);
   });
 
+  it.each([-40, 40])("连续十次 %ipx 累计四档，同向保留取整债务", (delta) => {
+    const acc = createWheelAccumulator();
+    const steps = Array.from({ length: 10 }, () => accumulateWheelSteps(acc, delta));
+    const direction = delta < 0 ? 1 : -1;
+    expect(steps.map((step) => step || 0)).toEqual(
+      [0, 1, 0, 1, 0, 0, 1, 0, 1, 0].map((step) => step * direction || 0),
+    );
+    expect(steps.reduce((sum, step) => sum + step, 0)).toBe(4 * direction);
+    expect(acc.remainder).toBe(0);
+  });
+
+  it.each([-40, 40])("%ipx 取整后的债务在真实反向时丢弃", (delta) => {
+    const acc = createWheelAccumulator();
+    accumulateWheelSteps(acc, delta);
+    accumulateWheelSteps(acc, delta);
+    expect(accumulateWheelSteps(acc, -delta)).toBeCloseTo(0);
+    expect(acc.remainder).toBe(delta < 0 ? -0.4 : 0.4);
+  });
+
+  it.each([-40, 40])("零输入不改变 %ipx 的上一方向或债务", (delta) => {
+    const acc = createWheelAccumulator();
+    accumulateWheelSteps(acc, delta);
+    accumulateWheelSteps(acc, delta);
+    const debt = acc.remainder;
+    expect(accumulateWheelSteps(acc, 0)).toBe(0);
+    expect(accumulateWheelSteps(acc, Number.NaN, Number.NaN)).toBe(0);
+    expect(acc.remainder).toBe(debt);
+    accumulateWheelSteps(acc, delta);
+    expect(acc.remainder).toBe(delta < 0 ? 0.2 : -0.2);
+  });
+
+  it.each([-40, 40])("reset 后同向 %ipx 不继承取整债务", (delta) => {
+    const acc = createWheelAccumulator();
+    accumulateWheelSteps(acc, delta);
+    accumulateWheelSteps(acc, delta);
+    resetWheelAccumulator(acc);
+    expect(acc.remainder).toBe(0);
+    expect(accumulateWheelSteps(acc, delta)).toBeCloseTo(0);
+    expect(acc.remainder).toBe(delta < 0 ? 0.4 : -0.4);
+  });
+
   it("4px 的触摸板小步长也能攒够一档（老代码里这是死区）", () => {
     const acc = createWheelAccumulator();
     const steps = [0, 1, 2, 3, 4].map(() => accumulateWheelSteps(acc, -4));
@@ -134,6 +175,7 @@ describe("accumulateWheelSteps（不足一档的位移要攒起来）", () => {
     accumulateWheelSteps(acc, -40);
     resetWheelAccumulator(acc);
     expect(acc.remainder).toBe(0);
+    expect(acc.lastDirection).toBe(0);
   });
 
   it("**回归**：在 250% 上限处，40px 的滚轮两格就能缩回 240%（用户报的「到上限就不行」）", () => {

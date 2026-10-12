@@ -488,11 +488,16 @@ for (const mode of ["write", "source"]) {
           }),
       ],
       [
-        "wheel",
-        async (up) =>
-          c.evaluate(
-            `window.dispatchEvent(new WheelEvent('wheel',{deltaY:${up ? -100 : 100},ctrlKey:true,bubbles:true,cancelable:true}));true`,
-          ),
+        "wheel-small",
+        async (up) => {
+          // 连续小步跨过取整债务：六次同向40px应走两档，不是三档。
+          for (let i = 0; i < 3; i++) {
+            await c.evaluate(
+              `window.dispatchEvent(new WheelEvent('wheel',{deltaY:${up ? -40 : 40},ctrlKey:true,bubbles:true,cancelable:true}));true`,
+            );
+            await sleep(35);
+          }
+        },
       ],
       ["menu", async (up) => menu(up ? "放大" : "缩小")],
     ]) {
