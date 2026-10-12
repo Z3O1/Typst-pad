@@ -100,16 +100,50 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     };
   }
 
-  function isStale(snapshot: ReturnType<typeof captureSnapshot>): boolean {
+  function isIdentityStale(snapshot: ReturnType<typeof captureSnapshot>): boolean {
     return (
       disposed ||
       generation !== snapshot.generation ||
       hooks.currentPath() !== snapshot.path ||
-      hooks.currentDoc() !== snapshot.doc ||
-      hooks.currentBaseline() !== snapshot.baseline ||
-      hooks.currentRevision?.() !== snapshot.revision ||
       (hooks.currentSession !== undefined && hooks.currentSession() !== snapshot.session)
     );
+  }
+
+  function isStale(snapshot: ReturnType<typeof captureSnapshot>): boolean {
+    return (
+      isIdentityStale(snapshot) ||
+      hooks.currentDoc() !== snapshot.doc ||
+      hooks.currentBaseline() !== snapshot.baseline ||
+      hooks.currentRevision?.() !== snapshot.revision
+    );
+  }
+
+  function rememberConflict(path: string, content: string): void {
+    const snapshot = captureSnapshot(path);
+    if (isIdentityStale(snapshot) || isContentUnchanged(content, snapshot.baseline)) return;
+    pendingConflict = true;
+    conflictSnapshot = {
+      path,
+      content,
+      pathAtStart: snapshot.path,
+      baselineAtStart: snapshot.baseline,
+      sessionAtStart: snapshot.session,
+    };
+  }
+
+  /** 身份变化丢弃；同身份输入只作废旧选择，不能遗忘已读到的磁盘版本。 */
+  function retainChangedDemand(
+    snapshot: ReturnType<typeof captureSnapshot>,
+    content?: string,
+  ): boolean {
+    if (isIdentityStale(snapshot)) return true;
+    if (!isStale(snapshot)) return false;
+    if (snapshot.path) {
+      if (content !== undefined) rememberConflict(snapshot.path, content);
+      // 单槽去抖重查，避免连续输入造成立即重读/重弹的忙循环。
+      onFileChanged({ path: snapshot.path });
+    }
+    return true;
   }
 
   function isContentUnchanged(content: string, baseline: string | null): boolean {
@@ -175,12 +209,12 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     try {
       content = (await hooks.readFile(path)).content;
     } catch (e) {
-      if (isStale(snapshot)) return;
+      if (retainChangedDemand(snapshot)) return;
       handleUnreadable();
       return;
     }
 
-    if (isStale(snapshot)) return;
+    if (retainChangedDemand(snapshot, content)) return;
 
     if (isContentUnchanged(content, snapshot.baseline)) {
       // 自己的 save / 同内容 / 外部改回基线：不提示，但清掉已解决的冲突
@@ -216,26 +250,24 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
       return;
     }
 
+    rememberConflict(path, content);
     const reload = await hooks.promptReloadOrKeep(
       `「${path}」已被外部程序修改。是否重新读取磁盘内容？\n选择「取消」将保留当前未保存的编辑。`,
       DIALOG_TITLE,
     );
 
-    if (isStale(snapshot) || hooks.currentDoc() !== snapshot.doc) {
-      // 提示期间路径/会话/正文变化：旧选择不得覆盖新状态
-      return;
-    }
+    if (retainChangedDemand(snapshot, content)) return;
 
     // 确认只授权刚才看到的磁盘版本；提示期间的新版本重新排队。
     try {
       const latest = (await hooks.readFile(path)).content;
-      if (isStale(snapshot)) return;
+      if (retainChangedDemand(snapshot, latest)) return;
       if (latest !== content) {
         pendingPath = path;
         return;
       }
     } catch {
-      if (!isStale(snapshot)) handleUnreadable();
+      if (!retainChangedDemand(snapshot, content)) handleUnreadable();
       return;
     }
 

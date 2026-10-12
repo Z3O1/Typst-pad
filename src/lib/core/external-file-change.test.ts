@@ -389,6 +389,56 @@ describe("createExternalFileChange", () => {
     expect(hooks.calls.applyReload).toHaveLength(0);
   });
 
+  it.each(["read", "prompt"])(
+    "同身份晚 %s 期间输入后直接保存，不遗忘外部版本或应用旧选择",
+    async (phase) => {
+      const hooks = createHooks();
+      hooks.setPath("/a.typ");
+      hooks.setDoc("local");
+      hooks.setBaseline("base");
+      hooks.setDisk("/a.typ", "external");
+      let release!: () => void;
+      let reads = 0;
+      const readFile = hooks.readFile;
+      hooks.readFile = async (path) => {
+        const disk = await readFile(path);
+        if (phase === "read" && ++reads === 1) {
+          await new Promise<void>((r) => (release = r));
+        }
+        return disk;
+      };
+      let prompts = 0;
+      hooks.promptReloadOrKeep = async (message, title) => {
+        hooks.calls.prompt.push([message, title]);
+        if (phase === "prompt" && ++prompts === 1) {
+          await new Promise<void>((r) => (release = r));
+          return true; // 迟到的重读同意必须作废
+        }
+        return false;
+      };
+      const m = createExternalFileChange(hooks);
+      await m.watchPath("/a.typ");
+      await vi.advanceTimersByTimeAsync(200);
+      hooks.setDoc("continued-input");
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hooks.currentDoc()).toBe("continued-input");
+      expect(hooks.calls.applyReload).toHaveLength(0);
+      expect(m.hasConflict()).toBe(true);
+      // 不发第二次 file-changed；用户直接 save 也必须确认，而不是静默放行。
+      expect(await m.confirmSaveIfConflict()).toBe(false);
+      expect(hooks.calls.prompt.at(-1)?.[1]).toBe("保存冲突");
+      expect(m.hasConflict()).toBe(true);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(hooks.currentDoc()).toBe("continued-input");
+      expect(m.hasConflict()).toBe(true);
+      const promptCount = hooks.calls.prompt.length;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(hooks.calls.prompt).toHaveLength(promptCount); // 无忙循环或重叠提示
+      await m.dispose();
+    },
+  );
+
   it("未知恢复基线按 dirty 提示，不自动覆盖", async () => {
     const hooks = createHooks();
     hooks.setPath("/a.typ");
