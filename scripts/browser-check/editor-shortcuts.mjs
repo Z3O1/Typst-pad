@@ -91,7 +91,7 @@ async function runModeTests(mode) {
   await c.key("D", { code: "KeyD", keyCode: 68, modifiers: 10 });
   const singleOnly = await ranges();
   check(
-    `${mode}: 无下一匹配时不环回`,
+    `${mode}: 首击只选中当前词`,
     (await doc()) === "foo bar foo" &&
       singleOnly.length === 1 &&
       singleOnly[0].from === 0 &&
