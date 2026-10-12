@@ -211,25 +211,53 @@ check(
 );
 await c.evaluate("document.querySelector('.preview-body').style.width=''; true");
 
-async function replaceSource(src) {
-  await c.evaluate(`(() => {
+async function replaceSources(sources) {
+  return c.evaluate(`(() => {
     const v=window.__typstPadView;
-    v.dispatch({changes:{from:0,to:v.state.doc.length,insert:${JSON.stringify(src)}},selection:{anchor:${src.length}}});
-    return true;
+    const before={at:performance.now(),compilerCount:window.__browserDevCompileCount,
+      stats:window.__typstPadScheduleStats?.()};
+    for(const src of ${JSON.stringify(sources)}) {
+      v.dispatch({changes:{from:0,to:v.state.doc.length,insert:src},selection:{anchor:src.length}});
+      window.__reflowEdits?.push({src,at:performance.now(),stats:window.__typstPadScheduleStats?.()});
+    }
+    return {before,after:{at:performance.now(),compilerCount:window.__browserDevCompileCount,
+      stats:window.__typstPadScheduleStats?.()}};
   })()`);
+}
+
+async function replaceSource(src) {
+  await replaceSources([src]);
 }
 
 async function trackCompileRequests() {
   await c.evaluate(`(() => {
     window.__reflowRequests=[];
+    window.__reflowEdits=[];
     const internals=window.__TAURI_INTERNALS__, invoke=internals.invoke;
     internals.invoke=async (command,args) => {
       if(command!=='compile_doc')return invoke(command,args);
-      const request={src:args.src,preview:args.previewPage??null,completed:false,widths:[]};
+      const request={seq:window.__reflowRequests.length+1,src:args.src,
+        preview:args.previewPage??null,startedAt:performance.now(),completed:false,widths:[],
+        mode:document.querySelector('.document-mode')?'write':'source',
+        stats:window.__typstPadScheduleStats?.(),compilerCount:window.__browserDevCompileCount,
+        knownPages:args.knownPages??null};
       window.__reflowRequests.push(request);
       const result=await invoke(command,args);
-      request.completed=true;
+      request.resultReadyAt=performance.now();
+      request.geometryId=result.geometryId??null;
+      request.pageCount=result.pages?.length??0;
+      request.reusedPages=(result.pages??[]).filter(page=>page===null).length;
+      request.pageKeys=result.pageKeys??null;
+      request.compilerCountAfter=window.__browserDevCompileCount;
+      request.geometry=(result.pages??[]).filter(Boolean).map(svg=>svg.match(/viewBox="([^"]+)"/)[1]);
       request.widths=(result.pages??[]).filter(Boolean).map(svg=>Number(svg.match(/viewBox="[^" ]+ [^" ]+ ([^" ]+)/)[1]));
+      if(window.__reflowHoldNextNatural && request.preview===null) {
+        window.__reflowHoldNextNatural=false;
+        await new Promise(resolve=>{window.__reflowReleaseNatural=resolve;});
+        window.__reflowReleaseNatural=null;
+      }
+      request.completed=true;
+      request.completedAt=performance.now();
       return result;
     };
     return true;
@@ -413,54 +441,155 @@ check(
   JSON.stringify({ prefixedLarge, prefixedSmall, prefixDisabled }),
 );
 
-// 快速连续编辑只学习最终源码；resize不应使已学习的自然纸型失效。
+// 同一浏览器回合的编辑才保证零中间请求：独立CDP调用+sleep可能跨过30/150ms期限。
+// 不改变生产调度；单独在下方检验合法到期启动后、在途编辑的单槽和过期隔离。
 firstRequest = await c.evaluate("window.__reflowRequests.length");
+await observeSinglePageUpdates();
 const finalPaper = paperSource(480, 480, "快速编辑最终纸型");
-for (const src of [smallPaper, largePaper, finalPaper]) {
-  await replaceSource(src);
-  await sleep(30);
-}
+const burst = await replaceSources([smallPaper, largePaper, finalPaper]);
 const rapidCount = await settledCompiles();
 await sleep(800);
 const rapid = await measured();
+const rapidTrace = await c.evaluate(`({
+  requests:window.__reflowRequests.slice(${firstRequest}),edits:window.__reflowEdits.slice(-3),
+  compilerCount:window.__browserDevCompileCount,stats:window.__typstPadScheduleStats?.(),
+  updates:window.__reflowUpdates,source:window.__typstPadView.state.doc.toString()
+})`);
+const rapidClauses = {
+  noRequestDuringBurst:
+    burst.before.compilerCount === burst.after.compilerCount &&
+    burst.before.stats.runs === burst.after.stats.runs,
+  requestedRatio: Math.abs(rapid.requestedHeightPt / rapid.requestedWidthPt - 1) < 0.001,
+  displayedGeometry:
+    Math.abs(rapid.pageWidthPt - 314.29) < 1 &&
+    Math.abs(rapid.pageHeightPt / rapid.pageWidthPt - 1) < 0.001,
+  exactlyTwoRequests: rapidTrace.requests.length === 2,
+  naturalThenDisplay:
+    rapidTrace.requests[0]?.preview === null &&
+    rapidTrace.requests[0]?.geometry[0] === "0 0 480 480" &&
+    Math.abs(rapidTrace.requests[1]?.preview?.widthPt - rapid.pageWidthPt) < 0.01 &&
+    Math.abs(rapidTrace.requests[1]?.preview?.heightPt - rapid.pageHeightPt) < 0.01,
+  finalSourceOnly:
+    rapidTrace.requests.every((r) => r.src === finalPaper) && rapidTrace.source === finalPaper,
+  oneSchedulerRun: rapidTrace.stats.runs === burst.before.stats.runs + 1,
+  stableCompilerCount:
+    rapidTrace.compilerCount === rapidCount && rapidCount === burst.before.compilerCount + 2,
+  noStalePaperWrites: rapidTrace.updates
+    .slice(1)
+    .every(
+      (u) =>
+        u.text.includes("快速编辑最终纸型") &&
+        Math.abs(u.width - rapid.pageWidthPt) < 0.01 &&
+        u.pages === 1,
+    ),
+  noOverflow: rapid.overflowX <= 1 && Math.abs(rapid.fontPx - 14) <= 0.1,
+};
+console.log(
+  "REFLOW_RAPID " +
+    JSON.stringify({ clauses: rapidClauses, burst, rapid, rapidCount, ...rapidTrace }),
+);
 check(
   "快速连续编辑去抖为最终源码的自然学习及一次重排，随后稳定",
-  Math.abs(rapid.requestedHeightPt / rapid.requestedWidthPt - 1) < 0.001 &&
-    (await c.evaluate(`window.__reflowRequests.slice(${firstRequest}).length===2 &&
-      window.__reflowRequests.slice(${firstRequest}).every(r=>r.src===${JSON.stringify(finalPaper)}) &&
-      window.__browserDevCompileCount===${rapidCount}`)),
+  Object.values(rapidClauses).every(Boolean),
+  JSON.stringify({ clauses: rapidClauses, burst, rapid, rapidCount, ...rapidTrace }),
 );
 
-// 旧源码的自然学习已在途时继续编辑，不能把旧的小纸型学进当前文档或短暂显示它。
+// 第一份编辑合法到期启动后，显式扣住其自然测量响应，避免CDP墙钟决定在途窗口。
+// 后续编辑的等待期限在途耗尽，再放行响应；只接最新一轮，不追加去抖或逐键请求。
 await c.evaluate(
   "history.replaceState(null,'',location.pathname+'?browserdev=1&compileslow=1'); true",
 );
 await observeSinglePageUpdates();
 firstRequest = await c.evaluate("window.__reflowRequests.length");
-await replaceSource(smallPaper);
+await c.evaluate("window.__reflowHoldNextNatural=true; true");
+const boundaryStart = await replaceSources([smallPaper]);
 await c.waitFor(
-  `window.__reflowRequests.length>${firstRequest} && window.__typstPadScheduleStats?.().inFlight`,
+  `window.__reflowRequests.length===${firstRequest + 1} && typeof window.__reflowReleaseNatural==='function' && window.__typstPadScheduleStats?.().inFlight`,
 );
-const staleNaturalRequest = await c.evaluate(`window.__reflowRequests[${firstRequest}].preview`);
-await replaceSource(paperSource(480, 960, "中间编辑纸型"));
-await sleep(30);
-await replaceSource(finalPaper);
+const pendingBurst = await replaceSources([paperSource(480, 960, "中间编辑纸型"), finalPaper]);
+// 源码模式的300ms最大等待（文档模式100ms）；假时钟单测精确检验边界及剩余预算。
+const held = await c.evaluate(`(async () => {
+  await new Promise(resolve=>setTimeout(resolve,300));
+  const snapshot={at:performance.now(),requestCount:window.__reflowRequests.length,
+    stats:window.__typstPadScheduleStats?.()};
+  window.__reflowReleaseNatural();
+  return snapshot;
+})()`);
 const latestCount = await settledCompiles();
 await sleep(800);
 const latest = await measured();
-check(
-  "过期自然学习不能落地或污染新纸型，连续编辑最终稳定",
-  staleNaturalRequest === null &&
+const latestTrace = await c.evaluate(`({
+  requests:window.__reflowRequests.slice(${firstRequest}),edits:window.__reflowEdits.slice(-3),
+  compilerCount:window.__browserDevCompileCount,stats:window.__typstPadScheduleStats?.(),
+  updates:window.__reflowUpdates,source:window.__typstPadView.state.doc.toString()
+})`);
+const latestClauses = {
+  expiredNaturalStarted:
+    latestTrace.requests[0]?.src === smallPaper &&
+    latestTrace.requests[0]?.preview === null &&
+    latestTrace.requests[0]?.geometry[0] === "0 0 240 320",
+  heldSingleSlot:
+    held.requestCount === firstRequest + 1 &&
+    held.stats.inFlight &&
+    held.stats.pending &&
+    pendingBurst.before.stats.runs === pendingBurst.after.stats.runs &&
+    held.stats.runs === pendingBurst.after.stats.runs,
+  exactlyThreeRequests: latestTrace.requests.length === 3,
+  finalNaturalThenDisplay:
+    latestTrace.requests[1]?.src === finalPaper &&
+    latestTrace.requests[1]?.preview === null &&
+    latestTrace.requests[1]?.geometry[0] === "0 0 480 480" &&
+    latestTrace.requests[2]?.src === finalPaper &&
+    Math.abs(latestTrace.requests[2]?.preview?.widthPt - latest.pageWidthPt) < 0.01 &&
+    Math.abs(latestTrace.requests[2]?.preview?.heightPt - latest.pageHeightPt) < 0.01,
+  currentFinalSource: latestTrace.source === finalPaper,
+  boundedSchedulerProgress:
+    latestTrace.stats.runs === boundaryStart.before.stats.runs + 2 &&
+    !latestTrace.stats.pending &&
+    !latestTrace.stats.inFlight,
+  finalGeometry:
     Math.abs(latest.requestedWidthPt - 314.29) <= 1 &&
     Math.abs(latest.requestedHeightPt / latest.requestedWidthPt - 1) < 0.001 &&
-    (await c.evaluate(`window.__reflowUpdates.length>0 &&
-      window.__reflowUpdates.some(update=>update.text.includes('快速编辑最终纸型')) &&
-      window.__reflowUpdates.every(update=>Math.abs(update.width-240)>1 && update.pages===1) &&
-      window.__reflowRequests.slice(${firstRequest}).length===3 &&
-      window.__browserDevCompileCount===${latestCount}`)),
-  await c.evaluate(
-    "JSON.stringify({requests:window.__reflowRequests.slice(-3),updates:window.__reflowUpdates})",
-  ),
+    Math.abs(latest.pageWidthPt - latest.requestedWidthPt) < 0.01 &&
+    Math.abs(latest.pageHeightPt / latest.pageWidthPt - 1) < 0.001,
+  noStalePaperWrites:
+    latestTrace.updates.length > 0 &&
+    latestTrace.updates.some((u) => u.text.includes("快速编辑最终纸型")) &&
+    latestTrace.updates.every(
+      (u) =>
+        u.text.includes("快速编辑最终纸型") &&
+        Math.abs(u.width - latest.pageWidthPt) < 0.01 &&
+        u.pages === 1,
+    ),
+  stableCompilerCount:
+    latestTrace.compilerCount === latestCount &&
+    latestCount === boundaryStart.before.compilerCount + 3,
+  noOverflow: latest.overflowX <= 1 && Math.abs(latest.fontPx - 14) <= 0.1,
+};
+console.log(
+  "REFLOW_INFLIGHT " +
+    JSON.stringify({
+      clauses: latestClauses,
+      boundaryStart,
+      pendingBurst,
+      held,
+      latest,
+      latestCount,
+      ...latestTrace,
+    }),
+);
+check(
+  "过期自然学习不能落地或污染新纸型，连续编辑最终稳定",
+  Object.values(latestClauses).every(Boolean),
+  JSON.stringify({
+    clauses: latestClauses,
+    boundaryStart,
+    pendingBurst,
+    held,
+    latest,
+    latestCount,
+    ...latestTrace,
+  }),
 );
 
 // 原生产物：整正文raw不能执行其中的页面声明，真实A4展示页必须与480×960自然页隔离。

@@ -189,6 +189,99 @@ describe("createDocumentCompileScheduler", () => {
     }
   });
 
+  it.each([
+    ["write", 30, 100],
+    ["source", 150, 300],
+  ] as const)("%s：期限到达后独立编辑不能要求零中间请求", async (_mode, debounceMs, maxWaitMs) => {
+    let source = "small-paper";
+    const start = Date.now();
+    const trace: Array<{ src: string; at: number }> = [];
+    const boundary = createDocumentCompileScheduler({
+      debounceMs,
+      maxWaitMs,
+      run: async () => {
+        trace.push({ src: source, at: Date.now() - start });
+      },
+    });
+    try {
+      boundary.request("edit");
+      await vi.advanceTimersByTimeAsync(debounceMs);
+      source = "large-paper";
+      boundary.request("edit");
+      await vi.advanceTimersByTimeAsync(debounceMs);
+      source = "final-paper";
+      boundary.request("edit");
+      await vi.advanceTimersByTimeAsync(debounceMs);
+      console.log("REFLOW_DEADLINE " + JSON.stringify({ debounceMs, maxWaitMs, trace }));
+      expect(trace).toEqual([
+        { src: "small-paper", at: debounceMs },
+        { src: "large-paper", at: debounceMs * 2 },
+        { src: "final-paper", at: debounceMs * 3 },
+      ]);
+      await vi.advanceTimersByTimeAsync(maxWaitMs);
+      expect(trace).toHaveLength(3);
+      expect(boundary.stats()).toMatchObject({ runs: 3, inFlight: false, pending: false });
+    } finally {
+      boundary.dispose();
+    }
+  });
+
+  it.each([
+    ["write", 30, 100],
+    ["source", 150, 300],
+  ] as const)(
+    "%s：同一时钟回合只消费最终源码，在途过期预算不再追加去抖",
+    async (_mode, debounceMs, maxWaitMs) => {
+      let source = "initial-paper";
+      let finish!: () => void;
+      const start = Date.now();
+      const trace: Array<{ src: string; at: number }> = [];
+      const burst = createDocumentCompileScheduler({
+        debounceMs,
+        maxWaitMs,
+        run: () => {
+          trace.push({ src: source, at: Date.now() - start });
+          return new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+        },
+      });
+      try {
+        for (source of ["small-paper", "large-paper", "final-paper"]) burst.request("edit");
+        expect(trace).toEqual([]);
+        await vi.advanceTimersByTimeAsync(debounceMs - 1);
+        expect(trace).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(trace).toEqual([{ src: "final-paper", at: debounceMs }]);
+        // 新一轮持续编辑的100/300ms预算在当前在途编译中耗尽；单槽只保留最新源码。
+        for (let i = 0; i < maxWaitMs / 10; i++) {
+          source = `pending-paper-${i}`;
+          burst.request("edit");
+          await vi.advanceTimersByTimeAsync(10);
+          expect(trace).toHaveLength(1);
+        }
+        source = "latest-paper";
+        burst.request("edit");
+        finish();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(trace).toEqual([
+          { src: "final-paper", at: debounceMs },
+          { src: "latest-paper", at: debounceMs + maxWaitMs },
+        ]);
+        expect(burst.stats()).toMatchObject({ runs: 2, inFlight: true, pending: false });
+        finish();
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(maxWaitMs);
+        expect(trace).toHaveLength(2);
+        expect(burst.stats()).toMatchObject({ inFlight: false, pending: false });
+      } finally {
+        burst.dispose();
+      }
+    },
+  );
+
   it("requestNow：不在途时**立刻**跑，Promise 在这一轮跑完后 resolve", async () => {
     let resolved = false;
     const done = scheduler.requestNow("context").then(() => {

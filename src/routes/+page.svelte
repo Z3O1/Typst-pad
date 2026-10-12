@@ -13,6 +13,7 @@
   import type {
     CompileErrorLocation,
     CompileOk,
+    CompileResult,
     Diagnostic,
     DocumentCaret,
     DocumentSelectionQuad,
@@ -439,8 +440,15 @@
       statusText = previewError ? "请先修正编译错误" : "正在编译";
       return;
     }
-    const hit = await hitTestDocument(documentGeometryId, req.page, req.xPt, req.yPt);
-    if (seq !== interactionSeq || input !== currentInput() || input !== renderedInput) return;
+    const geometryId = documentGeometryId;
+    const hit = await hitTestDocument(geometryId, req.page, req.xPt, req.yPt);
+    if (
+      seq !== interactionSeq ||
+      input !== currentInput() ||
+      input !== renderedInput ||
+      geometryId !== documentGeometryId
+    )
+      return;
     if (!hit) {
       statusText = "无法定位此处源码";
       return;
@@ -464,7 +472,12 @@
     documentCaret = changed || previewHit ? null : hit;
     const clickedInput = currentInput();
     await tick();
-    if (seq !== interactionSeq || clickedInput !== currentInput()) return;
+    if (
+      seq !== interactionSeq ||
+      clickedInput !== currentInput() ||
+      geometryId !== documentGeometryId
+    )
+      return;
     positioningFromPage = true;
     try {
       editorRef?.revealAt(pos, sourceRange ?? errorEditRange ?? undefined);
@@ -1546,7 +1559,8 @@
       previewPageRequest = null;
     }
     const mySeq = ++compileSeq;
-    const input = currentInput();
+    // 仅本轮原文测量成功后决定展示纸型时同步推进指纹，其余输入变化仍使请求过期。
+    let input = currentInput();
     const source = prefixEnabled ? ensureTrailingNewline(prefixCode) + doc : doc;
     const prefixLength = source.length - doc.length;
     const mode = viewMode;
@@ -1555,13 +1569,14 @@
     // 基准只来自已经落地的本会话产物；在途和回退中的临时产物不能成为引用来源。
     const previous = renderedPages;
     const editing = errorEditRange;
-    const previewPageRequested = previewPageRequest;
+    let previewPageRequested = previewPageRequest;
+    let naturalResult: CompileResult | null = null;
     const isCurrent = () =>
       mySeq === compileSeq &&
       input === currentInput() &&
       mode === viewMode &&
       editing === errorEditRange;
-    const { result, originalResult, projection, failure, errorRanges, editingRange, deferred } =
+    const { result, projection, failure, errorRanges, editingRange, deferred } =
       await compileDocumentWithFallback({
         source,
         prefixLength,
@@ -1577,9 +1592,27 @@
         emptyParagraphs: mode === "write",
         styleExpansion: mode === "write",
         previewExpansion: mode === "write",
-        compile: (src) => compileToSvg(src, path, fonts, previous, previewPageRequested),
+        compile: (src) =>
+          src === source && previewPageRequested === null && naturalResult
+            ? Promise.resolve(naturalResult)
+            : compileToSvg(src, path, fonts, previous, previewPageRequested),
         measureOriginal: needsNaturalPaper
-          ? (src) => compileToSvg(src, path, fonts, previous, null)
+          ? async (src) => {
+              const measured = await compileToSvg(src, path, fonts, previous, null);
+              if (!isCurrent() || writeScheduler.stats().composing) return measured;
+              naturalResult = measured;
+              if (measured.ok) {
+                learnPaperShape(paperInput, measured.pages);
+                const body = previewPaneRef?.body();
+                if (body && body.clientWidth > 0 && paperShape && paperShapeInput === paperInput) {
+                  previewPageRequested = desiredPreviewPage(body.clientWidth, paperShape);
+                  clearTimeout(previewReflowTimer);
+                  previewPageRequest = previewPageRequested;
+                  input = currentInput();
+                }
+              }
+              return measured;
+            }
           : undefined,
         isCurrent,
         canRetry: () => {
@@ -1595,8 +1628,6 @@
     }
     // 文本、会话、字体和前缀在等待期间变化时，迟到的成功与失败均不能落地。
     if (!isCurrent() || deferred) return;
-    if (needsNaturalPaper && previewPageRequested === null && originalResult?.ok)
-      learnPaperShape(paperInput, originalResult.pages);
     if (result.ok) {
       const body = previewPaneRef?.body();
       if (body && body.clientWidth > 0 && paperShape && paperShapeInput === paperInput) {

@@ -41,7 +41,7 @@ interface DocumentCompileOptions {
   styleExpansion?: boolean;
   previewExpansion?: boolean;
   compile: (source: string) => Promise<CompileResult>;
-  // 需要自然纸型时，compile也必须无页面注入；仅复用本轮原文结果，否则至多测量一次。
+  // 需要自然纸型时先测量原文；回调可据此决定本请求展示编译的页面注入。
   measureOriginal?: (source: string) => Promise<CompileResult>;
   isCurrent: () => boolean;
   // 在途编译允许结束，但后续恢复轮次必须尊重调度器的输入法暂停。
@@ -52,11 +52,10 @@ export async function compileDocumentWithFallback(
   options: DocumentCompileOptions,
 ): Promise<DocumentCompileResult> {
   let originalResult: CompileResult | null = null;
-  let originalAttempted = false;
-  let deferred = false;
+
   // 展开可能隐藏原文错误；依赖/动态上下文没有版本戳，每轮都先验证原文再排版展示。
   // 此结果也复用为自然纸型测量，失败直接驱动恢复，不再编译同一坏表达式的预览。
-  if (options.reveal && options.isCurrent()) {
+  if ((options.measureOriginal || options.reveal) && options.isCurrent()) {
     if (options.canRetry && !options.canRetry()) {
       return {
         result: { ok: false, error: "编译已暂停", errors: [] },
@@ -68,7 +67,6 @@ export async function compileDocumentWithFallback(
         deferred: true,
       };
     } else {
-      originalAttempted = true;
       originalResult = await (options.measureOriginal ?? options.compile)(options.source);
       if (!options.isCurrent() || (options.canRetry && !options.canRetry())) {
         return {
@@ -87,36 +85,15 @@ export async function compileDocumentWithFallback(
     ...options,
     initialFailure: originalResult && !originalResult.ok ? originalResult : null,
     compile: async (source) => {
-      if (
-        source !== options.source &&
-        options.measureOriginal &&
-        !originalAttempted &&
-        options.isCurrent()
-      ) {
-        if (options.canRetry && !options.canRetry()) deferred = true;
-        else {
-          originalAttempted = true;
-          originalResult = await options.measureOriginal(options.source);
-          // 自然测量先于展示编译；过期或合成暂停后不再启动旧投影。
-          if (!options.isCurrent()) return originalResult;
-          if (options.canRetry && !options.canRetry()) {
-            deferred = true;
-            return originalResult;
-          }
-        }
-      }
       const result = await options.compile(source);
-      if (source === options.source) {
-        originalAttempted = true;
-        originalResult = result;
-      }
+      // 测量后的展示可能注入了新纸型，即使字节相同也不能覆盖自然原文产物。
+      if (source === options.source && !options.measureOriginal) originalResult = result;
       return result;
     },
   });
   return {
     ...output,
-    originalResult: !deferred && options.isCurrent() ? originalResult : null,
-    ...(deferred ? { deferred: true } : {}),
+    originalResult: !output.deferred && options.isCurrent() ? originalResult : null,
   };
 }
 

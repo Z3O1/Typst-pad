@@ -94,15 +94,18 @@ export function wheelZoomSteps(deltaY: number, deltaX = 0, deltaMode = 0): numbe
 /** 滚轮余量累加器（就地更新；`remainder` 单位 = 档，记的是"还没走完的那部分"） */
 export interface WheelStepAccumulator {
   remainder: number;
+  /** 上一非零输入方向；取整债务可能与输入反号，不能用余量判定反向。 */
+  lastDirection: number;
 }
 
 export function createWheelAccumulator(): WheelStepAccumulator {
-  return { remainder: 0 };
+  return { remainder: 0, lastDirection: 0 };
 }
 
 /** 丢掉未走完的余量（用户改用键盘/菜单调档后调用：那两条路没有"半格"这回事） */
 export function resetWheelAccumulator(acc: WheelStepAccumulator): void {
   acc.remainder = 0;
+  acc.lastDirection = 0;
 }
 
 /**
@@ -119,7 +122,9 @@ export function accumulateWheelSteps(
 ): number {
   const notches = wheelZoomSteps(deltaY, deltaX, deltaMode);
   if (notches === 0) return 0;
-  const base = Math.sign(acc.remainder) === Math.sign(notches) ? acc.remainder : 0;
+  const direction = Math.sign(notches);
+  const base = acc.lastDirection === direction ? acc.remainder : 0;
+  acc.lastDirection = direction;
   const total = base + notches;
   const whole = Math.round(total);
   acc.remainder = Number((total - whole).toFixed(6)); // 圆整浮点毛刺，别写进状态

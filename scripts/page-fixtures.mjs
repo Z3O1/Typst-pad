@@ -1,73 +1,82 @@
 // 真实整页产物导出。cargo 失败或零用例均不能写出空夹具。
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-const result = spawnSync(
-  "cargo",
-  [
-    "test",
-    "--manifest-path",
-    "src-tauri/Cargo.toml",
-    "dump_page_fixtures",
-    "--",
-    "--ignored",
-    "--nocapture",
-  ],
-  { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { inspectPageFixtureOutput } from "./page-fixtures-output.mjs";
+
+const command = "cargo";
+const args = [
+  "test",
+  "--manifest-path",
+  "src-tauri/Cargo.toml",
+  "dump_page_fixtures",
+  "--",
+  "--ignored",
+  "--nocapture",
+];
+const startedAt = new Date().toISOString();
+const evidenceDir = `.browser-check/page-fixtures-exports/${startedAt.replaceAll(":", "-")}-${randomUUID()}`;
+mkdirSync(evidenceDir, { recursive: true });
+for (const file of ["page-fixtures.mjs", "page-fixtures-output.mjs"]) {
+  writeFileSync(`${evidenceDir}/${file}`, readFileSync(new URL(file, import.meta.url)));
+}
+const result = spawnSync(command, args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+// 必须先留存原输出和退出状态；即使解析/门禁失败也不能丢掉首轮证据。
+writeFileSync(`${evidenceDir}/stdout.log`, result.stdout ?? "");
+writeFileSync(`${evidenceDir}/stderr.log`, result.stderr ?? "");
+const gitHead = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" });
+const gitDiff = spawnSync("git", ["diff", "HEAD", "--"], { encoding: "utf8" });
+writeFileSync(`${evidenceDir}/source.diff`, gitDiff.stdout ?? "");
+writeFileSync(
+  `${evidenceDir}/command.json`,
+  JSON.stringify(
+    {
+      command,
+      args,
+      cwd: process.cwd(),
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      sourceHead: gitHead.stdout?.trim(),
+      gitHeadStatus: gitHead.status,
+      gitDiffStatus: gitDiff.status,
+      status: result.status,
+      signal: result.signal,
+      error: result.error?.message ?? null,
+      cargoBuildJobs: process.env.CARGO_BUILD_JOBS ?? null,
+      tmpdir: process.env.TMPDIR ?? null,
+    },
+    null,
+    2,
+  ),
 );
-if (result.status !== 0) {
-  process.stderr.write(result.stderr ?? "整页夹具导出失败\n");
+console.log(`原生夹具导出证据：${evidenceDir}`);
+const report = inspectPageFixtureOutput(result.stdout ?? "");
+writeFileSync(
+  `${evidenceDir}/counts.json`,
+  JSON.stringify(
+    report.groups.map(({ fixtures, ...diagnostics }) => diagnostics),
+    null,
+    2,
+  ),
+);
+console.log(
+  report.groups.map((group) => `${group.marker} ${group.actualCount}/${group.count}`).join("; "),
+);
+if (result.error || result.status !== 0) {
+  process.stderr.write(result.stderr ?? "");
+  console.error(
+    `整页夹具导出失败：status=${result.status}, signal=${result.signal}, error=${result.error?.message ?? "none"}`,
+  );
   process.exit(1);
 }
-const fixtures = result.stdout
-  .split("\n")
-  .filter((line) => line.startsWith("PAGEFIXTURE:"))
-  .map((line) => JSON.parse(line.slice("PAGEFIXTURE:".length)));
-if (!fixtures.length || fixtures.some((fixture) => !fixture.pages.length || !fixture.carets.length))
-  throw new Error("整页夹具或命中探针为空");
-if (
-  fixtures.some(
-    (fixture) =>
-      (fixture.brokenDoc != null && !fixture.diagnostics?.length) ||
-      (fixture.brokenPreviewDoc != null && !fixture.previewDiagnostics?.length),
-  )
-)
-  throw new Error("错误回退夹具缺少原生诊断，不能使用空错误验收");
-mkdirSync(".browser-check", { recursive: true });
-writeFileSync(".browser-check/page-fixtures.json", JSON.stringify(fixtures));
-const cursorFixtures = result.stdout
-  .split("\n")
-  .filter((line) => line.startsWith("CURSORFIXTURE:"))
-  .map((line) => JSON.parse(line.slice("CURSORFIXTURE:".length)));
-if (
-  cursorFixtures.length !== 9 ||
-  cursorFixtures.some((fixture) => !fixture.pages.length || !fixture.cursorQueries.length)
-)
-  throw new Error("光标渲染夹具缺失，不能使用空探针验收");
-writeFileSync(".browser-check/cursor-fixtures.json", JSON.stringify(cursorFixtures));
-const expansionFixtures = result.stdout
-  .split("\n")
-  .filter((line) => line.startsWith("EXPANSIONFIXTURE:"))
-  .map((line) => JSON.parse(line.slice("EXPANSIONFIXTURE:".length)));
-if (
-  expansionFixtures.length !== 33 ||
-  expansionFixtures.some((fixture) => !fixture.pages.length || !fixture.cursorQueries.length)
-)
-  throw new Error("光标展开夹具缺失，不能跳过真实重排验证");
-writeFileSync(".browser-check/expansion-fixtures.json", JSON.stringify(expansionFixtures));
-const paperFixtures = result.stdout
-  .split("\n")
-  .filter((line) => line.startsWith("PAPERFIXTURE:"))
-  .map((line) => JSON.parse(line.slice("PAPERFIXTURE:".length)));
-if (paperFixtures.length !== 15 || paperFixtures.some((f) => !f.pages.length || !f.carets.length))
-  throw new Error("原文/整正文raw纸型夹具缺失，不能跳过自然学习隔离验收");
-writeFileSync(".browser-check/preview-paper-fixtures.json", JSON.stringify(paperFixtures));
-const zoomFixtures = result.stdout
-  .split("\n")
-  .filter((line) => line.startsWith("ZOOMFIXTURE:"))
-  .map((line) => JSON.parse(line.slice("ZOOMFIXTURE:".length)));
-if (zoomFixtures.length !== 37 || zoomFixtures.some((f) => !f.pages.length || !f.carets.length))
-  throw new Error("缩放/边距真实夹具缺失");
-writeFileSync(".browser-check/zoom-fixtures.json", JSON.stringify(zoomFixtures));
+if (report.errors.length) {
+  console.error(`真实夹具门禁失败（原始输出见 ${evidenceDir}）：\n${report.errors.join("\n")}`);
+  process.exit(1);
+}
+// 所有数量、非空探针和原生诊断门禁通过后才写出这一轮夹具。
+for (const group of report.groups) {
+  writeFileSync(`.browser-check/${group.file}`, JSON.stringify(group.fixtures));
+}
 console.log(
-  `已导出 ${fixtures.length} 份真实整页夹具、${cursorFixtures.length} 份光标渲染夹具、${expansionFixtures.length} 份展开夹具、${paperFixtures.length} 份原文/raw纸型夹具、${zoomFixtures.length} 份缩放/边距夹具`,
+  `已导出 ${report.groups.map((group) => `${group.actualCount} 份 ${group.marker}`).join("、")} 真实夹具`,
 );

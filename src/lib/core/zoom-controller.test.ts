@@ -468,6 +468,41 @@ describe("滚轮余量与键盘调档", () => {
     expect(h.calls.levels).toEqual([1.1]);
   });
 
+  it.each([-40, 40])("连续十次 %ipx 只请求四档", (delta) => {
+    const h = harness();
+    for (let i = 0; i < 10; i++) h.c.wheel(delta, 0, 0);
+    expect(h.calls.levels).toEqual(delta < 0 ? [1.1, 1.2, 1.3, 1.4] : [0.9, 0.8, 0.7, 0.6]);
+    expect(h.level()).toBe(delta < 0 ? 1.4 : 0.6);
+  });
+
+  it.each([-40, 40])("两次 %ipx 取整后反向不立即改档", (delta) => {
+    const h = harness();
+    h.c.wheel(delta, 0, 0);
+    h.c.wheel(delta, 0, 0);
+    expect(h.c.wheel(-delta, 0, 0)).toBe(false);
+    expect(h.calls.levels).toEqual([delta < 0 ? 1.1 : 0.9]);
+  });
+
+  it.each([0.5, 2.5])("%s 边界连续同向后反向两次小步即可离开", (boundary) => {
+    const h = harness();
+    h.setLevel(boundary);
+    const outward = boundary === 2.5 ? -40 : 40;
+    for (let i = 0; i < 10; i++) h.c.wheel(outward, 0, 0);
+    expect(h.level()).toBe(boundary);
+    expect(h.c.wheel(-outward, 0, 0)).toBe(false);
+    expect(h.c.wheel(-outward, 0, 0)).toBe(true);
+    expect(h.level()).toBe(boundary === 2.5 ? 2.4 : 0.6);
+  });
+
+  it.each([-40, 40])("模式退出 resetWheel 后 %ipx 不继承债务", (delta) => {
+    const h = harness();
+    h.c.wheel(delta, 0, 0);
+    h.c.wheel(delta, 0, 0);
+    h.c.resetWheel();
+    expect(h.c.wheel(delta, 0, 0)).toBe(false);
+    expect(h.calls.levels).toEqual([delta < 0 ? 1.1 : 0.9]);
+  });
+
   it("往下滚是缩小", () => {
     const h = harness();
     expect(h.c.wheel(100, 0, 0)).toBe(true);
