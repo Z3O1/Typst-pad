@@ -9,7 +9,7 @@
 // 2026-09-28 起被接管，2026-10-07 档宽改为设置项 tabSpaces（默认 2 空格，0 = 制表符）：
 // Tab 有选区给行首加一档、无选区插一档、有补全候选先接受候选；Shift+Tab 对称退一档。
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
-import { EditorState } from "@codemirror/state";
+import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView, keymap as keymapFacet } from "@codemirror/view";
 import {
   indentLess,
@@ -18,6 +18,8 @@ import {
   copyLineDown,
   toggleBlockComment,
   toggleComment,
+  undo,
+  redo,
 } from "@codemirror/commands";
 import { autocompletion, completionStatus, startCompletion } from "@codemirror/autocomplete";
 import { indentUnit } from "@codemirror/language";
@@ -491,6 +493,139 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     expect(view.state.doc.toString()).toBe("ab\n\nnext");
     expect(view.state.selection.main.head).toBe("ab\n\n".length);
     view.destroy();
+  });
+
+  it("写作模式：闭合 $ 右侧 Enter 分段，闭合符左侧与未闭合公式只写单换行", () => {
+    for (const original of [
+      "$x$",
+      "$$",
+      "$  $",
+      "$\n  x\n$",
+      "$ x + #f(1) $",
+      "$ x ` y $",
+      "$\n a\n  \\ =& `b\n$",
+      '"$x$"',
+    ]) {
+      const view = makeWriteView(original);
+      const pos = original.lastIndexOf("$") + 1;
+      view.dispatch({ selection: { anchor: pos } });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+      expect(view.state.doc.toString()).toBe(original.slice(0, pos) + "\n\n" + original.slice(pos));
+      expect(view.state.selection.main.head).toBe(pos + 2);
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(original);
+      expect(view.state.selection.main.head).toBe(pos);
+      expect(redo(view)).toBe(true);
+      expect(view.state.selection.main.head).toBe(pos + 2);
+      view.destroy();
+    }
+    for (const original of ["$x", "$x ", "$\n  x", "$\n  x ", "$x$", "$\n  x\n$", '"$x$"']) {
+      const view = makeWriteView(original);
+      const pos =
+        original.endsWith("$") || original.endsWith('$"')
+          ? original.lastIndexOf("$")
+          : original.length;
+      view.dispatch({ selection: { anchor: pos } });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+      const indent = original.includes("\n") && !original.endsWith("$") ? "  " : "";
+      expect(view.state.doc.toString()).toBe(
+        original.slice(0, pos) + "\n" + indent + original.slice(pos),
+      );
+      view.destroy();
+    }
+  });
+
+  it("两模式中多行公式 Enter 延续前缀，行中拆分不吞字，作为一个真实事务撤销/重做", () => {
+    for (const writeMode of [false, true]) {
+      for (const lineBreak of ["\n", "\r\n"]) {
+        for (const prefix of ["  \\ =& ", "\t\\\t&=\t"]) {
+          const original = `$\n a\n${prefix}b + c\n$`;
+          const pos = original.indexOf("b") + 1;
+          const host = document.createElement("div");
+          document.body.appendChild(host);
+          const view = new EditorView({
+            parent: host,
+            state: EditorState.create({
+              doc: original.replaceAll("\n", lineBreak),
+              selection: { anchor: pos },
+              extensions: [
+                basicSetup,
+                typst_lezer(),
+                createEditorKeymap({ isWriteMode: () => writeMode }),
+                EditorState.lineSeparator.of(lineBreak),
+              ],
+            }),
+          });
+          press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+          const expected = original.slice(0, pos) + "\n" + prefix + original.slice(pos);
+          expect(view.state.doc.toString()).toBe(expected);
+          expect(view.state.selection.main.head).toBe(pos + 1 + prefix.length);
+          expect(undo(view)).toBe(true);
+          expect(view.state.doc.toString()).toBe(original);
+          expect(view.state.selection.main.head).toBe(pos);
+          expect(redo(view)).toBe(true);
+          expect(view.state.doc.toString()).toBe(expected);
+          expect(view.state.selection.main.head).toBe(pos + 1 + prefix.length);
+          view.destroy();
+        }
+      }
+    }
+  });
+
+  it("前缀延续不接管 Shift+Enter、选区、多光标、只读或合成", () => {
+    const original = "$\n a\n  \\ =& b\n$";
+    const pos = original.indexOf("b") + 1;
+    for (const scenario of ["shift", "selection", "multi", "readonly", "composing"] as const) {
+      const host = document.createElement("div");
+      document.body.appendChild(host);
+      const view = new EditorView({
+        doc: original,
+        parent: host,
+        extensions: [
+          basicSetup,
+          typst_lezer(),
+          editorKeymap,
+          EditorState.allowMultipleSelections.of(true),
+          EditorState.readOnly.of(scenario === "readonly"),
+        ],
+      });
+      view.dispatch({
+        selection:
+          scenario === "multi"
+            ? EditorSelection.create([EditorSelection.cursor(3), EditorSelection.cursor(pos)], 1)
+            : { anchor: pos, head: scenario === "selection" ? pos - 1 : pos },
+      });
+      if (scenario === "composing") Object.defineProperty(view, "composing", { value: true });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: scenario === "shift" });
+      expect(view.state.doc.toString().match(/\\ =&/g)).toHaveLength(1);
+      if (scenario === "readonly") expect(view.state.doc.toString()).toBe(original);
+      if (scenario === "composing")
+        expect(view.state.doc.toString()).toBe(
+          original.slice(0, pos) + "\n  " + original.slice(pos),
+        );
+      view.destroy();
+    }
+  });
+
+  it("CRLF 的闭合公式后分段与已有换行复用按 CM 内部坐标定位", () => {
+    for (const original of ["$x$", "$x$\n后文"]) {
+      const host = document.createElement("div");
+      document.body.appendChild(host);
+      const view = new EditorView({
+        parent: host,
+        state: EditorState.create({
+          doc: original.replaceAll("\n", "\r\n"),
+          selection: { anchor: 3 },
+          extensions: [...writeBehaviorExtensions, EditorState.lineSeparator.of("\r\n")],
+        }),
+      });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+      expect(view.state.doc.toString()).toBe(original === "$x$" ? "$x$\n\n" : "$x$\n\n后文");
+      expect(view.state.selection.main.head).toBe(5);
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(original);
+      view.destroy();
+    }
   });
 
   it("写作模式：代码、raw、注释与公式内沿用安全的普通换行", () => {
