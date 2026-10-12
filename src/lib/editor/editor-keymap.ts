@@ -17,7 +17,8 @@ import { insertNewTypstListItem, insertTypstListContinuation } from "codemirror-
 import { emptyPairBackspace, planScaffoldExpand } from "./auto-pair";
 import { addDollarPair } from "./dollar-pair-state";
 import { indentForNewLine, isBlankLine } from "./auto-indent";
-import { scanMathRanges } from "../core/math-ranges";
+import { enterMathRanges, mathContinuationPrefix, mathEnterTree } from "./math-enter";
+import type { EnterMathRange } from "./math-enter";
 import { scanNonMarkupRegions } from "../core/typst-lex";
 import type { Region } from "../core/typst-lex";
 import { defaultSettings } from "../core/app-settings";
@@ -205,7 +206,7 @@ function newlineKeepingIndent(view: EditorView): boolean {
         const blank = range.empty && isBlankLine(line.text);
         const from = blank ? line.from : range.from;
         const to = blank ? line.to : range.to;
-        const insert = state.lineBreak + indent;
+        const insert = state.toText(state.lineBreak + indent);
         return {
           changes: { from, to, insert },
           range: EditorSelection.cursor(from + insert.length),
@@ -223,14 +224,25 @@ function touchesOpaqueContext(
   to: number,
   doc: string,
   opaque: readonly Region[],
-  math: readonly { from: number; to: number }[],
+  math: readonly EnterMathRange[],
 ): boolean {
   // Lexer 为公式扫描也会记录 markup 直引号；字符串在 `#...` 代码里已包含于 code span。
-  const markupRegions = opaque.filter((region) => region.kind !== "string");
+  const markupRegions = opaque.filter(
+    (region) =>
+      region.kind !== "string" &&
+      // 数学内的同形字符（如反引号）不一定是 raw/code。语言树已确认闭合公式，
+      // 不让词法扫描从公式内部延伸出的区域把闭合 $ 右侧误判成不透明上下文。
+      !math.some((range) => range.closed && region.from > range.from && region.from < range.to),
+  );
   if (from !== to) {
     return [...markupRegions, ...math].some((range) => from < range.to && to > range.from);
   }
-  if ([...markupRegions, ...math].some((range) => from >= range.from && from < range.to)) {
+  if (
+    markupRegions.some((range) => from >= range.from && from < range.to) ||
+    math.some(
+      (range) => from >= range.from && (from < range.to || (!range.closed && from === range.to)),
+    )
+  ) {
     return true;
   }
 
@@ -290,7 +302,9 @@ function newlineWithTypstSemantics(view: EditorView, softBreak: boolean): boolea
 
   const doc = state.doc.toString();
   const opaque = scanNonMarkupRegions(doc);
-  const math = scanMathRanges(doc, opaque);
+  const math = enterMathRanges(
+    mathEnterTree(doc, ensureSyntaxTree(state, state.doc.length, 20) ?? undefined),
+  ).filter((range) => !range.closed || doc.slice(range.from + 1, range.to - 1).trim() !== "");
   view.dispatch(
     state.update(
       state.changeByRange((range) => {
@@ -300,7 +314,7 @@ function newlineWithTypstSemantics(view: EditorView, softBreak: boolean): boolea
 
         // 空白行上沿用原有行为：清理残留缩进并增加一行，不写没有正文的 `\\`。
         if (blank) {
-          const insert = state.lineBreak;
+          const insert = state.toText(state.lineBreak);
           return {
             changes: { from: line.from, to: line.to, insert },
             range: EditorSelection.cursor(line.from + insert.length),
@@ -308,7 +322,7 @@ function newlineWithTypstSemantics(view: EditorView, softBreak: boolean): boolea
         }
 
         if (touchesOpaqueContext(range.from, range.to, doc, opaque, math)) {
-          const insert = state.lineBreak + indent;
+          const insert = state.toText(state.lineBreak + indent);
           return {
             changes: { from: range.from, to: range.to, insert },
             range: EditorSelection.cursor(range.from + insert.length),
@@ -317,15 +331,13 @@ function newlineWithTypstSemantics(view: EditorView, softBreak: boolean): boolea
 
         // 当光标/选区正好到行尾时，已有的行分隔符可以参与构造：
         // Enter 在它前面再插一个换行，得到恰好两个换行；Shift+Enter 则把它改成 `\\\n`。
-        const endsAtLineBreak =
-          range.to === line.to &&
-          state.doc.sliceString(line.to, line.to + state.lineBreak.length) === state.lineBreak;
+        const endsAtLineBreak = range.to === line.to && line.to < state.doc.length;
 
         if (!softBreak) {
           // Enter = Typora 的新段落：用恰好两个换行替换行尾原有的一个，或在行中直接插入。
           // 光标落在新段落起点；接着打字不会落进空白分隔行里。
-          const insert = state.lineBreak.repeat(2) + indent;
-          const to = endsAtLineBreak ? range.to + state.lineBreak.length : range.to;
+          const insert = state.toText(state.lineBreak.repeat(2) + indent);
+          const to = endsAtLineBreak ? range.to + 1 : range.to;
           return {
             changes: { from: range.from, to, insert },
             range: EditorSelection.cursor(range.from + insert.length),
@@ -334,12 +346,12 @@ function newlineWithTypstSemantics(view: EditorView, softBreak: boolean): boolea
 
         if (endsAtLineBreak) {
           // 复用已有换行，并保留下一行现有缩进；仅在下一行没有缩进时沿用本行缩进。
-          const nextLine = state.doc.lineAt(line.to + state.lineBreak.length);
+          const nextLine = state.doc.lineAt(line.to + 1);
           const nextIndent = /^[ \t]*/.exec(nextLine.text)?.[0] ?? "";
           const continuationIndent = nextIndent.length === 0 ? indent : "";
-          const insert = "\\" + state.lineBreak + continuationIndent;
+          const insert = state.toText("\\" + state.lineBreak + continuationIndent);
           const from = range.from;
-          const to = range.to + state.lineBreak.length;
+          const to = range.to + 1;
           const caret = from + insert.length + (nextIndent.length > 0 ? nextIndent.length : 0);
           return {
             changes: { from, to, insert },
@@ -348,7 +360,7 @@ function newlineWithTypstSemantics(view: EditorView, softBreak: boolean): boolea
         }
 
         // Shift+Enter = Typst line break (`\\` followed by a source newline and indentation).
-        const insert = "\\" + state.lineBreak + indent;
+        const insert = state.toText("\\" + state.lineBreak + indent);
         return {
           changes: { from: range.from, to: range.to, insert },
           range: EditorSelection.cursor(range.from + insert.length),
@@ -406,6 +418,26 @@ function listAwareEnter(
   };
 }
 
+function continueMathPrefix(view: EditorView): boolean {
+  const { state } = view;
+  if (state.readOnly || view.composing || view.compositionStarted) return false;
+  if (state.selection.ranges.length !== 1 || !state.selection.main.empty) return false;
+  const syntax = ensureSyntaxTree(state, state.doc.length, 20);
+  if (!syntax && state.facet(language)) return false;
+  const pos = state.selection.main.head;
+  const doc = state.doc.toString();
+  const prefix = mathContinuationPrefix(doc, pos, mathEnterTree(doc, syntax ?? undefined));
+  if (prefix === null) return false;
+  const insert = state.toText(state.lineBreak + prefix);
+  view.dispatch({
+    changes: { from: pos, insert },
+    selection: { anchor: pos + insert.length },
+    scrollIntoView: true,
+    userEvent: "input",
+  });
+  return true;
+}
+
 /**
  * 光标在**独占一行的空配对** `$$` 或空行间脚手架 `$  $` 内部时，Enter 展开成三行：
  * `$` / 一档 / `$`（一档 = `tabUnit(tabSpaces)`，与 Tab 键的档宽联动；
@@ -453,10 +485,11 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
   const isWriteMode = opts.isWriteMode ?? (() => false);
   // 未传 getter 时（源码模式的 editorKeymap 导出、单测直建）回落 app-settings 的唯一默认源
   const tabSpaces = opts.tabSpaces ?? (() => defaultSettings().tabSpaces);
-  // Enter 的完整链路：空脚手架展开（新，最优先）→ 列表命令 → 段落/续行换行。
+  // Enter 链路：空脚手架展开 → 多行数学前缀延续 → 列表命令 → 段落/续行换行。
   // 展开不匹配时必须交回原链路，所以包成一层而不是拆开 listAwareEnter。
   const enterWithScaffold = (view: EditorView): boolean =>
     expandMathScaffold(view, tabSpaces()) ||
+    continueMathPrefix(view) ||
     listAwareEnter(isWriteMode, insertNewTypstListItem, false)(view);
   return Prec.high(
     keymap.of([
