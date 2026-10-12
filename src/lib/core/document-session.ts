@@ -78,10 +78,17 @@ export interface DocumentSessionHooks {
   fileTitle: () => string;
   /** 未保存修改的判据基线（`null` = 未知，见 `isDocModified`）：与 `doc` 一起决定"要不要问" */
   baseline: () => string | null;
+  /** 当前会话标识；防止迟到保存覆盖新会话 */
+  currentSession?: () => number | string;
+  currentRevision?: () => number;
   /** 把磁盘内容落到页面状态：`doc` / `editorDoc` / `filePath` / `fileTitle` / `baseline`（契约 3） */
   applyLoaded: (content: string, path: string) => void;
-  /** 保存成功后只动路径 / 标题 / 基线 —— **不碰 `doc` 与 `editorDoc`**（保存不改内容） */
-  applySaved: (path: string) => void;
+  /**
+   * 保存成功后只动路径 / 标题 / 基线 —— **不碰 `doc` 与 `editorDoc`**（保存不改内容）。
+   * `content` 是实际提交给 `writeFile` 的那份正文快照，基线必须绑到它而不是 await 后的当前 doc，
+   * 否则保存等待期间用户的后续输入会被错误地当成已保存版本。
+   */
+  applySaved: (path: string, content: string) => void;
   /** 新建：清空文档、路径置空、标题回到「未命名.typ」、基线回到空串 */
   applyNew: () => void;
   /** 载入（打开 / 重新读取）之后统一的后继动作：作废整页产物与交互 → 重编译 → 存会话 */
@@ -117,6 +124,27 @@ export interface DocumentSession {
 }
 
 export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSession {
+  let transition = 0;
+  function capture() {
+    return {
+      request: ++transition,
+      path: hooks.filePath(),
+      doc: hooks.doc(),
+      baseline: hooks.baseline(),
+      session: hooks.currentSession?.(),
+      revision: hooks.currentRevision?.(),
+    };
+  }
+  function stale(snapshot: ReturnType<typeof capture>): boolean {
+    return (
+      snapshot.request !== transition ||
+      snapshot.path !== hooks.filePath() ||
+      snapshot.doc !== hooks.doc() ||
+      snapshot.baseline !== hooks.baseline() ||
+      snapshot.session !== hooks.currentSession?.() ||
+      snapshot.revision !== hooks.currentRevision?.()
+    );
+  }
   /** 有未保存修改时请求确认；桌面走原生对话框（带标题与警告图标），浏览器回退到 `window.confirm` */
   async function confirmDiscard(
     message = DISCARD_OPEN_MESSAGE,
@@ -127,6 +155,7 @@ export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSess
   }
 
   async function openPath(path: string): Promise<boolean> {
+    const snapshot = capture();
     // 契约 1：**包括打开的就是当前这个文件**也算"会丢内容"，必须问
     if (isDocModified(hooks.doc(), hooks.baseline())) {
       const same = hooks.filePath() === path;
@@ -135,24 +164,26 @@ export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSess
           ? `「${hooks.fileTitle()}」有未保存的修改，重新打开将丢弃这些修改。仍要打开吗？`
           : DISCARD_OPEN_MESSAGE,
       );
-      if (!ok) return false;
+      if (!ok || stale(snapshot)) return false;
     }
     try {
       const opened = await hooks.readFile(path);
+      if (stale(snapshot)) return false;
       hooks.applyLoaded(opened.content, opened.path);
       hooks.afterLoad();
       hooks.setStatus("已打开");
       return true;
     } catch (e) {
       // 带上 Rust 侧的原因（`仅支持 .typ 文件` / `目录无效` …）：光写「打开失败」用户不知道能改什么
-      hooks.setStatus(failureStatus("打开失败", e));
+      if (!stale(snapshot)) hooks.setStatus(failureStatus("打开失败", e));
       return false;
     }
   }
 
   async function open(): Promise<void> {
+    const snapshot = capture();
     const path = await hooks.pickFile();
-    if (!path) return;
+    if (!path || stale(snapshot)) return;
     await openPath(path);
   }
 
@@ -160,41 +191,53 @@ export function createDocumentSession(hooks: DocumentSessionHooks): DocumentSess
     // 2026-09-18 用户要求删掉「保存空文档」那个确认窗：空文档保存进已有文件时**直接写**，不再问。
     // 前提没变：全工程只有 `writeFile`（页面侧 `saveTypFile`）一个 .typ 写入口，只挂在显式保存上 ——
     // 不按保存，磁盘上的文件一个字节也不会动。
+    // 先快照要写入的正文和会话：writeFile 是异步的，等待期间用户可能继续输入或切会话，
+    // 基线必须绑到真正落盘的内容，且不能把结果写入已经离开的会话。
+    const content = hooks.doc();
+    const sessionBefore = hooks.currentSession?.();
+    const pathBefore = hooks.filePath();
+    const stale = () =>
+      hooks.filePath() !== pathBefore ||
+      (hooks.currentSession && hooks.currentSession() !== sessionBefore);
     try {
-      const saved = await hooks.writeFile(hooks.filePath(), hooks.doc());
+      const saved = await hooks.writeFile(pathBefore, content);
       if (!saved) return null; // 另存为对话框里取消了：路径 / 基线都不许动（正文照旧算未保存修改）
-      hooks.applySaved(saved);
+      if (stale()) return null;
+      hooks.applySaved(saved, content);
       hooks.afterSave();
       return saved;
     } catch (e) {
-      hooks.setStatus(failureStatus("保存失败", e));
+      if (!stale()) hooks.setStatus(failureStatus("保存失败", e));
       return null;
     }
   }
 
   async function reload(): Promise<void> {
+    const snapshot = capture();
     const path = hooks.filePath();
     if (!path) return; // 未命名文档：忽略
     if (isDocModified(hooks.doc(), hooks.baseline())) {
       const ok = await confirmDiscard(
         "当前文档有未保存的修改，重新读取将丢失这些修改。仍要重新读取吗？",
       );
-      if (!ok) return;
+      if (!ok || stale(snapshot)) return;
     }
     try {
       const opened = await hooks.readFile(path);
+      if (stale(snapshot)) return;
       hooks.applyLoaded(opened.content, opened.path);
       hooks.afterLoad();
       hooks.setStatus("已重新读取");
     } catch (e) {
-      hooks.setStatus(failureStatus("重新读取失败", e));
+      if (!stale(snapshot)) hooks.setStatus(failureStatus("重新读取失败", e));
     }
   }
 
   async function createNew(): Promise<void> {
+    const snapshot = capture();
     if (isDocModified(hooks.doc(), hooks.baseline())) {
       const ok = await confirmDiscard("当前文档有未保存的修改，新建将丢弃这些修改。仍要新建吗？");
-      if (!ok) return;
+      if (!ok || stale(snapshot)) return;
     }
     hooks.applyNew();
     hooks.clearSession(); // 契约 4：连"启动恢复上次内容"那条后路一起断（页面负责只主窗口做）

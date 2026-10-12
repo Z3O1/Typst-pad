@@ -1,0 +1,809 @@
+// @vitest-environment node
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { createExternalFileChange, type ExternalFileChangeHooks } from "./external-file-change";
+
+function createHooks(): ExternalFileChangeHooks & {
+  calls: {
+    applyReload: [string, string][];
+    prompt: [string, string][];
+    status: string[];
+    startWatch: (string | null)[];
+    stopWatch: number;
+  };
+  setPromptResults: (results: boolean[]) => void;
+  setPath: (p: string | null) => void;
+  setDoc: (d: string) => void;
+  setBaseline: (b: string | null) => void;
+  setSession: (s: number) => void;
+  setDisk: (p: string, c: string) => void;
+  removeDisk: (p: string) => void;
+  bumpSession: () => void;
+} {
+  const calls = {
+    applyReload: [] as [string, string][],
+    prompt: [] as [string, string][],
+    status: [] as string[],
+    startWatch: [] as (string | null)[],
+    stopWatch: 0,
+  };
+  let path: string | null = null;
+  let doc = "";
+  let baseline: string | null = "";
+  let session = 0;
+  let disk = new Map<string, string>();
+  let promptResults: boolean[] = [];
+  let promptIndex = 0;
+
+  return {
+    calls,
+    setPromptResults: (results) => {
+      promptResults = results;
+      promptIndex = 0;
+    },
+    setPath: (p) => (path = p),
+    setDoc: (d) => (doc = d),
+    setBaseline: (b) => (baseline = b),
+    setSession: (s) => (session = s),
+    setDisk: (p, c) => disk.set(p, c),
+    removeDisk: (p) => disk.delete(p),
+    bumpSession: () => session++,
+    currentPath: () => path,
+    currentDoc: () => doc,
+    currentBaseline: () => baseline,
+    currentSession: () => session,
+    applyReload: (p, c) => {
+      calls.applyReload.push([p, c]);
+      doc = c;
+      baseline = c;
+      path = p;
+    },
+    promptReloadOrKeep: async (message, title) => {
+      calls.prompt.push([message, title]);
+      const result = promptResults[promptIndex++] ?? false;
+      return result;
+    },
+    setStatus: (text) => calls.status.push(text),
+    readFile: async (p) => {
+      const content = disk.get(p);
+      if (content === undefined) throw new Error("文件不存在");
+      return { path: p, content };
+    },
+    startWatch: async (p) => {
+      calls.startWatch.push(p);
+    },
+    stopWatch: async () => {
+      calls.stopWatch++;
+    },
+  };
+}
+
+describe("createExternalFileChange", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("干净文档遇到外部修改时自动重读", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("hello");
+    hooks.setBaseline("hello");
+    hooks.setDisk("/doc.typ", "world");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+    expect(hooks.calls.startWatch).toEqual(["/doc.typ"]);
+
+    m.onFileChanged({ path: "/doc.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(hooks.calls.applyReload).toEqual([["/doc.typ", "world"]]);
+    expect(m.hasConflict()).toBe(false);
+    expect(hooks.calls.prompt).toHaveLength(0);
+  });
+
+  it("外部修改与当前正文一致时不动作", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("same");
+    hooks.setBaseline("same");
+    hooks.setDisk("/doc.typ", "same");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+    m.onFileChanged({ path: "/doc.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(hooks.calls.applyReload).toHaveLength(0);
+    expect(hooks.calls.prompt).toHaveLength(0);
+  });
+
+  it("有未保存修改时提示用户；选择重读则应用磁盘内容", async () => {
+    const hooks = createHooks();
+    hooks.setPromptResults([true]);
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/doc.typ", "disk");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+    m.onFileChanged({ path: "/doc.typ" });
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(hooks.calls.prompt).toHaveLength(1);
+    expect(hooks.calls.applyReload).toEqual([["/doc.typ", "disk"]]);
+    expect(m.hasConflict()).toBe(false);
+  });
+
+  it("有未保存修改时选择保留，则不再为同一磁盘版本重复弹窗", async () => {
+    const hooks = createHooks();
+    hooks.setPromptResults([false]);
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/doc.typ", "disk");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+    m.onFileChanged({ path: "/doc.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(hooks.calls.prompt).toHaveLength(1);
+    expect(hooks.calls.applyReload).toHaveLength(0);
+    expect(m.hasConflict()).toBe(true);
+
+    // 同一内容再次触发事件
+    m.onFileChanged({ path: "/doc.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(hooks.calls.prompt).toHaveLength(1); // 没有二次弹窗
+  });
+
+  it("新的外部版本会再次提示", async () => {
+    const hooks = createHooks();
+    hooks.setPromptResults([false, true]);
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+
+    hooks.setDisk("/doc.typ", "disk1");
+    m.onFileChanged({ path: "/doc.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    hooks.setDisk("/doc.typ", "disk2");
+    m.onFileChanged({ path: "/doc.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(hooks.calls.prompt).toHaveLength(2);
+    expect(hooks.calls.applyReload).toEqual([["/doc.typ", "disk2"]]);
+  });
+
+  it("旧路径事件在切文件后被忽略", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("a");
+    hooks.setBaseline("a");
+    hooks.setDisk("/a.typ", "changed");
+    hooks.setDisk("/b.typ", "b");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+
+    // 切到 b.typ
+    await m.watchPath("/b.typ");
+
+    // 旧的 a.typ 事件到达
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(hooks.calls.applyReload).toHaveLength(0);
+    expect(hooks.calls.prompt).toHaveLength(0);
+  });
+
+  it("文件不可读时给出非破坏提示", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("local");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+    m.onFileChanged({ path: "/doc.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(hooks.calls.applyReload).toHaveLength(0);
+    expect(hooks.calls.prompt).toHaveLength(0);
+    expect(hooks.calls.status.at(-1)).toContain("已删除或暂时无法读取");
+  });
+
+  it("保存前已知冲突时确认；取消则阻止保存", async () => {
+    const hooks = createHooks();
+    hooks.setPromptResults([false, false]); // 保留外部修改，再取消保存
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/doc.typ", "disk");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+    m.onFileChanged({ path: "/doc.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    const proceed = await m.confirmSaveIfConflict();
+    expect(proceed).toBe(false);
+    expect(hooks.calls.prompt).toHaveLength(2);
+  });
+
+  it("保存前无冲突时直接放行", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+
+    const proceed = await m.confirmSaveIfConflict();
+    expect(proceed).toBe(true);
+    expect(hooks.calls.prompt).toHaveLength(0);
+  });
+
+  it("保存成功后清除冲突标记", async () => {
+    const hooks = createHooks();
+    hooks.setPromptResults([false]);
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/doc.typ", "disk");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+    m.onFileChanged({ path: "/doc.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(m.hasConflict()).toBe(true);
+
+    m.clearConflict();
+    expect(m.hasConflict()).toBe(false);
+  });
+
+  it("dispose 取消在途检查并停止监控", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/doc.typ");
+    hooks.setDoc("a");
+    hooks.setBaseline("a");
+    hooks.setDisk("/doc.typ", "b");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/doc.typ");
+    m.onFileChanged({ path: "/doc.typ" });
+
+    await m.dispose();
+    vi.advanceTimersByTimeAsync(500);
+
+    expect(hooks.calls.applyReload).toHaveLength(0);
+    expect(hooks.calls.stopWatch).toBeGreaterThan(0);
+  });
+
+  it("在途 read 完成后若路径已切换，不得应用旧磁盘内容", async () => {
+    const hooks = createHooks();
+    let finishRead: ((value: { path: string; content: string }) => void) | null = null;
+    hooks.setPath("/a.typ");
+    hooks.setDoc("a-baseline");
+    hooks.setBaseline("a-baseline");
+    hooks.readFile = () =>
+      new Promise((resolve) => {
+        finishRead = resolve;
+      });
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    // read 在途时切到 b.typ
+    hooks.setPath("/b.typ");
+    hooks.setDoc("b-baseline");
+    hooks.setBaseline("b-baseline");
+    await m.watchPath("/b.typ");
+
+    finishRead!({ path: "/a.typ", content: "external-a" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(hooks.calls.applyReload).toHaveLength(0);
+    expect(hooks.calls.prompt).toHaveLength(0);
+  });
+
+  it("dirty 文档收到磁盘仍是基线的内容时，不视为外部变更", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("new-unsaved-edit-after-save");
+    hooks.setBaseline("a-baseline");
+    hooks.setDisk("/a.typ", "a-baseline");
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(hooks.calls.prompt).toHaveLength(0);
+    expect(m.hasConflict()).toBe(false);
+  });
+
+  it("同路径新会话开始后，旧 prompt 的结果不得覆盖新会话", async () => {
+    const hooks = createHooks();
+    let finishPrompt: ((value: boolean) => void) | null = null;
+    hooks.setPath("/a.typ");
+    hooks.setDoc("dirty-a");
+    hooks.setBaseline("a-baseline");
+    hooks.setDisk("/a.typ", "external-a");
+    hooks.promptReloadOrKeep = async () =>
+      new Promise((resolve) => {
+        finishPrompt = resolve;
+      });
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    // prompt 在途时同路径换成新会话
+    hooks.setDoc("new-session-same-path");
+    hooks.setBaseline("new-session-same-path");
+    hooks.bumpSession();
+    await m.watchPath("/a.typ");
+
+    finishPrompt!(true);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(hooks.calls.applyReload).toHaveLength(0);
+  });
+
+  it("提示期间用户继续输入，旧选择不得覆盖新编辑", async () => {
+    const hooks = createHooks();
+    let finishPrompt: ((value: boolean) => void) | null = null;
+    hooks.setPromptResults([]);
+    hooks.setPath("/a.typ");
+    hooks.setDoc("dirty-a");
+    hooks.setBaseline("a-baseline");
+    hooks.setDisk("/a.typ", "external-a");
+    hooks.promptReloadOrKeep = async () =>
+      new Promise((resolve) => {
+        finishPrompt = resolve;
+      });
+
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+
+    hooks.setDoc("typed-after-prompt");
+    finishPrompt!(true);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(hooks.calls.applyReload).toHaveLength(0);
+  });
+
+  it.each(["read", "prompt"])(
+    "同身份晚 %s 期间输入后直接保存，不遗忘外部版本或应用旧选择",
+    async (phase) => {
+      const hooks = createHooks();
+      hooks.setPath("/a.typ");
+      hooks.setDoc("local");
+      hooks.setBaseline("base");
+      hooks.setDisk("/a.typ", "external");
+      let release!: () => void;
+      let reads = 0;
+      const readFile = hooks.readFile;
+      hooks.readFile = async (path) => {
+        const disk = await readFile(path);
+        if (phase === "read" && ++reads === 1) {
+          await new Promise<void>((r) => (release = r));
+        }
+        return disk;
+      };
+      let prompts = 0;
+      hooks.promptReloadOrKeep = async (message, title) => {
+        hooks.calls.prompt.push([message, title]);
+        if (phase === "prompt" && ++prompts === 1) {
+          await new Promise<void>((r) => (release = r));
+          return true; // 迟到的重读同意必须作废
+        }
+        return false;
+      };
+      const m = createExternalFileChange(hooks);
+      await m.watchPath("/a.typ");
+      await vi.advanceTimersByTimeAsync(200);
+      hooks.setDoc("continued-input");
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hooks.currentDoc()).toBe("continued-input");
+      expect(hooks.calls.applyReload).toHaveLength(0);
+      expect(m.hasConflict()).toBe(true);
+      // 不发第二次 file-changed；用户直接 save 也必须确认，而不是静默放行。
+      expect(await m.confirmSaveIfConflict()).toBe(false);
+      expect(hooks.calls.prompt.at(-1)?.[1]).toBe("保存冲突");
+      expect(m.hasConflict()).toBe(true);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(hooks.currentDoc()).toBe("continued-input");
+      expect(m.hasConflict()).toBe(true);
+      const promptCount = hooks.calls.prompt.length;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(hooks.calls.prompt).toHaveLength(promptCount); // 无忙循环或重叠提示
+      await m.dispose();
+    },
+  );
+
+  it("未知恢复基线按 dirty 提示，不自动覆盖", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("restored");
+    hooks.setBaseline(null);
+    hooks.setDisk("/a.typ", "disk");
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(hooks.calls.prompt).toHaveLength(1);
+    expect(hooks.calls.applyReload).toHaveLength(0);
+  });
+
+  it("stop/start 串行，切换和 dispose 不留下旧 watch", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    let release!: () => void;
+    let actual: string | null = null;
+    hooks.startWatch = async (path) => {
+      hooks.calls.startWatch.push(path);
+      if (path === "/a.typ") await new Promise<void>((r) => (release = r));
+      actual = path;
+    };
+    hooks.stopWatch = async () => {
+      actual = null;
+    };
+    const m = createExternalFileChange(hooks);
+    const a = m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(0);
+    hooks.setPath("/b.typ");
+    const b = m.watchPath("/b.typ");
+    expect(hooks.calls.startWatch).toEqual(["/a.typ"]);
+    release();
+    await Promise.all([a, b]);
+    expect(actual).toBe("/b.typ");
+    await m.dispose();
+    expect(actual).toBeNull();
+  });
+
+  it("确认期间的新磁盘版本保留 latest demand，旧版本不落地", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "disk1");
+    let release!: (value: boolean) => void;
+    let prompts = 0;
+    hooks.promptReloadOrKeep = async () => {
+      prompts++;
+      if (prompts === 1) return new Promise<boolean>((r) => (release = r));
+      return false;
+    };
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    hooks.setDisk("/a.typ", "disk2");
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(prompts).toBe(1);
+    release(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prompts).toBe(2);
+    expect(hooks.calls.applyReload).toHaveLength(0);
+    expect(m.hasConflict()).toBe(true);
+  });
+
+  it("保存和外部事件共用提示槽，不重叠确认或丢掉最新事件", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "disk1");
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    let release!: (value: boolean) => void;
+    let prompts = 0;
+    hooks.promptReloadOrKeep = async () => {
+      prompts++;
+      if (prompts === 1) return new Promise<boolean>((r) => (release = r));
+      return false;
+    };
+    const save = m.confirmSaveIfConflict();
+    hooks.setDisk("/a.typ", "disk2");
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(prompts).toBe(1);
+    release(true);
+    expect(await save).toBe(false);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(prompts).toBe(2);
+    expect(m.hasConflict()).toBe(true);
+    expect(hooks.calls.applyReload).toHaveLength(0);
+  });
+
+  it.each(["path", "same-path-session", "reject", "dispose"])(
+    "%s：旧保存确认未 settle 时保持全局提示占用，身份授权立即作废",
+    async (change) => {
+      const hooks = createHooks();
+      hooks.setPath("/a.typ");
+      hooks.setDoc("local-a");
+      hooks.setBaseline("base-a");
+      hooks.setDisk("/a.typ", "external-a");
+      const m = createExternalFileChange(hooks);
+      await m.watchPath("/a.typ");
+      await vi.advanceTimersByTimeAsync(200); // A 已选择 keep，存在保存冲突
+      let release!: (value: boolean) => void;
+      let reject!: (error: Error) => void;
+      let unsettled = 0;
+      let maxUnsettled = 0;
+      let prompts = 0;
+      hooks.promptReloadOrKeep = async (message, title) => {
+        hooks.calls.prompt.push([message, title]);
+        unsettled++;
+        maxUnsettled = Math.max(maxUnsettled, unsettled);
+        try {
+          if (++prompts === 1) {
+            expect(title).toBe("保存冲突");
+            return await new Promise<boolean>((resolve, fail) => {
+              release = resolve;
+              reject = fail;
+            });
+          }
+          return false;
+        } finally {
+          unsettled--;
+        }
+      };
+      const old = m.beginSave()!;
+      const saving = m
+        .confirmSaveIfConflict(old)
+        .finally(() => m.endSave(old))
+        .catch(() => "rejected" as const);
+      const path = change === "same-path-session" ? "/a.typ" : "/b.typ";
+      hooks.setPath(path);
+      hooks.bumpSession();
+      hooks.setDoc("local-b");
+      hooks.setBaseline("base-b");
+      hooks.setDisk(path, "external-b");
+      await m.watchPath(path);
+      if (change === "dispose") await m.dispose();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(maxUnsettled).toBe(1);
+      expect(unsettled).toBe(1);
+      expect(prompts).toBe(1);
+      expect(hooks.currentDoc()).toBe("local-b");
+      if (change === "reject") reject(new Error("dialog rejected"));
+      else release(true); // 旧同意也不得授权保存或覆盖 B
+      expect(await saving).toBe(change === "reject" ? "rejected" : false);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(unsettled).toBe(0);
+      expect(maxUnsettled).toBe(1);
+      expect(hooks.calls.applyReload).toHaveLength(0);
+      if (change === "dispose") {
+        expect(prompts).toBe(1);
+        expect(m.beginSave()).toBeNull();
+        return;
+      }
+      expect(prompts).toBe(2); // B 最新需求仅在旧 dialog 真正结束后消费
+      expect(m.hasConflict()).toBe(true);
+      const current = m.beginSave()!;
+      expect(await m.confirmSaveIfConflict(current)).toBe(false);
+      m.endSave(current);
+      m.endSave(old);
+      expect(prompts).toBe(3);
+      expect(m.hasConflict()).toBe(true);
+      expect(hooks.currentDoc()).toBe("local-b");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(prompts).toBe(3); // 单槽需求，无无限提示队列
+    },
+  );
+
+  it("own-save 槽从同步入口保持到真实基线应用，提前事件不误报", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("saved-snapshot");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "base");
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    const token = m.beginSave()!;
+    expect(m.beginSave()).toBeNull();
+    expect(await m.confirmSaveIfConflict(token)).toBe(true);
+    hooks.setDisk("/a.typ", "saved-snapshot");
+    hooks.setDoc("saved-snapshot-plus-input");
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hooks.calls.prompt).toHaveLength(0);
+    expect(hooks.calls.applyReload).toHaveLength(0);
+    hooks.setBaseline("saved-snapshot");
+    m.acknowledgeSave("/a.typ", "saved-snapshot");
+    m.endSave(token);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(hooks.calls.prompt).toHaveLength(0);
+    expect(hooks.currentDoc()).toBe("saved-snapshot-plus-input");
+    expect(hooks.currentBaseline()).toBe("saved-snapshot");
+    const next = m.beginSave()!;
+    expect(next).not.toBeNull();
+    m.endSave(next);
+  });
+
+  it.each(["cancel", "failure"])("%s 后释放 own-save 槽并恢复最新外部需求", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "base");
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    const token = m.beginSave()!;
+    hooks.setDisk("/a.typ", "external");
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hooks.calls.prompt).toHaveLength(0);
+    // 页面取消或 write 失败均在 finally 释放，但不推进基线或清冲突。
+    m.endSave(token);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(hooks.calls.prompt).toHaveLength(1);
+    expect(m.hasConflict()).toBe(true);
+    expect(hooks.currentDoc()).toBe("local");
+    const next = m.beginSave()!;
+    expect(await m.confirmSaveIfConflict(next)).toBe(false);
+    m.endSave(next);
+    expect(m.hasConflict()).toBe(true);
+  });
+
+  it.each(["path", "same-path-session"])(
+    "%s 切换后旧 save finally 不解除新 save 槽",
+    async (change) => {
+      const hooks = createHooks();
+      hooks.setPath("/a.typ");
+      hooks.setDoc("local-a");
+      hooks.setBaseline("base-a");
+      hooks.setDisk("/a.typ", "base-a");
+      const m = createExternalFileChange(hooks);
+      await m.watchPath("/a.typ");
+      await vi.advanceTimersByTimeAsync(200);
+      const old = m.beginSave()!;
+      expect(await m.confirmSaveIfConflict(old)).toBe(true);
+      const path = change === "path" ? "/b.typ" : "/a.typ";
+      hooks.setPath(path);
+      hooks.bumpSession();
+      hooks.setDoc("local-b");
+      hooks.setBaseline("base-b");
+      hooks.setDisk(path, "base-b");
+      await m.watchPath(path);
+      await vi.advanceTimersByTimeAsync(200);
+      const current = m.beginSave()!;
+      expect(current).not.toBeNull();
+      expect(await m.confirmSaveIfConflict(current)).toBe(true);
+      hooks.setDisk(path, "external-b");
+      m.onFileChanged({ path });
+      m.endSave(old);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(hooks.calls.prompt).toHaveLength(0);
+      m.endSave(current);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(hooks.calls.prompt).toHaveLength(1);
+      expect(m.hasConflict()).toBe(true);
+      m.endSave(old);
+      expect(m.hasConflict()).toBe(true);
+      expect(hooks.currentDoc()).toBe("local-b");
+    },
+  );
+
+  it("同步 save 入口等待已有 read，外部版本只交保存确认而不重叠提示", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "external");
+    const read = hooks.readFile;
+    let release!: () => void;
+    let reads = 0;
+    hooks.readFile = async (path) => {
+      const disk = await read(path);
+      if (++reads === 1) await new Promise<void>((r) => (release = r));
+      return disk;
+    };
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    const token = m.beginSave()!;
+    const save = m.confirmSaveIfConflict(token);
+    release();
+    expect(await save).toBe(false);
+    expect(m.hasConflict()).toBe(true);
+    expect(hooks.calls.prompt.map((p) => p[1])).toEqual(["保存冲突"]);
+    m.endSave(token);
+  });
+
+  it("dispose 作废 own-save token，不因迟到 finally 恢复检测", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDisk("/a.typ", "external");
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    const token = m.beginSave()!;
+    m.onFileChanged({ path: "/a.typ" });
+    await m.dispose();
+    m.endSave(token);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(m.beginSave()).toBeNull();
+    expect(hooks.calls.prompt).toHaveLength(0);
+    expect(hooks.calls.applyReload).toHaveLength(0);
+  });
+
+  it("保存结果不盲清保存期间出现的新冲突", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("saved");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "external-during-save");
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    hooks.setBaseline("saved");
+    m.acknowledgeSave("/a.typ", "saved");
+    expect(m.hasConflict()).toBe(true);
+    hooks.setPromptResults([false]);
+    expect(await m.confirmSaveIfConflict()).toBe(false);
+  });
+
+  it("正文输入再撤销回原值也让旧确认作废", async () => {
+    const hooks = createHooks();
+    let revision = 0;
+    hooks.currentRevision = () => revision;
+    hooks.setPath("/a.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "disk");
+    let release!: (value: boolean) => void;
+    hooks.promptReloadOrKeep = () => new Promise<boolean>((r) => (release = r));
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    revision += 2;
+    release(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.calls.applyReload).toHaveLength(0);
+  });
+
+  it.each(["session", "path", "disk", "doc"])(
+    "保存确认绑定原快照：%s 变化则拒绝",
+    async (change) => {
+      const hooks = createHooks();
+      hooks.setPath("/a.typ");
+      hooks.setDoc("local");
+      hooks.setBaseline("base");
+      hooks.setDisk("/a.typ", "disk");
+      const m = createExternalFileChange(hooks);
+      await m.watchPath("/a.typ");
+      await vi.advanceTimersByTimeAsync(200);
+      let release!: (value: boolean) => void;
+      hooks.promptReloadOrKeep = () => new Promise<boolean>((r) => (release = r));
+      const save = m.confirmSaveIfConflict();
+      if (change === "session") hooks.bumpSession();
+      if (change === "path") hooks.setPath("/b.typ");
+      if (change === "disk") hooks.setDisk("/a.typ", "new-disk");
+      if (change === "doc") hooks.setDoc("new-input");
+      release(true);
+      expect(await save).toBe(false);
+      expect(hooks.calls.applyReload).toHaveLength(0);
+    },
+  );
+});

@@ -19,6 +19,9 @@ edition = "2021"
 name = "typst_pad_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -48,6 +51,10 @@ ureq = "3"
 tar = "0.4"
 flate2 = "1"
 dirs = "6"
+# 跨平台原生文件监控：仅 watch 当前主文件，配合前端处理外部修改。
+# 选择 notify 8.x 稳定线（8.2.0，rust-version 1.77），不引入 9.0.0-rc 预发布。
+notify = "8.2.0"
+notify-debouncer-mini = "0.7.0"
 
 [target.'cfg(windows)'.dependencies]
 # 禁用 WebView2 浏览器加速键（Ctrl+R 整页刷新等）：直接操作 WebView2 COM 接口

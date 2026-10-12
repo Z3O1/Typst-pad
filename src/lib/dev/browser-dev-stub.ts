@@ -184,6 +184,41 @@ const FAKE_UPDATE = {
 const FAKE_PATH = "/browser-dev/未命名.typ";
 const fakeFiles = new Map<string, string>();
 
+/** 只用于文件变更接线验收：扣住一次 IPC 的响应，不替代真实磁盘 watcher。 */
+function deferredFileResponse() {
+  let resolve: (() => void) | null = null;
+  return {
+    holdNext: false,
+    get pending() {
+      return resolve !== null;
+    },
+    release() {
+      resolve?.();
+      resolve = null;
+    },
+    async wait() {
+      if (!this.holdNext) return;
+      this.holdNext = false;
+      await new Promise<void>((r) => {
+        resolve = r;
+      });
+    },
+  };
+}
+const fileChangeStub = {
+  read: deferredFileResponse(),
+  prompt: deferredFileResponse(),
+  write: deferredFileResponse(),
+  writeFailure: { message: null as string | null },
+  prompts: [] as string[],
+  watchedPath: null as string | null,
+  starts: [] as string[],
+  stops: 0,
+  setDisk(path: string, content: string) {
+    fakeFiles.set(path, content);
+  },
+};
+
 /** 已提示过的命令（编译每次输入都会触发，只提示一次，避免刷屏） */
 const notified = new Set<string>();
 
@@ -488,11 +523,28 @@ async function handleCommand(
       writes.push({ path, content });
       w.__browserDevWrites = writes;
       notify(command);
+      await fileChangeStub.write.wait();
+      const failure = fileChangeStub.writeFailure.message;
+      fileChangeStub.writeFailure.message = null;
+      if (failure) throw new Error(failure);
       return null;
     }
     case "read_file": {
       notify(command);
-      return fakeFiles.get(typeof a.path === "string" ? a.path : "") ?? "";
+      const content = fakeFiles.get(typeof a.path === "string" ? a.path : "") ?? "";
+      await fileChangeStub.read.wait();
+      return content;
+    }
+    case "start_file_watch": {
+      const path = String(a.path);
+      fileChangeStub.watchedPath = path;
+      fileChangeStub.starts.push(path);
+      return null;
+    }
+    case "stop_file_watch": {
+      fileChangeStub.watchedPath = null;
+      fileChangeStub.stops++;
+      return null;
     }
     case "export_pdf": {
       notify(command);
@@ -596,6 +648,8 @@ async function handleCommand(
         );
       }
       if (command === "plugin:dialog|message") {
+        fileChangeStub.prompts.push(String(a.message));
+        await fileChangeStub.prompt.wait();
         return (window as unknown as { __browserDevConfirm?: boolean }).__browserDevConfirm === true
           ? "Ok"
           : "Cancel";
@@ -704,6 +758,46 @@ export function installBrowserDevStub(): void {
 
   const callbacks = new Map<number, (payload: unknown) => void>();
   let nextCallbackId = 1;
+  const listeners = new Map<
+    number,
+    {
+      event: string;
+      handler: number;
+      target: { kind?: string; label?: string };
+    }
+  >();
+  let nextListenerId = 1;
+  const host = window as unknown as Record<string, unknown>;
+  host.__browserDevFileChanges = {
+    ...fileChangeStub,
+    get watchedPath() {
+      return fileChangeStub.watchedPath;
+    },
+    get stops() {
+      return fileChangeStub.stops;
+    },
+    emit(path: string, windowLabel = "main") {
+      for (const [id, listener] of listeners) {
+        if (
+          listener.event === "file-changed" &&
+          (!listener.target.label || listener.target.label === windowLabel)
+        ) {
+          callbacks.get(listener.handler)?.({ event: "file-changed", id, payload: { path } });
+        }
+      }
+    },
+    get listenerReady() {
+      return [...listeners.values()].some((l) => l.event === "file-changed");
+    },
+    get listenerTarget() {
+      return [...listeners.values()].find((l) => l.event === "file-changed")?.target;
+    },
+  };
+  host.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+    unregisterListener(_event: string, id: number) {
+      listeners.delete(id);
+    },
+  };
 
   // 验收可注入 CDP 引擎与逐请求观测；只存在于 dev 桩，不改变生产 IPC。
   const interceptor = (
@@ -717,10 +811,24 @@ export function installBrowserDevStub(): void {
   ).__browserDevInvoke;
   const internals = {
     // Tauri 2 的 JS API 走这个入口（见 node_modules/@tauri-apps/api/core.js）
-    invoke: (command: string, args?: Record<string, unknown>) =>
-      interceptor
+    invoke: (command: string, args?: Record<string, unknown>) => {
+      if (command === "plugin:event|listen") {
+        const id = nextListenerId++;
+        listeners.set(id, {
+          event: String(args?.event),
+          handler: Number(args?.handler),
+          target: (args?.target ?? {}) as { kind?: string; label?: string },
+        });
+        return Promise.resolve(id);
+      }
+      if (command === "plugin:event|unlisten") {
+        listeners.delete(Number(args?.eventId));
+        return Promise.resolve();
+      }
+      return interceptor
         ? interceptor(command, args, () => handleCommand(command, args))
-        : handleCommand(command, args),
+        : handleCommand(command, args);
+    },
     // 事件系统（@tauri-apps/api/event）依赖的方法：注册回调并返回 id
     transformCallback: (callback?: (payload: unknown) => void, once = false): number => {
       const id = nextCallbackId++;
