@@ -455,6 +455,35 @@ describe("createExternalFileChange", () => {
     expect(m.hasConflict()).toBe(true);
   });
 
+  it("保存和外部事件共用提示槽，不重叠确认或丢掉最新事件", async () => {
+    const hooks = createHooks();
+    hooks.setPath("/a.typ");
+    hooks.setDoc("local");
+    hooks.setBaseline("base");
+    hooks.setDisk("/a.typ", "disk1");
+    const m = createExternalFileChange(hooks);
+    await m.watchPath("/a.typ");
+    await vi.advanceTimersByTimeAsync(200);
+    let release!: (value: boolean) => void;
+    let prompts = 0;
+    hooks.promptReloadOrKeep = async () => {
+      prompts++;
+      if (prompts === 1) return new Promise<boolean>((r) => (release = r));
+      return false;
+    };
+    const save = m.confirmSaveIfConflict();
+    hooks.setDisk("/a.typ", "disk2");
+    m.onFileChanged({ path: "/a.typ" });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(prompts).toBe(1);
+    release(true);
+    expect(await save).toBe(false);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(prompts).toBe(2);
+    expect(m.hasConflict()).toBe(true);
+    expect(hooks.calls.applyReload).toHaveLength(0);
+  });
+
   it("保存结果不盲清保存期间出现的新冲突", async () => {
     const hooks = createHooks();
     hooks.setPath("/a.typ");

@@ -64,6 +64,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   /** 当前正在执行的检查（读盘或提示） */
   let activeCheck: Promise<void> | null = null;
+  let saveConfirmation = false;
   let disposed = false;
   let pendingConflict = false;
   let conflictSnapshot: {
@@ -152,7 +153,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
   }
 
   function scheduleCheck(): void {
-    if (activeCheck || debounceTimer || !pendingPath) return;
+    if (activeCheck || saveConfirmation || debounceTimer || !pendingPath) return;
     const path = pendingPath;
     pendingPath = null;
     const snapshot = captureSnapshot(path);
@@ -281,6 +282,21 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
   }
 
   async function confirmSaveIfConflict(): Promise<boolean> {
+    if (saveConfirmation || disposed) return false;
+    saveConfirmation = true;
+    const snapshot = captureSnapshot(hooks.currentPath());
+    try {
+      // 保存确认和外部检查共用提示槽；等待时路径/正文变化不能授权保存新状态。
+      if (activeCheck) await activeCheck;
+      if (isStale(snapshot)) return false;
+      return await checkSaveConflict();
+    } finally {
+      saveConfirmation = false;
+      scheduleCheck();
+    }
+  }
+
+  async function checkSaveConflict(): Promise<boolean> {
     if (!hasConflict()) return true;
     const snap = conflictSnapshot!;
     const snapshot = captureSnapshot(hooks.currentPath());

@@ -2129,6 +2129,7 @@
 
     return () => {
       disposed = true;
+      documentSession++; // 卸载同时作废在途打开/重读/保存结果
       media.removeEventListener("change", onSystemThemeChange);
       window.removeEventListener("keydown", handleKeydown);
       window.removeEventListener("contextmenu", handleContextMenu);
