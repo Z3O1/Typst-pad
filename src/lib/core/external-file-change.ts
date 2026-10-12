@@ -38,6 +38,12 @@ export interface ExternalFileChangeHooks {
   stopWatch(): Promise<void>;
 }
 
+export interface ExternalFileSaveToken {
+  readonly path: string | null;
+  readonly session: number | string | undefined;
+  readonly generation: number;
+}
+
 export interface ExternalFileChange {
   /** 切换要监控的文件；传 null 表示停止监控 */
   watchPath(path: string | null, session?: number | string): Promise<void>;
@@ -45,8 +51,12 @@ export interface ExternalFileChange {
   onFileChanged(payload: { path: string }): void;
   /** 是否存在已知的外部变更冲突（用于保存前确认） */
   hasConflict(): boolean;
-  /** 保存前调用；返回 true 表示可以继续保存 */
-  confirmSaveIfConflict(): Promise<boolean>;
+  /** 显式保存的同步入口：同身份只允许一次保存，暂缓检查但保留最新事件。 */
+  beginSave(): ExternalFileSaveToken | null;
+  /** 保存前调用；返回 true 表示可以继续保存。传 token 时检查槽保留到 endSave。 */
+  confirmSaveIfConflict(token?: ExternalFileSaveToken): Promise<boolean>;
+  /** write 回复、基线应用或取消/失败后释放；旧身份 token 不影响新保存。 */
+  endSave(token: ExternalFileSaveToken): void;
   /** 保存成功后核对实际写入快照；不能清掉期间出现的另一磁盘版本冲突 */
   acknowledgeSave(path: string, content: string): void;
   clearConflict(): void;
@@ -64,7 +74,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   /** 当前正在执行的检查（读盘或提示） */
   let activeCheck: Promise<void> | null = null;
-  let saveConfirmation = false;
+  let ownSave: { token: ExternalFileSaveToken; writing: boolean } | null = null;
   let disposed = false;
   let pendingConflict = false;
   let conflictSnapshot: {
@@ -100,7 +110,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     };
   }
 
-  function isIdentityStale(snapshot: ReturnType<typeof captureSnapshot>): boolean {
+  function isIdentityStale(snapshot: ExternalFileSaveToken): boolean {
     return (
       disposed ||
       generation !== snapshot.generation ||
@@ -137,6 +147,15 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     content?: string,
   ): boolean {
     if (isIdentityStale(snapshot)) return true;
+    if (savePaused()) {
+      if (snapshot.path) {
+        // 确认阶段尚未写盘，已有 read 的外部版本仍必须进入保存 guard。
+        // write 阶段可能读到自己的落盘快照，留到实际基线应用后再检查。
+        if (content !== undefined && !ownSave!.writing) rememberConflict(snapshot.path, content);
+        pendingPath = snapshot.path;
+      }
+      return true;
+    }
     if (!isStale(snapshot)) return false;
     if (snapshot.path) {
       if (content !== undefined) rememberConflict(snapshot.path, content);
@@ -159,6 +178,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     const request = ++generation;
     clearTimer();
     pendingPath = null;
+    ownSave = null;
     clearConflict();
     watchQueue = watchQueue.then(async () => {
       if (disposed || request !== generation) return;
@@ -187,7 +207,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
   }
 
   function scheduleCheck(): void {
-    if (activeCheck || saveConfirmation || debounceTimer || !pendingPath) return;
+    if (activeCheck || savePaused() || debounceTimer || !pendingPath) return;
     const path = pendingPath;
     pendingPath = null;
     const snapshot = captureSnapshot(path);
@@ -313,18 +333,45 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     );
   }
 
-  async function confirmSaveIfConflict(): Promise<boolean> {
-    if (saveConfirmation || disposed) return false;
-    saveConfirmation = true;
+  function savePaused(): boolean {
+    return ownSave !== null && !isIdentityStale(ownSave.token);
+  }
+
+  function beginSave(): ExternalFileSaveToken | null {
+    if (disposed || savePaused()) return null;
+    const token = captureSnapshot(hooks.currentPath());
+    ownSave = { token, writing: false };
+    return token;
+  }
+
+  function endSave(token: ExternalFileSaveToken): void {
+    if (ownSave?.token !== token) return;
+    ownSave = null;
+    scheduleCheck();
+  }
+
+  async function confirmSaveIfConflict(token?: ExternalFileSaveToken): Promise<boolean> {
+    const managed = token === undefined;
+    token ??= beginSave() ?? undefined;
+    if (!token || ownSave?.token !== token || isIdentityStale(token)) return false;
     const snapshot = captureSnapshot(hooks.currentPath());
     try {
       // 保存确认和外部检查共用提示槽；等待时路径/正文变化不能授权保存新状态。
       if (activeCheck) await activeCheck;
-      if (isStale(snapshot)) return false;
-      return await checkSaveConflict();
+      if (isStale(snapshot) || ownSave?.token !== token) return false;
+      if (pendingPath === token.path && token.path) {
+        // 同步保存入口前已有的事件先读一次，只记版本、不弹外部提示或重读正文。
+        clearTimer();
+        pendingPath = null;
+        await runCheck(token.path);
+      }
+      if (isStale(snapshot) || ownSave?.token !== token) return false;
+      const proceed = await checkSaveConflict();
+      if (!proceed || isStale(snapshot) || ownSave?.token !== token) return false;
+      ownSave.writing = true;
+      return true;
     } finally {
-      saveConfirmation = false;
-      scheduleCheck();
+      if (managed) endSave(token);
     }
   }
 
@@ -384,6 +431,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     clearTimer();
     pendingPath = null;
     watchedPath = null;
+    ownSave = null;
     pendingConflict = false;
     conflictSnapshot = null;
     lastIgnored = null;
@@ -399,7 +447,9 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     watchPath,
     onFileChanged,
     hasConflict,
+    beginSave,
     confirmSaveIfConflict,
+    endSave,
     acknowledgeSave,
     clearConflict,
     dispose,

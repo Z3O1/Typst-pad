@@ -209,6 +209,7 @@ const fileChangeStub = {
   read: deferredFileResponse(),
   prompt: deferredFileResponse(),
   write: deferredFileResponse(),
+  writeFailure: { message: null as string | null },
   prompts: [] as string[],
   watchedPath: null as string | null,
   starts: [] as string[],
@@ -523,6 +524,9 @@ async function handleCommand(
       w.__browserDevWrites = writes;
       notify(command);
       await fileChangeStub.write.wait();
+      const failure = fileChangeStub.writeFailure.message;
+      fileChangeStub.writeFailure.message = null;
+      if (failure) throw new Error(failure);
       return null;
     }
     case "read_file": {

@@ -1149,19 +1149,18 @@
     }
   });
 
-  /** 保存串行化；外部冲突确认与写盘均绑定发起时的路径/会话。 */
-  let saving = false;
+  /** 同身份保存串行化；暂停检查直到 write 回复并应用实际快照基线。 */
   async function saveDocument(): Promise<string | null> {
-    if (saving) return null;
-    saving = true;
+    const token = externalFileChange.beginSave();
+    if (!token) return null;
     const session = documentSession;
     const path = filePath;
     try {
-      if (!(await externalFileChange.confirmSaveIfConflict())) return null;
+      if (!(await externalFileChange.confirmSaveIfConflict(token))) return null;
       if (documentSession !== session || filePath !== path) return null;
       return await docSession.save();
     } finally {
-      saving = false;
+      externalFileChange.endSave(token);
     }
   }
 

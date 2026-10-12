@@ -1,5 +1,5 @@
 // 页面文件变更接线验收；假磁盘/事件/延迟 IPC，仅证明前端，不代表原生 watcher 或 WebView2。
-// 无真实排版夹具依赖（只核对编译入参与编辑会话），独立运行 22 项断言。
+// 无真实排版夹具依赖（只核对编译入参与编辑会话），独立运行 29 项断言。
 import { connect, DEV_URL } from "./cdp.mjs";
 import { boot, createChecker, finish, sleep, compileSettled, flushStateSeed } from "./harness.mjs";
 const c = await connect();
@@ -98,6 +98,23 @@ check(
   (await doc()) === "b-session" && (await c.evaluate(`${fs}.watchedPath === '/fake/b.typ'`)),
 );
 
+await open("/fake/a.typ", "continued-read-base");
+await c.evaluate(`${fs}.read.holdNext=true;window.__browserDevConfirm=false`);
+await external("/fake/a.typ", "continued-read-external");
+await c.waitFor(`${fs}.read.pending`);
+await edit("continued-during-read");
+const writesBeforeStaleReadSave = await writes();
+prompts = await promptCount();
+await c.evaluate(`${fs}.read.release()`);
+await c.key("s", { keyCode: 83, modifiers: 2 }); // 不再发送任何文件事件
+await sleep(350);
+check(
+  "晚 read 期间输入后直接 save 仍需冲突确认，无隐式覆盖",
+  (await doc()) === "continued-during-read" &&
+    (await writes()) === writesBeforeStaleReadSave &&
+    (await c.evaluate(`${fs}.prompts.slice(${prompts}).some(p=>p.includes('保存会覆盖'))`)),
+);
+
 await open("/fake/a.typ", "prompt-base");
 await edit("dirty-prompt");
 await c.evaluate(`${fs}.prompt.holdNext=true;window.__browserDevConfirm=true`);
@@ -113,9 +130,17 @@ await c.evaluate(`${fs}.prompt.holdNext=true;window.__browserDevConfirm=true`);
 await external("/fake/a.typ", "prompt-external");
 await c.waitFor(`${fs}.prompt.pending`);
 await edit("typed-during-confirm");
-await c.evaluate(`${fs}.prompt.release()`);
+const writesBeforeStalePromptSave = await writes();
+prompts = await promptCount();
+await c.evaluate(`window.__browserDevConfirm=false;${fs}.prompt.release()`);
+await c.key("s", { keyCode: 83, modifiers: 2 }); // 无第二个文件事件，保存不能忘记外部版本
 await sleep(350);
 check("提示期间继续输入不被旧确认覆盖", (await doc()) === "typed-during-confirm");
+check(
+  "晚 prompt 期间输入后直接 save 仍需冲突确认",
+  (await writes()) === writesBeforeStalePromptSave &&
+    (await c.evaluate(`${fs}.prompts.slice(${prompts}).some(p=>p.includes('保存会覆盖'))`)),
+);
 
 await open("/fake/a.typ", "save-base");
 await edit("save-snapshot");
@@ -123,10 +148,14 @@ await c.evaluate(`${fs}.write.holdNext=true`);
 await c.key("s", { keyCode: 83, modifiers: 2 });
 await c.waitFor(`${fs}.write.pending`);
 await edit("save-snapshot-plus-input");
-await c.evaluate(`${fs}.write.release()`);
-await sleep(120);
 prompts = await promptCount();
 await c.evaluate(`${fs}.emit('/fake/a.typ')`);
+await sleep(500); // 超过事件去抖和读盘窗口，write 响应仍被扣住
+check(
+  "自己的事件先于 write 响应时不弹外部确认",
+  (await promptCount()) === prompts && (await doc()) === "save-snapshot-plus-input",
+);
+await c.evaluate(`${fs}.write.release()`);
 await sleep(350);
 check(
   "自己 save + 继续输入不误报，正文仍 dirty",
@@ -136,21 +165,65 @@ check(
 );
 await c.key("z", { keyCode: 90, modifiers: 2 });
 check("保存等待期间的撤销历史不丢失", (await doc()) === "save-snapshot");
+check(
+  "保存基线仅推进到 write 快照，撤销续写后 clean",
+  await c.evaluate("!window.__browserDevLastTitle.includes(' •')"),
+);
 
+await open("/fake/a.typ", "failed-save-base");
+await edit("failed-save-local");
+await c.evaluate(
+  `${fs}.write.holdNext=true;${fs}.writeFailure.message='injected write failure';window.__browserDevConfirm=false`,
+);
+await c.key("s", { keyCode: 83, modifiers: 2 });
+await c.waitFor(`${fs}.write.pending`);
+prompts = await promptCount();
+await external("/fake/a.typ", "external-during-failed-write");
+const noPromptDuringFailure = (await promptCount()) === prompts;
+await c.evaluate(`${fs}.write.release()`);
+await sleep(350);
+check(
+  "write 失败 finally 恢复最新检测需求，不清外部冲突或当前输入",
+  noPromptDuringFailure &&
+    (await promptCount()) === prompts + 1 &&
+    (await doc()) === "failed-save-local" &&
+    (await c.evaluate("window.__browserDevLastTitle.includes(' •')")),
+);
+const attemptsAfterFailure = await writes();
+await c.key("s", { keyCode: 83, modifiers: 2 }); // 取消冲突确认，不再尝试 write
+await sleep(150);
+await external("/fake/a.typ", "external-after-cancel");
+check(
+  "取消保存后检查槽也恢复，新的外部版本仍提示",
+  (await writes()) === attemptsAfterFailure &&
+    (await promptCount()) === prompts + 3 &&
+    (await doc()) === "failed-save-local",
+);
+
+await open("/fake/a.typ", "late-save-base");
 await edit("late-save-a");
 await c.evaluate(`${fs}.write.holdNext=true`);
 await c.key("s", { keyCode: 83, modifiers: 2 });
 await c.waitFor(`${fs}.write.pending`);
 await open("/fake/b.typ", "save-new-session-b");
+await edit("save-new-session-b-local");
+await c.evaluate("window.__browserDevConfirm=false");
+prompts = await promptCount();
+await external("/fake/b.typ", "new-session-external-before-old-write-reply");
+check(
+  "旧会话 write 未回复时新文档的外部观察不悬挂",
+  (await promptCount()) === prompts + 1 && (await doc()) === "save-new-session-b-local",
+);
 await c.evaluate(`${fs}.write.release();${fs}.emit('/fake/a.typ')`);
 await sleep(350);
 check(
   "迟到 save 不修改新会话内容、基线或状态",
-  (await doc()) === "save-new-session-b" &&
+  (await doc()) === "save-new-session-b-local" &&
     (await c.evaluate(
-      "!window.__browserDevLastTitle.includes(' •') && window.__browserDevLastCompile.documentPath === '/fake/b.typ'",
+      "window.__browserDevLastTitle.includes(' •') && window.__browserDevLastCompile.documentPath === '/fake/b.typ'",
     )),
 );
+await open("/fake/b.typ", "before-conflict-save-base");
 await edit("local-before-conflict-save");
 await c.evaluate("window.__browserDevConfirm=false");
 await external("/fake/b.typ", "save-conflict-version1");
