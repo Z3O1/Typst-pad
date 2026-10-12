@@ -74,6 +74,8 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   /** 当前正在执行的检查（读盘或提示） */
   let activeCheck: Promise<void> | null = null;
+  /** dialog 占用独立于身份授权；切会话不能释放尚未结束的原生提示。 */
+  let activePrompt: Promise<boolean> | null = null;
   let ownSave: { token: ExternalFileSaveToken; writing: boolean } | null = null;
   let disposed = false;
   let pendingConflict = false;
@@ -207,7 +209,7 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
   }
 
   function scheduleCheck(): void {
-    if (activeCheck || savePaused() || debounceTimer || !pendingPath) return;
+    if (activeCheck || activePrompt || savePaused() || debounceTimer || !pendingPath) return;
     const path = pendingPath;
     pendingPath = null;
     const snapshot = captureSnapshot(path);
@@ -219,6 +221,32 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
         activeCheck = null;
         scheduleCheck();
       });
+  }
+
+  async function promptForSnapshot(
+    snapshot: ReturnType<typeof captureSnapshot>,
+    message: string,
+    title: string,
+  ): Promise<boolean> {
+    while (activePrompt) {
+      try {
+        await activePrompt;
+      } catch {
+        // 前一个 dialog 的拒绝只释放占用，不应传给新身份的请求。
+      }
+      if (isStale(snapshot)) return false;
+    }
+    if (isStale(snapshot)) return false;
+    const prompt = hooks.promptReloadOrKeep(message, title);
+    activePrompt = prompt;
+    try {
+      return await prompt;
+    } finally {
+      if (activePrompt === prompt) {
+        activePrompt = null;
+        scheduleCheck();
+      }
+    }
   }
 
   async function runCheck(path: string): Promise<void> {
@@ -271,7 +299,8 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     }
 
     rememberConflict(path, content);
-    const reload = await hooks.promptReloadOrKeep(
+    const reload = await promptForSnapshot(
+      snapshot,
       `「${path}」已被外部程序修改。是否重新读取磁盘内容？\n选择「取消」将保留当前未保存的编辑。`,
       DIALOG_TITLE,
     );
@@ -379,7 +408,8 @@ export function createExternalFileChange(hooks: ExternalFileChangeHooks): Extern
     if (!hasConflict()) return true;
     const snap = conflictSnapshot!;
     const snapshot = captureSnapshot(hooks.currentPath());
-    const proceed = await hooks.promptReloadOrKeep(
+    const proceed = await promptForSnapshot(
+      snapshot,
       "磁盘上的文件已被外部程序修改，保存会覆盖这些修改。仍要保存吗？",
       SAVE_CONFLICT_TITLE,
     );

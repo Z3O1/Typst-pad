@@ -534,6 +534,83 @@ describe("createExternalFileChange", () => {
     expect(hooks.calls.applyReload).toHaveLength(0);
   });
 
+  it.each(["path", "same-path-session", "reject", "dispose"])(
+    "%s：旧保存确认未 settle 时保持全局提示占用，身份授权立即作废",
+    async (change) => {
+      const hooks = createHooks();
+      hooks.setPath("/a.typ");
+      hooks.setDoc("local-a");
+      hooks.setBaseline("base-a");
+      hooks.setDisk("/a.typ", "external-a");
+      const m = createExternalFileChange(hooks);
+      await m.watchPath("/a.typ");
+      await vi.advanceTimersByTimeAsync(200); // A 已选择 keep，存在保存冲突
+      let release!: (value: boolean) => void;
+      let reject!: (error: Error) => void;
+      let unsettled = 0;
+      let maxUnsettled = 0;
+      let prompts = 0;
+      hooks.promptReloadOrKeep = async (message, title) => {
+        hooks.calls.prompt.push([message, title]);
+        unsettled++;
+        maxUnsettled = Math.max(maxUnsettled, unsettled);
+        try {
+          if (++prompts === 1) {
+            expect(title).toBe("保存冲突");
+            return await new Promise<boolean>((resolve, fail) => {
+              release = resolve;
+              reject = fail;
+            });
+          }
+          return false;
+        } finally {
+          unsettled--;
+        }
+      };
+      const old = m.beginSave()!;
+      const saving = m
+        .confirmSaveIfConflict(old)
+        .finally(() => m.endSave(old))
+        .catch(() => "rejected" as const);
+      const path = change === "same-path-session" ? "/a.typ" : "/b.typ";
+      hooks.setPath(path);
+      hooks.bumpSession();
+      hooks.setDoc("local-b");
+      hooks.setBaseline("base-b");
+      hooks.setDisk(path, "external-b");
+      await m.watchPath(path);
+      if (change === "dispose") await m.dispose();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(maxUnsettled).toBe(1);
+      expect(unsettled).toBe(1);
+      expect(prompts).toBe(1);
+      expect(hooks.currentDoc()).toBe("local-b");
+      if (change === "reject") reject(new Error("dialog rejected"));
+      else release(true); // 旧同意也不得授权保存或覆盖 B
+      expect(await saving).toBe(change === "reject" ? "rejected" : false);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(unsettled).toBe(0);
+      expect(maxUnsettled).toBe(1);
+      expect(hooks.calls.applyReload).toHaveLength(0);
+      if (change === "dispose") {
+        expect(prompts).toBe(1);
+        expect(m.beginSave()).toBeNull();
+        return;
+      }
+      expect(prompts).toBe(2); // B 最新需求仅在旧 dialog 真正结束后消费
+      expect(m.hasConflict()).toBe(true);
+      const current = m.beginSave()!;
+      expect(await m.confirmSaveIfConflict(current)).toBe(false);
+      m.endSave(current);
+      m.endSave(old);
+      expect(prompts).toBe(3);
+      expect(m.hasConflict()).toBe(true);
+      expect(hooks.currentDoc()).toBe("local-b");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(prompts).toBe(3); // 单槽需求，无无限提示队列
+    },
+  );
+
   it("own-save 槽从同步入口保持到真实基线应用，提前事件不误报", async () => {
     const hooks = createHooks();
     hooks.setPath("/a.typ");

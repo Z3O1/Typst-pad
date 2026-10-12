@@ -1,5 +1,5 @@
 // 页面文件变更接线验收；假磁盘/事件/延迟 IPC，仅证明前端，不代表原生 watcher 或 WebView2。
-// 无真实排版夹具依赖（只核对编译入参与编辑会话），独立运行 29 项断言。
+// 无真实排版夹具依赖（只核对编译入参与编辑会话），独立运行 31 项断言。
 import { connect, DEV_URL } from "./cdp.mjs";
 import { boot, createChecker, finish, sleep, compileSettled, flushStateSeed } from "./harness.mjs";
 const c = await connect();
@@ -198,6 +198,36 @@ check(
   (await writes()) === attemptsAfterFailure &&
     (await promptCount()) === prompts + 3 &&
     (await doc()) === "failed-save-local",
+);
+
+await open("/fake/a.typ", "pending-save-dialog-base");
+await edit("pending-save-dialog-local-a");
+await c.evaluate("window.__browserDevConfirm=false");
+await external("/fake/a.typ", "pending-save-dialog-external-a");
+const writesBeforePendingSaveDialog = await writes();
+await c.evaluate(`${fs}.prompt.holdNext=true;window.__browserDevConfirm=true`);
+await c.key("s", { keyCode: 83, modifiers: 2 });
+await c.waitFor(`${fs}.prompt.pending`);
+await open("/fake/save-dialog-b.typ", "pending-save-dialog-base-b");
+await edit("pending-save-dialog-local-b");
+await c.evaluate("window.__browserDevConfirm=false");
+prompts = await promptCount(); // 不把打开文档的 discard 确认算作 manager 外部提示
+await external("/fake/save-dialog-b.typ", "pending-save-dialog-external-b");
+await sleep(200); // 总等待超过去抖/读盘窗口，旧 SAVE dialog 仍未 settle
+check(
+  "SAVE dialog 待决时切身份仍独占 manager 提示槽，不发送旧 write",
+  (await promptCount()) === prompts &&
+    (await writes()) === writesBeforePendingSaveDialog &&
+    (await doc()) === "pending-save-dialog-local-b",
+);
+await c.evaluate(`window.__browserDevConfirm=true;${fs}.prompt.release()`);
+await sleep(450);
+check(
+  "旧 SAVE 同意失效后才提示 B 最新需求，新选择可重读且无旧 write",
+  (await promptCount()) === prompts + 1 &&
+    (await writes()) === writesBeforePendingSaveDialog &&
+    (await doc()) === "pending-save-dialog-external-b" &&
+    (await c.evaluate("window.__browserDevLastCompile.documentPath === '/fake/save-dialog-b.typ'")),
 );
 
 await open("/fake/a.typ", "late-save-base");
