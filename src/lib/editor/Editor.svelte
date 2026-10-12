@@ -1,7 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { EditorView, Decoration, hoverTooltip } from "@codemirror/view";
-  import { EditorState, Compartment, StateField, StateEffect } from "@codemirror/state";
+  import {
+    Compartment,
+    StateField,
+    StateEffect,
+    Transaction,
+    type Extension,
+    type EditorState,
+  } from "@codemirror/state";
+  import { createEditorDocumentState } from "./editor-session";
   import { indentUnit, syntaxTree, syntaxTreeAvailable } from "@codemirror/language";
   import type { DecorationSet } from "@codemirror/view";
   import { basicSetup } from "codemirror";
@@ -32,6 +40,8 @@
 
   interface Props {
     initialDoc?: string;
+    /** 只在新建、打开/重载或恢复新文档时改变；保存及编译上下文变化不改变。 */
+    session?: number;
     onDocChange?: (doc: string, mapPosition: (pos: number, assoc?: number) => number) => void;
     onCursor?: (line: number, col: number, change: SourceCursorChange) => void;
     onFocusChange?: (focused: boolean) => void;
@@ -60,6 +70,7 @@
 
   let {
     initialDoc = "",
+    session = 0,
     onDocChange,
     onCursor,
     onFocusChange,
@@ -85,6 +96,16 @@
   // svelte-check 判为"只捕获初值"的误用告警（state_referenced_locally）。
   let appliedWrap = false;
   let applyingExternal = false; // 外部 doc 同步时抑制 onDocChange，避免误标脏
+  let editorExtensions: Extension;
+  let appliedSession = 0;
+
+  function createDocumentState(content: string) {
+    return createEditorDocumentState(content, editorExtensions, view?.state, [
+      themeCompartment,
+      diagnosticsCompartment,
+      wrapCompartment,
+    ]);
+  }
   // 当前生效的编译错误与前缀代码（由 diagnostics/prefixCode prop 驱动；供波浪线与 hover 提示读取）
   let diagState: { list: CompileErrorLocation[]; prefix: string } = { list: [], prefix: "" };
 
@@ -154,9 +175,11 @@
     diagState = { list: diagnostics ?? [], prefix: prefixCode ?? "" };
     // 同理：换行开关的初值也由 buildExtensions 按当时的 wrap 建好，这里标记为"已应用"
     appliedWrap = wrap === true;
+    appliedSession = session;
+    editorExtensions = buildExtensions();
     view = new EditorView({
       parent: host,
-      state: EditorState.create({ doc: initialDoc, extensions: buildExtensions() }),
+      state: createDocumentState(initialDoc),
     });
     mark("editor-created");
     registerEditorView(view);
@@ -183,6 +206,27 @@
   let appliedExternalDoc: string | undefined = undefined;
   $effect(() => {
     if (!view || doc === undefined) return;
+    // 会话身份先于字符串守卫：相同文本的重新打开也不能沿用旧历史。
+    if (session !== appliedSession) {
+      appliedSession = session;
+      appliedExternalDoc = doc;
+      caretAnchorEpoch += 1;
+      caretAnchor = null;
+      applyingExternal = true;
+      try {
+        // setState 保留输入上下文但不推送文本/选区；先经公开事务同步（等长/同文本也一样），
+        // 再清空历史与文档字段。此事务的 updateListener 同步页面光标，但不回写正文。
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: doc },
+          selection: { anchor: 0 },
+          annotations: Transaction.addToHistory.of(false),
+        });
+        view.setState(createDocumentState(doc));
+      } finally {
+        applyingExternal = false;
+      }
+      return;
+    }
     if (doc === appliedExternalDoc) return;
     appliedExternalDoc = doc;
     const current = view.state.doc.toString();

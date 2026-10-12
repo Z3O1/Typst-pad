@@ -1914,6 +1914,7 @@
     lastUpdateCheckAt = plan.lastUpdateCheckAt;
     updateDismissedAt = plan.updateDismissedAt;
     if (plan.content) {
+      documentSession++;
       doc = plan.content.text;
       editorDoc = plan.content.text; // 镜像同步，见 editorDoc 声明处
       filePath = plan.content.filePath;
@@ -2106,6 +2107,7 @@
             bind:this={editorRef}
             initialDoc={editorDoc}
             doc={editorDoc}
+            session={documentSession}
             theme={resolvedTheme}
             diagnostics={editorDiagnostics}
             prefixCode={prefixEnabled ? ensureTrailingNewline(prefixCode) : ""}
