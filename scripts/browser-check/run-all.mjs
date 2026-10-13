@@ -44,6 +44,7 @@ const SUITES = [
   ["document-completion.mjs", 21],
   ["editor-shortcuts.mjs", 22],
   ["file-changes.mjs", 31],
+  ["source-scroll-sync.mjs", 22],
 ];
 const only = process.env.ONLY ? new Set(process.env.ONLY.split(",").map((s) => s.trim())) : null;
 
@@ -62,8 +63,12 @@ const SUITE_FIXTURES = {
   "document-completion.mjs": ["pages"],
   "editor-shortcuts.mjs": [],
   "file-changes.mjs": [],
+  "source-scroll-sync.mjs": ["scroll"],
 };
-const FIXTURE_STEPS = { pages: ["fixtures-pages", ["run", "fixtures:pages"]] };
+const FIXTURE_STEPS = {
+  pages: ["fixtures-pages", ["run", "fixtures:pages"]],
+  scroll: ["fixtures-scroll", ["run", "fixtures:scroll"]],
+};
 
 // 防止 ONLY 拼错时运行零套件仍报成功。
 let ran = 0;
@@ -306,7 +311,7 @@ if (!SKIP_DEV || process.env.SKIP_WARMUP !== "1") {
 
 if (!SKIP_FIXTURES) {
   // 按**依赖**导夹具（见 neededFixtures）：没被任何要跑的套件声明的夹具不导。
-  for (const name of ["pages"]) {
+  for (const name of Object.keys(FIXTURE_STEPS)) {
     if (!neededFixtures.has(name)) continue;
     const [step, args] = FIXTURE_STEPS[name];
     if (!runStep(step, "npm", args)) {

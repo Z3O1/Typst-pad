@@ -6,6 +6,7 @@
     FormulaPreview,
   } from "$lib/core/typst-engine";
   import type { DocumentPoint } from "$lib/core/document-drag-selection";
+  import type { PreviewScrollAnchor } from "$lib/core/source-scroll-sync";
   import { createDocumentPages, type DocumentPage } from "./document-pages";
   import { caretScrollDelta, projectDocumentCaret } from "./document-caret";
   import type { PaperShape } from "$lib/core/preview-scale";
@@ -30,6 +31,8 @@
     onEditSource,
     onFormulaClick,
     onCaretPosition,
+    onScrollIntent,
+    onPreviewScroll,
   }: {
     hidden: boolean;
     status: "idle" | "ready" | "error";
@@ -49,6 +52,8 @@
     onEditSource?: () => void;
     onFormulaClick?: () => void;
     onCaretPosition?: (position: { left: number; top: number; height: number } | null) => void;
+    onScrollIntent?: () => void;
+    onPreviewScroll?: () => void;
   } = $props();
   let paperEl = $state<HTMLElement | undefined>();
   let bodyEl = $state<HTMLElement | undefined>();
@@ -87,12 +92,14 @@
   let dragPoint: { x: number; y: number } | null = null;
   let pages: ReturnType<typeof createDocumentPages> | undefined;
   export function updatePages(sources: string[]): void {
+    userScrolling = false;
     if (!paperEl) return;
     pages ??= createDocumentPages(paperEl);
     pages.update(sources);
     measureCaret();
   }
   export function clearPages(): void {
+    userScrolling = false;
     pages?.clear();
   }
   export function pageWidthPt(): number {
@@ -107,6 +114,37 @@
   }
   export function body(): HTMLElement | undefined {
     return bodyEl;
+  }
+
+  let userScrolling = false;
+  $effect(() => {
+    void editable;
+    void hidden;
+    void stale;
+    userScrolling = false;
+  });
+  function scrollIntent(): void {
+    userScrolling = true;
+    if (!editable && !hidden) onScrollIntent?.();
+  }
+  export function previewScrollAnchor(): PreviewScrollAnchor | null {
+    if (!bodyEl || hidden || editable || stale) return null;
+    const rect = bodyEl.getBoundingClientRect();
+    const point = pages?.nearest({
+      x: rect.left + bodyEl.clientWidth / 2,
+      y: rect.top + bodyEl.clientHeight * 0.2,
+    });
+    return point ? { point, viewportRatio: 0.2 } : null;
+  }
+  export function scrollPreviewTo(anchor: PreviewScrollAnchor): void {
+    if (!bodyEl || hidden || editable || stale) return;
+    const page = pages?.page(anchor.point.page);
+    if (!page) return;
+    const rect = page.host.getBoundingClientRect();
+    const y = rect.top + ((anchor.point.yPt - page.box.y) / page.box.height) * rect.height;
+    userScrolling = false;
+    bodyEl.scrollTop +=
+      y - bodyEl.getBoundingClientRect().top - bodyEl.clientHeight * anchor.viewportRatio;
   }
 
   /** 展开/收起后的光标跟随真实新产物，避免重排把输入位置留在视口外。 */
@@ -402,9 +440,15 @@
     onscroll={() => {
       measureCaret();
       if (pointerStart?.selecting) moveSelection();
+      if (!editable && !hidden && userScrolling) onPreviewScroll?.();
     }}
+    onwheel={scrollIntent}
+    ontouchstart={scrollIntent}
     onclick={handleClick}
-    onpointerdown={handlePointerDown}
+    onpointerdown={(event) => {
+      scrollIntent();
+      handlePointerDown(event);
+    }}
     onpointermove={handlePointerMove}
     onpointerup={handlePointerUp}
     onpointerleave={(event) => {
@@ -416,6 +460,7 @@
       if (dragPoint) cancelDrag();
     }}
     onkeydown={(event) => {
+      scrollIntent();
       if (editable && (event.key === "Enter" || event.key === "F2")) {
         event.preventDefault();
         onEditSource?.();

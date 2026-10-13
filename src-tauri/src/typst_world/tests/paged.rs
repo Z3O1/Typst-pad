@@ -631,3 +631,60 @@ fn dump_page_fixtures() {
         );
     }
 }
+
+// Dense native cursor and vertical hit queries for dual-pane scrolling, never synthetic SVG.
+#[test]
+#[ignore]
+fn dump_source_scroll_fixture() {
+    let mut src = String::from(
+        "#set page(width: 400pt, height: 500pt, margin: 24pt)\n#set text(size: 11pt)\n",
+    );
+    for index in 0..100 {
+        src.push_str(&format!(
+            "\n// no output {index}\n\n段落 {index} 中文 😀 office é {} $x^2 + y$\n\n",
+            "非等长行 wrap words ".repeat(index % 5 + 1)
+        ));
+    }
+    let world = TypstWorld::new(src.clone(), None, &fonts_dir(), &FontConfig::default());
+    let document = typst::compile::<PagedDocument>(&world)
+        .output
+        .expect("scroll fixture compiles");
+    assert!(document.pages().len() >= 5);
+    let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+    let carets: Vec<_> = items
+        .iter()
+        .map(|item| crate::document_geometry::caret_for_item(item, item.range.start))
+        .collect();
+    let id = crate::document_geometry::store(items, src.len(), stats.foreign_ink);
+    let cursor_queries: Vec<_> = src
+        .char_indices()
+        .map(|(offset, _)| {
+            serde_json::json!({
+                "offset": offset, "caret": crate::document_geometry::locate(id, offset)
+            })
+        })
+        .collect();
+    let whitespace_hits: Vec<_> = document
+        .pages()
+        .iter()
+        .enumerate()
+        .flat_map(|(index, page)| {
+            let x = page.frame.width().to_pt() / 2.0;
+            (0..=500).map(move |y| {
+                serde_json::json!({
+                    "page": index + 1, "xPt": x, "yPt": y,
+                    "caret": crate::document_geometry::hit_test(id, index + 1, x, y as f64)
+                })
+            })
+        })
+        .collect();
+    assert!(crate::document_geometry::locate(id, src.find("// no output").unwrap()).is_none());
+    let pages: Vec<_> = document.pages().iter().map(svg_for_page).collect();
+    println!(
+        "SCROLLFIXTURE:{}",
+        serde_json::json!({
+            "doc": src, "pages": pages, "carets": carets,
+            "cursorQueries": cursor_queries, "whitespaceHits": whitespace_hits
+        })
+    );
+}

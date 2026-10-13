@@ -25,10 +25,11 @@ const expectedSuites = [
   ["document-completion.mjs", 21],
   ["editor-shortcuts.mjs", 22],
   ["file-changes.mjs", 31],
+  ["source-scroll-sync.mjs", 22],
 ];
 
 describe("browser-check/run-all registration", () => {
-  it("runs all thirteen suites with their exact assertion counts", () => {
+  it("runs all fourteen suites with their exact assertion counts", () => {
     expect(suites).toEqual(expectedSuites);
     for (const [file] of suites) {
       expect(readFileSync(new URL(file, import.meta.url), "utf8").length).toBeGreaterThan(0);
@@ -45,10 +46,11 @@ describe("browser-check/run-all registration", () => {
       "file-changes.mjs",
     ]);
     for (const [file] of suites) {
-      expect(fixtures[file]).toEqual(fixtureFree.has(file) ? [] : ["pages"]);
+      expect(fixtures[file]).toEqual(
+        file === "source-scroll-sync.mjs" ? ["scroll"] : fixtureFree.has(file) ? [] : ["pages"],
+      );
     }
-    expect(source).toContain(
-      'const FIXTURE_STEPS = { pages: ["fixtures-pages", ["run", "fixtures:pages"]] };',
-    );
+    expect(source).toContain('scroll: ["fixtures-scroll", ["run", "fixtures:scroll"]]');
+    expect(source).toContain("for (const name of Object.keys(FIXTURE_STEPS))");
   });
 });
