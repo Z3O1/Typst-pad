@@ -251,8 +251,10 @@ pub fn hit_test(id: u64, page: usize, x_pt: f64, y_pt: f64) -> Option<DocumentCa
             )?;
         }
     }
-    if x >= item.rect.min.x && x <= item.rect.max.x && y >= item.rect.min.y && y <= item.rect.max.y
-    {
+    // 与选中字符的规则使用同一命中盒：字体行高内、墨迹外的点击仍是字符点击，
+    // 否则光标已经落在公式内部，却被标为段落空白而阻止源码展开。
+    let hit_rect = item.hit_rect();
+    if x >= hit_rect.min.x && x <= hit_rect.max.x && y >= hit_rect.min.y && y <= hit_rect.max.y {
         return Some(hit_for_item(item, offset, false));
     }
     // 空白先选行，再在该行选横向位置，避免行侧点击被高字/上标吸走。

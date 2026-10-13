@@ -289,6 +289,8 @@
   let paperShape: PaperShape | null = null;
   // 自然纸型只属于已通过过期检查的源码/前缀上下文；栏宽和展开态不使它失效。
   let paperShapeInput: string | null = null;
+  // 原文失败时，仅用于当前恢复源码的展示适配；绝不作为自然纸型或跨修订复用。
+  let recoveryPaper: { input: string; source: string; shape: PaperShape } | null = null;
   let previewReflowTimer: ReturnType<typeof setTimeout> | undefined;
   let compileSeq = 0; // 代次令牌：丢弃过期编译结果
   let dragActive = $state(false); // 拖放悬停中：显示覆盖层提示
@@ -534,6 +536,7 @@
   }
 
   async function handlePageClick(req: { page: number; xPt: number; yPt: number }): Promise<void> {
+    if (viewMode !== "write" || inputComposing) return;
     const input = currentInput();
     const seq = ++interactionSeq;
     pendingCaretReveal = false;
@@ -1439,6 +1442,10 @@
     // 合成只冻结本会话最后的可见起点，不拿过期偏移定位新源码。
     compositionCaret = active ? documentCaret : null;
     inputComposing = active;
+    if (active) {
+      interactionSeq++;
+      dragSelection?.cancel();
+    }
     // 恢复调度前先按最终选区决定展开，避免旧范围抢先发起一轮编译。
     if (!active && sourceOpen && viewMode === "write") {
       const selection = editorRef?.selection();
@@ -1477,6 +1484,7 @@
     // 换文档/清空：纸型要重新学（新文档可能是 A5/横向），重排请求跟着作废
     paperShape = null;
     paperShapeInput = null;
+    recoveryPaper = null;
     previewPageRequest = null;
     clearTimeout(previewReflowTimer);
   }
@@ -1673,14 +1681,20 @@
     clearTimeout(previewReflowTimer);
     previewReflowTimer = setTimeout(() => {
       const body = previewPaneRef?.body();
-      if (!body || body.clientWidth <= 0 || !paperShape || paperShapeInput !== naturalPaperInput)
-        return;
-      const next = desiredPreviewPage(body.clientWidth, paperShape);
+      const shape = displayPaperShape();
+      if (!body || body.clientWidth <= 0 || !shape) return;
+      const next = desiredPreviewPage(body.clientWidth, shape);
       if (!reflowChanged(next, previewPageRequest)) return;
       previewPageRequest = next;
       dbg.log("preview-reflow", next ? `页宽 ${next.widthPt.toFixed(1)}pt` : "关闭（不重排）");
       void compileNow("preview-reflow");
     }, PREVIEW_REFLOW_DELAY_MS);
+  }
+
+  function displayPaperShape(): PaperShape | null {
+    if (viewMode === "write" && recoveryPaper?.input === naturalPaperInput)
+      return recoveryPaper.shape;
+    return paperShapeInput === naturalPaperInput ? paperShape : null;
   }
 
   /** 只消费同一当前输入的无注入原文成功页；展示的raw/展开/回退页不能成为自然基准。 */
@@ -1724,9 +1738,9 @@
     const paperInput = naturalPaperInput;
     const needsNaturalPaper = paperShapeInput !== paperInput;
     if (needsNaturalPaper) {
-      // 保留旧基准但不绑定新上下文；本轮无注入，原文成功前不学习或请求重排。
+      // 原文测量始终无注入；已有的同修订恢复纸型只供展示，不冒充自然基准。
       clearTimeout(previewReflowTimer);
-      previewPageRequest = null;
+      if (viewMode !== "write" || recoveryPaper?.input !== paperInput) previewPageRequest = null;
     }
     const mySeq = ++compileSeq;
     // 仅本轮原文测量成功后决定展示纸型时同步推进指纹，其余输入变化仍使请求过期。
@@ -1762,16 +1776,33 @@
         emptyParagraphs: mode === "write",
         styleExpansion: mode === "write",
         previewExpansion: mode === "write",
-        compile: (src) =>
-          src === source && previewPageRequested === null && naturalResult
-            ? Promise.resolve(naturalResult)
-            : compileToSvg(src, path, fonts, previous, previewPageRequested),
+        compile: async (src) => {
+          if (src === source && previewPageRequested === null && naturalResult)
+            return naturalResult;
+          if (mode === "write" && naturalResult && !naturalResult.ok && src !== source) {
+            if (recoveryPaper?.input !== paperInput || recoveryPaper.source !== src) {
+              // 恢复可能隐藏原文中的纸型规则，先测量这份展示副本，不能套用旧原文纸型。
+              const visible = await compileToSvg(src, path, fonts, previous, null);
+              if (!isCurrent() || writeScheduler.stats().composing || !visible.ok) return visible;
+              const shape = paperShapeFromPages(visible.pages);
+              if (!shape) return visible;
+              recoveryPaper = { input: paperInput, source: src, shape };
+              const body = previewPaneRef?.body();
+              previewPageRequested = body ? desiredPreviewPage(body.clientWidth, shape) : null;
+              previewPageRequest = previewPageRequested;
+              input = currentInput();
+              if (!previewPageRequested) return visible;
+            }
+          }
+          return compileToSvg(src, path, fonts, previous, previewPageRequested);
+        },
         measureOriginal: needsNaturalPaper
           ? async (src) => {
               const measured = await compileToSvg(src, path, fonts, previous, null);
               if (!isCurrent() || writeScheduler.stats().composing) return measured;
               naturalResult = measured;
               if (measured.ok) {
+                recoveryPaper = null;
                 learnPaperShape(paperInput, measured.pages);
                 const body = previewPaneRef?.body();
                 if (body && body.clientWidth > 0 && paperShape && paperShapeInput === paperInput) {
@@ -1798,10 +1829,15 @@
     }
     // 文本、会话、字体和前缀在等待期间变化时，迟到的成功与失败均不能落地。
     if (!isCurrent() || deferred) return;
+    if (writeScheduler.stats().composing) {
+      scheduleCompile();
+      return;
+    }
     if (result.ok) {
       const body = previewPaneRef?.body();
-      if (body && body.clientWidth > 0 && paperShape && paperShapeInput === paperInput) {
-        const next = desiredPreviewPage(body.clientWidth, paperShape);
+      const shape = displayPaperShape();
+      if (body && body.clientWidth > 0 && shape) {
+        const next = desiredPreviewPage(body.clientWidth, shape);
         if (reflowChanged(next, previewPageRequested)) {
           // 无注入产物只用于测量；迟到的旧栏宽也不得短暂替换可见页与命中几何。
           // 保留上一轮完整展示，最终纸型与 SVG/几何在同一次成功落地。

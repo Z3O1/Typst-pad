@@ -14,12 +14,12 @@ const fixtures = JSON.parse(
 const expectedSuites = [
   ["document-mode.mjs", 81],
   ["document-cursor.mjs", 37],
-  ["document-expansion.mjs", 104],
+  ["document-expansion.mjs", 114],
   ["empty-formula.mjs", 39],
   ["document-transaction.mjs", 6],
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
-  ["preview-reflow.mjs", 25],
+  ["preview-reflow.mjs", 28],
   ["zoom-stability.mjs", 38],
   ["source-workflows.mjs", 59],
   ["dollar-completion.mjs", 32],
@@ -30,7 +30,7 @@ const expectedSuites = [
 ];
 
 describe("browser-check/run-all registration", () => {
-  it("runs all fourteen suites with their exact assertion counts", () => {
+  it("runs all fifteen suites with their exact assertion counts", () => {
     expect(suites).toEqual(expectedSuites);
     for (const [file] of suites) {
       expect(readFileSync(new URL(file, import.meta.url), "utf8").length).toBeGreaterThan(0);
