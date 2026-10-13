@@ -1,3 +1,4 @@
+import { EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import {
   resolveSourceExpansion as resolve,
@@ -137,5 +138,110 @@ describe("光标主导的源码展开", () => {
     expect(sameSourceRange(math, null)).toBe(false);
     const locked = { range: null, error: math };
     expect(resolve(doc, locked, at(math.from + 2), "move", { errors: [{ ...math }] })).toBe(locked);
+  });
+});
+
+describe("标题光标展开状态机", () => {
+  const source = "前文\n== 中文🙂 $x$ 与 #strong[粗体] \t\n后文\n=== ";
+  const heading = { from: source.indexOf("=="), to: source.indexOf("\n后文") };
+  const second = { from: source.lastIndexOf("==="), to: source.length };
+  const active: SourceExpansion = { range: heading, error: null };
+
+  it("点击与左右进入共用完整标题边界，跨出边界收起", () => {
+    const head = source.indexOf("中文");
+    expect(resolve(source, empty, at(head), "click")).toEqual(active);
+    expect(resolve(source, empty, at(head, head - 1), "move")).toEqual(active);
+    expect(resolve(source, empty, at(heading.from, heading.from - 1), "move")).toEqual(active);
+    expect(resolve(source, empty, at(heading.to, heading.to + 1), "move")).toEqual(active);
+    expect(resolve(source, active, at(heading.to, heading.to - 1), "move")).toEqual(empty);
+    expect(resolve(source, active, at(heading.from, heading.from + 1), "move")).toEqual(empty);
+    expect(resolve(source, active, at(source.indexOf("后文")), "click")).toEqual(empty);
+  });
+
+  it("标题展开后进入嵌套代码或数学不缩小父范围，未展开时仍取最小范围", () => {
+    for (const head of [source.indexOf("x"), source.indexOf("strong"), source.indexOf("粗体")]) {
+      expect(resolve(source, active, at(head, head - 1), "move")).toBe(active);
+      const child = resolve(source, empty, at(head), "click").range;
+      expect(child).not.toBeNull();
+      expect(child!.from).toBeGreaterThan(heading.from);
+      expect(child!.to).toBeLessThan(heading.to);
+    }
+    const parent = { range: { from: 0, to: source.length }, error: null };
+    expect(resolve(source, parent, at(heading.from + 1), "move")).toBe(parent);
+  });
+
+  it("点击标题行末空白不打开邻居，已有标题内空白保持展开", () => {
+    for (const head of [heading.to - 1, heading.to, second.to]) {
+      expect(resolve(source, empty, at(head), "click", { whitespace: true })).toBe(empty);
+    }
+    expect(resolve(source, active, at(heading.to), "click", { whitespace: true })).toBe(active);
+    expect(resolve(source, active, at(second.to), "click", { whitespace: true })).toEqual(empty);
+    expect(resolve(source, active, at(second.to), "click")).toEqual({ range: second, error: null });
+  });
+
+  it("空标题的行末可直接进入；从旧标题切换无需中间收起", () => {
+    expect(resolve(source, empty, at(second.to), "edit")).toEqual({ range: second, error: null });
+    expect(resolve(source, active, at(second.from, heading.to), "move")).toEqual({
+      range: second,
+      error: null,
+    });
+  });
+
+  it("标题选区和合成期间冻结，最终光标决定范围；恢复不自动展开", () => {
+    for (const cursor of [
+      at(second.to, heading.from, heading.from),
+      at(heading.from, second.to, second.to),
+    ])
+      expect(resolve(source, active, cursor, "move")).toBe(active);
+    expect(resolve(source, active, at(second.to), "edit", { composing: true })).toBe(active);
+    expect(resolve(source, active, at(second.to), "edit")).toEqual({ range: second, error: null });
+    expect(resolve(source, empty, at(heading.from + 1), "restore")).toBe(empty);
+    expect(resolve(source, active, at(second.to), "restore")).toBe(active);
+  });
+
+  it("真实编辑事务映射标题边界与 UTF-16 光标，反向事务恢复同一源码范围", () => {
+    const state = EditorState.create({ doc: source });
+    const transaction = state.update({
+      changes: [
+        { from: 0, insert: "前置🙂\n" },
+        { from: heading.to, insert: "补充🙂" },
+      ],
+    });
+    const edited = transaction.state.doc.toString();
+    const mapped = {
+      range: {
+        from: transaction.changes.mapPos(heading.from, -1),
+        to: transaction.changes.mapPos(heading.to, 1),
+      },
+      error: null,
+    };
+    expect(edited.slice(mapped.range.from, mapped.range.to)).toBe(
+      source.slice(heading.from, heading.to) + "补充🙂",
+    );
+    expect(resolve(edited, mapped, at(mapped.range.to), "edit")).toBe(mapped);
+    const reversed = transaction.state.update({ changes: transaction.changes.invert(state.doc) });
+    const restored = {
+      range: {
+        from: reversed.changes.mapPos(mapped.range.from, -1),
+        to: reversed.changes.mapPos(mapped.range.to, 1),
+      },
+      error: null,
+    };
+    expect(reversed.state.doc.toString()).toBe(source);
+    expect(restored).toEqual(active);
+    expect(resolve(source, restored, at(heading.to), "edit")).toBe(restored);
+  });
+
+  it("删除完整标题后不保留零宽编辑范围；残缺标题输入仍可打开", () => {
+    const state = EditorState.create({ doc: source });
+    const transaction = state.update({ changes: { from: heading.from, to: heading.to } });
+    const head = transaction.changes.mapPos(heading.from, -1);
+    const mapped = { range: { from: head, to: head }, error: null };
+    expect(resolve(transaction.state.doc.toString(), mapped, at(head), "edit")).toEqual(empty);
+    for (const incomplete of ["=", "== ", "=== *未完成"])
+      expect(resolve(incomplete, empty, at(incomplete.length), "edit")).toEqual({
+        range: { from: 0, to: incomplete.length },
+        error: null,
+      });
   });
 });

@@ -5,7 +5,7 @@ import { parser } from "codemirror-lang-typst/lezer";
 let parsed: { doc: string; tree: ReturnType<typeof parser.parse> } | null = null;
 export type SourceSyntaxTree = ReturnType<typeof parser.parse>;
 type SyntaxNode = SourceSyntaxTree["topNode"];
-type RevealRange = { from: number; to: number; kind: "math" | "code" | "text" };
+type RevealRange = { from: number; to: number; kind: "math" | "code" | "heading" | "text" };
 const trivia = new Set(["Space", "LineComment", "BlockComment"]);
 
 function inMarkup(node: SyntaxNode): boolean {
@@ -27,6 +27,20 @@ function codeBoundary(node: SyntaxNode): RevealRange | null {
   // 分号及其前的语法空白仍属于 # 代码模式，不能留在 raw 之外变成正文。
   if (next?.name === "Semicolon") to = next.to;
   return { from: hash.from, to, kind: "code" };
+}
+
+function headingBoundary(node: SyntaxNode, doc: string): RevealRange | null {
+  // Lezer 把标题行末空白放在 Heading 外；空标题的标记后也仍可输入正文。
+  const heading = node.name === "Space" || node.name === "Parbreak" ? node.prevSibling : node;
+  if (heading?.name !== "Heading" || !inMarkup(heading)) return null;
+  let to = heading.to;
+  const trailing = heading.nextSibling;
+  if (trailing?.name === "Space" || trailing?.name === "Parbreak") {
+    const whitespace = doc.slice(trailing.from, trailing.to);
+    const lineEnd = whitespace.search(/[^ \t]/);
+    to = trailing.from + (lineEnd < 0 ? whitespace.length : lineEnd);
+  }
+  return { from: heading.from, to, kind: "heading" };
 }
 
 export function sourceRevealRange(
@@ -53,7 +67,7 @@ export function sourceRevealRange(
         const range =
           node.name === "Equation" && inMarkup(node)
             ? { from: node.from, to: node.to, kind: "math" as const }
-            : codeBoundary(node);
+            : (codeBoundary(node) ?? headingBoundary(node, doc));
         if (
           range &&
           (affinity > 0
@@ -62,9 +76,15 @@ export function sourceRevealRange(
               ? at > range.from && at <= range.to
               : at >= range.from && at <= range.to)
         ) {
-          if (!outermost) return range;
-          if (!candidate || (range.from <= candidate.from && range.to >= candidate.to))
+          // 点击起点时左侧可能是外层代码，右侧才是内容块中的标题；比较两侧的安全范围。
+          if (
+            !candidate ||
+            (outermost
+              ? range.from <= candidate.from && range.to >= candidate.to
+              : range.from >= candidate.from && range.to <= candidate.to)
+          )
             candidate = range;
+          if (!outermost) break;
         }
         node = node.parent;
       }
