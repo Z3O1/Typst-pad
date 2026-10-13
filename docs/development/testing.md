@@ -45,13 +45,14 @@ ONLY=document-cursor.mjs npm run verify:browser
 ONLY=zoom-stability.mjs npm run verify:browser
 ONLY=document-expansion.mjs npm run verify:browser
 ONLY=empty-formula.mjs npm run verify:browser
+ONLY=source-scroll-sync.mjs npm run verify:browser
 ONLY=dollar-completion.mjs npm run verify:browser
 ONLY=document-completion.mjs npm run verify:browser
 ONLY=editor-shortcuts.mjs,file-changes.mjs npm run verify:browser
 CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 ```
 
-运行器默认运行全部 14 套（期望断言数见下表），并导出套件依赖的真实夹具。运行器启动独立服务和 Chromium，只清理自己创建的进程，避开桌面开发端口。`ONLY` 必须匹配实际套件；期望断言数量不符、夹具为空或导出失败均直接失败。产物和截图保存在 `.browser-check/`。`SKIP_DEV=1` 可复用服务；`SKIP_FIXTURES=1` 只在夹具与当前代码一致时使用。
+运行器默认运行全部 15 套（期望断言数见下表），并导出套件依赖的真实夹具。运行器启动独立服务和 Chromium，只清理自己创建的进程，避开桌面开发端口。`ONLY` 必须匹配实际套件；期望断言数量不符、夹具为空或导出失败均直接失败。产物和截图保存在 `.browser-check/`。`SKIP_DEV=1` 可复用服务；`SKIP_FIXTURES=1` 只在夹具与当前代码一致时使用。
 
 | 套件（期望断言数） | 证明的行为 |
 | --- | --- |
@@ -69,8 +70,11 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 | `preview-reflow.mjs`（25） | 预览重排（纸张跟着预览栏走）：文档模式停在自然尺寸、源码模式按栏宽重排、请求页宽 = 栏宽 × 11/14、极窄栏的页宽下限、字号不超过编辑区且不横滚；连续缩窄去抖、变宽恢复自然纸型与编译稳定、单页 ShadowRoot 实际更新中的迟到窄栏结果作废；同会话纸型编辑（缩小、反向、页高变化）、前缀变更、快速编辑与过期自然学习隔离；真实多纸型夹具的自然比例学习、原文480×960与整正文raw的真实A4产物隔离、错误编辑锁修复/收起及迟到原文测量，以及「注入被文档自己的纸型覆盖」时退回等比缩放 |
 | `editor-shortcuts.mjs`（22） | 文档/源码两模式的 `Ctrl+Shift+D` 首击选词、追加相同文本选区、多选区输入与撤销、Esc 收拢、`Ctrl+D` 仍删行；文档画布仅显示主选区/主光标，不宣称全部可见；无夹具依赖 |
 | `file-changes.mjs`（31） | 假 IPC 与真实页面接线：clean 自动重读、dirty 选择重读/保留、同版本去重与新版本提示、显式保存冲突确认、保存快照及续写、迟到读盘/提示/写盘与跨会话串行隔离；无夹具依赖，不替代真实 OS watch、原生对话框与窗口 IPC |
+| `source-scroll-sync.mjs`（22） | 源码模式双向真实滚轮与原生 cursor/hit 几何对应：跨页、折行、中文/emoji/公式、字体行高、viewport/DPR/布局缩放、UI zoom 与字体配置迟到查询作废、手动反向优先、无回声、无 selection/focus/source/保存/undo 副作用、无输出位置保守停止、纵滚保留独立横滚、模式/修订/会话取消；依赖 `fixtures:scroll`，不替代 WebView2 真实 IPC |
 
 `npm run fixtures:pages` 调用真实原生引擎，导出包含中文、emoji、公式、表格、图片和宏输出的整页夹具与命中探针，覆盖正常、编辑和源码展开状态；另导出 9 份光标渲染夹具及原生源码位置查询（含空文档、空段投影及其原文产物、不可映射位置），用于盒模型和截图像素对照；另导出 62 份正常、嵌套公式/调用、代码/数学交叉模式、多行脚本、数字/分式点击和块公式浮动预览、长行/高矩阵/嵌套分式根号、靠底公式、counter 和用户 raw 规则隔离的光标展开夹具，包含编辑、完整表达式删除与收起后的真实产物，以及 9 份标题正常/完整 block raw/编辑/空标题/内容块标题/mixed 标题光标产物、20 份紧凑 `$$`、`$  $`、Enter 多行空公式、增删空格、续写与正文末尾/空行产物；另导出 37 份默认/紧凑页面缩放与边距夹具（包含正常父布局缩放产生的实际请求几何），比较真实页宽、光标几何及 PDF 原文不变；另导出 15 份原文/整正文 raw 纸型夹具，分别匹配无注入与明确预览几何，验证自然学习不依赖开发桩对源码中页面规则的猜测。另导出 16 份同请求原文测量/最终展示事务夹具，覆盖原文与展开源码、自然页面与明确预览几何；原生测试还核对展开的固定字体/11pt 字号、真实行距、左右内距、跨页首/末行及逐字符停靠点，有自然断点的长行折行后的宽度与字符停靠点，以及 raw 隐藏/替换/包装/字号样式规则的局部隔离、预览完整字形/分式线/根号、预览不移动后续正文、公式内部命中不误判空白、变量赋值与 counter 更新只执行一次。错误预览夹具保留原生诊断，不以空错误模拟失败。测试先确认完整显示，再确认编辑交互，不以点击覆盖率决定页面如何呈现。
+
+`npm run fixtures:scroll` 独立导出 1 份真实多页 `SCROLLFIXTURE`，包含逐字符 cursor 与页中线 hit 查询，严格核对非空 SVG/几何及 1/1 计数。运行器按套件依赖选择 `fixtures:pages` / `fixtures:scroll`，默认全量运行时两者都重新导出；滚动导出证据保存在 `.browser-check/source-scroll-fixtures-exports/<时间戳>-<唯一编号>/`。滚动同步实现契约见[架构](architecture.md#布局滚动与缩放)。
 
 夹具导出每轮把 Cargo 原始 stdout/stderr、完整命令/退出状态、源码 HEAD 与工作区 diff、导出脚本快照、实际数量与夹具名字留在 `.browser-check/page-fixtures-exports/<时间戳>-<唯一编号>/`，成功和失败都保留，不覆盖前一轮。Cargo 使用 libtest `--show-output` 汇总各测试捕获的 stdout，避免并发进度前缀与原生 marker 黏连；门禁仍不接受带前缀的 marker。门禁严格核对 8/9/62/15/37/16 份产物、非空页面/对应探针以及错误回退的原生诊断；Cargo 非零退出、信号或启动/缓冲区错误不能成功。失败信息定位到 marker、原输出行号、夹具名字（无名字时为原文摘要）及缺失字段；数量不足时也记录非行首 marker 的前缀线索，但不擅自接受未知前缀。所有组通过后才写出浏览器消费的 JSON，不自动重试；先检查该轮证据，不能用之后的成功推断之前失败的首因。
 
