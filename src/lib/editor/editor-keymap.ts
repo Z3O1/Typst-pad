@@ -8,6 +8,7 @@ import {
   indentLess,
   indentMore,
   deleteLine,
+  deleteCharBackwardStrict,
   toggleBlockComment,
   toggleComment,
 } from "@codemirror/commands";
@@ -15,7 +16,11 @@ import { selectNextOccurrence } from "@codemirror/search";
 import type { Command } from "@codemirror/view";
 import { insertNewTypstListItem, insertTypstListContinuation } from "codemirror-lang-typst/lezer";
 import { emptyPairBackspace, planScaffoldExpand } from "./auto-pair";
-import { addDollarPair } from "./dollar-pair-state";
+import {
+  addDollarPair,
+  createPristineMathScaffold,
+  pristineMathScaffold,
+} from "./dollar-pair-state";
 import { indentForNewLine, isBlankLine } from "./auto-indent";
 import { enterMathRanges, mathContinuationPrefix, mathEnterTree } from "./math-enter";
 import type { EnterMathRange } from "./math-enter";
@@ -24,7 +29,7 @@ import type { Region } from "../core/typst-lex";
 import { defaultSettings } from "../core/app-settings";
 
 /**
- * 退格删掉空 $$；空行间公式先缩回 $$，下一次才删除定界符。
+ * 退格删掉空 $$；仅 Enter 刚生成且未动过的多行空公式可先缩回 $$。
  * 不接管时返回 false，keymap 会继续往下找 basicSetup 的默认退格（不会丢功能）。
  * 删除范围由 emptyPairBackspace 给（**光标两侧各删几个**，行间脚手架是跨在光标两侧的），
  * 所有光标都匹配才接管（与 CM deleteBracketPair 一致），混合情况交回默认退格。
@@ -36,9 +41,22 @@ function deleteEmptyDollarPair(view: EditorView): boolean {
   const syntax = ensureSyntaxTree(state, state.doc.length, 20);
   if (!syntax && state.facet(language)) return false;
   const tree = syntax?.topNode.name === "Typst" ? syntax : undefined;
+  const pristine = state.field(pristineMathScaffold);
+  const main = state.selection.main;
+  // 未动资格以外的同形多行空公式删一个字符，不折回，也不整档吞掉空格。
+  const multiline = main.empty ? emptyPairBackspace(doc, main.head, tree, true) : null;
+  if (
+    state.selection.ranges.length === 1 &&
+    pristine?.caret !== main.head &&
+    multiline &&
+    doc.slice(main.head - multiline.before, main.head + multiline.after).includes("\n")
+  )
+    return deleteCharBackwardStrict(view);
   let complete = true;
   const changes = state.changeByRange((range) => {
-    const span = range.empty ? emptyPairBackspace(doc, range.head, tree) : null;
+    const span = range.empty
+      ? emptyPairBackspace(doc, range.head, tree, pristine?.caret === range.head)
+      : null;
     if (!span) {
       complete = false;
       return { range };
@@ -467,11 +485,10 @@ function expandMathScaffold(view: EditorView, tabSpaces: number): boolean {
   view.dispatch({
     changes: { from: plan.from, to: plan.to, insert },
     selection: { anchor: caret },
-    effects: addDollarPair.of({
-      open: plan.from,
-      close: plan.from + insert.length - 1,
-      display: true,
-    }),
+    effects: [
+      addDollarPair.of({ open: plan.from, close: plan.from + insert.length - 1, display: true }),
+      createPristineMathScaffold.of({ from: plan.from, to: plan.from + insert.length, caret }),
+    ],
     scrollIntoView: true,
     userEvent: "input",
   });
@@ -492,6 +509,7 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
     continueMathPrefix(view) ||
     listAwareEnter(isWriteMode, insertNewTypstListItem, false)(view);
   return [
+    pristineMathScaffold,
     Prec.high(
       keymap.of([
         // **Tab / Shift+Tab**（2026-09-28 接管普通 Tab；2026-10-07 档宽改为设置项 tabSpaces）：

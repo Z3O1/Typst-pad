@@ -37,6 +37,7 @@
   import { observeEditorComposition } from "./editor-composition";
   import type { SourceCursorChange } from "$lib/core/document-source-expansion";
   import { dollarAutoPair } from "./dollar-auto-pair";
+  import { invalidatePristineMathScaffold } from "./dollar-pair-state";
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
   import type { CompileErrorLocation } from "../core/typst-engine";
@@ -204,9 +205,11 @@
     });
     mark("editor-created");
     registerEditorView(view);
-    const stopComposition = observeEditorComposition(view.contentDOM, (active) =>
-      onComposition?.(active),
-    );
+    const stopComposition = observeEditorComposition(view.contentDOM, (active) => {
+      // 合成开始即撤销未动资格（含取消合成），DOM/EditContext 两条路径统一；不改原文/历史。
+      if (active) view?.dispatch({ effects: invalidatePristineMathScaffold.of(null) });
+      onComposition?.(active);
+    });
 
     return () => {
       stopComposition();
@@ -416,6 +419,7 @@
   $effect(() => {
     if (!view) return;
     if (appliedMode === mode) return;
+    if (appliedMode !== null) view.dispatch({ effects: invalidatePristineMathScaffold.of(null) });
     appliedMode = mode;
     const epoch = caretAnchorEpoch;
     requestAnimationFrame(() => restoreCaretAnchor(epoch));

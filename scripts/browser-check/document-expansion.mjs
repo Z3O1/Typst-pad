@@ -11,7 +11,7 @@ import {
   shotPath,
 } from "./harness.mjs";
 const expansion = loadFixtures("expansion-fixtures.json", {
-  predicate: (fs) => fs.length === 33 && fs.every((f) => f.pages.length && f.cursorQueries.length),
+  predicate: (fs) => fs.length === 62 && fs.every((f) => f.pages.length && f.cursorQueries.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const fixtures = [...loadFixtures("page-fixtures.json"), ...expansion];
@@ -208,7 +208,7 @@ async function caretMatches(value, head, visible = false) {
   return true;
 }
 // 字形是 Typst SVG 路径而非 CSS text；用原生光标高度与实际背景盒验证样式。
-async function sourceStyleMatches(value, { panel }) {
+async function sourceStyleMatches(value, { panel, heading = false }) {
   const first = query(value, value.range.from);
   const last = query(value, value.range.to - 1);
   const result = await c.evaluate(`(() => {
@@ -241,13 +241,15 @@ async function sourceStyleMatches(value, { panel }) {
     const border=getComputedStyle(outline);
     const glyphs=[...svg.querySelectorAll('use[fill="'+ink+'"]')].map(el=>el.getBoundingClientRect());
     const inkTop=Math.min(...glyphs.map(r=>r.top)),inkBottom=Math.max(...glyphs.map(r=>r.bottom));
-    // Typst 默认末行按 baseline 排版，descender 会进入 8pt inset；实际墨迹仍须留出 6pt。
+    // Typst 默认末行按 baseline 排版，descender 会进入 8pt inset；普通脚本墨迹仍留 6pt。
+    // 标题 raw 的 CJK 全宽字形 ascender/descender 更大（原生墨迹 top≈7.13/bottom≈5.64），
+    // 仍验证相同 8pt inset 面板、完整 caret、颜色/边框；不放松既有脚本/公式的阈值。
     // 光标使用 em 高度，不等于墨迹盒，完整光标也须留在面板内。
     const valid=readable&&contrast>=4.5&&border.stroke!=='none'&&parseFloat(border.strokeWidth)>=.5
       &&/[Cc]/.test(background.getAttribute('d'))
       &&Math.abs(rect.width/scale-312)<1
       &&x(first)-rect.left>=9*scale&&rect.right-x(last)>=9*scale
-      &&inkTop-rect.top>=7.5*scale&&rect.bottom-inkBottom>=6*scale
+      &&inkTop-rect.top>=${heading ? 7 : 7.5}*scale&&rect.bottom-inkBottom>=${heading ? 5.5 : 6}*scale
       &&y(first)>=rect.top&&y(last)+last.heightPt*scale<=rect.bottom;
     return {valid,readable,contrast,stroke:border.stroke,strokeWidth:border.strokeWidth,width:rect.width/scale,left:(x(first)-rect.left)/scale,right:(rect.right-x(last))/scale,top:(inkTop-rect.top)/scale,bottom:(rect.bottom-inkBottom)/scale,caretBottom:(rect.bottom-y(last)-last.heightPt*scale)/scale};
   })()`);
@@ -960,9 +962,117 @@ await c.key("Escape", { keyCode: 27 });
 await settled(bottomBase);
 await viewport(1400, 900);
 
+// 标题：真实空白/字形命中与左右键、编辑历史共用生产投影。
+const headingBase = f("heading-base"),
+  heading = f("heading");
+await replace(headingBase);
+const headingBlank = headingBase.whitespaceHits?.[0];
+if (!headingBlank?.caret.isWhitespace) throw Error("标题空白验收必须有原生命中证据");
+async function nativePoint(p) {
+  return c.evaluate(
+    `(() => {const p=${JSON.stringify(p)},h=document.querySelectorAll('#preview-host>.document-page')[p.page-1],r=h.getBoundingClientRect(),v=h.shadowRoot.querySelector('svg').viewBox.baseVal;return {x:r.left+(p.xPt-v.x)*r.width/v.width,y:r.top+(p.yPt-v.y)*r.height/v.height}})()`,
+  );
+}
+const whitespacePoint = await nativePoint(headingBlank);
+await c.click(whitespacePoint.x, whitespacePoint.y);
+await compileQuiesce();
+check("标题行侧真实空白仅定位，不自动展开标题", await pagesMatch(headingBase));
+const titleCaret = query(headingBase, headingBase.original.indexOf("中文标题"));
+const titlePoint = await nativePoint({
+  ...titleCaret,
+  xPt: titleCaret.xPt + 1,
+  yPt: titleCaret.yPt + titleCaret.heightPt / 2,
+});
+await c.click(titlePoint.x, titlePoint.y);
+await settled(heading);
+check(
+  "真实鼠标点击标题在原位展开完整级别标记且没有公式气泡",
+  (await pagesMatch(heading)) &&
+    (await doc()) === heading.original &&
+    (await c.evaluate("!document.querySelector('.formula-preview')")),
+);
+await cursor(heading.original.indexOf("x^2"));
+await settled(heading);
+check(
+  "标题源码内嵌公式/脚本移动保持父标题且副作用一次",
+  (await pagesMatch(heading)) &&
+    /COUNT:\s*1/.test(heading.visibleText) &&
+    (await c.evaluate("!document.querySelector('.formula-preview')")),
+);
+await cursor(heading.range.from + 1);
+await c.key("ArrowLeft", { keyCode: 37 });
+await settled(headingBase);
+check("真实左键跨出标题起点恢复正常标题", await pagesMatch(headingBase));
+await c.key("ArrowRight", { keyCode: 39 });
+await settled(heading);
+check(
+  "真实右键进入 = 标记即展开完整标题",
+  (await pagesMatch(heading)) && (await caretMatches(heading, heading.range.from + 1, true)),
+);
+for (const theme of ["dark", "light"]) {
+  await setTheme(theme);
+  check(
+    `标题 ${theme}：统一源码面板颜色、内距与原生 caret`,
+    (await sourceStyleMatches(heading, { panel: true, heading: true })) &&
+      (await pagesMatch(heading)),
+  );
+  await c.screenshot(shotPath(`document-expansion-heading-${theme}`));
+}
+await cursor(heading.range.to - 1);
+await c.key("ArrowRight", { keyCode: 39 });
+await settled(headingBase);
+check("真实右键跨出标题末尾收起而不黏连后文", await pagesMatch(headingBase));
+await cursor(heading.original.indexOf("中文标题") + 4);
+await settled(heading);
+await c.send("Input.dispatchKeyEvent", { type: "char", key: "续", text: "续" });
+await settled(f("heading-edited"));
+check(
+  "标题真实输入同步原文、完整源码与后文排版",
+  (await doc()) === f("heading-edited").original && (await pagesMatch(f("heading-edited"))),
+);
+await c.key("z", { keyCode: 90, modifiers: 2 });
+await settled(heading);
+check(
+  "标题编辑撤销恢复原文及真实展开页面",
+  (await doc()) === heading.original && (await pagesMatch(heading)),
+);
+await c.key("y", { keyCode: 89, modifiers: 2 });
+await settled(f("heading-edited"));
+check(
+  "标题编辑重做恢复原文及真实展开页面",
+  (await doc()) === f("heading-edited").original && (await pagesMatch(f("heading-edited"))),
+);
+await c.evaluate(
+  `(() => {const old=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=(cmd,args)=>{if(cmd==='export_pdf')window.__headingPdfSource=args.src;return old(cmd,args)};return true})()`,
+);
+await c.evaluate("window.__browserDevSavePath='/fake/heading.pdf';true");
+await c.key("p", { keyCode: 80, modifiers: 2 });
+await c.waitFor("typeof window.__headingPdfSource==='string'");
+check(
+  "标题展开时 PDF 请求仍是原文，不含 raw/隐藏标题/样式",
+  (await c.evaluate("window.__headingPdfSource")) === f("heading-edited").original &&
+    (await pagesMatch(f("heading-edited"))),
+);
+await c.key("Escape", { keyCode: 27 });
+await settled(f("heading-edited-base"));
+check(
+  "标题 Esc 收起恢复原生编号和正文，无气泡残留",
+  (await pagesMatch(f("heading-edited-base"))) &&
+    (await c.evaluate("!document.querySelector('.formula-preview')")),
+);
+for (const name of ["heading-empty", "heading-nested"]) {
+  await replace(f(`${name}-base`));
+  await cursor(f(name).range.from + 1);
+  await settled(f(name));
+  check(
+    `${name}：空标题/内容块标题完整 block raw 且可真实停靠`,
+    (await pagesMatch(f(name))) && (await caretMatches(f(name), f(name).range.from + 1, true)),
+  );
+}
+
 check(
   "展开流程没有隐式写盘或脚本异常",
   await c.evaluate("!window.__browserDevWrites?.length&&!window.__browserDevErrors?.length"),
 );
 await c.close();
-finish(`通过 ${state.passed} 项检查；光标主导展开 + 33 份真实 Typst 产物`);
+finish(`通过 ${state.passed} 项检查；光标主导展开 + 62 份真实 Typst 产物`);

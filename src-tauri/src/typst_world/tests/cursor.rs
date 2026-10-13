@@ -2,7 +2,7 @@ use super::*;
 use crate::block_geometry::{PlacedItem, PlacedItemKind};
 use crate::document_geometry::{caret_for_item, hit_test, locate, selection};
 
-fn mixed_source() -> String {
+pub(super) fn mixed_source() -> String {
     r#"#set page(width: 360pt, height: 600pt, margin: 24pt)
 #set text(size: 12pt, font: "Libertinus Serif")
 = 中文标题 Heading

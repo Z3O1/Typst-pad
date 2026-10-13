@@ -259,6 +259,7 @@ export function emptyPairBackspace(
   doc: string,
   pos: number,
   tree = treeFor(doc),
+  pristineScaffold = false,
 ): PairBackspace | null {
   if (!validPosition(doc, pos)) return null;
   const context = contextAt(doc, pos, tree);
@@ -269,6 +270,7 @@ export function emptyPairBackspace(
   // 空格/Enter 的行间手势先退回 $$，下一次 Backspace 才删掉配对。
   const padded = body === "  " && pos === from + 2;
   const expanded =
+    pristineScaffold &&
     /^\r?\n[ \t]*\r?\n[ \t]*$/.test(body) &&
     doc.slice(lineBounds(doc, from).start, from).trim() === "" &&
     doc.slice(close + 1, lineBounds(doc, close).end).trim() === "" &&

@@ -25,7 +25,7 @@ fn expansion_sample() -> String {
     "#set page(width: 360pt, height: 260pt, margin: 24pt)\n#set text(size: 12pt)\n正文 $a + b$ 中间 #text(fill: red)[嵌套 $c + d$ 与 #strong[粗体]] 后文。\n\n混合公式 $a + #sym.beta$。\n\n#let formula = $c + d$; 声明输出 #formula。\n\n#let helper = {\n let value = 1\n\n // 代码空白 中文🙂\n \t\n\t \n\n value\n\n};\n\n#block[\n多行脚本正文。\n第二行中文与 😀。\n]\n\n#pagebreak()\n第二页正文。\n".into()
 }
 
-type ExpansionSource = (&'static str, String, Option<(usize, usize)>);
+pub(super) type ExpansionSource = (&'static str, String, Option<(usize, usize)>);
 
 fn expansion_sources() -> Vec<ExpansionSource> {
     let base = expansion_sample();
@@ -111,10 +111,12 @@ fn expansion_sources() -> Vec<ExpansionSource> {
         });
         (name, doc, range)
     })
+    .chain(heading::sources())
+    .chain(empty_math::sources())
     .collect()
 }
 
-fn projected(doc: &str, range: Option<(usize, usize)>) -> String {
+pub(super) fn projected(doc: &str, range: Option<(usize, usize)>) -> String {
     let Some((from, to)) = range else {
         return doc.into();
     };
@@ -127,11 +129,16 @@ fn projected(doc: &str, range: Option<(usize, usize)>) -> String {
     let declaration = declaration_prefix(text);
     let raw = styled_raw_kind(&raw, text.starts_with('$') && text.ends_with('$'));
     let preview = expansion_preview(text, expanded_block(text), true);
-    format!("{}{declaration}{raw}{preview}{}", &doc[..from], &doc[to..])
+    let separator = if heading_source(text) { "\n\n" } else { "" };
+    format!(
+        "{}{declaration}{raw}{separator}{preview}{}",
+        &doc[..from],
+        &doc[to..]
+    )
 }
 
 // 与 document-projection.ts 一致：占位只在 raw 展示副本，执行/预览仍使用原表达式。
-fn raw_blank_placeholders(text: &str) -> String {
+pub(super) fn raw_blank_placeholders(text: &str) -> String {
     text.split('\n')
         .map(|line| {
             if line.chars().all(|ch| ch == ' ' || ch == '\t') {
@@ -144,8 +151,14 @@ fn raw_blank_placeholders(text: &str) -> String {
         .join("\n")
 }
 
+pub(super) fn heading_source(text: &str) -> bool {
+    typst::syntax::parse(text)
+        .children()
+        .any(|node| node.kind() == SyntaxKind::Heading)
+}
+
 fn expanded_block(text: &str) -> bool {
-    text.contains('\n') || (text.starts_with("$ ") && text.ends_with(" $"))
+    heading_source(text) || text.contains('\n') || (text.starts_with("$ ") && text.ends_with(" $"))
 }
 
 pub(super) fn declaration_prefix(text: &str) -> String {
@@ -179,7 +192,7 @@ fn preview_start(doc: &str, from: usize, to: usize) -> usize {
         .len()
 }
 
-fn visible_start(doc: &str, from: usize, to: usize) -> usize {
+pub(super) fn visible_start(doc: &str, from: usize, to: usize) -> usize {
     let text = &doc[from..to];
     from + declaration_prefix(text).len()
         + expansion_style()[if text.starts_with('$') && text.ends_with('$') {
@@ -200,7 +213,10 @@ fn cursor_expansion_preserves_full_output_and_raw_character_locations() {
         let world = TypstWorld::new(src.clone(), None, &fonts_dir(), &FontConfig::default());
         let document = typst::compile::<PagedDocument>(&world).output.expect(name);
         let (document, formula_preview) = super::super::formula_preview::extract(&document);
-        assert!(document.pages().len() >= 2, "{name}");
+        assert!(
+            document.pages().len() >= if name.starts_with("empty-") { 1 } else { 2 },
+            "{name}"
+        );
         let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
         let carets: Vec<_> = items
             .iter()
@@ -213,8 +229,8 @@ fn cursor_expansion_preserves_full_output_and_raw_character_locations() {
             let start = visible_start(&doc, from, to);
             assert_eq!(
                 formula_preview.is_some(),
-                text.starts_with('$'),
-                "只有公式有预览：{name}"
+                text.starts_with('$') && !text[1..text.len() - 1].trim().is_empty(),
+                "只有有墨迹的公式有预览，空公式仍显示完整 raw：{name}"
             );
             // raw 中的中文/emoji 和多行都必须有真实源码光标，不能只成功导出一张页图。
             let raw_text = if expanded_block(text) {
@@ -235,7 +251,7 @@ fn cursor_expansion_preserves_full_output_and_raw_character_locations() {
     }
 }
 
-fn visible_frame_text(frame: &Frame, output: &mut String) {
+pub(super) fn visible_frame_text(frame: &Frame, output: &mut String) {
     for (_, item) in frame.items() {
         match item {
             FrameItem::Text(text) => output.push_str(&text.text),
@@ -778,7 +794,30 @@ fn dump_page_fixtures_expansion() {
                 )
             })
             .collect();
+        let heading_blank = src.find("== 中文标题").and_then(|from| {
+            let to = src[from..].find('\n').map_or(src.len(), |end| from + end);
+            items
+                .iter()
+                .filter(|item| item.range.start >= from && item.range.end <= to)
+                .max_by_key(|item| item.range.end)
+                .map(|item| {
+                    (
+                        item.page,
+                        item.caret_end.x.to_pt() + 24.0,
+                        (item.caret_start + item.caret_vector / 2.0).y.to_pt(),
+                    )
+                })
+        });
         let id = store(items, src.len(), stats.foreign_ink);
+        let heading_whitespace_hits: Vec<_> = heading_blank
+            .into_iter()
+            .filter_map(|(page, x_pt, y_pt)| {
+                let caret = crate::document_geometry::hit_test(id, page, x_pt, y_pt)?;
+                (caret.is_whitespace == Some(true)).then(
+                    || serde_json::json!({ "page":page, "xPt":x_pt, "yPt":y_pt, "caret":caret }),
+                )
+            })
+            .collect();
         let formula_hits: Vec<_> = formula_points.into_iter().map(|(page,x_pt,y_pt)| serde_json::json!({ "page":page, "xPt":x_pt, "yPt":y_pt, "caret":crate::document_geometry::hit_test(id,page,x_pt,y_pt).unwrap() })).collect();
         let queries: Vec<_> = src
             .char_indices()
@@ -804,7 +843,7 @@ fn dump_page_fixtures_expansion() {
         }
         println!(
             "EXPANSIONFIXTURE:{}",
-            serde_json::json!({ "name": name, "doc": src, "original": original, "range": range, "pages": pages, "visibleText": visible_text, "formulaPreview": formula_preview, "formulaHits": formula_hits, "carets": carets, "cursorQueries": queries, "selectionQuads": selection(id, 0, src.len()) })
+            serde_json::json!({ "name": name, "doc": src, "original": original, "range": range, "pages": pages, "visibleText": visible_text, "formulaPreview": formula_preview, "formulaHits": formula_hits, "whitespaceHits": heading_whitespace_hits, "carets": carets, "cursorQueries": queries, "selectionQuads": selection(id, 0, src.len()) })
         );
     }
 }

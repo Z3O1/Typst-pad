@@ -4,6 +4,30 @@ import expansionStyle from "./document-expansion-style.json";
 import { projectEmptyParagraphs } from "./document-empty-paragraphs";
 
 describe("Typst 原地源码展开", () => {
+  it("标题包含级别标记，单行也使用 block raw 并隔离后文，只执行一个隐藏标题", () => {
+    for (const title of ["== 中文🙂 $x$ #strong[标题]", "=== ", "= 标题 #block[\n多行\n]"]) {
+      const source = `前文\n\n${title}\n后正文。`;
+      const from = source.indexOf(title),
+        to = from + title.length;
+      const p = projectDocumentRanges(source, [{ from, to }], { styled: true, preview: true });
+      expect(p.source).toContain(`\`\`\`\n${title}\n\`\`\`${expansionStyle.tail}\n\n`);
+      expect(p.source).toContain(
+        `${expansionStyle.outputHead}\n${title}${expansionStyle.outputTail}\n\n`,
+      );
+      expect(p.source).not.toContain(expansionStyle.previewInlineHead);
+      expect(p.original).toBe(source);
+      for (let pos = 0; pos <= source.length; pos++)
+        expect(p.renderedToSource(p.sourceToRendered(pos))).toBe(pos);
+      const preview = p.source.lastIndexOf(title);
+      expect(p.isPreview!(p.sourceToRendered(from))).toBe(false);
+      expect(p.renderedToSource(preview + 2)).toBe(from + 2);
+      const invalid = projectDocumentRanges(source, [{ from, to, preserveDeclaration: false }], {
+        styled: true,
+        preview: true,
+      });
+      expect(invalid.source).not.toContain(expansionStyle.outputHead);
+    }
+  });
   it("公式和脚本共享中性代码样式，不为高亮切分 raw 或改变诊断来源", () => {
     expect(expansionStyle.formulaHead).toBe(expansionStyle.head);
     expect(expansionStyle.head).toContain("ligatures: false");

@@ -60,8 +60,13 @@ export function projectDocumentRanges(
   const segments = normalized.map(({ from, to, preserveDeclaration }) => {
     const text = source.slice(from, to);
     const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
+    const syntax = sourceRevealRange(source, from);
+    const heading = syntax.kind === "heading" && syntax.from === from && syntax.to === to;
     const block =
-      text.includes("\n") || longest >= 2 || (options.preview && /^\$\s[\s\S]*\s\$$/.test(text));
+      heading ||
+      text.includes("\n") ||
+      longest >= 2 ||
+      (options.preview && /^\$\s[\s\S]*\s\$$/.test(text));
     // raw 空行没有带来源的字形；仅在展示副本的缩进之后加入真实 Typst 占位。
     const blankLines = block
       ? [...text.matchAll(/^[ \t]*(?=\r?$)/gm)].map((match) => ({
@@ -95,8 +100,7 @@ export function projectDocumentRanges(
     // regex show 的 slice_textual 同样不保留切片起点的 span_offset，不能用它绕过高亮问题。
     // 展开以源码停靠点为准：使用无语言 raw 和统一代码色板，不切分文本或猜字形坐标。
     // 局部规则消费 raw 的原始行 body，防止用户 show raw 隐藏/替换源码；不重造字形来源。
-    const syntax = text.startsWith("$") ? sourceRevealRange(source, from + 1) : null;
-    const formula = syntax?.kind === "math" && syntax.from === from && syntax.to === to;
+    const formula = syntax.kind === "math" && syntax.from === from && syntax.to === to;
     const style = options.styled
       ? {
           head: options.preview && formula ? expansionStyle.formulaHead : expansionStyle.head,
@@ -104,7 +108,8 @@ export function projectDocumentRanges(
         }
       : { head: "", tail: "" };
     const head = declaration + style.head + (block ? `${fence}\n` : `${fence} `);
-    const tail = (block ? `\n${fence}` : ` ${fence}`) + style.tail;
+    // 单行标题也必须是 block raw；段落边界隔离后文，不能把它黏入标题或隐藏副本。
+    const tail = (block ? `\n${fence}` : ` ${fence}`) + style.tail + (heading ? "\n\n" : "");
     const start = from + offset;
     const textStart = start + head.length;
     const textEnd = textStart + rawText.length;
@@ -112,13 +117,16 @@ export function projectDocumentRanges(
     const previewHead = previewLive
       ? formula
         ? expansionStyle.previewInlineHead
-        : expansionStyle.outputHead
+        : expansionStyle.outputHead + (heading ? "\n" : "")
       : "";
     const previewBody = previewLive ? text : "";
     const preview =
       previewHead +
       previewBody +
-      (previewLive ? (formula ? expansionStyle.previewTail : expansionStyle.outputTail) : "");
+      (previewLive
+        ? (formula ? expansionStyle.previewTail : expansionStyle.outputTail) +
+          (heading ? "\n\n" : "")
+        : "");
     const previewFrom = textEnd + tail.length;
     const previewTextStart = previewFrom + previewHead.length;
     const previewTextEnd = previewTextStart + previewBody.length;

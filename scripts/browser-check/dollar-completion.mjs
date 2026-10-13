@@ -164,15 +164,20 @@ check(
   (await doc()) === "  $\n    x\n  $" && (await head()) === 13,
 );
 
-await replace("  $\n    \n  $", 8);
+await replace("  ");
+await c.type("$");
+await c.key("Enter", { keyCode: 13 });
+// 时间不撤销未动资格；把生成和两次删除分开历史组，独立验证删除的 undo。
+await sleep(600);
 await c.key("Backspace", { keyCode: 8 });
 const collapsed = (await doc()) === "  $$" && (await head()) === 3;
 await c.key("Backspace", { keyCode: 8 });
 const removed = (await doc()) === "  ";
 await c.key("z", { keyCode: 90, modifiers: 2 });
 check(
-  "空三行公式分两级退格，撤销恢复原光标",
+  "刚自动生成且未动的三行公式分两级退格，撤销恢复原文/光标",
   collapsed && removed && (await doc()) === "  $\n    \n  $" && (await head()) === 8,
+  JSON.stringify({ collapsed, removed, doc: await doc(), head: await head() }),
 );
 
 await replace("");

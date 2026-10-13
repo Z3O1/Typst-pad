@@ -4,7 +4,12 @@ import { closeBrackets, insertBracket } from "@codemirror/autocomplete";
 import { history, redo, undo } from "@codemirror/commands";
 import { typst_lezer } from "codemirror-lang-typst/lezer";
 import { dollarAutoPair, insertDollar, insertDollarSpace } from "./dollar-auto-pair";
-import { dollarPairs } from "./dollar-pair-state";
+import {
+  dollarPairs,
+  createPristineMathScaffold,
+  invalidatePristineMathScaffold,
+  pristineMathScaffold,
+} from "./dollar-pair-state";
 
 function stateFor(doc = "", anchor = doc.length, head = anchor) {
   return EditorState.create({
@@ -34,6 +39,73 @@ beforeEach(() => {
   vi.setSystemTime(1_000_000);
 });
 afterEach(() => vi.useRealTimers());
+
+describe("Enter 多行脚手架的临时未动资格", () => {
+  const generated = () =>
+    EditorState.create({
+      doc: "$$",
+      selection: { anchor: 1 },
+      extensions: [history(), pristineMathScaffold],
+    }).update({
+      changes: { from: 0, to: 2, insert: "$\n  \n$" },
+      selection: { anchor: 4 },
+      effects: createPristineMathScaffold.of({ from: 0, to: 6, caret: 4 }),
+      userEvent: "input",
+    }).state;
+  it("只有生成 effect 创建资格；同位置/配置事务不撤销，移动往返不可恢复", () => {
+    let state = generated();
+    expect(state.field(pristineMathScaffold)).toEqual({ from: 0, to: 6, caret: 4 });
+    state = state.update({ selection: { anchor: 4 } }).state;
+    expect(state.field(pristineMathScaffold)).not.toBeNull();
+    state = state.update({ selection: { anchor: 3 } }).state;
+    state = state.update({ selection: { anchor: 4 } }).state;
+    expect(state.field(pristineMathScaffold)).toBeNull();
+    expect(
+      EditorState.create({ doc: "$\n  \n$", extensions: [pristineMathScaffold] }).field(
+        pristineMathScaffold,
+      ),
+    ).toBeNull();
+  });
+  it("空格编辑/逆修改也不恢复资格，undo/redo 只恢复源码不恢复资格", () => {
+    let state = generated();
+    state = state.update({ changes: { from: 4, insert: " " }, selection: { anchor: 5 } }).state;
+    state = state.update({ changes: { from: 4, to: 5 }, selection: { anchor: 4 } }).state;
+    expect(state.doc.toString()).toBe("$\n  \n$");
+    expect(state.field(pristineMathScaffold)).toBeNull();
+    state = generated();
+    const target = {
+      get state() {
+        return state;
+      },
+      dispatch: (tr: ReturnType<EditorState["update"]>) => {
+        state = tr.state;
+      },
+    };
+    expect(undo(target)).toBe(true);
+    expect(redo(target)).toBe(true);
+    expect(state.doc.toString()).toBe("$\n  \n$");
+    expect(state.field(pristineMathScaffold)).toBeNull();
+  });
+  it("合成开始（即使取消）仅撤销资格，不改变原文、选区或历史", () => {
+    const before = generated();
+    const after = before.update({ effects: invalidatePristineMathScaffold.of(null) }).state;
+    expect(after.field(pristineMathScaffold)).toBeNull();
+    expect(after.doc).toBe(before.doc);
+    expect(after.selection.eq(before.selection)).toBe(true);
+    let state = after;
+    expect(
+      undo({
+        get state() {
+          return state;
+        },
+        dispatch: (tr) => {
+          state = tr.state;
+        },
+      }),
+    ).toBe(true);
+    expect(state.doc.toString()).toBe("$$");
+  });
+});
 
 describe("$ 与 CM 原生 ( 的手感对照", () => {
   it.each([

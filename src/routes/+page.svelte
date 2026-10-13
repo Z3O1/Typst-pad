@@ -1010,7 +1010,14 @@
     if (!positioningFromPage) interactionSeq++;
     const selection = change ?? editorRef?.selection();
     documentHasSelection = !!selection && selection.anchor !== selection.head;
-    if (viewMode === "write" && sourceOpen && !positioningFromPage && selection) {
+    if (
+      viewMode === "write" &&
+      !positioningFromPage &&
+      selection &&
+      (sourceOpen || change?.reason === "edit")
+    ) {
+      // 模式往返后编辑器仍可聚焦；真实输入即进入编辑态，不能因旧 sourceOpen=false 漏掉新 $$。
+      sourceOpen = true;
       if (change?.reason !== "restore") pendingCaretReveal = !documentHasSelection;
       const changed = reconcileSourceExpansion(change?.reason ?? "explicit", selection);
       // 编辑本身已由 handleDocChange 去抖；不要因为输入进入表达式而变成逐键立即编译。

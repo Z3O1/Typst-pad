@@ -10,11 +10,12 @@ const fixtures = JSON.parse(
   source.match(/const SUITE_FIXTURES = ({[\s\S]*?\n});/)[1].replace(/,\s*}/g, "}"),
 );
 
-// Preserve the existing suites and counts when registering new fixture-free suites.
+// 真实产物/交互覆盖变化时，套件、计数与夹具依赖一起更新。
 const expectedSuites = [
   ["document-mode.mjs", 81],
-  ["document-cursor.mjs", 36],
-  ["document-expansion.mjs", 89],
+  ["document-cursor.mjs", 37],
+  ["document-expansion.mjs", 104],
+  ["empty-formula.mjs", 39],
   ["document-transaction.mjs", 6],
   ["document-performance.mjs", 6],
   ["computed-style.mjs", 18],
@@ -28,7 +29,7 @@ const expectedSuites = [
 ];
 
 describe("browser-check/run-all registration", () => {
-  it("runs all thirteen suites with their exact assertion counts", () => {
+  it("runs all fourteen suites with their exact assertion counts", () => {
     expect(suites).toEqual(expectedSuites);
     for (const [file] of suites) {
       expect(readFileSync(new URL(file, import.meta.url), "utf8").length).toBeGreaterThan(0);

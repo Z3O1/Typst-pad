@@ -47,9 +47,11 @@ fn expansion_preview(text: &str, block: bool, available: bool) -> String {
     } else {
         "previewInlineHead"
     };
-    let body = text;
+    let heading = expansion::heading_source(text);
+    let start = if heading { "\n" } else { "" };
+    let end = if heading { "\n\n" } else { "" };
     format!(
-        "{}{body}{}",
+        "{}{start}{text}{}{end}",
         style[head].as_str().unwrap(),
         style[if formula { "previewTail" } else { "outputTail" }]
             .as_str()
@@ -109,8 +111,10 @@ fn font_count() -> usize {
 
 mod cursor;
 mod edit_performance;
+mod empty_math;
 mod expansion;
 mod fonts;
+mod heading;
 mod packages;
 mod paged;
 mod paths;

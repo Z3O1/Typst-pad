@@ -403,6 +403,38 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     view.destroy();
   });
 
+  it("刚 Enter 生成可立即折回；移动、空格编辑或手工同形多行公式不折回", () => {
+    for (const make of [makeView, makeWriteView]) {
+      let view = make("$$");
+      view.dispatch({ selection: { anchor: 1 } });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+      press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+      expect(view.state.doc.toString()).toBe("$$");
+      expect(view.state.selection.main.head).toBe(1);
+      view.destroy();
+      view = make("$$");
+      view.dispatch({ selection: { anchor: 1 } });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+      view.dispatch({ selection: { anchor: 3 } });
+      press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+      expect(view.state.doc.toString()).toBe("$\n \n$");
+      view.destroy();
+      view = make("$$");
+      view.dispatch({ selection: { anchor: 1 } });
+      press(view, { key: "Enter", code: "Enter", keyCode: 13 });
+      view.dispatch({ changes: { from: 4, insert: " " }, selection: { anchor: 5 } });
+      view.dispatch({ changes: { from: 4, to: 5 }, selection: { anchor: 4 } });
+      press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+      expect(view.state.doc.toString()).toBe("$\n \n$");
+      view.destroy();
+      view = make("$\n  \n$");
+      view.dispatch({ selection: { anchor: 3 } });
+      press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+      expect(view.state.doc.toString()).toBe("$\n \n$");
+      view.destroy();
+    }
+  });
+
   it("脚手架展开不接管：光标不在中间 / 行内有内容 / Shift+Enter", () => {
     // 光标在行首（不在两个 $ 之间）→ 普通换行（源码模式：换行继承前导空白，此处无）
     let view = makeView("$  $");

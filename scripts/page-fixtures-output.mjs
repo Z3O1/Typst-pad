@@ -5,7 +5,7 @@ const fixtureGroups = [
   {
     marker: "EXPANSIONFIXTURE:",
     file: "expansion-fixtures.json",
-    count: 33,
+    count: 62,
     probe: "cursorQueries",
   },
   { marker: "PAPERFIXTURE:", file: "preview-paper-fixtures.json", count: 15, probe: "carets" },
