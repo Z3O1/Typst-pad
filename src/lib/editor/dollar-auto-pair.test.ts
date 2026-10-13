@@ -251,8 +251,24 @@ describe("$ 输入接线、历史与退格", () => {
     expect(view.state.selection.main.head).toBe(13);
   });
 
-  it("空三行公式先退回 $$，下一次退格删除配对", () => {
-    const view = viewFor("  $\n    \n  $", 8);
+  it("真实 Enter 刚生成的空三行公式可折回，手工同形内容只删一格", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000_000);
+    const manual = viewFor("  $\n    \n  $", 8);
+    backspace(manual);
+    expect(manual.state.doc.toString()).toBe("  $\n   \n  $");
+    const view = viewFor("  $$", 3);
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    // 时间不影响未动资格，但生成与删除分别成组，避免 undo 把真实 Enter 一起撤回。
+    vi.setSystemTime(1_000_600);
     backspace(view);
     expect(view.state.doc.toString()).toBe("  $$");
     expect(view.state.selection.main.head).toBe(3);

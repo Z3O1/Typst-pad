@@ -238,9 +238,13 @@ describe("emptyPairBackspace（空配对整对退格）", () => {
     }
   });
 
-  it("空三行公式先退回 $$，已有公式内容不接管", () => {
-    expect(emptyPairBackspace("  $\n    \n  $", 8)).toEqual({ before: 5, after: 3 });
-    expect(emptyPairBackspace("$\n  x\n$", 4)).toBeNull();
+  it("多行空白形状不能决定自动回退，必须有 Enter 未动资格", () => {
+    expect(emptyPairBackspace("  $\n    \n  $", 8)).toBeNull();
+    expect(emptyPairBackspace("  $\n    \n  $", 8, undefined, true)).toEqual({
+      before: 5,
+      after: 3,
+    });
+    expect(emptyPairBackspace("$\n  x\n$", 4, undefined, true)).toBeNull();
   });
 
   it("普通文本位置 → null（不接管退格）", () => {

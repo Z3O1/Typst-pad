@@ -4,6 +4,28 @@ import { MapMode, StateEffect, StateField } from "@codemirror/state";
 import type { ChangeDesc } from "@codemirror/state";
 import { invertedEffects } from "@codemirror/commands";
 
+// Enter 创建的多行空公式只有这一笔之后未编辑/未移动时可一键折回。
+// 与配对跳过状态分开：资格不入 history，undo/redo、合成开始与模式切换均清除，不恢复。
+export interface PristineMathScaffold {
+  from: number;
+  to: number;
+  caret: number;
+}
+export const createPristineMathScaffold = StateEffect.define<PristineMathScaffold>();
+export const invalidatePristineMathScaffold = StateEffect.define<null>();
+export const pristineMathScaffold = StateField.define<PristineMathScaffold | null>({
+  create: () => null,
+  update(value, tr) {
+    const history = tr.isUserEvent("undo") || tr.isUserEvent("redo");
+    if (history || tr.docChanged || !tr.startState.selection.eq(tr.newSelection)) value = null;
+    for (const effect of tr.effects) {
+      if (effect.is(invalidatePristineMathScaffold)) value = null;
+      if (effect.is(createPristineMathScaffold) && !history) value = effect.value;
+    }
+    return value;
+  },
+});
+
 export interface DollarPair {
   open: number;
   close: number;

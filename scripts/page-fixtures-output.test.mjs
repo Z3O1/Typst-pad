@@ -11,7 +11,7 @@ const samples = JSON.parse(
 
 // 每组最短的一条原始 println!，逐字取自本轮真实 Cargo 导出（没有替换 SVG/探针）。
 // 重复样本只构造数量边界，不把此输入冒充完整的原生导出。
-const counts = [8, 9, 33, 15, 37, 16];
+const counts = [8, 9, 62, 15, 37, 16];
 const lines = samples.flatMap((sample, index) => Array(counts[index]).fill(sample));
 const validOutput = lines.join("\n");
 
@@ -85,14 +85,14 @@ describe("page-fixtures native stdout protocol", () => {
     altered[index] =
       `test typst_world::tests::expansion::dump_page_fixtures_expansion ... ${samples[2]}`;
     const report = inspectPageFixtureOutput(altered.join("\n"));
-    expect(report.groups[2].actualCount).toBe(32);
+    expect(report.groups[2].actualCount).toBe(61);
     expect(report.groups[2].prefixedMarkers).toEqual([
       {
         line: index + 1,
         prefix: "test typst_world::tests::expansion::dump_page_fixtures_expansion ... ",
       },
     ]);
-    expect(report.errors[0]).toContain("EXPANSIONFIXTURE: expected 33, got 32; prefixed markers:");
+    expect(report.errors[0]).toContain("EXPANSIONFIXTURE: expected 62, got 61; prefixed markers:");
   });
 
   it("reports truncated native JSON and non-object records rather than dropping them", () => {

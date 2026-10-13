@@ -16,7 +16,13 @@ const cursorFixtures = loadFixtures("cursor-fixtures.json", {
   hint: "先跑 npm run fixtures:pages",
 });
 const pageFixtures = loadFixtures("page-fixtures.json");
-const fixtures = [...pageFixtures, ...cursorFixtures];
+const expansionFixtures = loadFixtures("expansion-fixtures.json", {
+  predicate: (fs) => fs.length === 62 && fs.every((f) => f.pages.length && f.cursorQueries.length),
+  hint: "先跑 npm run fixtures:pages",
+});
+const headingFixture = expansionFixtures.find((f) => f.name === "cursor-heading");
+if (!headingFixture) throw new Error("缺少真实标题光标展开夹具");
+const fixtures = [...pageFixtures, ...cursorFixtures, ...expansionFixtures];
 const fixture = (name) => {
   const f = cursorFixtures.find((f) => f.name === name);
   if (!f) throw new Error(`缺少光标夹具：${name}`);
@@ -151,6 +157,39 @@ for (const name of ["mixed", "raw", "whitespace"]) {
   await showBlink();
   await c.screenshot(shotPath(`document-cursor-${name}`));
 }
+
+// 标题激活输入后自动展开：不能继续拿普通标题的字号/坐标断言源码面板。
+await replace(mixed);
+const headingHit = queryAt(mixed, byteAt(mixed, "中文标题 Heading")).caret;
+const headingPoint = await c.evaluate(
+  `(() => {const p=${expectedExpression(headingHit)};return {x:p.x+1,y:p.y+p.height/2}})()`,
+);
+await c.click(headingPoint.x, headingPoint.y);
+await c.waitFor(compileSettled(headingFixture.doc), { timeout: 8000 });
+const title = mixed.doc.slice(headingFixture.range.from, headingFixture.range.to);
+// 从左侧进入起点；向左落在起点按契约会收起，不能用错误方向断言 raw 坐标。
+await c.evaluate(
+  `window.__typstPadView.dispatch({selection:{anchor:${headingFixture.range.from - 1}}});true`,
+);
+for (const { index } of segmenter.segment(title)) {
+  const head = headingFixture.range.from + index;
+  await c.evaluate(`window.__typstPadView.dispatch({selection:{anchor:${head}}});true`);
+  await c.waitFor(compileSettled(headingFixture.doc), { timeout: 8000 });
+  const rendered = headingFixture.range.renderedFrom + index;
+  const native = headingFixture.cursorQueries.find(
+    (q) => q.offset === Buffer.byteLength(headingFixture.doc.slice(0, rendered)),
+  );
+  if (!native?.caret) throw new Error(`标题字符缺少真实光标 ${head}`);
+  await pose(mixed, native, { dispatch: false });
+  checkedStops++;
+}
+check(
+  "标题真实鼠标激活后完整源码含 = 自动展开，逐字素使用新产物盒模型",
+  (await compiledPagesMatch(headingFixture)) &&
+    (await doc()) === mixed.doc &&
+    (await c.evaluate("!document.querySelector('.formula-preview')")),
+);
+await c.screenshot(shotPath("document-cursor-heading-expanded"));
 
 await replace(mixed);
 const asciiStart = byteAt(mixed, "a.Ag!");

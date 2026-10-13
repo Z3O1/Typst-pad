@@ -659,10 +659,13 @@ await c.key("e", { keyCode: 69, modifiers: 2 });
 await settled(errorRecovered);
 check("返回文档模式重新启用错误区域回退", await compiledPagesMatch(errorRecovered));
 await c.key("y", { keyCode: 89, modifiers: 2 });
+await settled(mathExpanded);
+const redoRepaired = (await doc()) === original.doc && (await compiledPagesMatch(mathExpanded));
+await c.key("Escape", { keyCode: 27 });
 await settled(original);
 check(
-  "重做修复自动恢复正常排版",
-  (await doc()) === original.doc && (await compiledPagesMatch(original)),
+  "重做修复按最终光标展开正常公式，Esc 恢复完整排版",
+  redoRepaired && (await compiledPagesMatch(original)),
 );
 await replace(errorRecovered.brokenDoc, errorRecovered.doc);
 await hitAt("unknown", errorRecovered);
@@ -779,8 +782,10 @@ check(
 );
 await replace(original.doc);
 await hitAt("x^2");
+// 在普通正文编辑；源码首行是 #set，落到其起点如今会合法展开，不能误判为迟到公式点击。
+const editHead = original.doc.indexOf("正文") + 1;
 await c.evaluate(
-  "window.__typstPadView.dispatch({changes:{from:0,insert:'新'},selection:{anchor:1}})",
+  `window.__typstPadView.dispatch({changes:{from:${editHead - 1},insert:'新'},selection:{anchor:${editHead}}})`,
 );
 await sleep(500);
 // 旧的判据是 `!document.querySelector('.close-source')`（右上角按钮不存在）—— 按钮删除后
@@ -790,7 +795,7 @@ await c.waitFor(COMPILE_IDLE, { timeout: 8000 });
 check(
   "迟到命中不能展开旧源码",
   await c.evaluate(
-    "window.__typstPadView.state.selection.main.head===1 && !window.__browserDevLastCompile.src.includes('`')",
+    `window.__typstPadView.state.selection.main.head===${editHead} && !window.__browserDevLastCompile.src.includes(String.fromCharCode(96))`,
   ),
 );
 await replace(original.doc);

@@ -171,3 +171,125 @@ it("未闭合语法仍按 #/$ 模式展开，raw、转义和注释中的同形�
   for (const doc of ["`#foo $x$`", "\\#foo \\$x\\$", "/* #foo $x$ */", "// #foo $x$"])
     expect(sourceRevealRange(doc, doc.indexOf("foo")).kind).toBe("text");
 });
+
+describe("标题源码边界", () => {
+  it.each(["= 中文🙂标题", "== English heading", "====== 多级 *标题*", "=", "== ", "===\t  "])(
+    "真实标题 %j 包含级别标记、正文与行末输入空白，不吞下一行",
+    (heading) => {
+      const doc = `前文\n  ${heading}\n后文`;
+      const from = doc.indexOf("=");
+      const to = from + heading.length;
+      for (let pos = from; pos < to; pos++)
+        expect(sourceRevealRange(doc, pos, false, 1)).toEqual({ from, to, kind: "heading" });
+      expect(sourceRevealRange(doc, to)).toEqual({ from, to, kind: "heading" });
+      expect(sourceRevealRange(doc, to, false, 1).kind).toBe("text");
+      expect(sourceRevealRange(doc, from, false, -1).kind).toBe("text");
+      expect(sourceRevealRange(doc, to + 1).kind).toBe("text");
+    },
+  );
+
+  it.each(["\n", "\r\n", "\n\n", "\r\n\r\n", "\v", "\f", "\u0085", "\u2028", "\u2029"])(
+    "行末空白不包含语法识别的换行 %j",
+    (newline) => {
+      for (const heading of ["== 标题 \t", "== \t"]) {
+        const doc = `${heading}${newline}后文`;
+        expect(sourceRevealRange(doc, heading.length - 1)).toEqual({
+          from: 0,
+          to: heading.length,
+          kind: "heading",
+        });
+        expect(sourceRevealRange(doc, doc.indexOf("后文")).kind).toBe("text");
+      }
+    },
+  );
+
+  it.each(["= *未完成", "== $x", "=== #foo(", "= `raw", "== [未完成"])(
+    "残缺标题 %j 仍按当前语法树取得安全完整边界",
+    (doc) => {
+      expect(sourceRevealRange(doc, 0, false, 1)).toEqual({
+        from: 0,
+        to: doc.length,
+        kind: "heading",
+      });
+    },
+  );
+
+  it("多行标题正文中的完整调用不能被截断为一行", () => {
+    const heading = "== #block[\n正文🙂\n]";
+    const doc = `${heading}\n后文`;
+    expect(sourceRevealRange(doc, 1)).toEqual({ from: 0, to: heading.length, kind: "heading" });
+    // 未闭合的嵌套模式可能延伸到下一行；不猜测行尾而留下不安全的语法碎片。
+    const incomplete = "= *未完成\n后文";
+    expect(sourceRevealRange(incomplete, 0, false, 1).to).toBe(incomplete.length);
+  });
+
+  it("标题中的代码和数学保持最小安全归属，最外层查询才取完整标题", () => {
+    const doc = "== 中文 $a + #sym.beta$ 与 #strong[粗体]";
+    for (const [token, expression, kind] of [
+      ["sym", "$a + #sym.beta$", "math"],
+      ["粗体", "#strong[粗体]", "code"],
+    ] as const) {
+      const pos = doc.indexOf(token);
+      const range = sourceRevealRange(doc, pos);
+      expect(range.kind).toBe(kind);
+      expect(doc.slice(range.from, range.to)).toBe(expression);
+      expect(sourceRevealRange(doc, pos, true)).toEqual({
+        from: 0,
+        to: doc.length,
+        kind: "heading",
+      });
+    }
+  });
+
+  it("代码内容块中的标题取最小标题边界，保留外层代码范围查询", () => {
+    const doc = "#block[\n== 子标题🙂 $x$\n正文\n]";
+    const from = doc.indexOf("==");
+    const to = doc.indexOf("\n正文");
+    for (const pos of [from, doc.indexOf("子标题"), doc.indexOf("🙂")])
+      expect(sourceRevealRange(doc, pos)).toEqual({ from, to, kind: "heading" });
+    expect(sourceRevealRange(doc, doc.indexOf("子标题"), true)).toEqual({
+      from: 0,
+      to: doc.length,
+      kind: "code",
+    });
+    expect(sourceRevealRange(doc, doc.indexOf("x")).kind).toBe("math");
+    const nested = "= #block[\n== 子标题\n]";
+    const range = sourceRevealRange(nested, nested.indexOf("子标题"));
+    expect(nested.slice(range.from, range.to)).toBe("== 子标题");
+  });
+
+  it.each([
+    "`= 假标题`",
+    "```\n== 假标题\n```",
+    "// = 假标题",
+    "/*\n== 假标题\n*/",
+    "\\= 假标题",
+    "===未加空格",
+    "正文 = 非标题",
+    "$ = x $",
+    '#let title = "= 假标题";',
+    "#{ let x = 1; x == 1 }",
+    "- 列表",
+  ])("raw、注释、转义、代码与其他正文 %j 不误认标题", (doc) => {
+    for (let pos = 0; pos <= doc.length; pos++)
+      expect(sourceRevealRange(doc, pos).kind).not.toBe("heading");
+  });
+
+  it("标题定位也复用编辑器当前增量树，不使用其他修订的边界", () => {
+    const docs = ["= 标题", "== 标题🙂", "=== 标题🙂\n后文"];
+    const trees = docs.map((doc) => parser.parse(doc));
+    const parse = vi.spyOn(parser, "parse");
+    try {
+      docs.forEach((doc, index) => {
+        expect(sourceRevealRange(doc, 0, false, 1, trees[index])).toEqual({
+          from: 0,
+          to: doc.split("\n")[0].length,
+          kind: "heading",
+        });
+      });
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+});

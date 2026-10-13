@@ -21,7 +21,9 @@ await c.send("Emulation.setDeviceMetricsOverride", {
   deviceScaleFactor: 1,
   mobile: false,
 });
-const caret = fixture.carets.find((point) => point.page === 1 && point.offset > 165);
+// 候选锚点位于真实正文；标题光标如今会自动展开，应由标题专用夹具验收。
+const bodyOffset = Buffer.byteLength(fixture.doc.slice(0, fixture.doc.indexOf("正文含")));
+const caret = fixture.carets.find((point) => point.page === 1 && point.offset === bodyOffset);
 if (!caret) throw new Error("缺少真实页面光标夹具");
 const pos = Buffer.from(fixture.doc).subarray(0, caret.offset).toString().length;
 const evidence = [];
@@ -31,9 +33,13 @@ const sourceMode = async (source) => {
     await c.key("e", { keyCode: 69, modifiers: 2 });
 };
 const replace = async (text = fixture.doc, anchor = pos) => {
+  // 整篇夹具安装在源码模式中进行，不把旧展开表达式的编辑范围映射成全篇 raw。
+  const write = await c.evaluate("!!document.querySelector('.input-proxy')");
+  if (write) await sourceMode(true);
   await c.evaluate(
     `(() => {const v=window.__typstPadView;v.dispatch({changes:{from:0,to:v.state.doc.length,insert:${JSON.stringify(text)}},selection:{anchor:${anchor}}});v.focus();return true})()`,
   );
+  if (write) await sourceMode(false);
   await c.waitFor(COMPILE_IDLE);
 };
 const measure = () =>

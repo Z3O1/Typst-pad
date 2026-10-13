@@ -4,6 +4,66 @@ import expansionStyle from "./document-expansion-style.json";
 import { projectEmptyParagraphs } from "./document-empty-paragraphs";
 
 describe("Typst 原地源码展开", () => {
+  it("标题包含级别标记，单行也使用 block raw 并隔离后文，只执行一个隐藏标题", () => {
+    for (const title of ["== 中文🙂 $x$ #strong[标题]", "=== ", "= 标题 #block[\n多行\n]"]) {
+      const source = `前文\n\n${title}\n后正文。`;
+      const from = source.indexOf(title),
+        to = from + title.length;
+      const p = projectDocumentRanges(source, [{ from, to }], { styled: true, preview: true });
+      expect(p.source).toContain(`\`\`\`\n${title}\n\`\`\`${expansionStyle.tail}\n\n`);
+      expect(p.source).toContain(
+        `${expansionStyle.outputHead}\n${title}${expansionStyle.outputTail}\n\n`,
+      );
+      expect(p.source).not.toContain(expansionStyle.previewInlineHead);
+      expect(p.original).toBe(source);
+      for (let pos = 0; pos <= source.length; pos++)
+        expect(p.renderedToSource(p.sourceToRendered(pos))).toBe(pos);
+      const preview = p.source.lastIndexOf(title);
+      expect(p.isPreview!(p.sourceToRendered(from))).toBe(false);
+      expect(p.renderedToSource(preview + 2)).toBe(from + 2);
+      const invalid = projectDocumentRanges(source, [{ from, to, preserveDeclaration: false }], {
+        styled: true,
+        preview: true,
+      });
+      expect(invalid.source).not.toContain(expansionStyle.outputHead);
+    }
+  });
+  it("公式和脚本共享中性代码样式，不为高亮切分 raw 或改变诊断来源", () => {
+    expect(expansionStyle.formulaHead).toBe(expansionStyle.head);
+    expect(expansionStyle.head).toContain("ligatures: false");
+    expect(expansionStyle.head).toContain("size: 11pt");
+    expect(expansionStyle.head).toContain("lang: none, theme: none");
+    expect(expansionStyle.head).not.toContain("regex(");
+    for (const text of [
+      '$a_12 + "中文🙂"$\n',
+      '#let value = {\n  "中文🙂" // comment\n  12 + 34\n};',
+    ]) {
+      const p = projectDocumentRanges(text, [{ from: 0, to: text.length }], {
+        styled: true,
+        preview: true,
+      });
+      expect(p.original).toBe(text);
+      for (let pos = 0; pos <= text.length; pos++)
+        expect(p.renderedToSource(p.sourceToRendered(pos))).toBe(pos);
+      const offset = text.indexOf("中");
+      const rendered = p.sourceToRendered(offset);
+      const before = p.source.slice(0, rendered);
+      const [error] = sourceDiagnostics(p, [
+        {
+          message: "source",
+          line: before.split("\n").length,
+          col: [...before.slice(before.lastIndexOf("\n") + 1)].length + 1,
+          endLine: before.split("\n").length,
+          endCol: [...before.slice(before.lastIndexOf("\n") + 1)].length + 2,
+        },
+      ]);
+      const originalBefore = text.slice(0, offset);
+      expect(error).toMatchObject({
+        line: originalBefore.split("\n").length,
+        col: originalBefore.slice(originalBefore.lastIndexOf("\n") + 1).length + 1,
+      });
+    }
+  });
   it("展开 raw 的空行与缩进只在投影中占位，边界/中文/emoji/多范围映射可往返", () => {
     const text = "\n \t\n中文🙂\n\n\t \n";
     const source = `前🙂 ${text} 后 $x$\n\n`;

@@ -12,7 +12,8 @@ const args = [
   "dump_page_fixtures",
   "--",
   "--ignored",
-  "--nocapture",
+  // 等 libtest 汇总后输出每个测试的 stdout，避免并发进度前缀粘住原生 marker。
+  "--show-output",
 ];
 const startedAt = new Date().toISOString();
 const evidenceDir = `.browser-check/page-fixtures-exports/${startedAt.replaceAll(":", "-")}-${randomUUID()}`;
