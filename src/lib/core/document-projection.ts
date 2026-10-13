@@ -92,7 +92,8 @@ export function projectDocumentRanges(
     const isDeclaration = /^#(?:let|set|show|import)\b/.test(text);
     const declaration = preserveDeclaration !== false && isDeclaration ? `${text}\n` : "";
     // Typst 0.15.1 的 typ 高亮把 raw 第一行各 token 的 span_offset 重置为 0。
-    // 展开以源码停靠点为准：使用无语言 raw，保留每个实际字符的原生来源，不猜字形坐标。
+    // regex show 的 slice_textual 同样不保留切片起点的 span_offset，不能用它绕过高亮问题。
+    // 展开以源码停靠点为准：使用无语言 raw 和统一代码色板，不切分文本或猜字形坐标。
     // 局部规则消费 raw 的原始行 body，防止用户 show raw 隐藏/替换源码；不重造字形来源。
     const syntax = text.startsWith("$") ? sourceRevealRange(source, from + 1) : null;
     const formula = syntax?.kind === "math" && syntax.from === from && syntax.to === to;

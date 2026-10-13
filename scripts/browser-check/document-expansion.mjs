@@ -208,7 +208,7 @@ async function caretMatches(value, head, visible = false) {
   return true;
 }
 // 字形是 Typst SVG 路径而非 CSS text；用原生光标高度与实际背景盒验证样式。
-async function sourceStyleMatches(value, { formula, panel }) {
+async function sourceStyleMatches(value, { panel }) {
   const first = query(value, value.range.from);
   const last = query(value, value.range.to - 1);
   const result = await c.evaluate(`(() => {
@@ -216,8 +216,8 @@ async function sourceStyleMatches(value, { formula, panel }) {
     const host=document.querySelectorAll('#preview-host>.document-page')[first.page-1];
     const svg=host.shadowRoot.querySelector('svg'),view=svg.viewBox.baseVal;
     const scale=host.getBoundingClientRect().width/view.width;
-    const fill=${JSON.stringify(formula ? "#f4f1f8" : panel ? "#f3f5f8" : "#eef1f5")};
-    const ink=${JSON.stringify(formula ? "#65458b" : "#273449")};
+    const fill="#f0f2f5";
+    const ink="#303744";
     const background=svg.querySelector('path[fill="'+fill+'"]');
     const glyph=svg.querySelector('use[fill="'+ink+'"]');
     if(!background||!glyph||first.page!==last.page) return false;
@@ -241,13 +241,13 @@ async function sourceStyleMatches(value, { formula, panel }) {
     const border=getComputedStyle(outline);
     const glyphs=[...svg.querySelectorAll('use[fill="'+ink+'"]')].map(el=>el.getBoundingClientRect());
     const inkTop=Math.min(...glyphs.map(r=>r.top)),inkBottom=Math.max(...glyphs.map(r=>r.bottom));
-    // Typst 默认末行按 baseline 排版，descender 会进入 7pt inset；实际墨迹仍须留出 5pt。
+    // Typst 默认末行按 baseline 排版，descender 会进入 8pt inset；实际墨迹仍须留出 6pt。
     // 光标使用 em 高度，不等于墨迹盒，完整光标也须留在面板内。
     const valid=readable&&contrast>=4.5&&border.stroke!=='none'&&parseFloat(border.strokeWidth)>=.5
       &&/[Cc]/.test(background.getAttribute('d'))
       &&Math.abs(rect.width/scale-312)<1
-      &&x(first)-rect.left>=8*scale&&rect.right-x(last)>=8*scale
-      &&inkTop-rect.top>=6.5*scale&&rect.bottom-inkBottom>=5*scale
+      &&x(first)-rect.left>=9*scale&&rect.right-x(last)>=9*scale
+      &&inkTop-rect.top>=7.5*scale&&rect.bottom-inkBottom>=6*scale
       &&y(first)>=rect.top&&y(last)+last.heightPt*scale<=rect.bottom;
     return {valid,readable,contrast,stroke:border.stroke,strokeWidth:border.strokeWidth,width:rect.width/scale,left:(x(first)-rect.left)/scale,right:(rect.right-x(last))/scale,top:(inkTop-rect.top)/scale,bottom:(rect.bottom-inkBottom)/scale,caretBottom:(rect.bottom-y(last)-last.heightPt*scale)/scale};
   })()`);
@@ -744,7 +744,7 @@ await c.screenshot(shotPath("document-expansion-display-preview"));
 for (const theme of ["dark", "light"]) {
   await setTheme(theme);
   check(
-    `多行公式 ${theme}：与脚本统一的圆角/内距，保留低饱和紫色与可读对比度`,
+    `多行公式 ${theme}：与脚本统一的代码色板/圆角/内距与可读对比度`,
     await sourceStyleMatches(display, { formula: true, panel: true }),
   );
   await cursor(display.range.from + 1);

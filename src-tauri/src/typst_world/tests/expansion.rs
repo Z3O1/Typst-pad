@@ -638,6 +638,37 @@ fn expansion_panel_has_readable_type_spacing_and_cross_page_carets() {
 }
 
 #[test]
+fn expansion_code_palette_keeps_exact_first_line_token_spans() {
+    // typ 高亮和 regex show 会丢切片偏移；统一色板必须保留首行每个 token 的真实来源。
+    let text = "#let office = 123 + 456; // first 中文\n\"second\" == value != other -> end";
+    for formula in [false, true] {
+        let source = styled_raw_kind(&format!("```\n{text}\n```"), formula);
+        let start = source.find(text).unwrap();
+        let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
+        let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+        let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+        for (offset, ch) in text.char_indices().filter(|(_, ch)| !ch.is_whitespace()) {
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.range == (start + offset..start + offset + ch.len_utf8())),
+                "每个源码字符须有精确范围，不能回落到 token 或行首：{ch} at {offset}"
+            );
+        }
+        let id = store(items, source.len(), stats.foreign_ink);
+        let mut previous = None;
+        for (offset, _) in text.char_indices().filter(|(_, ch)| !ch.is_whitespace()) {
+            let caret = locate(id, start + offset).unwrap();
+            let line = text[..offset].bytes().filter(|byte| *byte == b'\n').count();
+            if let Some((x, previous_line)) = previous {
+                assert!(line > previous_line || caret.x_pt > x);
+            }
+            previous = Some((caret.x_pt, line));
+        }
+    }
+}
+
+#[test]
 fn expansion_is_scoped_away_from_user_show_raw_rules() {
     for rule in [
         "it => []",
