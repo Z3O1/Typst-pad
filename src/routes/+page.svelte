@@ -21,6 +21,11 @@
   } from "$lib/core/typst-engine";
   import { createSourceCoordinates } from "$lib/core/source-coordinates";
   import {
+    createSourceScrollSync,
+    type SourceScrollAnchor,
+    type PreviewScrollAnchor,
+  } from "$lib/core/source-scroll-sync";
+  import {
     resolveSourceExpansion,
     sameSourceRange,
     type ExpansionIntent,
@@ -213,6 +218,9 @@
     selectRange(anchor: number, head: number): void;
     selection(): { anchor: number; head: number } | null;
     sourceSyntaxTree(): import("$lib/core/document-interaction").SourceSyntaxTree | null;
+    sourceScrollAnchor(): SourceScrollAnchor | null;
+    sourceScrollLayout(): string | null;
+    scrollSourceTo(anchor: SourceScrollAnchor): void;
     focus(): void;
   }
 
@@ -264,6 +272,8 @@
     pageWidthPt(): number;
     pageShape(): PaperShape | null;
     revealCaret(caret: DocumentCaret): void;
+    previewScrollAnchor(): PreviewScrollAnchor | null;
+    scrollPreviewTo(anchor: PreviewScrollAnchor): void;
   } | null>(null);
   let previewResizeObserver: ResizeObserver | undefined; // 容器尺寸监听（窗口/分栏变化时重算画布缩放）
   let previewScaleFrame = 0; // 已排队的重算帧号（见 onMount 里的 ResizeObserver）
@@ -434,6 +444,87 @@
   function currentInput(): string {
     return inputFingerprint;
   }
+
+  // Source-only dual-pane scrolling shares one queue and the same current-output contract.
+  function scrollSyncContext(): string | null {
+    if (
+      viewMode !== "source" ||
+      !showPreview ||
+      inputComposing ||
+      previewStatus !== "ready" ||
+      currentInput() !== renderedInput ||
+      !documentGeometryId
+    )
+      return null;
+    const body = previewPaneRef?.body();
+    if (!body) return null;
+    return JSON.stringify([
+      documentSession,
+      documentRevision,
+      documentGeometryId,
+      uiZoom,
+      editorWrap,
+      editorRef?.sourceScrollLayout(),
+      body.clientWidth,
+      body.clientHeight,
+      window.innerWidth,
+      window.innerHeight,
+      window.devicePixelRatio,
+    ]);
+  }
+  const scrollSync = createSourceScrollSync<SourceScrollAnchor | PreviewScrollAnchor>({
+    context: scrollSyncContext,
+    frame: (callback) => requestAnimationFrame(callback),
+    cancelFrame: (id) => cancelAnimationFrame(id),
+    resolve: async (pane, anchor) => {
+      const geometryId = documentGeometryId;
+      const prefix = prefixEnabled ? ensureTrailingNewline(prefixCode) : "";
+      if (pane === "source") {
+        const source = anchor as SourceScrollAnchor;
+        const offset = renderedCoordinates.toByte(
+          renderedProjection.sourceToRendered(prefix.length + source.pos),
+        );
+        const caret = await locateDocumentCursor(geometryId, offset);
+        // Whitespace/comments/declarations with no output: stop, never guess page progress.
+        return caret
+          ? {
+              point: { page: caret.page, xPt: caret.xPt, yPt: caret.yPt },
+              viewportRatio: source.viewportRatio,
+            }
+          : null;
+      }
+      const preview = anchor as PreviewScrollAnchor;
+      const hit = await hitTestDocument(
+        geometryId,
+        preview.point.page,
+        preview.point.xPt,
+        preview.point.yPt,
+      );
+      if (!hit) return null;
+      const sourcePos = renderedProjection.renderedToSource(
+        renderedCoordinates.toPosition(hit.offset),
+      );
+      if (sourcePos < prefix.length || sourcePos > prefix.length + doc.length) return null;
+      return { pos: sourcePos - prefix.length, viewportRatio: preview.viewportRatio };
+    },
+    apply: (pane, anchor) => {
+      if (pane === "source") previewPaneRef?.scrollPreviewTo(anchor as PreviewScrollAnchor);
+      else editorRef?.scrollSourceTo(anchor as SourceScrollAnchor);
+    },
+  });
+  $effect(() => {
+    // Includes session/revision/fonts/path/projection/page input and mode/visibility changes.
+    void currentInput();
+    void documentGeometryId;
+    void renderedInput;
+    void previewStatus;
+    void viewMode;
+    void showPreview;
+    void inputComposing;
+    void uiZoom;
+    void editorWrap;
+    scrollSync.cancel();
+  });
 
   function handleOpenLink(href: string): void {
     if (!/^(https?:|mailto:)/i.test(href)) return;
@@ -918,6 +1009,7 @@
 
   /** 模式切换保留编辑器；离开展开态时恢复原文的编译输入。 */
   function toggleViewMode() {
+    scrollSync.cancel();
     editorRef?.captureCaretAnchor();
     interactionSeq++;
     caretSeq++;
@@ -1356,6 +1448,7 @@
   }
 
   function resetDocumentRender(): void {
+    scrollSync.cancel();
     writeScheduler.cancelPending();
     documentSession++;
     documentRevision = 0;
@@ -2047,6 +2140,7 @@
     // 复核就会把"引擎接受了"读成"引擎没动"（用户第五次反馈的「界面缩放未生效」就是这个）。
     // 所以判据交给纯函数 shouldRebaselineZoom：复核在跑、或还在沉降窗口内 → 不校。
     const onWindowResize = () => {
+      scrollSync.cancel();
       // 视口判据的 100% 基准要跟着校；"缩放自己引发的 resize"由控制器按沉降窗口让开
       // （判据是纯函数 shouldRebaselineZoom，见 zoom-controller.onResize）
       zoom.onResize();
@@ -2067,6 +2161,7 @@
     // 同步改会让 ResizeObserver 报 "loop completed with undelivered notifications"
     //（规范允许、但会在控制台/状态栏刷提示，见 reportScriptError 的注解）。
     previewResizeObserver = new ResizeObserver(() => {
+      scrollSync.cancel();
       if (previewScaleFrame !== 0) return; // 同一帧只排一次
       previewScaleFrame = requestAnimationFrame(() => {
         previewScaleFrame = 0;
@@ -2148,6 +2243,7 @@
       window.removeEventListener("error", onWindowError);
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
       previewResizeObserver?.disconnect();
+      scrollSync.dispose();
       clearTimeout(previewReflowTimer);
       if (previewScaleFrame !== 0) cancelAnimationFrame(previewScaleFrame);
       unlisteners.forEach((un) => un());
@@ -2212,6 +2308,9 @@
             wrap={viewMode === "source" ? editorWrap : false}
             {tabSpaces}
             onComposition={handleComposition}
+            onScrollIntent={() => scrollSync.intent()}
+            onSourceScroll={() =>
+              scrollSync.observe("source", () => editorRef?.sourceScrollAnchor() ?? null)}
           />
         </div>
       </section>
@@ -2227,6 +2326,9 @@
         formulaPreview={viewMode === "write" ? formulaPreview : null}
         {formulaAnchor}
         stale={previewStatus === "ready" && renderedInput !== currentInput()}
+        onScrollIntent={() => scrollSync.intent()}
+        onPreviewScroll={() =>
+          scrollSync.observe("preview", () => previewPaneRef?.previewScrollAnchor() ?? null)}
         onPageClick={handlePageClick}
         onSelectionStart={handleSelectionStart}
         onSelectionMove={(point) => dragSelection?.move(point)}

@@ -15,7 +15,8 @@
     "format:check": "prettier --check .",
     "verify:browser": "node scripts/browser-check/run-all.mjs",
     "tauri": "tauri",
-    "fixtures:pages": "node scripts/page-fixtures.mjs"
+    "fixtures:pages": "node scripts/page-fixtures.mjs",
+    "fixtures:scroll": "node scripts/source-scroll-fixtures.mjs"
   },
   "license": "MIT",
   "dependencies": {

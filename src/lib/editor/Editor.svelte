@@ -48,6 +48,7 @@
   import { mark } from "../core/startup-timing";
   import { dbg } from "../core/debug";
   import { anchorEffectAt, measureAnchorYMargin } from "./scroll-anchor";
+  import type { SourceScrollAnchor } from "$lib/core/source-scroll-sync";
   // 浏览器验收用的测试钩子（只在 `?browserdev=1` 下真的挂到 window 上，桌面版是空操作）
   import { registerEditorView, unregisterEditorView } from "../dev/editor-test-hook";
 
@@ -74,6 +75,8 @@
     inputAnchor?: DocumentInputAnchor | null;
     /** 合成期间暂停后台整页编译，源码镜像仍实时更新。 */
     onComposition?: (active: boolean) => void;
+    onScrollIntent?: () => void;
+    onSourceScroll?: () => void;
     /**
      * 自动换行（源码模式 Alt+Z 切换，状态与持久化由父组件持有）。
      * 打开时给内容加 CodeMirror 的 `cm-lineWrapping`（`white-space: break-spaces` + 断词），
@@ -100,6 +103,8 @@
     tooltipParent,
     inputAnchor = null,
     onComposition,
+    onScrollIntent,
+    onSourceScroll,
     wrap = false,
     tabSpaces = defaultSettings().tabSpaces,
   }: Props = $props();
@@ -171,6 +176,20 @@
       wrapCompartment.of(wrap ? EditorView.lineWrapping : []),
       diagTheme,
       revealField,
+      EditorView.scrollHandler.of((target, range, options) => {
+        const pending = syncHorizontal;
+        syncHorizontal = null;
+        if (pending && range.head === pending.pos && options.y === "start") {
+          const epoch = scrollEpoch;
+          const document = target.state.doc;
+          // Let CM consume the vertical effect first; restore only the independent horizontal axis before paint.
+          queueMicrotask(() => {
+            if (epoch === scrollEpoch && mode === "source" && target.state.doc === document)
+              target.scrollDOM.scrollLeft = pending.left;
+          });
+        }
+        return false;
+      }),
       EditorView.updateListener.of((update) => {
         if (update.focusChanged) onFocusChange?.(update.view.hasFocus);
         if (update.docChanged && !applyingExternal) {
@@ -205,6 +224,26 @@
     });
     mark("editor-created");
     registerEditorView(view);
+    const intent = () => {
+      userScrolling = true;
+      scrollEpoch++;
+      syncHorizontal = null;
+      if (mode === "source") onScrollIntent?.();
+    };
+    let lastScrollTop = view.scrollDOM.scrollTop;
+    const scroll = () => {
+      const vertical = view.scrollDOM.scrollTop !== lastScrollTop;
+      lastScrollTop = view.scrollDOM.scrollTop;
+      if (vertical && mode === "source" && userScrolling) onSourceScroll?.();
+    };
+    const gestures = ["wheel", "pointerdown", "touchstart", "keydown"];
+    for (const event of gestures) view.scrollDOM.addEventListener(event, intent, { passive: true });
+    view.scrollDOM.addEventListener("scroll", scroll);
+    const scrollResize = new ResizeObserver(() => {
+      userScrolling = false;
+      if (mode === "source") onScrollIntent?.();
+    });
+    scrollResize.observe(view.scrollDOM);
     const stopComposition = observeEditorComposition(view.contentDOM, (active) => {
       // 合成开始即撤销未动资格（含取消合成），DOM/EditContext 两条路径统一；不改原文/历史。
       if (active) view?.dispatch({ effects: invalidatePristineMathScaffold.of(null) });
@@ -213,6 +252,10 @@
 
     return () => {
       stopComposition();
+      scrollEpoch++;
+      for (const event of gestures) view.scrollDOM.removeEventListener(event, intent);
+      view.scrollDOM.removeEventListener("scroll", scroll);
+      scrollResize.disconnect();
       // 视图销毁：让已经排队的那次"模式切换恢复"作废（它要去动一个已经拆掉的视图）
       caretAnchorEpoch += 1;
       caretAnchor = null;
@@ -228,6 +271,55 @@
       effects: tooltipCompartment.reconfigure(tooltips(parent ? { parent } : {})),
     });
   });
+
+  let userScrolling = false;
+  let scrollEpoch = 0;
+  let syncHorizontal: { pos: number; left: number } | null = null;
+  $effect(() => {
+    void mode;
+    void session;
+    void wrap;
+    void doc;
+    userScrolling = false;
+    scrollEpoch++;
+    syncHorizontal = null;
+  });
+
+  export function sourceScrollLayout(): string | null {
+    if (!view || mode !== "source") return null;
+    return JSON.stringify([
+      view.scrollDOM.clientWidth,
+      view.scrollDOM.clientHeight,
+      view.defaultLineHeight,
+      view.defaultCharacterWidth,
+    ]);
+  }
+
+  /** Read the actual wrapped visual row near the viewport's upper fifth. */
+  export function sourceScrollAnchor(): SourceScrollAnchor | null {
+    if (!view || mode !== "source") return null;
+    const box = view.scrollDOM.getBoundingClientRect();
+    const content = view.contentDOM.getBoundingClientRect();
+    const pos = view.posAtCoords({
+      x: Math.max(box.left + 2, content.left + 2),
+      y: box.top + view.scrollDOM.clientHeight * 0.2,
+    });
+    if (pos === null) return null;
+    const row = view.coordsAtPos(pos);
+    if (!row || !box.height) return null;
+    return { pos, viewportRatio: Math.max(0, Math.min(0.9, (row.top - box.top) / box.height)) };
+  }
+
+  /** Effects only: no selection, focus, source, or history transaction. */
+  export function scrollSourceTo(anchor: SourceScrollAnchor): void {
+    if (!view || mode !== "source") return;
+    userScrolling = false;
+    const pos = Math.max(0, Math.min(view.state.doc.length, anchor.pos));
+    syncHorizontal = { pos, left: view.scrollDOM.scrollLeft };
+    view.dispatch({
+      effects: anchorEffectAt(pos, view.scrollDOM.clientHeight * anchor.viewportRatio),
+    });
+  }
 
   let completionMode: "write" | "source" | undefined;
   $effect(() => {
