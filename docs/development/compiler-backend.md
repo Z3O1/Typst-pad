@@ -73,7 +73,9 @@ Typst 整页和 PDF 使用 Rust `FontBook`；源码编辑器使用等宽系统�
 
 字体族名以字体文件中的英文族名为准；设置列表不保证与 `typst fonts` 的本地化名称逐字一致，后者通过 fontdb 可能显示本地化族名或额外字体类型。比对可用字体时应核对英文族名。
 
-`build_library` 注入默认字体族，使中英文和公式在不同平台得到稳定回退；注入在 Typst library 的基础样式层完成，因此文档自己的 `#set text(font: ...)` 仍优先。默认族列表以源码为准。用户字体选择顺序需保留拉丁基准族在首位，再放入所选字体和剩余兜底族。
+`build_library` 在 Typst library 的基础样式层注入默认**正文**字体族，使中英文在不同平台得到稳定回退；文档自己的 `#set text(font: ...)` 仍优先。默认族列表以源码为准。用户字体选择顺序需保留拉丁基准族在首位，再放入所选字体和剩余兜底族。
+
+数学字体由 Typst 0.15.1 的方程 show-set 规则选择 `New Computer Modern Math`，默认 weight 450（Book）；它覆盖基础正文字体列表，文档自己的 `#show math.equation: set text(font: ...)` 则优先。`text(features: ...)` 原样交给原生数学 shaping，不由前端模拟。打包的三个 NewCM 数学 face 与 `typst-assets` 的 `v0.15.1` 对齐，来源和 SHA-256 由 `scripts/math-font-assets.mjs` 统一固定，下载前校验、`node scripts/check-fonts.mjs` 复核。字体族名甚至字体版本字符串相同，也可能含不同 GSUB 表；例如旧资产的 `cv01` 只替换空集，新资产还替换数字零。比较 CLI 与应用时需核对实际 face、字节哈希和字形，不能只核对族名。
 
 字体族名写错时 Typst 会警告并静默回退，因此必须保留 warning 展示。正文、公式和 PDF 共用同一字体设置；保存字体设置后触发整页重编译。
 
