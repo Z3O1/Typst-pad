@@ -131,12 +131,15 @@ try {
     if (sourceMetrics.fontPx !== 14) throw Error("源码模式实际字号应为14px");
     await c.screenshot(shotPath(`style-${name}-source`));
   }
+  const totalStops = measurements.reduce((sum, m) => sum + m.stops, 0);
+  if (measurements.length !== 8 || totalStops !== 44)
+    throw Error(`样式探针覆盖不完整：${measurements.length}/8 场景，${totalStops}/44 停靠点`);
   writeFileSync(
     new URL("../../.browser-check/style-probe.json", import.meta.url),
     JSON.stringify(measurements, null, 2),
   );
   console.log(
-    `样式探针通过：${measurements.length} 个真实明暗主题场景，${measurements.reduce((sum, m) => sum + m.stops, 0)} 个原生 caret 停靠点；含多行空公式与实际光标像素。`,
+    `通过 ${measurements.length} 项检查；真实明暗主题场景、${totalStops} 个原生 caret 停靠点，含多行空公式与实际光标像素。`,
   );
 } finally {
   c.close();

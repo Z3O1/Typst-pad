@@ -744,6 +744,37 @@ fn expansion_code_palette_keeps_exact_first_line_token_spans() {
 }
 
 #[test]
+fn expansion_background_is_not_captured_by_user_white_binding() {
+    for expression in ["#(1 + 2)", "#(\n1 + 2\n)", "$1 + 2$", "$\n1 + 2\n$"] {
+        let original = format!("#let white = 0\nResult {expression} after");
+        let world = TypstWorld::new(original.clone(), None, &fonts_dir(), &FontConfig::default());
+        typst::compile::<PagedDocument>(&world)
+            .output
+            .expect("合法 white 绑定不能使原文编译失败");
+        println!("WHITE_BINDING_ORIGINAL_OK: {expression:?}");
+        let from = original.find(expression).unwrap();
+        let to = from + expression.len();
+        let source = projected(&original, Some((from, to)));
+        let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
+        let result = typst::compile::<PagedDocument>(&world);
+        let document = result.output.unwrap_or_else(|diagnostics| {
+            panic!("展开背景不能捕获用户 white 变量：{diagnostics:?}")
+        });
+        let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+        let id = store(items, source.len(), stats.foreign_ink);
+        let start = visible_start(&original, from, to);
+        for (offset, ch) in expression
+            .char_indices()
+            .filter(|(_, ch)| !ch.is_whitespace())
+        {
+            let caret = locate(id, start + offset).expect("展开源码每个字符仍有真实停靠点");
+            assert!(caret.height_pt < 15.0, "源码字符字号不变：{ch}");
+        }
+        println!("WHITE_BINDING_EXPANSION_OK: {expression:?}");
+    }
+}
+
+#[test]
 fn expansion_is_scoped_away_from_user_show_raw_rules() {
     for rule in [
         "it => []",

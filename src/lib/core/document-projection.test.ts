@@ -34,10 +34,17 @@ describe("Typst 原地源码展开", () => {
     // 文档 11pt 经页面缩放对应源码模式的 14px；白底由现有页面主题滤镜处理。
     expect(expansionStyle.head).toContain("size: 11pt");
     expect(expansionStyle.head).toContain('fill: std.rgb("#1f1f1f")');
-    expect(expansionStyle.head).toContain("fill: white, stroke: none, radius: 0pt");
+    expect(expansionStyle.head).toContain('fill: std.rgb("#ffffff"), stroke: none, radius: 0pt');
+    expect(expansionStyle.head).not.toContain("fill: white");
+    for (const head of [expansionStyle.previewInlineHead, expansionStyle.previewBlockHead]) {
+      expect(head).toContain('fill: std.rgb("#ffffff")');
+      expect(head).not.toContain("fill: white");
+    }
     expect(expansionStyle.head).toContain("inset: (x: 0pt, y: 2pt)");
     expect(expansionStyle.head).toContain("leading: 0.64em");
-    expect(expansionStyle.head).toContain("std.highlight(fill: white, radius: 0pt, extent: 0pt");
+    expect(expansionStyle.head).toContain(
+      'std.highlight(fill: std.rgb("#ffffff"), radius: 0pt, extent: 0pt',
+    );
     expect(expansionStyle.head).toContain("lang: none, theme: none");
     expect(expansionStyle.head).not.toContain("regex(");
     for (const text of [
