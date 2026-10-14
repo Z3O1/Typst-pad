@@ -129,6 +129,112 @@ fn default_font_families_apply() {
     );
 }
 
+/// `cv01` 必须改变数学零的真实字形，而非只改变字体族名或浏览器样式。
+/// Typst 0.15.1 默认方程选 Book (450)；显式 Regular/Bold 也应使用同版资产。
+#[test]
+fn math_cv01_substitutes_zero_in_bundled_fonts() {
+    use typst::text::FontInstance;
+
+    fn glyphs(frame: &Frame, out: &mut Vec<(FontInstance, u16)>) {
+        for (_, item) in frame.items() {
+            match item {
+                FrameItem::Group(group) => glyphs(&group.frame, out),
+                FrameItem::Text(text) => out.extend(
+                    text.glyphs
+                        .iter()
+                        .map(|glyph| (text.font.clone(), glyph.id)),
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    let dir = fonts_dir();
+    for (weight, file) in [
+        (450, "NewCMMath-Book.otf"),
+        (400, "NewCMMath-Regular.otf"),
+        (700, "NewCMMath-Bold.otf"),
+    ] {
+        let expected = fs::read(dir.join(file)).unwrap();
+        let mut rendered = Vec::new();
+        for cv01 in [false, true] {
+            let rule = if cv01 {
+                "#show math.equation: set text(features: (\"cv01\",))\n"
+            } else {
+                ""
+            };
+            let weight_rule = if weight == 450 {
+                String::new()
+            } else {
+                format!("#show math.equation: set text(weight: {weight})\n")
+            };
+            let source = format!("{weight_rule}{rule}$0$\n");
+            let world = TypstWorld::new(source, None, &dir, &FontConfig::default());
+            let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+            let mut shaped = Vec::new();
+            glyphs(&document.pages()[0].frame, &mut shaped);
+            assert_eq!(shaped.len(), 1, "夹具应只有一个数学零");
+            let (font, id) = &shaped[0];
+            assert_eq!(font.data().as_slice(), expected.as_slice(), "应选 {file}");
+            if !cv01 {
+                assert_eq!(*id, font.ttf().glyph_index('0').unwrap().0);
+            }
+            println!("MATHFONT file={file} weight={weight} cv01={cv01} glyph={id}");
+            if let Ok(output) = std::env::var("FONT_PARITY_ARTIFACT_DIR") {
+                let output = PathBuf::from(output);
+                let name = format!("native-{weight}-{}", if cv01 { "cv01" } else { "plain" });
+                fs::write(
+                    output.join(format!("{name}.svg")),
+                    svg_for_page(&document.pages()[0]),
+                )
+                .unwrap();
+                fs::write(
+                    output.join(format!("{name}.pdf")),
+                    typst_pdf::pdf(&document, &PdfOptions::default()).unwrap(),
+                )
+                .unwrap();
+            }
+            rendered.push((*id, svg_for_page(&document.pages()[0])));
+        }
+        assert_ne!(rendered[0].0, rendered[1].0, "{file}: cv01 必须替换 zero");
+        assert_ne!(rendered[0].1, rendered[1].1, "{file}: SVG 轮廓必须改变");
+    }
+}
+
+/// 基础正文字体注入不能覆盖 Typst 的数学字体或文档的显式数学字体。
+#[test]
+fn math_font_rules_override_body_defaults_and_preserve_warnings() {
+    let dir = fonts_dir();
+    let source = "#show math.equation: set text(features: (\"cv01\",))\n$0$\n";
+    let native = FontConfig::new(Some(Vec::new()), None);
+    let with_defaults = compile(source.to_string(), None, &dir, &FontConfig::default());
+    let without_defaults = compile(source.to_string(), None, &dir, &native);
+    assert!(with_defaults.ok && without_defaults.ok);
+    assert_eq!(with_defaults.pages, without_defaults.pages);
+
+    let explicit = "#show math.equation: set text(font: \"Libertinus Serif\")\n$0$\n";
+    let with_defaults = compile(explicit.to_string(), None, &dir, &FontConfig::default());
+    let without_defaults = compile(explicit.to_string(), None, &dir, &native);
+    assert!(with_defaults.ok && without_defaults.ok);
+    assert_eq!(with_defaults.pages, without_defaults.pages);
+    assert_ne!(
+        with_defaults.pages,
+        compile("$0$".to_string(), None, &dir, &native).pages
+    );
+    assert!(with_defaults
+        .warnings
+        .iter()
+        .any(|warning| warning.message.contains("math")));
+
+    let missing = compile(
+        "#show math.equation: set text(font: \"Typst Pad Missing Math Font\")\n$0$\n".to_string(),
+        None,
+        &dir,
+        &FontConfig::default(),
+    );
+    assert!(!missing.warnings.is_empty(), "缺字体警告不能被吞掉");
+}
+
 /// 把单 face 的 sfnt 包成 `faces` 个 face 的 **.ttc 集合**（测试用）。
 ///
 /// 集合头：`ttcf` + version + numFonts + 每个 face 的偏移（都指向同一份表目录）；
