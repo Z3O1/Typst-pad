@@ -633,7 +633,7 @@ fn styled_source_lines_wrap_at_spaces_with_original_caret_locations() {
 }
 
 #[test]
-fn expansion_panel_has_readable_type_spacing_and_cross_page_carets() {
+fn expansion_editor_style_has_readable_type_spacing_and_cross_page_carets() {
     fn check_type(frame: &Frame) {
         for (_, item) in frame.items() {
             match item {
@@ -685,8 +685,8 @@ fn expansion_panel_has_readable_type_spacing_and_cross_page_carets() {
         assert!(
             visible
                 .iter()
-                .all(|item| item.rect.min.x.to_pt() >= 32.9 && item.rect.max.x.to_pt() <= 207.1),
-            "字形保留面板左右内距"
+                .all(|item| item.rect.min.x.to_pt() >= 23.9 && item.rect.max.x.to_pt() <= 216.1),
+            "源码与正文版心对齐，不增加面板左右内距"
         );
         let mut rows: Vec<_> = visible
             .iter()
@@ -696,7 +696,7 @@ fn expansion_panel_has_readable_type_spacing_and_cross_page_carets() {
         rows.dedup();
         for pair in rows.windows(2).filter(|pair| pair[0].0 == pair[1].0) {
             let gap = pair[1].1 - pair[0].1;
-            assert!((15.0..19.0).contains(&gap), "真实行距应舒展但不松散：{gap}");
+            assert!((15.0..19.0).contains(&gap), "真实行距接近源码编辑器：{gap}");
         }
         let id = store(items, source.len(), stats.foreign_ink);
         for (offset, ch) in text.char_indices().filter(|(_, ch)| !ch.is_whitespace()) {
