@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
-// Read only the declarative registry: importing run-all would launch processes.
+// Inspect source without importing run-all, which would launch processes.
 const source = readFileSync(new URL("./run-all.mjs", import.meta.url), "utf8");
 const suites = JSON.parse(
   source.match(/const SUITES = (\[[\s\S]*?\n\]);/)[1].replace(/,\s*]/g, "]"),
@@ -28,6 +30,32 @@ const expectedSuites = [
   ["file-changes.mjs", 31],
   ["source-scroll-sync.mjs", 22],
 ];
+
+describe("browser-check/run-all headless launch", () => {
+  it.each([
+    "/cache/chromium/chrome-linux64/chrome",
+    "/cache/chromium_headless_shell/chrome-headless-shell-linux64/chrome-headless-shell",
+  ])("explicitly launches %s without a visible browser window", (chrome) => {
+    // 执行实际启动调用，但截获 launch；不导入会启动进程的运行器。
+    const launchSource = source.match(/  launch\("chrome", chrome, \[[\s\S]*?\n  \]\);/)[0];
+    const calls = [];
+    runInNewContext(launchSource, {
+      launch: (...args) => calls.push(args),
+      chrome,
+      join,
+      OUT: "/worktree/.browser-check",
+      cdpPort: "19464",
+      APP_URL: "http://127.0.0.1:15464/?browserdev=1",
+    });
+    expect(calls).toHaveLength(1);
+    const [label, executable, args] = calls[0];
+    expect([label, executable]).toEqual(["chrome", chrome]);
+    expect(args.filter((arg) => arg.startsWith("--headless"))).toEqual(["--headless=new"]);
+    expect(args).toContain("--password-store=basic");
+    expect(args).toContain("--user-data-dir=/worktree/.browser-check/cdp-profile-run-all-19464");
+    expect(args).toContain("--remote-debugging-port=19464");
+  });
+});
 
 describe("browser-check/run-all registration", () => {
   it("runs all fifteen suites with their exact assertion counts", () => {
