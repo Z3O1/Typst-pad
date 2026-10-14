@@ -8,7 +8,11 @@
   import type { DocumentPoint } from "$lib/core/document-drag-selection";
   import type { PreviewScrollAnchor } from "$lib/core/source-scroll-sync";
   import { createDocumentPages, type DocumentPage } from "./document-pages";
-  import { caretScrollDelta, projectDocumentCaret } from "./document-caret";
+  import {
+    caretScrollDelta,
+    projectDocumentCaret,
+    type DocumentCaretAnchor,
+  } from "./document-caret";
   import type { PaperShape } from "$lib/core/preview-scale";
   import { layoutFormulaPreview } from "$lib/core/formula-preview-layout";
 
@@ -18,6 +22,7 @@
     editable = false,
     stale = false,
     caret = null,
+    caretAnchor = null,
     caretVisible = false,
     composing = false,
     selection = [],
@@ -39,6 +44,7 @@
     editable?: boolean;
     stale?: boolean;
     caret?: DocumentCaret | null;
+    caretAnchor?: DocumentCaretAnchor | null;
     caretVisible?: boolean;
     composing?: boolean;
     selection?: DocumentSelectionQuad[];
@@ -51,7 +57,7 @@
     onOpenLink?: (href: string) => void;
     onEditSource?: () => void;
     onFormulaClick?: () => void;
-    onCaretPosition?: (position: { left: number; top: number; height: number } | null) => void;
+    onCaretPosition?: (position: DocumentCaretAnchor | null) => void;
     onScrollIntent?: () => void;
     onPreviewScroll?: () => void;
   } = $props();
@@ -174,7 +180,7 @@
         caretStyle = "";
         onCaretPosition?.(null);
       };
-      if (!editable || hidden || (stale && !composing) || !canvasEl || !paperEl) {
+      if (!editable || hidden || (stale && !composing && !caretAnchor) || !canvasEl || !paperEl) {
         selectionPath = "";
         formulaStyle = "";
         formulaFlipped = false;
@@ -248,6 +254,11 @@
           );
         })
         .join(" ");
+      if (caretAnchor) {
+        // 物理输入锚点不是当前源码的几何；换页期间也不套用新页尺寸重投影。
+        caretStyle = `left:${caretAnchor.left - root.left}px;top:${caretAnchor.top - root.top}px;height:${caretAnchor.height}px;transform:rotate(${caretAnchor.rotation}deg)`;
+        return;
+      }
       if (!caret) return hideCaret();
       const page = pageMeasure(caret.page);
       if (!page) return hideCaret();
@@ -259,6 +270,7 @@
   }
   $effect(() => {
     void caret;
+    void caretAnchor;
     void selection;
     void editable;
     void hidden;
@@ -491,8 +503,14 @@
         <svg class="document-selection" aria-hidden="true"><path d={selectionPath}></path></svg>
       {/if}
       {#key caret}
-        {#if caretStyle && caretVisible && windowFocused}
-          <div class="document-caret" class:composing style={caretStyle} aria-hidden="true"></div>
+        {#if caretStyle && (caret || caretAnchor) && caretVisible && windowFocused}
+          <div
+            class="document-caret"
+            class:composing
+            class:pending={!!caretAnchor && !composing}
+            style={caretStyle}
+            aria-hidden="true"
+          ></div>
         {/if}
       {/key}
     </div>
@@ -600,7 +618,8 @@
     transform-origin: top left;
     animation: document-caret-blink 1s step-end infinite;
   }
-  .document-caret.composing {
+  .document-caret.composing,
+  .document-caret.pending {
     animation: none;
   }
   @keyframes document-caret-blink {

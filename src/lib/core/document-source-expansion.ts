@@ -1,5 +1,9 @@
 // 展开由源码选区的活动端和移动意图决定；不修改选区、源码或版面。
-import { sourceRevealRange, type SourceSyntaxTree } from "./document-interaction";
+import {
+  closedMathRangeAt,
+  sourceRevealRange,
+  type SourceSyntaxTree,
+} from "./document-interaction";
 import type { SourceRange } from "./document-projection";
 
 export interface SourceCursorChange {
@@ -51,10 +55,21 @@ export function resolveSourceExpansion(
   // 当前修订的错误范围可能扩大/缩小；锁跟随该范围，修好后才保留映射的旧范围。
   if (error) return result(null, error);
   if (contains(current.error)) return result(null, current.error);
+  // 事务映射的右边界可能吸收闭合 $ 后输入的正文；完整语法边界优先于映射锁。
+  // 左移仍允许从右侧进入终点，其余意图在闭合 $ 之后已属于正文。
+  const closed = current.range && closedMathRangeAt(doc, current.range.from, options.syntax);
+  const activeRange = closed ?? current.range;
+  const containsMath = (range: SourceRange) => contains(range) && !(side >= 0 && head >= range.to);
   // 已展开的完整父表达式内不再切换到嵌套子表达式。
-  if (contains(current.range)) return result(current.range, null);
+  if (closed ? containsMath(closed) : contains(activeRange)) return result(activeRange, null);
   if (intent === "click" && options.whitespace) return result(null, null);
   const range = sourceRevealRange(doc, head, false, side as -1 | 0 | 1, options.syntax);
+  if (
+    range.kind === "math" &&
+    closedMathRangeAt(doc, range.from, options.syntax) &&
+    !containsMath(range)
+  )
+    return result(null, null);
   return result(
     range.kind === "text" || range.to <= range.from ? null : { from: range.from, to: range.to },
     null,

@@ -8,6 +8,29 @@ type SyntaxNode = SourceSyntaxTree["topNode"];
 type RevealRange = { from: number; to: number; kind: "math" | "code" | "heading" | "text" };
 const trivia = new Set(["Space", "LineComment", "BlockComment"]);
 
+function sourceTree(doc: string, syntax?: SourceSyntaxTree | null): SourceSyntaxTree {
+  if (syntax?.length === doc.length) return syntax;
+  if (!parsed || parsed.doc !== doc) parsed = { doc, tree: parser.parse(doc) };
+  return parsed.tree;
+}
+
+/** 只接受语法树里的闭合 Dollar；转义美元符号和未完成公式不是退出边界。 */
+export function closedMathRangeAt(
+  doc: string,
+  pos: number,
+  syntax?: SourceSyntaxTree | null,
+): { from: number; to: number } | null {
+  const range = sourceRevealRange(doc, pos, false, 1, syntax);
+  if (range.kind !== "math") return null;
+  let node = sourceTree(doc, syntax).resolveInner(range.to, -1);
+  while (node.parent) {
+    if (node.name === "Equation" && node.from === range.from && node.to === range.to)
+      return node.lastChild?.name === "Dollar" ? { from: range.from, to: range.to } : null;
+    node = node.parent;
+  }
+  return null;
+}
+
 function inMarkup(node: SyntaxNode): boolean {
   return node.parent?.name === "Typst" || node.parent?.name === "Markup";
 }
@@ -54,11 +77,7 @@ export function sourceRevealRange(
   // 复用源码编辑器的无 wasm 语法树，内容块里的文字也能展开完整的外层调用。
   try {
     // 优先使用当前 EditorState 的增量树；不完整树不能确认完整替换边界。
-    if (!syntax || syntax.length !== doc.length) {
-      if (!parsed || parsed.doc !== doc) parsed = { doc, tree: parser.parse(doc) };
-      syntax = parsed.tree;
-    }
-    const tree = syntax;
+    const tree = sourceTree(doc, syntax);
     let candidate: RevealRange | null = null;
     for (const side of affinity === 0 ? ([-1, 1] as const) : [affinity]) {
       let node = tree.resolveInner(at, side);
