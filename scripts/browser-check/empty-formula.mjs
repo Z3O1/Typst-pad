@@ -117,6 +117,9 @@ check(
     (await caretMatches(multiline, 4)),
 );
 await c.screenshot(shotPath("empty-formula-multiline"));
+// Typst/截图耗时不能决定 Enter 与续写是否落在 CodeMirror 默认 500ms 撤销组内。
+// 明确跨过组间隔，下面的 undo 必须只撤销 x，而不是偶然连 Enter 一起撤销。
+await new Promise((resolve) => setTimeout(resolve, 600));
 await keyText("x");
 const typed = fixture("empty-multiline-typed");
 await settled(typed);
@@ -127,16 +130,28 @@ check(
 await c.key("z", { keyCode: 90, modifiers: 2 });
 const undone = await doc();
 console.log("EMPTY_FORMULA_UNDO", JSON.stringify({ doc: undone, head: await head() }));
-await settled(padded);
+await settled(multiline);
 check(
-  "空公式输入撤销恢复真实 $  $ 原文及产物",
-  undone === "$  $" && (await pagesMatch(padded)) && (await caretMatches(padded, 2)),
+  "空公式续写独立撤销恢复多行原文及产物，不依赖排版耗时分组",
+  undone === "$\n  \n$" && (await pagesMatch(multiline)) && (await caretMatches(multiline, 4)),
 );
 await c.key("y", { keyCode: 89, modifiers: 2 });
 await settled(typed);
+const redoneInside =
+  (await doc()) === "$\n  x\n$" &&
+  (await head()) === 5 &&
+  (await pagesMatch(typed)) &&
+  (await caretMatches(typed, 5));
+await c.key("ArrowRight", { keyCode: 39 });
+await c.key("ArrowRight", { keyCode: 39 });
+const typedBase = fixture("empty-multiline-typed-base");
+await settled(typedBase);
 check(
-  "空公式真实输入链路重做恢复原文及展开产物",
-  (await doc()) === "$\n  x\n$" && (await pagesMatch(typed)),
+  "空公式续写重做恢复内部原文/caret，右移越过闭合 $ 后收起",
+  redoneInside &&
+    (await doc()) === "$\n  x\n$" &&
+    (await head()) === 7 &&
+    (await pagesMatch(typedBase)),
 );
 await c.key("Escape", { keyCode: 27 });
 await settled(fixture("empty-multiline-typed-base"));
