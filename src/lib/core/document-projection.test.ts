@@ -28,10 +28,23 @@ describe("Typst 原地源码展开", () => {
       expect(invalid.source).not.toContain(expansionStyle.outputHead);
     }
   });
-  it("公式和脚本共享中性代码样式，不为高亮切分 raw 或改变诊断来源", () => {
+  it("公式和脚本共享无胶囊的源码编辑区样式，不为高亮切分 raw 或改变诊断来源", () => {
     expect(expansionStyle.formulaHead).toBe(expansionStyle.head);
     expect(expansionStyle.head).toContain("ligatures: false");
+    // 文档 11pt 经页面缩放对应源码模式的 14px；白底由现有页面主题滤镜处理。
     expect(expansionStyle.head).toContain("size: 11pt");
+    expect(expansionStyle.head).toContain('fill: std.rgb("#1f1f1f")');
+    expect(expansionStyle.head).toContain('fill: std.rgb("#ffffff"), stroke: none, radius: 0pt');
+    expect(expansionStyle.head).not.toContain("fill: white");
+    for (const head of [expansionStyle.previewInlineHead, expansionStyle.previewBlockHead]) {
+      expect(head).toContain('fill: std.rgb("#ffffff")');
+      expect(head).not.toContain("fill: white");
+    }
+    expect(expansionStyle.head).toContain("inset: (x: 0pt, y: 2pt)");
+    expect(expansionStyle.head).toContain("leading: 0.64em");
+    expect(expansionStyle.head).toContain(
+      'std.highlight(fill: std.rgb("#ffffff"), radius: 0pt, extent: 0pt',
+    );
     expect(expansionStyle.head).toContain("lang: none, theme: none");
     expect(expansionStyle.head).not.toContain("regex(");
     for (const text of [

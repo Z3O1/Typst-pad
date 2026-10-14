@@ -1,4 +1,5 @@
 // 光标驱动展开：真实全页产物、选区、调度和重排后的插入点一起验证。
+import { writeFileSync } from "node:fs";
 import { connect, DEV_URL } from "./cdp.mjs";
 import {
   boot,
@@ -207,8 +208,9 @@ async function caretMatches(value, head, visible = false) {
   await c.waitFor(expression, { timeout: 4000, interval: 16 });
   return true;
 }
+const styleMeasurements = [];
 // 字形是 Typst SVG 路径而非 CSS text；用原生光标高度与实际背景盒验证样式。
-async function sourceStyleMatches(value, { panel, heading = false }) {
+async function sourceStyleMatches(value, { panel }) {
   const first = query(value, value.range.from);
   const last = query(value, value.range.to - 1);
   const result = await c.evaluate(`(() => {
@@ -216,9 +218,16 @@ async function sourceStyleMatches(value, { panel, heading = false }) {
     const host=document.querySelectorAll('#preview-host>.document-page')[first.page-1];
     const svg=host.shadowRoot.querySelector('svg'),view=svg.viewBox.baseVal;
     const scale=host.getBoundingClientRect().width/view.width;
-    const fill="#f0f2f5";
-    const ink="#303744";
-    const background=svg.querySelector('path[fill="'+fill+'"]');
+    const fill="#ffffff";
+    const ink="#1f1f1f";
+    const page=host.getBoundingClientRect();
+    const x=p=>page.left+(p.xPt-view.x)*scale;
+    const y=p=>page.top+(p.yPt-view.y)*scale;
+    // 页底本身也是白色 path；必须找到包含真实源码停靠点的局部底色，不能测整页。
+    const background=[...svg.querySelectorAll('path[fill="'+fill+'"]')].find(el=>{
+      const r=el.getBoundingClientRect(),cx=x(first)+.1,cy=y(first)+first.heightPt*scale/2;
+      return r.width<page.width-.1&&cx>=r.left&&cx<r.right&&cy>=r.top&&cy<r.bottom;
+    });
     const glyph=svg.querySelector('use[fill="'+ink+'"]');
     if(!background||!glyph||first.page!==last.page) return false;
     const filter=getComputedStyle(host).filter;
@@ -232,27 +241,35 @@ async function sourceStyleMatches(value, { panel, heading = false }) {
     const a=luminance(getComputedStyle(glyph).fill),b=luminance(getComputedStyle(background).fill);
     const contrast=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
     const readable=first.heightPt>=10&&first.heightPt<=14&&first.heightPt*scale>=12;
-    if(!${panel}) return readable&&contrast>=4.5;
-    const rect=background.getBoundingClientRect(),page=host.getBoundingClientRect();
-    const x=p=>page.left+(p.xPt-view.x)*scale;
-    const y=p=>page.top+(p.yPt-view.y)*scale;
+    // 页面当前夹具的缩放应把 11pt 源码显示成与编辑器相同的 14px。
+    const sourceFontPx=parseFloat(getComputedStyle(document.querySelector('.cm-editor')).fontSize);
+    const matchingSize=Math.abs(11*scale-sourceFontPx)<.1;
+    const square=!/[Cc]/.test(background.getAttribute('d'));
     const outline=background.parentElement.querySelector('path[stroke]');
-    if(!outline) return false;
-    const border=getComputedStyle(outline);
+    const borderless=!outline||getComputedStyle(outline).stroke==='none';
+    const rect=background.getBoundingClientRect();
+    if(!${panel}) {
+      // 行内 raw 围栏两侧的原有空格仍有真实字形；底色只含这一字符，不额外加 extent。
+      const valid=readable&&matchingSize&&contrast>=4.5&&square&&borderless
+        &&x(first)-rect.left>=0&&x(first)-rect.left<7*scale;
+      return {valid,filter,readable,matchingSize,sourceFontPx,renderedFontPx:11*scale,contrast,square,borderless,left:(x(first)-rect.left)/scale};
+    }
     const glyphs=[...svg.querySelectorAll('use[fill="'+ink+'"]')].map(el=>el.getBoundingClientRect());
     const inkTop=Math.min(...glyphs.map(r=>r.top)),inkBottom=Math.max(...glyphs.map(r=>r.bottom));
-    // Typst 默认末行按 baseline 排版，descender 会进入 8pt inset；普通脚本墨迹仍留 6pt。
-    // 标题 raw 的 CJK 全宽字形 ascender/descender 更大（原生墨迹 top≈7.13/bottom≈5.64），
-    // 仍验证相同 8pt inset 面板、完整 caret、颜色/边框；不放松既有脚本/公式的阈值。
-    // 光标使用 em 高度，不等于墨迹盒，完整光标也须留在面板内。
-    const valid=readable&&contrast>=4.5&&border.stroke!=='none'&&parseFloat(border.strokeWidth)>=.5
-      &&/[Cc]/.test(background.getAttribute('d'))
+    // 源码贴齐版心；仅 2pt 纵向留白，不再画胶囊、圆角、描边或大内距。
+    // Typst baseline 布局不等于 caret 的字体 em 盒，不用背景盒裁剪光标。
+    const valid=readable&&matchingSize&&contrast>=4.5&&square&&borderless
       &&Math.abs(rect.width/scale-312)<1
-      &&x(first)-rect.left>=9*scale&&rect.right-x(last)>=9*scale
-      &&inkTop-rect.top>=${heading ? 7 : 7.5}*scale&&rect.bottom-inkBottom>=${heading ? 5.5 : 6}*scale
-      &&y(first)>=rect.top&&y(last)+last.heightPt*scale<=rect.bottom;
-    return {valid,readable,contrast,stroke:border.stroke,strokeWidth:border.strokeWidth,width:rect.width/scale,left:(x(first)-rect.left)/scale,right:(rect.right-x(last))/scale,top:(inkTop-rect.top)/scale,bottom:(rect.bottom-inkBottom)/scale,caretBottom:(rect.bottom-y(last)-last.heightPt*scale)/scale};
+      &&Math.abs(x(first)-rect.left)<.1*scale&&rect.right-x(last)>=0
+      &&inkTop-rect.top>=0&&inkTop-rect.top<=2.1*scale
+      &&rect.bottom-inkBottom>=-1*scale&&rect.bottom-inkBottom<=2.1*scale;
+    return {valid,filter,readable,matchingSize,sourceFontPx,renderedFontPx:11*scale,contrast,square,borderless,width:rect.width/scale,left:(x(first)-rect.left)/scale,right:(rect.right-x(last))/scale,top:(inkTop-rect.top)/scale,bottom:(rect.bottom-inkBottom)/scale,caretBottom:(rect.bottom-y(last)-last.heightPt*scale)/scale};
   })()`);
+  styleMeasurements.push({ name: value.name, panel, result });
+  writeFileSync(
+    new URL("../../.browser-check/document-expansion-style.json", import.meta.url),
+    JSON.stringify(styleMeasurements, null, 2),
+  );
   if (typeof result === "boolean") return result;
   if (!result.valid) console.error("展开样式测量", JSON.stringify(result));
   return result.valid;
@@ -434,7 +451,7 @@ await c.screenshot(shotPath("document-expansion-inline-preview"));
 for (const theme of ["dark", "light"]) {
   await setTheme(theme);
   check(
-    `行内公式 ${theme}：真实字号可读，滤镜后前景/浅底对比度至少 4.5`,
+    `行内公式 ${theme}：无胶囊/描边，字号匹配 14px 源码，滤镜后对比度至少 4.5`,
     await sourceStyleMatches(math, { formula: true, panel: false }),
   );
   await c.screenshot(shotPath(`document-expansion-inline-${theme}`));
@@ -587,7 +604,7 @@ const beforeTheme = await count();
 for (const theme of ["dark", "light"]) {
   await setTheme(theme);
   check(
-    `多行脚本 ${theme}：实际圆角面板、边界内距、可读字号与滤镜后对比度`,
+    `多行脚本 ${theme}：无框源码编辑区、版心对齐、紧凑内距与 14px 字号`,
     await sourceStyleMatches(block, { formula: false, panel: true }),
   );
   await cursor(block.range.to - 1);
@@ -838,7 +855,7 @@ await c.screenshot(shotPath("document-expansion-display-preview"));
 for (const theme of ["dark", "light"]) {
   await setTheme(theme);
   check(
-    `多行公式 ${theme}：与脚本统一的代码色板/圆角/内距与可读对比度`,
+    `多行公式 ${theme}：与脚本统一的无框源码观感、紧凑内距与可读对比度`,
     await sourceStyleMatches(display, { formula: true, panel: true }),
   );
   await cursor(display.range.from + 1);

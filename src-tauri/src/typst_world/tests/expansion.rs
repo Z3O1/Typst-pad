@@ -633,7 +633,7 @@ fn styled_source_lines_wrap_at_spaces_with_original_caret_locations() {
 }
 
 #[test]
-fn expansion_panel_has_readable_type_spacing_and_cross_page_carets() {
+fn expansion_editor_style_has_readable_type_spacing_and_cross_page_carets() {
     fn check_type(frame: &Frame) {
         for (_, item) in frame.items() {
             match item {
@@ -685,8 +685,8 @@ fn expansion_panel_has_readable_type_spacing_and_cross_page_carets() {
         assert!(
             visible
                 .iter()
-                .all(|item| item.rect.min.x.to_pt() >= 32.9 && item.rect.max.x.to_pt() <= 207.1),
-            "字形保留面板左右内距"
+                .all(|item| item.rect.min.x.to_pt() >= 23.9 && item.rect.max.x.to_pt() <= 216.1),
+            "源码与正文版心对齐，不增加面板左右内距"
         );
         let mut rows: Vec<_> = visible
             .iter()
@@ -696,7 +696,7 @@ fn expansion_panel_has_readable_type_spacing_and_cross_page_carets() {
         rows.dedup();
         for pair in rows.windows(2).filter(|pair| pair[0].0 == pair[1].0) {
             let gap = pair[1].1 - pair[0].1;
-            assert!((15.0..19.0).contains(&gap), "真实行距应舒展但不松散：{gap}");
+            assert!((15.0..19.0).contains(&gap), "真实行距接近源码编辑器：{gap}");
         }
         let id = store(items, source.len(), stats.foreign_ink);
         for (offset, ch) in text.char_indices().filter(|(_, ch)| !ch.is_whitespace()) {
@@ -740,6 +740,37 @@ fn expansion_code_palette_keeps_exact_first_line_token_spans() {
             }
             previous = Some((caret.x_pt, line));
         }
+    }
+}
+
+#[test]
+fn expansion_background_is_not_captured_by_user_white_binding() {
+    for expression in ["#(1 + 2)", "#(\n1 + 2\n)", "$1 + 2$", "$\n1 + 2\n$"] {
+        let original = format!("#let white = 0\nResult {expression} after");
+        let world = TypstWorld::new(original.clone(), None, &fonts_dir(), &FontConfig::default());
+        typst::compile::<PagedDocument>(&world)
+            .output
+            .expect("合法 white 绑定不能使原文编译失败");
+        println!("WHITE_BINDING_ORIGINAL_OK: {expression:?}");
+        let from = original.find(expression).unwrap();
+        let to = from + expression.len();
+        let source = projected(&original, Some((from, to)));
+        let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
+        let result = typst::compile::<PagedDocument>(&world);
+        let document = result.output.unwrap_or_else(|diagnostics| {
+            panic!("展开背景不能捕获用户 white 变量：{diagnostics:?}")
+        });
+        let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+        let id = store(items, source.len(), stats.foreign_ink);
+        let start = visible_start(&original, from, to);
+        for (offset, ch) in expression
+            .char_indices()
+            .filter(|(_, ch)| !ch.is_whitespace())
+        {
+            let caret = locate(id, start + offset).expect("展开源码每个字符仍有真实停靠点");
+            assert!(caret.height_pt < 15.0, "源码字符字号不变：{ch}");
+        }
+        println!("WHITE_BINDING_EXPANSION_OK: {expression:?}");
     }
 }
 
