@@ -1,5 +1,37 @@
 import type { DocumentCaret } from "../core/typst-engine";
 
+export interface DocumentCaretAnchor {
+  left: number;
+  top: number;
+  height: number;
+  rotation: number;
+}
+export interface PendingCaretFeedback {
+  anchor: DocumentCaretAnchor;
+  expiresAt: number;
+}
+// 从首次编辑起有界保留，不因连续输入延长；等待的是精确几何，不预测新字符位置。
+export const PENDING_CARET_TIMEOUT_MS = 1500;
+
+export function createPendingCaretFeedback() {
+  let pending: PendingCaretFeedback | null = null;
+  const current = (now: number) => {
+    if (pending && now >= pending.expiresAt) pending = null;
+    return pending;
+  };
+  return {
+    current,
+    begin(anchor: DocumentCaretAnchor | null, now: number): PendingCaretFeedback | null {
+      if (current(now)) return pending;
+      if (!anchor) return null;
+      return (pending = { anchor, expiresAt: now + PENDING_CARET_TIMEOUT_MS });
+    },
+    cancel() {
+      pending = null;
+    },
+  };
+}
+
 /** 仅滚动真实光标越界的轴；不会为保持插入点而改变页面尺寸或排版。 */
 export function caretScrollDelta(
   position: { left: number; top: number; height: number; rotation: number },

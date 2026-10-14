@@ -21,6 +21,11 @@
   } from "$lib/core/typst-engine";
   import { createSourceCoordinates } from "$lib/core/source-coordinates";
   import {
+    createPendingCaretFeedback,
+    type DocumentCaretAnchor,
+    type PendingCaretFeedback,
+  } from "$lib/ui/document-caret";
+  import {
     createSourceScrollSync,
     type SourceScrollAnchor,
     type PreviewScrollAnchor,
@@ -412,6 +417,35 @@
   let documentHasSelection = $state(false);
   let inputComposing = $state(false);
   let compositionCaret = $state<DocumentCaret | null>(null);
+  let compositionAnchor = $state<DocumentCaretAnchor | null>(null);
+  let pendingCaret = $state<PendingCaretFeedback | null>(null);
+  const pendingCaretFeedback = createPendingCaretFeedback();
+  let pendingCaretTimer: ReturnType<typeof setTimeout>;
+  let confirmedCaretAnchor: { caret: DocumentCaret; position: DocumentCaretAnchor } | null = null;
+
+  function cancelPendingCaret(): void {
+    clearTimeout(pendingCaretTimer);
+    pendingCaretFeedback.cancel();
+    pendingCaret = null;
+  }
+
+  function retainPendingCaret(anchor: DocumentCaretAnchor | null): void {
+    clearTimeout(pendingCaretTimer);
+    pendingCaret = pendingCaretFeedback.begin(anchor, performance.now());
+    if (pendingCaret) {
+      const pending = pendingCaret;
+      pendingCaretTimer = setTimeout(
+        () => {
+          // 旧期限不能取消另一轮精确输出之后开始的新反馈。
+          if (pendingCaret === pending) {
+            pendingCaret = pendingCaretFeedback.current(performance.now());
+            if (pendingCaret) retainPendingCaret(null);
+          }
+        },
+        Math.max(1, Math.ceil(pending.expiresAt - performance.now())),
+      );
+    }
+  }
   let interactionSeq = 0;
   let caretSeq = 0;
   let selectionSeq = 0;
@@ -537,6 +571,7 @@
 
   async function handlePageClick(req: { page: number; xPt: number; yPt: number }): Promise<void> {
     if (viewMode !== "write" || inputComposing) return;
+    cancelPendingCaret();
     const input = currentInput();
     const seq = ++interactionSeq;
     pendingCaretReveal = false;
@@ -593,6 +628,7 @@
   }
 
   function handleSelectionStart(point: DocumentPoint): void {
+    cancelPendingCaret();
     pendingCaretReveal = false;
     dragSelection?.cancel();
     const input = currentInput();
@@ -637,6 +673,7 @@
   }
 
   function closeSource(): void {
+    cancelPendingCaret();
     const expanded = sourceRange !== null || errorEditRange !== null;
     sourceOpen = false;
     sourceRange = null;
@@ -652,6 +689,7 @@
     const seq = ++caretSeq;
     const geometryId = documentGeometryId;
     if (viewMode !== "write" || input !== renderedInput || geometryId === 0) {
+      if (viewMode !== "write" || geometryId === 0) cancelPendingCaret();
       documentCaret = null;
       return;
     }
@@ -678,6 +716,7 @@
       input === currentInput() &&
       input === renderedInput
     ) {
+      cancelPendingCaret(); // 当前输出的精确 null 同样是结论，不能继续显示旧锚点。
       documentCaret = caret;
       if (pendingCaretReveal && !inputComposing) {
         pendingCaretReveal = false;
@@ -1012,6 +1051,7 @@
 
   /** 模式切换保留编辑器；离开展开态时恢复原文的编译输入。 */
   function toggleViewMode() {
+    cancelPendingCaret();
     scrollSync.cancel();
     editorRef?.captureCaretAnchor();
     interactionSeq++;
@@ -1105,6 +1145,14 @@
     if (!positioningFromPage) interactionSeq++;
     const selection = change ?? editorRef?.selection();
     documentHasSelection = !!selection && selection.anchor !== selection.head;
+    const independentlyMoved =
+      change?.reason !== "edit" &&
+      (!change || change.reason === "restore" || change.head !== change.previousHead);
+    if (!inputComposing && (documentHasSelection || independentlyMoved)) {
+      cancelPendingCaret();
+      // 独立移动时旧精确位置不属于新的插入点；禁止在新查询返回前拿它开始反馈。
+      if (!positioningFromPage) documentCaret = null;
+    }
     if (
       viewMode === "write" &&
       !positioningFromPage &&
@@ -1125,6 +1173,28 @@
   }
 
   function handleDocChange(newDoc: string, mapPosition: (pos: number, assoc?: number) => number) {
+    const selection = editorRef?.selection();
+    const previousHead = documentCoordinates.linePosition(cursorLine, cursorCol);
+    const mappedStart = mapPosition(previousHead, -1);
+    const mappedEnd = mapPosition(previousHead, 1);
+    if (
+      viewMode === "write" &&
+      !inputComposing &&
+      documentInputFocused &&
+      document.hasFocus() &&
+      document.visibilityState === "visible" &&
+      !documentHasSelection &&
+      selection &&
+      selection.anchor === selection.head &&
+      selection.head >= mappedStart &&
+      selection.head <= mappedEnd
+    ) {
+      retainPendingCaret(
+        documentCaret && confirmedCaretAnchor?.caret === documentCaret
+          ? confirmedCaretAnchor.position
+          : null,
+      );
+    } else if (!inputComposing) cancelPendingCaret();
     if (sourceRange)
       sourceRange = { from: mapPosition(sourceRange.from, -1), to: mapPosition(sourceRange.to, 1) };
     if (errorEditRange)
@@ -1441,6 +1511,8 @@
   function handleComposition(active: boolean): void {
     // 合成只冻结本会话最后的可见起点，不拿过期偏移定位新源码。
     compositionCaret = active ? documentCaret : null;
+    compositionAnchor = active ? (pendingCaret?.anchor ?? null) : null;
+    cancelPendingCaret();
     inputComposing = active;
     if (active) {
       interactionSeq++;
@@ -1455,6 +1527,9 @@
   }
 
   function resetDocumentRender(): void {
+    cancelPendingCaret();
+    confirmedCaretAnchor = null;
+    compositionAnchor = null;
     scrollSync.cancel();
     writeScheduler.cancelPending();
     documentSession++;
@@ -1872,6 +1947,7 @@
       void updateDocumentSelection();
       void updateFormulaAnchor();
     } else {
+      cancelPendingCaret();
       documentGeometryId = 0;
       documentCaret = null;
       documentErrorRanges = [];
@@ -2186,10 +2262,14 @@
     // 可能把宿主设的 ZoomFactor 丢掉，而那时界面已经和状态不一致了（用户看到的就是"放大没用"）。
     // 值没被丢时这次调用是空操作；丢掉时它自己会走复核，结论照样写进状态栏（见 verifyZoomApplied）。
     const reapplyZoomOnReturn = () => {
-      if (document.visibilityState !== "visible") return;
+      if (document.visibilityState !== "visible") {
+        cancelPendingCaret();
+        return;
+      }
       zoom.reapply(); // 假引擎（浏览器桩）在里面直接返回
     };
     window.addEventListener("focus", reapplyZoomOnReturn);
+    window.addEventListener("blur", cancelPendingCaret);
     document.addEventListener("visibilitychange", reapplyZoomOnReturn);
     // 预览画布缩放：观测预览容器宽度变化（窗口 resize / 分栏布局变化），重算画布宽度；
     // observe 首次回调立即触发一次（覆盖挂载时已渲染的产物）
@@ -2273,6 +2353,7 @@
       window.removeEventListener("wheel", handleZoomWheel, { capture: true });
       window.removeEventListener("resize", onWindowResize);
       window.removeEventListener("focus", reapplyZoomOnReturn);
+      window.removeEventListener("blur", cancelPendingCaret);
       document.removeEventListener("visibilitychange", reapplyZoomOnReturn);
       zoom.dispose(); // 取消还没落地的"缩放再确认一次"
       openFileClaim.dispose(); // 关窗时取消还没落地的兜底打开
@@ -2292,6 +2373,7 @@
       interactionSeq++; // 卸载后不得展开源码或写入页面光标
       caretSeq++;
       selectionSeq++;
+      cancelPendingCaret();
       dragSelection?.cancel();
       compileSeq++; // 使在途编译结果过期，防止卸载后写入 DOM
     };
@@ -2335,6 +2417,7 @@
             onCursor={handleCursor}
             onFocusChange={(focused) => {
               documentInputFocused = focused;
+              if (!focused) cancelPendingCaret();
             }}
             onDocChange={handleDocChange}
             mode={viewMode}
@@ -2357,6 +2440,7 @@
         editable={viewMode === "write"}
         caret={viewMode === "write" ? (inputComposing ? compositionCaret : documentCaret) : null}
         caretVisible={documentInputFocused && !documentHasSelection}
+        caretAnchor={inputComposing ? compositionAnchor : (pendingCaret?.anchor ?? null)}
         composing={inputComposing}
         selection={viewMode === "write" ? documentSelection : []}
         formulaPreview={viewMode === "write" ? formulaPreview : null}
@@ -2373,7 +2457,11 @@
         onCaretPosition={(position) => {
           // 同一文档等待新排版时保留输入/IME 的最后锚点，不能瞬移到窗口左上角。
           // 新会话由 resetDocumentRender 显式清除。
-          if (position) inputPosition = position;
+          if (position) {
+            inputPosition = position;
+            if (documentCaret && !inputComposing && currentInput() === renderedInput)
+              confirmedCaretAnchor = { caret: documentCaret, position };
+          }
         }}
         onEditSource={toggleViewMode}
         onFormulaClick={() => {

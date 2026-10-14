@@ -1,9 +1,51 @@
 import { describe, expect, it } from "vitest";
-import { caretScrollDelta, projectDocumentCaret } from "./document-caret";
+import {
+  caretScrollDelta,
+  projectDocumentCaret,
+  createPendingCaretFeedback,
+  PENDING_CARET_TIMEOUT_MS,
+} from "./document-caret";
 
 const caret = { offset: 3, page: 2, xPt: 30, yPt: 50, heightPt: 12 };
 const rect = { left: 100, top: -40, width: 400, height: 600 };
 const box = { x: 20, y: 30, width: 200, height: 300 };
+
+describe("待编译光标反馈", () => {
+  const anchor = { left: 120, top: 40, height: 16, rotation: 0 };
+
+  it("只保持已确认的输入锚点，不创建源码偏移或预测新字形位置", () => {
+    const feedback = createPendingCaretFeedback();
+    expect(feedback.begin(null, 0)).toBeNull();
+    const pending = feedback.begin(anchor, 10)!;
+    expect(pending.anchor).toBe(anchor);
+    expect(pending.expiresAt).toBe(10 + PENDING_CARET_TIMEOUT_MS);
+    expect(feedback.current(20)).toBe(pending);
+  });
+
+  it("连续编辑不能延长第一份锚点的期限；过期后无新精确锚点不复活", () => {
+    const feedback = createPendingCaretFeedback();
+    const pending = feedback.begin(anchor, 0)!;
+    expect(feedback.begin(null, PENDING_CARET_TIMEOUT_MS - 1)).toBe(pending);
+    expect(feedback.current(PENDING_CARET_TIMEOUT_MS)).toBeNull();
+    expect(feedback.begin(null, PENDING_CARET_TIMEOUT_MS + 1)).toBeNull();
+  });
+
+  it("取消后立即清除反馈，不等待原期限", () => {
+    const feedback = createPendingCaretFeedback();
+    expect(feedback.begin(anchor, 0)).not.toBeNull();
+    feedback.cancel();
+    expect(feedback.current(1)).toBeNull();
+  });
+
+  it("过期定时器读取当前状态，不能取消后开始的新反馈", () => {
+    const feedback = createPendingCaretFeedback();
+    feedback.begin(anchor, 0);
+    feedback.cancel();
+    const newer = feedback.begin({ ...anchor, left: 160 }, 100)!;
+    expect(feedback.current(PENDING_CARET_TIMEOUT_MS)).toBe(newer);
+    expect(feedback.current(100 + PENDING_CARET_TIMEOUT_MS)).toBeNull();
+  });
+});
 
 describe("文档光标投影", () => {
   it("非零 viewBox、滚动和共同缩放都使用同一坐标系", () => {
