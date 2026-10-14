@@ -17,6 +17,7 @@ const expectedSuites = [
   ["document-mode.mjs", 81],
   ["document-cursor.mjs", 37],
   ["document-expansion.mjs", 114],
+  ["document-expansion-style.mjs", 8],
   ["empty-formula.mjs", 39],
   ["document-transaction.mjs", 6],
   ["document-performance.mjs", 6],
@@ -58,11 +59,29 @@ describe("browser-check/run-all headless launch", () => {
 });
 
 describe("browser-check/run-all registration", () => {
-  it("runs all fifteen suites with their exact assertion counts", () => {
+  it("runs all sixteen suites with their exact assertion counts", () => {
     expect(suites).toEqual(expectedSuites);
     for (const [file] of suites) {
       expect(readFileSync(new URL(file, import.meta.url), "utf8").length).toBeGreaterThan(0);
     }
+  });
+
+  it("selects the style suite alone with its real pages fixture dependency", () => {
+    const only = new Set(["document-expansion-style.mjs"]);
+    expect(suites.filter(([file]) => only.has(file))).toEqual([
+      ["document-expansion-style.mjs", 8],
+    ]);
+    const dependencySource = source.match(
+      /const neededFixtures = new Set\(\);[\s\S]*?(?=const sleep =)/,
+    )[0];
+    const dependencies = runInNewContext(`${dependencySource}\n[...neededFixtures]`, {
+      Set,
+      SUITES: suites,
+      SUITE_FIXTURES: fixtures,
+      only,
+    });
+    expect(Array.from(dependencies)).toEqual(["pages"]);
+    expect(source).toContain('pages: ["fixtures-pages", ["run", "fixtures:pages"]]');
   });
 
   it("retains real page export dependencies and registers fixture-free additions", () => {
