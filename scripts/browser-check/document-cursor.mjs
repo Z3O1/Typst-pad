@@ -17,7 +17,7 @@ const cursorFixtures = loadFixtures("cursor-fixtures.json", {
 });
 const pageFixtures = loadFixtures("page-fixtures.json");
 const expansionFixtures = loadFixtures("expansion-fixtures.json", {
-  predicate: (fs) => fs.length === 62 && fs.every((f) => f.pages.length && f.cursorQueries.length),
+  predicate: (fs) => fs.length === 64 && fs.every((f) => f.pages.length && f.cursorQueries.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const headingFixture = expansionFixtures.find((f) => f.name === "cursor-heading");

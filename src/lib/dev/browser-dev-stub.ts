@@ -282,6 +282,12 @@ interface PageFixture {
     yPt: number;
     caret: import("../core/typst-engine").DocumentCaret;
   }[];
+  formulaGlyphHits?: {
+    page: number;
+    xPt: number;
+    yPt: number;
+    caret: import("../core/typst-engine").DocumentCaret;
+  }[];
   whitespaceHits?: {
     page: number;
     xPt: number;
@@ -473,7 +479,10 @@ async function handleCommand(
           Math.abs(p.yPt - Number(a.yPt)) < 1,
       );
       if (whitespaceHit) return whitespaceHit.caret;
-      const formulaHit = pageSnapshot.fixture.formulaHits?.find(
+      const formulaHit = [
+        ...(pageSnapshot.fixture.formulaHits ?? []),
+        ...(pageSnapshot.fixture.formulaGlyphHits ?? []),
+      ].find(
         (p) =>
           p.page === a.page &&
           Math.abs(p.xPt - Number(a.xPt)) < 1 &&

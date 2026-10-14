@@ -2,7 +2,7 @@
 import { connect, DEV_URL } from "./cdp.mjs";
 import { boot, loadFixtures, createChecker, compileSettled, finish, shotPath } from "./harness.mjs";
 const expansion = loadFixtures("expansion-fixtures.json", {
-  predicate: (fs) => fs.length === 62,
+  predicate: (fs) => fs.length === 64,
   hint: "先跑 npm run fixtures:pages",
 });
 const cursors = loadFixtures("cursor-fixtures.json");

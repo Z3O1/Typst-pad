@@ -355,7 +355,7 @@ fn dump_page_fixtures_preview_paper() {
             styled_raw_kind(&format!("```\n{small}\n```"), false),
         ),
     ] {
-        for preview in [
+        let mut previews = vec![
             None,
             Some(PreviewPage {
                 width_pt: width,
@@ -367,7 +367,17 @@ fn dump_page_fixtures_preview_paper() {
                 height_pt: width * 841.8897637795276 / a4_width,
                 margin_pt: 70.87 * width / a4_width,
             }),
-        ] {
+        ];
+        if name == "recovered" {
+            for recovery_width in [width, a4_width] {
+                previews.push(Some(PreviewPage {
+                    width_pt: recovery_width,
+                    height_pt: recovery_width * 841.8897637795276 / a4_width,
+                    margin_pt: 24.0 * recovery_width / a4_width,
+                }));
+            }
+        }
+        for preview in previews {
             let out = compile_incremental_with_preview(
                 doc.clone(),
                 None,

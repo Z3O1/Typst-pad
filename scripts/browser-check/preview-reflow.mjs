@@ -10,6 +10,7 @@
 // 看得见；把查询串换成 `&reflowfail=1`（不用重启页面，桩是每次编译时读它）模拟"文档把纸型
 // 写在别处、注入被覆盖"，必须退回等比缩放。
 
+import { chromium } from "playwright";
 import { connect, DEV_URL } from "./cdp.mjs";
 import { boot, createChecker, finish, sleep, COMPILE_IDLE, loadFixtures } from "./harness.mjs";
 
@@ -60,6 +61,11 @@ const measured = () =>
       requestedWidthPt: requested ? requested.widthPt : null,
       requestedHeightPt: requested ? requested.heightPt : null,
       fontPx: pageWidthPt ? (rect.width / pageWidthPt) * 11 : NaN,
+      physicalFontPx: pageWidthPt ? (rect.width / pageWidthPt) * 11 * devicePixelRatio : NaN,
+      dpr: devicePixelRatio,
+      hostWidth: svg?.getBoundingClientRect().width ?? 0,
+      glyphBox: (()=>{const r=svg?.querySelector('use')?.getBoundingClientRect();return r ? {width:r.width,height:r.height} : null})(),
+      editorFontPx: parseFloat(getComputedStyle(document.querySelector('.cm-editor')).fontSize),
     };
   })()`);
 
@@ -251,6 +257,11 @@ async function trackCompileRequests() {
       request.compilerCountAfter=window.__browserDevCompileCount;
       request.geometry=(result.pages??[]).filter(Boolean).map(svg=>svg.match(/viewBox="([^"]+)"/)[1]);
       request.widths=(result.pages??[]).filter(Boolean).map(svg=>Number(svg.match(/viewBox="[^" ]+ [^" ]+ ([^" ]+)/)[1]));
+      if(window.__reflowHoldRecoverySource===args.src && request.preview===null) {
+        window.__reflowHoldRecoverySource=null;
+        await new Promise(resolve=>{window.__reflowReleaseRecovery=resolve;});
+        window.__reflowReleaseRecovery=null;
+      }
       if(window.__reflowHoldNextNatural && request.preview===null) {
         window.__reflowHoldNextNatural=false;
         await new Promise(resolve=>{window.__reflowReleaseNatural=resolve;});
@@ -600,7 +611,7 @@ const nativeSmall = paperFixtures.find(
 );
 const nativeRecovered = paperFixtures.find((f) => f.name === "recovered" && f.previewPage === null);
 if (!nativeOriginal || !nativeSmall || !nativeRecovered) throw new Error("原文/raw真实夹具缺失");
-async function matchesNativePaper(name) {
+async function nativePaperFixture(name) {
   const requested = await c.evaluate("window.__browserDevLastCompile.previewPage");
   const expected = paperFixtures.find(
     (f) =>
@@ -613,6 +624,10 @@ async function matchesNativePaper(name) {
           )),
   );
   if (!expected) throw new Error(`缺少对应纸型的原生${name}夹具`);
+  return expected;
+}
+async function matchesNativePaper(name) {
+  const expected = await nativePaperFixture(name);
   return c.evaluate(`(() => {
     const expected=${JSON.stringify(expected.pages)},hosts=[...document.querySelectorAll('#preview-host .document-page')];
     return hosts.length===expected.length && hosts.every((host,i)=>{
@@ -622,9 +637,10 @@ async function matchesNativePaper(name) {
   })()`);
 }
 async function lockWholeBodyError() {
-  const at = nativeRecovered.doc.indexOf("width");
-  const byte = Buffer.byteLength(nativeRecovered.doc.slice(0, at));
-  const caret = nativeRecovered.carets.find((p) => p.offset >= byte && p.offset < byte + 5);
+  const current = await nativePaperFixture("recovered");
+  const at = current.doc.indexOf("width");
+  const byte = Buffer.byteLength(current.doc.slice(0, at));
+  const caret = current.carets.find((p) => p.offset >= byte && p.offset < byte + 5);
   if (!caret) throw new Error("整正文raw缺少真实命中探针");
   const point = await c.evaluate(`(() => {
     const p=${JSON.stringify(caret)},body=document.querySelector('.preview-body');
@@ -648,16 +664,116 @@ await c.evaluate(`(() => {
 })()`);
 await settledCompiles();
 await trackCompileRequests();
+const compositionBaselineMatches = await matchesNativePaper("original");
+const visibleNativePages = () =>
+  c.evaluate(
+    "[...document.querySelectorAll('#preview-host .document-page')].map(h=>h.shadowRoot.querySelector('svg').outerHTML).join('')",
+  );
+const compositionBaselineSvg = await visibleNativePages();
+await c.evaluate(`window.__reflowHoldRecoverySource=${JSON.stringify(nativeRecovered.doc)};true`);
 await replaceSource(nativeRecovered.brokenDoc);
+await c.waitFor("typeof window.__reflowReleaseRecovery==='function'");
+await c.evaluate(
+  "document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));true",
+);
+await c.waitFor("window.__typstPadScheduleStats().composing");
+await c.evaluate("window.__reflowReleaseRecovery();true");
+await c.waitFor("!window.__typstPadScheduleStats().inFlight");
+const pausedRecoveryCount = await c.evaluate("window.__browserDevCompileCount");
+await sleep(500);
+check(
+  "输入法暂停期间迟到恢复测量不落地或学习展示纸型，结束后再恢复",
+  compositionBaselineMatches &&
+    (await visibleNativePages()) === compositionBaselineSvg &&
+    (await c.evaluate(
+      `window.__typstPadScheduleStats().composing && window.__browserDevCompileCount===${pausedRecoveryCount}`,
+    )),
+);
+await c.evaluate(
+  "document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}));true",
+);
 const failedNaturalCount = await settledCompiles();
 await sleep(800);
+const errorScale = await measured();
+console.log(
+  `REFLOW_ERROR ${JSON.stringify({ errorScale, requests: await c.evaluate("window.__reflowRequests") })}`,
+);
+await c.screenshot(
+  new URL("../../.browser-check/error-scale-narrow.png", import.meta.url).pathname,
+);
 check(
-  "真实原文失败时保留A4整正文raw，但不误学为自然纸型或重排循环",
+  "真实原文失败时整正文raw按展示纸型适配窄栏，不误学自然纸型或重排循环",
   (await matchesNativePaper("recovered")) &&
-    (await measured()).requestedWidthPt === null &&
+    Math.abs(errorScale.fontPx - 14) < 0.1 &&
+    Math.abs(errorScale.pageHeightPt / errorScale.pageWidthPt - 841.89 / 595.28) < 0.001 &&
+    errorScale.overflowX <= 1 &&
     (await c.evaluate(`document.querySelectorAll('.error-count')[0].textContent!=='0' &&
       window.__browserDevCompileCount===${failedNaturalCount}`)),
 );
+await c.evaluate(
+  `(() => {const b=document.querySelector('.preview-body');b.style.width=(800+b.offsetWidth-b.clientWidth)+'px';return true;})()`,
+);
+const wideErrorCount = await settledCompiles();
+const wideError = await measured();
+await sleep(800);
+check(
+  "错误恢复变宽保持14px、真实A4展示比例及有界两次请求",
+  (await matchesNativePaper("recovered")) &&
+    Math.abs(wideError.fontPx - 14) < 0.1 &&
+    Math.abs(wideError.pageWidthPt - 595.28) < 0.01 &&
+    wideError.overflowX <= 1 &&
+    wideErrorCount === failedNaturalCount + 2 &&
+    (await c.evaluate(`window.__browserDevCompileCount===${wideErrorCount}`)),
+  JSON.stringify(wideError),
+);
+await c.screenshot(new URL("../../.browser-check/error-scale-wide.png", import.meta.url).pathname);
+await c.evaluate(
+  `(() => {const b=document.querySelector('.preview-body');b.style.width=(400+b.offsetWidth-b.clientWidth)+'px';return true;})()`,
+);
+await settledCompiles();
+// CDP模拟真实布局/DPR的引擎缩放，不用CSS zoom，不改变文档或选区。
+const zoomBrowser = await chromium.connectOverCDP(
+  `http://127.0.0.1:${process.env.CDP_PORT ?? 9333}`,
+);
+const zoomPage = zoomBrowser.contexts()[0].pages()[0];
+await zoomPage.exposeFunction("__errorZoomEngine", async (target) => {
+  await c.send("Emulation.setDeviceMetricsOverride", {
+    width: Math.round(1400 / target),
+    height: Math.round(900 / target),
+    deviceScaleFactor: target,
+    mobile: false,
+  });
+});
+await c.evaluate(
+  `(() => {const internals=window.__TAURI_INTERNALS__;window.__errorZoomInvokeOriginal=internals.invoke;internals.invoke=(command,args)=>command==='plugin:webview|set_webview_zoom' ? window.__errorZoomEngine(args.value) : window.__errorZoomInvokeOriginal(command,args);return true;})()`,
+);
+await c.key("=", { code: "Equal", keyCode: 187, modifiers: 10 });
+await sleep(300);
+console.log(`REFLOW_ZOOM_ENGINE ${JSON.stringify(await measured())}`);
+await c.waitFor("Math.abs(devicePixelRatio-1.1)<.00001");
+await settledCompiles();
+const zoomError = await measured();
+check(
+  "编译错误下改缩放仍保持编辑区字号与完整真实SVG，物理字号跟随引擎",
+  (await matchesNativePaper("recovered")) &&
+    Math.abs(zoomError.fontPx - zoomError.editorFontPx) < 0.1 &&
+    Math.abs(zoomError.physicalFontPx - 15.4) < 0.1 &&
+    zoomError.hostWidth <= zoomError.clientWidth + 1 &&
+    zoomError.glyphBox?.height > 0 &&
+    zoomError.overflowX <= 1,
+  JSON.stringify(zoomError),
+);
+console.log(
+  `REFLOW_ERROR_ZOOM ${JSON.stringify({ wideError, zoomError, requests: await c.evaluate("window.__reflowRequests") })}`,
+);
+await c.screenshot(new URL("../../.browser-check/error-scale-zoom.png", import.meta.url).pathname);
+await c.key("-", { code: "Minus", keyCode: 189, modifiers: 10 });
+await c.waitFor("devicePixelRatio===1");
+await settledCompiles();
+await c.evaluate(
+  "window.__TAURI_INTERNALS__.invoke=window.__errorZoomInvokeOriginal;delete window.__errorZoomInvokeOriginal;true",
+);
+await zoomBrowser.close();
 await lockWholeBodyError();
 const repairStart = await c.evaluate("window.__reflowRequests.length");
 await replaceSource(nativeOriginal.doc);

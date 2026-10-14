@@ -11,7 +11,7 @@ import {
   shotPath,
 } from "./harness.mjs";
 const expansion = loadFixtures("expansion-fixtures.json", {
-  predicate: (fs) => fs.length === 62 && fs.every((f) => f.pages.length && f.cursorQueries.length),
+  predicate: (fs) => fs.length === 64 && fs.every((f) => f.pages.length && f.cursorQueries.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const fixtures = [...loadFixtures("page-fixtures.json"), ...expansion];
@@ -265,13 +265,14 @@ async function setTheme(theme) {
     `document.querySelector('.app').classList.contains('light')===${theme === "light"}`,
   );
 }
-async function replace(value = base) {
+async function replace(value = base, activate = true) {
   if (await c.evaluate("!!document.querySelector('.document-pane')"))
     await c.key("e", { keyCode: 69, modifiers: 2 });
   await c.selectAll();
   await c.type(value.original);
   await c.key("e", { keyCode: 69, modifiers: 2 });
   await settled(value);
+  if (!activate) return;
   // 先点击实际正文激活输入；后续选择事务与真实键盘复用同一展开流程。
   const p = query(value, value.original.indexOf("正文"));
   const point = await c.evaluate(
@@ -282,6 +283,97 @@ async function replace(value = base) {
     `window.__typstPadView.hasFocus&&window.__typstPadView.state.selection.main.head===${value.original.indexOf("正文")}`,
   );
 }
+for (const name of ["math", "number", "fraction", "complex-block"]) {
+  const normal = f(name === "math" ? "base" : `${name}-base`);
+  const expanded = f(name);
+  await replace(normal, false);
+  const hit = normal.formulaGlyphHits.find(
+    (h) =>
+      h.caret.offset > Buffer.byteLength(normal.original.slice(0, expanded.range.from)) &&
+      h.caret.offset < Buffer.byteLength(normal.original.slice(0, expanded.range.to)),
+  );
+  if (!hit) throw Error(`缺少真实公式命中 ${name}`);
+  for (const repeat of [false, true]) {
+    const point = await nativePoint(hit);
+    const previousHead = await c.evaluate("window.__typstPadView.state.selection.main.head");
+    const before = await count();
+    await c.click(point.x, point.y);
+    await settled(expanded);
+    const matches = await pagesMatch(expanded);
+    const head = await c.evaluate("window.__typstPadView.state.selection.main.head");
+    const expectedHead = Buffer.from(normal.original)
+      .subarray(0, hit.caret.offset)
+      .toString().length;
+    const caret = await caretMatches(expanded, head, true);
+    console.log(
+      `FORMULA_CLICK ${JSON.stringify({ name, repeat, hit, previousHead, expectedHead, head, matches, caret, requests: (await count()) - before })}`,
+    );
+    check(
+      `${name}：${repeat ? "相同head再次" : "未激活正文直接"}点击展开完整原生源码`,
+      matches &&
+        caret &&
+        !hit.caret.isWhitespace &&
+        head === expectedHead &&
+        (!repeat || previousHead === head) &&
+        (await bubbleMatches(expanded)) &&
+        (await doc()) === expanded.original &&
+        (await count()) === before + 2,
+    );
+    await c.screenshot(shotPath(`formula-click-${name}-${repeat ? "repeat" : "first"}`));
+    await c.key("Escape", { keyCode: 27 });
+    await settled(normal);
+  }
+  if (name === "complex-block") {
+    const gapHit = normal.formulaHits.find(
+      (h) =>
+        h.caret.offset > Buffer.byteLength(normal.original.slice(0, expanded.range.from)) &&
+        h.caret.offset < Buffer.byteLength(normal.original.slice(0, expanded.range.to)),
+    );
+    const point = await nativePoint(gapHit);
+    await c.click(point.x, point.y);
+    await settled(expanded);
+    check(
+      "复杂块公式中心/分式间隙保留公式命中，完整源码及原生caret可见",
+      !gapHit.caret.isWhitespace &&
+        (await pagesMatch(expanded)) &&
+        (await bubbleMatches(expanded)) &&
+        (await caretMatches(
+          expanded,
+          await c.evaluate("window.__typstPadView.state.selection.main.head"),
+          true,
+        )),
+    );
+    await c.screenshot(shotPath("formula-click-complex-block-gap"));
+    await c.key("Escape", { keyCode: 27 });
+    await settled(normal);
+  }
+}
+await replace(base, false);
+const delayedPoint = await nativePoint(base.formulaGlyphHits[0]);
+const beforeImeClick = await c.evaluate(
+  "({head:window.__typstPadView.state.selection.main.head,compiles:window.__browserDevCallCounts.compile_doc??0,hits:window.__browserDevCallCounts.document_hit_test??0})",
+);
+await c.evaluate(
+  "history.replaceState(null,'',location.pathname+'?browserdev=1&compileslow=1');true",
+);
+await c.click(delayedPoint.x, delayedPoint.y);
+await c.waitFor(`(window.__browserDevCallCounts.document_hit_test??0)>${beforeImeClick.hits}`);
+await c.evaluate(
+  "document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));true",
+);
+await c.waitFor("window.__typstPadScheduleStats().composing");
+await c.evaluate(
+  "document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}));true",
+);
+await sleep(800);
+check(
+  "合成开始后即使无编辑并取消，也作废迟到的真实公式点击",
+  (await pagesMatch(base)) &&
+    (await c.evaluate(
+      `window.__typstPadView.state.selection.main.head===${beforeImeClick.head} && (window.__browserDevCallCounts.compile_doc??0)===${beforeImeClick.compiles}`,
+    )),
+);
+await c.evaluate("history.replaceState(null,'',location.pathname+'?browserdev=1');true");
 await replace();
 check("正文保持完整原生页面，激活输入不展开普通文字", await pagesMatch(base));
 const beforeMath = await count();
@@ -1075,4 +1167,4 @@ check(
   await c.evaluate("!window.__browserDevWrites?.length&&!window.__browserDevErrors?.length"),
 );
 await c.close();
-finish(`通过 ${state.passed} 项检查；光标主导展开 + 62 份真实 Typst 产物`);
+finish(`通过 ${state.passed} 项检查；光标主导展开 + 64 份真实 Typst 产物`);

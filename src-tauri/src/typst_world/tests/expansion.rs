@@ -41,6 +41,8 @@ fn expansion_sources() -> Vec<ExpansionSource> {
     let long_line = base.replace("$a + b$", LONG_LINE_FORMULA);
     let tall_matrix = base.replace("$a + b$", TALL_MATRIX_FORMULA);
     let nested_fraction = base.replace("$a + b$", NESTED_FRACTION_FORMULA);
+    let complex_block_formula = "$ \nsqrt(frac(1 + x, 2 - y) + frac(3, sqrt(5)))\n $";
+    let complex_block = base.replace("$a + b$", complex_block_formula);
     let bottom = "#set page(width: 360pt, height: 260pt, margin: 24pt)\n#set text(size: 12pt)\n#v(160pt)\n正文 $y + z$ 结束。\n\n#pagebreak()\n第二页。".to_string();
     [
         ("base", base.clone(), None),
@@ -51,6 +53,8 @@ fn expansion_sources() -> Vec<ExpansionSource> {
         ("fraction", fraction, Some("$frac(1, sqrt(2))$")),
         ("display-base", display.clone(), None),
         ("display-math", display, Some("$ \na + b\n $")),
+        ("complex-block-base", complex_block.clone(), None),
+        ("complex-block", complex_block, Some(complex_block_formula)),
         ("counter-base", counter.clone(), None),
         ("counter", counter, Some(counter_expression)),
         ("raw-hidden-base", hidden.clone(), None),
@@ -291,6 +295,61 @@ fn formula_center_clicks_include_fraction_bars_and_numeric_tokens() {
         .unwrap();
         assert_eq!(hit.is_whitespace, Some(false), "公式内部不是段落空白");
         assert!(hit.offset > region.range.start && hit.offset < region.range.end);
+    }
+}
+
+#[test]
+fn formula_glyph_line_boxes_are_direct_hits_but_line_side_is_whitespace() {
+    for formula in [
+        "$998244353$",
+        "$frac(1, sqrt(2))$",
+        "$ \nsqrt(frac(1 + x, 2 - y) + frac(3, sqrt(5)))\n $",
+    ] {
+        let src = format!("前文 {formula} 后文");
+        let from = src.find('$').unwrap();
+        let to = src.rfind('$').unwrap() + 1;
+        let world = TypstWorld::new(src.clone(), None, &fonts_dir(), &FontConfig::default());
+        let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+        let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+        let probes: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                item.kind == crate::block_geometry::PlacedItemKind::Text
+                    && item.range.start > from
+                    && item.range.end < to
+            })
+            .map(|item| {
+                let point = item.caret_start + item.caret_vector * 0.05;
+                (
+                    item.page,
+                    (item.caret_start.x + item.caret_end.x).to_pt() / 2.0,
+                    point.y.to_pt(),
+                )
+            })
+            .collect();
+        let side = items
+            .iter()
+            .filter(|item| item.kind == crate::block_geometry::PlacedItemKind::Text)
+            .max_by_key(|item| item.range.end)
+            .unwrap();
+        let side_point = (
+            side.page,
+            side.caret_end.x.to_pt() + 24.0,
+            (side.caret_start + side.caret_vector / 2.0).y.to_pt(),
+        );
+        let id = store(items, src.len(), stats.foreign_ink);
+        assert!(!probes.is_empty());
+        for (page, x, y) in probes {
+            let hit = crate::document_geometry::hit_test(id, page, x, y).unwrap();
+            assert_eq!(hit.is_whitespace, Some(false), "{formula} at {x}, {y}");
+            assert!(hit.offset > from && hit.offset < to, "{hit:?}");
+        }
+        assert_eq!(
+            crate::document_geometry::hit_test(id, side_point.0, side_point.1, side_point.2)
+                .unwrap()
+                .is_whitespace,
+            Some(true)
+        );
     }
 }
 
@@ -794,6 +853,24 @@ fn dump_page_fixtures_expansion() {
                 )
             })
             .collect();
+        let formula_glyph_points: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                item.kind == crate::block_geometry::PlacedItemKind::Text
+                    && items.iter().any(|region| {
+                        region.kind == crate::block_geometry::PlacedItemKind::Formula
+                            && item.range.start >= region.range.start
+                            && item.range.end <= region.range.end
+                    })
+            })
+            .map(|item| {
+                (
+                    item.page,
+                    (item.caret_start.x + item.caret_end.x).to_pt() / 2.0,
+                    (item.caret_start + item.caret_vector * 0.05).y.to_pt(),
+                )
+            })
+            .collect();
         let heading_blank = src.find("== 中文标题").and_then(|from| {
             let to = src[from..].find('\n').map_or(src.len(), |end| from + end);
             items
@@ -819,6 +896,7 @@ fn dump_page_fixtures_expansion() {
             })
             .collect();
         let formula_hits: Vec<_> = formula_points.into_iter().map(|(page,x_pt,y_pt)| serde_json::json!({ "page":page, "xPt":x_pt, "yPt":y_pt, "caret":crate::document_geometry::hit_test(id,page,x_pt,y_pt).unwrap() })).collect();
+        let formula_glyph_hits: Vec<_> = formula_glyph_points.into_iter().map(|(page,x_pt,y_pt)| serde_json::json!({ "page":page, "xPt":x_pt, "yPt":y_pt, "caret":crate::document_geometry::hit_test(id,page,x_pt,y_pt).unwrap() })).collect();
         let queries: Vec<_> = src
             .char_indices()
             .map(|(offset, _)| offset)
@@ -843,7 +921,7 @@ fn dump_page_fixtures_expansion() {
         }
         println!(
             "EXPANSIONFIXTURE:{}",
-            serde_json::json!({ "name": name, "doc": src, "original": original, "range": range, "pages": pages, "visibleText": visible_text, "formulaPreview": formula_preview, "formulaHits": formula_hits, "whitespaceHits": heading_whitespace_hits, "carets": carets, "cursorQueries": queries, "selectionQuads": selection(id, 0, src.len()) })
+            serde_json::json!({ "name": name, "doc": src, "original": original, "range": range, "pages": pages, "visibleText": visible_text, "formulaPreview": formula_preview, "formulaHits": formula_hits, "formulaGlyphHits": formula_glyph_hits, "whitespaceHits": heading_whitespace_hits, "carets": carets, "cursorQueries": queries, "selectionQuads": selection(id, 0, src.len()) })
         );
     }
 }
