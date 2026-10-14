@@ -257,6 +257,8 @@ if (reuseCdp && (await httpOk(`http://127.0.0.1:${CDP_PORT}/json/version`))) {
     process.exit(1);
   }
   launch("chrome", chrome, [
+    // 完整 Chrome 需显式启用无头模式；headless shell 本身无窗口，也接受此参数。
+    "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",
