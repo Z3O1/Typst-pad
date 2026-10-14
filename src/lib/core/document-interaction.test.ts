@@ -1,8 +1,24 @@
 import { describe, it, expect, vi } from "vitest";
 import { parser } from "codemirror-lang-typst/lezer";
-import { nearestPageCoordinates, pageCoordinates, sourceRevealRange } from "./document-interaction";
+import {
+  closedMathRangeAt,
+  nearestPageCoordinates,
+  pageCoordinates,
+  sourceRevealRange,
+} from "./document-interaction";
 
 describe("整页交互", () => {
+  it("闭合数学范围使用当前语法树，不把转义、raw 或代码中的 $ 当闭合公式", () => {
+    for (const source of ["$a$ 后文", "$$正文", "$\na\n$ "])
+      expect(closedMathRangeAt(source, 0, parser.parse(source))).toEqual({
+        from: 0,
+        to: source.lastIndexOf("$") + 1,
+      });
+    for (const source of ["$a", "$a\\$", "`$a$`", "#let a = $x$;"])
+      expect(closedMathRangeAt(source, 0)).toBeNull();
+    const changed = "$a + b$ 后文";
+    expect(closedMathRangeAt(changed, 0, parser.parse("$a$"))).toEqual({ from: 0, to: 7 });
+  });
   it("缩放与滚动后的页面坐标沿用原始 viewBox", () => {
     expect(
       pageCoordinates(

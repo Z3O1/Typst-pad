@@ -530,8 +530,82 @@ check(
   "重做恢复对应原生页与光标位置",
   (await doc()) === edited.doc && (await compiledPagesMatch(edited)),
 );
+// 闭合 $ 后的插入点属于正文；使用真实展开/收起产物，不只检查灰色外观。
+// 此时 compileslow 会话仍在，快速移出也必须作废迟到的展开。
+const boundaryBase = expansionFixtures.find((f) => f.name === "base");
+const boundaryMath = expansionFixtures.find((f) => f.name === "math");
+const boundaryEdited = expansionFixtures.find((f) => f.name === "edited-base");
+const boundaryEditedMath = expansionFixtures.find((f) => f.name === "math-edited");
+if (!boundaryBase || !boundaryMath || !boundaryEdited || !boundaryEditedMath)
+  throw new Error("缺少闭合公式边界的真实夹具");
+await replace(boundaryBase);
+const formulaHit = boundaryBase.formulaHits[0];
+const formulaPoint = await c.evaluate(`(() => {
+  const host=document.querySelectorAll('#preview-host>.document-page')[${formulaHit.page - 1}],
+    r=host.getBoundingClientRect(),v=host.shadowRoot.querySelector('svg').viewBox.baseVal;
+  return {x:r.left+(${formulaHit.xPt}-v.x)*r.width/v.width,y:r.top+(${formulaHit.yPt}-v.y)*r.height/v.height};
+})()`);
+await c.click(formulaPoint.x, formulaPoint.y);
+await settled(boundaryMath);
+await c.screenshot(shotPath("document-cursor-boundary-open"));
+const start = boundaryMath.range.from,
+  end = boundaryMath.range.to;
+const editedEnd = boundaryEditedMath.range.to;
+await c.evaluate(`window.__typstPadView.dispatch({
+  changes:{from:${start + 1},to:${end - 1},insert:'a + b + z'},
+  selection:{anchor:${editedEnd}},userEvent:'input.type'
+});true`);
+await settled(boundaryEdited);
+if (!(await compiledPagesMatch(boundaryEdited)) || (await doc()) !== boundaryEdited.original)
+  throw new Error("闭合 $ 后的编辑光标仍保留源码展开，或原文被改变");
+await pose(boundaryEdited, queryAt(boundaryEdited, byteAt(boundaryEdited, "$a + b + z$") + 11), {
+  dispatch: false,
+});
+await c.screenshot(shotPath("document-cursor-boundary-closed"));
+await c.key("ArrowLeft", { keyCode: 37 });
+await settled(boundaryEditedMath);
+if (!(await compiledPagesMatch(boundaryEditedMath))) throw new Error("左移进入公式没有展开");
+await c.key("ArrowRight", { keyCode: 39 });
+await settled(boundaryEdited);
+if (!(await compiledPagesMatch(boundaryEdited))) throw new Error("右移跨过闭合 $ 没有收起");
+await c.key("ArrowLeft", { keyCode: 37 });
+await settled(boundaryEditedMath);
+const rawEnd = queryAt(
+  boundaryEditedMath,
+  Buffer.byteLength(
+    boundaryEditedMath.doc.slice(0, boundaryEditedMath.range.renderedFrom + editedEnd - start),
+  ),
+).caret;
+if (!rawEnd) throw new Error("闭合符右侧缺少真实光标几何");
+const outsidePoint = await c.evaluate(`(() => {const p=${expectedExpression(rawEnd)};
+  return {x:p.x+4,y:p.y+p.height/2};})()`);
+await c.click(outsidePoint.x, outsidePoint.y);
+await settled(boundaryEdited);
+if (!(await compiledPagesMatch(boundaryEdited))) throw new Error("点击闭合公式外没有收起");
+// 收拢选区 head 不变，没有移动方向，也不能重新打开右边界。
+await c.evaluate(`(() => {const v=window.__typstPadView;
+  v.dispatch({selection:{anchor:${editedEnd - 2}}});
+  v.dispatch({selection:{anchor:${editedEnd - 2},head:${editedEnd}}});
+  v.dispatch({selection:{anchor:${editedEnd}}});return true;
+})()`);
+await settled(boundaryEdited);
+if (!(await compiledPagesMatch(boundaryEdited))) throw new Error("终点选区收拢重新打开公式");
+// 输入层保持源码位置；展开请求在途时退出，最终页面只能采用收起产物。
+await c.evaluate(`window.__typstPadView.dispatch({selection:{anchor:${editedEnd - 1}}});true`);
+await c.waitFor("window.__typstPadScheduleStats?.().inFlight");
+await c.key("ArrowRight", { keyCode: 39 });
+await settled(boundaryEdited);
+if (!(await compiledPagesMatch(boundaryEdited))) throw new Error("迟到的公式展开覆盖了收起");
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await settled(boundaryEdited);
+if (!(await compiledPagesMatch(boundaryEdited)) || (await doc()) !== boundaryEdited.original)
+  throw new Error("模式往返重新打开公式或改变原文");
+console.log(
+  "闭合公式边界：编辑/左右键/选区收拢/迟到展开/模式往返均使用真实 Typst 产物；等待编译的光标隐藏策略未改变",
+);
 check(
-  "光标渲染矩阵没有写盘或脚本异常",
+  "光标渲染矩阵含闭合公式边界没有写盘或脚本异常",
   await c.evaluate(
     "!window.__browserDevWrites?.length && !document.body.innerText.includes('脚本错误')",
   ),

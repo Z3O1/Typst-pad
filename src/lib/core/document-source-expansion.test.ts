@@ -63,11 +63,57 @@ describe("光标主导的源码展开", () => {
     for (const head of [doc.indexOf("c +"), doc.indexOf("strong")])
       expect(resolve(doc, parent, at(head, head - 1), "move")).toBe(parent);
   });
-  it("边界输入或残缺语法继续保留已映射的编辑范围", () => {
-    expect(resolve(doc, expanded, at(math.to, math.to - 1), "edit")).toBe(expanded);
+  it("输入落在闭合公式之后收起；残缺语法继续保留已映射的编辑范围", () => {
+    expect(resolve(doc, expanded, at(math.to, math.to - 1), "edit")).toEqual(empty);
     const broken = doc.slice(0, math.to - 1) + doc.slice(math.to);
     const mapped = { range: { from: math.from, to: math.to - 1 }, error: null };
     expect(resolve(broken, mapped, at(math.to - 1), "edit")).toBe(mapped);
+  });
+  it("闭合公式的映射范围不能吞掉公式外新输入的文字或空白", () => {
+    for (const suffix of [" ", "正文", "🙂", "\t"]) {
+      const original = "$x<i, y > i$";
+      const state = EditorState.create({ doc: original });
+      const edit = state.update({ changes: { from: original.length, insert: suffix } });
+      const source = edit.state.doc.toString();
+      const mapped = {
+        range: { from: edit.changes.mapPos(0, -1), to: edit.changes.mapPos(original.length, 1) },
+        error: null,
+      };
+      expect(resolve(source, mapped, at(source.length), "edit")).toEqual(empty);
+      expect(resolve(source, mapped, at(source.length, source.length - 1), "move")).toEqual(empty);
+      const inside = resolve(source, mapped, at(2), "edit");
+      expect(inside.range).toEqual({ from: 0, to: source.indexOf("$", 1) + 1 });
+    }
+  });
+  it("输入闭合 $ 后收起，撤销闭合符后保留未完成公式以便继续编辑", () => {
+    const original = "$x<i, y > i";
+    const state = EditorState.create({ doc: original });
+    const edit = state.update({ changes: { from: original.length, insert: "$" } });
+    const source = edit.state.doc.toString();
+    const mapped = { range: { from: 0, to: edit.changes.mapPos(original.length, 1) }, error: null };
+    expect(resolve(source, mapped, at(source.length), "edit")).toEqual(empty);
+    const undo = edit.state.update({ changes: edit.changes.invert(state.doc) });
+    expect(undo.state.doc.toString()).toBe(original);
+    expect(resolve(original, empty, at(original.length), "edit").range).toEqual({
+      from: 0,
+      to: original.length,
+    });
+  });
+  it("闭合符输入和选区收拢在公式终点不重新打开公式", () => {
+    for (const source of ["$x<i, y > i$", "$$", "$ a $", "$\na\n$"]) {
+      const range = { from: 0, to: source.length };
+      for (const intent of ["edit", "explicit", "click"] as const)
+        expect(resolve(source, { range, error: null }, at(range.to), intent)).toEqual(empty);
+      expect(resolve(source, { range, error: null }, at(range.to, range.to), "move")).toEqual(
+        empty,
+      );
+      expect(resolve(source, empty, at(range.to, range.to + 1), "move").range).toEqual(range);
+    }
+  });
+  it("转义美元符号不是闭合边界，未闭合公式终点仍可编辑", () => {
+    const source = "$a\\$";
+    const range = { from: 0, to: source.length };
+    expect(resolve(source, { range, error: null }, at(source.length), "edit").range).toEqual(range);
   });
   it("输入新公式可自动展开；删空范围后不保留无效编辑锁", () => {
     const inserted = "正文 $$";
@@ -93,9 +139,9 @@ describe("光标主导的源码展开", () => {
   });
   it("点击空白不展开邻近表达式，已展开范围内空白不收起", () => {
     expect(resolve(doc, empty, at(math.to), "click", { whitespace: true })).toBe(empty);
-    expect(resolve(doc, expanded, at(math.to), "click", { whitespace: true })).toBe(expanded);
+    expect(resolve(doc, expanded, at(math.to), "click", { whitespace: true })).toEqual(empty);
     expect(resolve(doc, expanded, at(doc.length), "click", { whitespace: true })).toEqual(empty);
-    expect(resolve(doc, empty, at(math.to), "click")).toEqual(expanded);
+    expect(resolve(doc, empty, at(math.to), "click")).toBe(empty);
   });
   it("键盘进入错误区建立编辑锁，修好但光标没离开时继续保留", () => {
     const error = { range: null, error: math };
