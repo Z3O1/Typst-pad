@@ -21,9 +21,13 @@ describe("编译快照坐标索引", () => {
     expect(b.linePosition(2, 3)).toBe(6);
     expect(a.toByte(a.linePosition(2, 3))).toBe(11);
     expect(a.linePosition(3, 1)).toBe(6);
+    expect(a.lineRange(1)).toEqual({ from: 0, to: 2 });
+    expect(a.lineRange(2)).toEqual({ from: 3, to: 5 });
+    expect(a.lineRange(99)).toEqual({ from: 6, to: 6 });
     const empty = createSourceCoordinates("");
     expect(empty.toByte(10)).toBe(0);
     expect(empty.toPosition(10)).toBe(0);
     expect(empty.linePosition(1, 1)).toBe(0);
+    expect(empty.lineRange(1)).toEqual({ from: 0, to: 0 });
   });
 });

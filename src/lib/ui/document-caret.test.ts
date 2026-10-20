@@ -2,48 +2,131 @@ import { describe, expect, it } from "vitest";
 import {
   caretScrollDelta,
   projectDocumentCaret,
-  createPendingCaretFeedback,
-  PENDING_CARET_TIMEOUT_MS,
+  createDocumentCaretFeedback,
+  caretSourceContext,
+  type CaretFallbackReason,
 } from "./document-caret";
 
 const caret = { offset: 3, page: 2, xPt: 30, yPt: 50, heightPt: 12 };
 const rect = { left: 100, top: -40, width: 400, height: 600 };
 const box = { x: 20, y: 30, width: 200, height: 300 };
 
-describe("待编译光标反馈", () => {
+describe("统一编辑光标反馈", () => {
   const anchor = { left: 120, top: 40, height: 16, rotation: 0 };
+  const input = {
+    scope: 1,
+    active: true,
+    composing: false,
+    exact: anchor,
+    reason: "pending" as CaretFallbackReason,
+    viewport: { left: 10, top: 20, width: 300, height: 200 },
+  };
 
-  it("只保持已确认的输入锚点，不创建源码偏移或预测新字形位置", () => {
-    const feedback = createPendingCaretFeedback();
-    expect(feedback.begin(null, 0)).toBeNull();
-    const pending = feedback.begin(anchor, 10)!;
-    expect(pending.anchor).toBe(anchor);
-    expect(pending.expiresAt).toBe(10 + PENDING_CARET_TIMEOUT_MS);
-    expect(feedback.current(20)).toBe(pending);
+  it("优先显示当前真实几何，不创建新的源码偏移", () => {
+    expect(createDocumentCaretFeedback().resolve(input)).toEqual({
+      scope: 1,
+      anchor,
+      kind: "exact",
+    });
   });
 
-  it("连续编辑不能延长第一份锚点的期限；过期后无新精确锚点不复活", () => {
-    const feedback = createPendingCaretFeedback();
-    const pending = feedback.begin(anchor, 0)!;
-    expect(feedback.begin(null, PENDING_CARET_TIMEOUT_MS - 1)).toBe(pending);
-    expect(feedback.current(PENDING_CARET_TIMEOUT_MS)).toBeNull();
-    expect(feedback.begin(null, PENDING_CARET_TIMEOUT_MS + 1)).toBeNull();
+  it.each(["pending", "unmapped", "unavailable"] as const)(
+    "%s 从未定位过也有明确的视区内输入反馈",
+    (reason) => {
+      const result = createDocumentCaretFeedback().resolve({ ...input, exact: null, reason })!;
+      expect(result.kind).toBe(reason);
+      expect(result.anchor.left).toBeGreaterThan(input.viewport.left);
+      expect(result.anchor.top + result.anchor.height).toBeLessThan(
+        input.viewport.top + input.viewport.height,
+      );
+    },
+  );
+
+  it("连续编辑、导航、null 和失败都保持已确认的物理起点，不设超时", () => {
+    const feedback = createDocumentCaretFeedback();
+    feedback.resolve(input);
+    for (let round = 0; round < 100; round++) {
+      for (const reason of ["pending", "unmapped", "unavailable"] as const) {
+        const result = feedback.resolve({ ...input, exact: null, reason })!;
+        expect(result.anchor).toBe(anchor);
+        expect(result.kind).toBe(reason);
+        expect(result).not.toHaveProperty("expiresAt");
+      }
+    }
+    const next = { ...anchor, left: 180 };
+    expect(feedback.resolve({ ...input, exact: next })).toEqual({
+      scope: 1,
+      anchor: next,
+      kind: "exact",
+    });
   });
 
-  it("取消后立即清除反馈，不等待原期限", () => {
-    const feedback = createPendingCaretFeedback();
-    expect(feedback.begin(anchor, 0)).not.toBeNull();
-    feedback.cancel();
-    expect(feedback.current(1)).toBeNull();
+  it("失焦、非空选区和离开文档模式统一停用，回来不能复用先前的物理起点", () => {
+    const feedback = createDocumentCaretFeedback();
+    feedback.resolve(input);
+    expect(feedback.resolve({ ...input, active: false })).toBeNull();
+    const returned = feedback.resolve({ ...input, exact: null })!;
+    expect(returned.kind).toBe("pending");
+    expect(returned.anchor).not.toEqual(anchor);
   });
 
-  it("过期定时器读取当前状态，不能取消后开始的新反馈", () => {
-    const feedback = createPendingCaretFeedback();
-    feedback.begin(anchor, 0);
-    feedback.cancel();
-    const newer = feedback.begin({ ...anchor, left: 160 }, 100)!;
-    expect(feedback.current(PENDING_CARET_TIMEOUT_MS)).toBe(newer);
-    expect(feedback.current(100 + PENDING_CARET_TIMEOUT_MS)).toBeNull();
+  it("新会话不能借用旧文档的输入位置，即使仍聚焦且首编译失败", () => {
+    const feedback = createDocumentCaretFeedback();
+    feedback.resolve(input);
+    const next = feedback.resolve({ ...input, scope: 2, exact: null, reason: "unavailable" })!;
+    expect(next.scope).toBe(2);
+    expect(next.kind).toBe("unavailable");
+    expect(next.anchor).not.toEqual(anchor);
+  });
+
+  it("合成冻结最后可见物理起点，不受新源码或迟到几何影响，结束后采用当前精确位置", () => {
+    const feedback = createDocumentCaretFeedback();
+    feedback.resolve(input);
+    const changed = { ...anchor, left: 180 };
+    expect(feedback.resolve({ ...input, composing: true, exact: null })?.anchor).toBe(anchor);
+    expect(feedback.resolve({ ...input, composing: true, exact: changed })?.anchor).toBe(anchor);
+    expect(feedback.resolve({ ...input, exact: changed })?.anchor).toBe(changed);
+  });
+
+  it("合成前没有几何也不会消失；取消合成后仍有常规反馈", () => {
+    const feedback = createDocumentCaretFeedback();
+    const composing = feedback.resolve({ ...input, composing: true, exact: null })!;
+    expect(composing.kind).toBe("composing");
+    expect(feedback.resolve({ ...input, exact: null })?.anchor).toBe(composing.anchor);
+  });
+
+  it("离屏真实位置与滚动/缩窗后的旧锚点只产生已标记的可见兜底，不伪称精确", () => {
+    const feedback = createDocumentCaretFeedback();
+    const outside = { ...anchor, left: 500, top: 500 };
+    expect(feedback.resolve({ ...input, exact: outside })?.kind).toBe("offscreen");
+    const viewport = { left: 10, top: 20, width: 45, height: 35 };
+    const next = feedback.resolve({ ...input, exact: null, viewport })!;
+    expect(next.anchor.left).toBeGreaterThanOrEqual(viewport.left);
+    expect(next.anchor.left + 2).toBeLessThanOrEqual(viewport.left + viewport.width);
+    expect(next.anchor.top + next.anchor.height).toBeLessThanOrEqual(
+      viewport.top + viewport.height,
+    );
+    expect(feedback.resolve({ ...input, exact: anchor })?.kind).toBe("exact");
+  });
+
+  it("无法显示的隐藏/零尺寸视区不产生坏 CSS", () => {
+    for (const width of [0, 1, NaN])
+      expect(
+        createDocumentCaretFeedback().resolve({ ...input, viewport: { ...input.viewport, width } }),
+      ).toBeNull();
+  });
+
+  it("源码上下文保留真实插入点、空行和 Unicode；长行两侧分别截断", () => {
+    expect(caretSourceContext("中文😀abc", 5)).toEqual({ before: "中文😀", after: "abc" });
+    expect(caretSourceContext("", 1)).toEqual({ before: "", after: "" });
+    expect(caretSourceContext("first\n中文😀abc\nlast", 5, 6, 13)).toEqual({
+      before: "中文😀",
+      after: "abc",
+    });
+    expect(caretSourceContext("😀".repeat(50), 51)).toEqual({
+      before: "…" + "😀".repeat(20),
+      after: "😀".repeat(20) + "…",
+    });
   });
 });
 
