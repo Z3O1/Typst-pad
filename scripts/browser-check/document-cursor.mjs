@@ -13,7 +13,7 @@ import {
 } from "./harness.mjs";
 const cursorFixtures = loadFixtures("cursor-fixtures.json", {
   predicate: (fixtures) =>
-    fixtures.length === 9 && fixtures.every((f) => f.cursorQueries?.length && f.pages.length),
+    fixtures.length === 26 && fixtures.every((f) => f.cursorQueries?.length && f.pages.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const pageFixtures = loadFixtures("page-fixtures.json");
@@ -158,6 +158,77 @@ for (const name of ["mixed", "raw", "whitespace"]) {
   await showBlink();
   await c.screenshot(shotPath(`document-cursor-${name}`));
 }
+
+// 列表 Enter 生成的空项必须有本轮真实停靠点，不能只等临时 pending 锚点撑住。
+for (const kind of ["bullet", "auto", "numbered", "nested"]) {
+  const initial = fixture(`list-${kind}`);
+  const empty = fixture(`list-${kind}-empty`);
+  const typed = fixture(`list-${kind}-typed`);
+  const exit = fixture(`list-${kind}-exit`);
+  const endQuery = (f) => queryAt(f, Buffer.byteLength(f.doc));
+  const atEnd = (f) => pose(f, endQuery(f), { dispatch: false });
+  await replace(initial);
+  await pose(initial, endQuery(initial));
+  await c.key("Enter", { keyCode: 13 });
+  await settled(empty);
+  await atEnd(empty);
+  if ((await doc()) !== empty.doc || !(await compiledPagesMatch(empty)))
+    throw Error(`${kind}: 空项没有采用完整真实占位产物，或原文被污染`);
+  const point = await c.evaluate(
+    `(() => {const p=${expectedExpression(endQuery(empty).caret)};return {x:p.x+1,y:p.y+p.height/2}})()`,
+  );
+  await c.click(point.x, point.y);
+  await atEnd(empty);
+  if (!(await c.evaluate("window.__typstPadView.hasFocus")))
+    throw Error(`${kind}: 空项点击无法恢复输入`);
+  if (kind === "numbered") {
+    await showBlink();
+    await c.screenshot(shotPath("document-cursor-empty-list"));
+  }
+  await c.type("乙");
+  await settled(typed);
+  await atEnd(typed);
+  if ((await doc()) !== typed.doc || !(await compiledPagesMatch(typed)))
+    throw Error(`${kind}: 列表续写产物或源码错误`);
+  // 跨过 CodeMirror 的历史分组间隔，退格撤销不能与刚才的输入合并。
+  await sleep(600);
+  await c.key("Backspace", { keyCode: 8 });
+  await settled(empty);
+  await atEnd(empty);
+  await c.key("z", { keyCode: 90, modifiers: 2 });
+  await settled(typed);
+  await atEnd(typed);
+  await c.key("y", { keyCode: 89, modifiers: 2 });
+  await settled(empty);
+  await atEnd(empty);
+  await c.key("e", { keyCode: 69, modifiers: 2 });
+  await settled({ source: empty.doc });
+  if (!(await compiledPagesMatch({ pages: empty.originalPages })) || (await doc()) !== empty.doc)
+    throw Error(`${kind}: 源码模式没有恢复原文产物`);
+  await c.key("e", { keyCode: 69, modifiers: 2 });
+  await settled(empty);
+  await atEnd(empty);
+  await c.key("Enter", { keyCode: 13 });
+  await settled(exit);
+  await atEnd(exit);
+  check(
+    `${kind} 列表：空项点击/续写/删除/撤销重做/模式往返/退出都有真实光标`,
+    (await doc()) === exit.doc && (await compiledPagesMatch(exit)),
+  );
+}
+const listInitial = fixture("list-bullet"),
+  listContinuation = fixture("list-continuation");
+await replace(listInitial);
+await pose(listInitial, queryAt(listInitial, Buffer.byteLength(listInitial.doc)));
+await c.key("Enter", { keyCode: 13, modifiers: 8 });
+await settled(listContinuation);
+await pose(listContinuation, queryAt(listContinuation, Buffer.byteLength(listContinuation.doc)), {
+  dispatch: false,
+});
+check(
+  "列表 Shift+Enter 的空续行保留真实停靠点和源码缩进",
+  (await doc()) === listContinuation.doc && (await compiledPagesMatch(listContinuation)),
+);
 
 // 标题激活输入后自动展开：不能继续拿普通标题的字号/坐标断言源码面板。
 await replace(mixed);

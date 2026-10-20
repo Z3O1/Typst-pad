@@ -70,6 +70,61 @@ describe("文档模式空段占位", () => {
     expect(project("#set text(size: 12pt)\n").source).toBe(`#set text(size: 12pt)\n${space}`);
   });
 
+  it("无序、自动编号和显式编号的空列表项在标记后的空白末尾占位", () => {
+    for (const marker of ["-", "+", "12."]) {
+      for (const source of [`${marker} `, `${marker}  \t`, `${marker} 甲\n${marker} `]) {
+        const projection = roundTrip(source);
+        expect(hasEmptyParagraphs(source)).toBe(true);
+        expect(projection.source).toBe(source + space);
+        const start = source.lastIndexOf(marker);
+        for (let pos = start; pos <= source.length; pos++)
+          expect(projection.sourceToCaret!(pos)).toBe(source.length);
+        expect(projection.renderedToSource(projection.source.length)).toBe(source.length);
+      }
+    }
+  });
+
+  it("中间空列表项的行尾也能定位，嵌套列表与顶层空段按原文顺序组合", () => {
+    const source = "\n\n- 父\n  -  \n  - 子\n\n\n\n+ \n+ 乙";
+    const projection = roundTrip(source);
+    expect(projection.source).toBe(
+      `${space}\n\n- 父\n  -  ${space}\n  - 子\n\n${space}\n\n+ ${space}\n+ 乙`,
+    );
+    for (const end of [source.indexOf("  \n") + 2, source.indexOf("+ \n") + 2]) {
+      const caret = projection.sourceToCaret!(end);
+      expect(projection.source[caret]).toBe(space);
+      expect(projection.renderedToSource(caret)).toBe(end);
+    }
+  });
+
+  it("列表退出和缩进续行后的末尾空行有停靠点，未结束的正文不受影响", () => {
+    for (const source of ["- 甲\n", "+ 甲\n  ", "12. 甲\r\n    "]) {
+      const projection = roundTrip(source);
+      expect(projection.source).toBe(source + space);
+      expect(projection.sourceToCaret!(source.length)).toBe(source.length);
+    }
+    expect(roundTrip("- 甲\n- 乙").source).toBe("- 甲\n- 乙");
+    expect(roundTrip("- 甲\n  续行").source).toBe("- 甲\n  续行");
+    expect(roundTrip("#block[\n- \n]").source).toBe("#block[\n- \n]");
+  });
+
+  it("列表占位尊重前缀边界，不进入展开 raw；诊断仍使用精确原文位置", () => {
+    const prefix = "- \n\n";
+    const source = "- \n- #unknown()";
+    const projection = projectEmptyParagraphs(
+      projectDocument(prefix + source, null),
+      prefix.length,
+    );
+    expect(projection.source).toBe(prefix + `- ${space}\n- #unknown()`);
+    expect(
+      sourceDiagnostics(projection, [
+        { severity: "error", message: "error", line: 4, column: 4 },
+      ])[0],
+    ).toMatchObject({ line: 4, column: 4 });
+    const expanded = projectDocument("- \n- 乙", { from: 0, to: 2 });
+    expect(projectEmptyParagraphs(expanded).source).toBe(expanded.source);
+  });
+
   it("CRLF 不被占位切开", () => {
     expect(roundTrip("#set text(size: 12pt)\r\n").source).toBe(`#set text(size: 12pt)\r\n${space}`);
     expect(roundTrip("A\r\n\r\n\r\n\r\nB\r\n\r\n").source).toBe(
