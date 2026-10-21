@@ -594,11 +594,13 @@
     position: absolute;
     z-index: 12;
     padding: 10px;
-    background: #111;
+    background: #14161b;
     color: white;
-    border: 1px solid #2a2a2a;
-    border-radius: 8px;
-    box-shadow: 0 6px 20px #0006;
+    border: 1px solid #2e333a;
+    border-radius: 10px;
+    box-shadow:
+      0 8px 24px #0007,
+      0 2px 6px #0004;
     user-select: none;
     cursor: text;
     /* 不裁外层的箭头：::before/::after 都画在盒外（top/bottom: -8px），SVG 裁剪与框内滚动交给 .formula-preview-content。 */
@@ -611,7 +613,7 @@
     transform: translateX(-50%);
     border-left: 8px solid transparent;
     border-right: 8px solid transparent;
-    border-bottom: 8px solid #111;
+    border-bottom: 8px solid #14161b;
   }
   .formula-preview.flipped::before {
     display: none;
@@ -624,7 +626,7 @@
     transform: translateX(-50%);
     border-left: 8px solid transparent;
     border-right: 8px solid transparent;
-    border-top: 8px solid #111;
+    border-top: 8px solid #14161b;
   }
   .formula-preview-content {
     width: var(--formula-container-width);
