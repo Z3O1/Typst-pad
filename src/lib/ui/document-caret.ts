@@ -6,29 +6,122 @@ export interface DocumentCaretAnchor {
   height: number;
   rotation: number;
 }
-export interface PendingCaretFeedback {
-  anchor: DocumentCaretAnchor;
-  expiresAt: number;
+export type CaretFallbackReason = "pending" | "unmapped" | "unavailable";
+export type CaretPresentationKind = "exact" | "composing" | "offscreen" | CaretFallbackReason;
+export interface CaretViewport {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
-// 从首次编辑起有界保留，不因连续输入延长；等待的是精确几何，不预测新字符位置。
-export const PENDING_CARET_TIMEOUT_MS = 1500;
+export interface CaretPresentation {
+  scope: number;
+  anchor: DocumentCaretAnchor;
+  kind: CaretPresentationKind;
+}
 
-export function createPendingCaretFeedback() {
-  let pending: PendingCaretFeedback | null = null;
-  const current = (now: number) => {
-    if (pending && now >= pending.expiresAt) pending = null;
-    return pending;
-  };
+function visibleAnchor(anchor: DocumentCaretAnchor, viewport: CaretViewport): boolean {
+  const angle = (anchor.rotation * Math.PI) / 180;
+  const x = anchor.left - Math.sin(angle) * anchor.height;
+  const y = anchor.top + Math.cos(angle) * anchor.height;
+  return (
+    Math.min(x, anchor.left) >= viewport.left &&
+    Math.max(x, anchor.left) <= viewport.left + viewport.width - 2 &&
+    Math.min(y, anchor.top) >= viewport.top &&
+    Math.max(y, anchor.top) <= viewport.top + viewport.height
+  );
+}
+
+/** 反馈只保留物理锚点，不借用旧源码偏移；无锚点或视口变化时用视区内的明确兜底。 */
+function feedbackAnchor(
+  anchor: DocumentCaretAnchor | null,
+  viewport: CaretViewport,
+): DocumentCaretAnchor {
+  if (anchor && visibleAnchor(anchor, viewport)) return anchor;
+  const margin = Math.min(12, viewport.width / 4, viewport.height / 4);
+  const height = Math.min(anchor?.height ?? 18, viewport.height - margin * 2);
+  const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(value, max));
   return {
-    current,
-    begin(anchor: DocumentCaretAnchor | null, now: number): PendingCaretFeedback | null {
-      if (current(now)) return pending;
-      if (!anchor) return null;
-      return (pending = { anchor, expiresAt: now + PENDING_CARET_TIMEOUT_MS });
+    left: clamp(
+      anchor?.left ?? viewport.left + 24,
+      viewport.left + margin,
+      viewport.left + viewport.width - margin - 2,
+    ),
+    top: clamp(
+      anchor?.top ?? viewport.top + 24,
+      viewport.top + margin,
+      viewport.top + viewport.height - margin - height,
+    ),
+    height,
+    rotation: 0,
+  };
+}
+
+/** 所有编辑路径共用的显示状态机；只在失焦、选区、离开模式/会话时清除，不依赖编译期限。 */
+export function createDocumentCaretFeedback() {
+  let scope = -1;
+  let last: DocumentCaretAnchor | null = null;
+  let frozen: DocumentCaretAnchor | null = null;
+  let wasComposing = false;
+  return {
+    resolve(input: {
+      scope: number;
+      active: boolean;
+      composing: boolean;
+      exact: DocumentCaretAnchor | null;
+      reason: CaretFallbackReason;
+      viewport: CaretViewport;
+    }): CaretPresentation | null {
+      if (scope !== input.scope || !input.active) {
+        scope = input.scope;
+        last = frozen = null;
+        wasComposing = false;
+      }
+      const { viewport } = input;
+      if (
+        !input.active ||
+        !Object.values(viewport).every(Number.isFinite) ||
+        viewport.width <= 2 ||
+        viewport.height <= 2
+      )
+        return null;
+      let kind: CaretPresentationKind;
+      let anchor: DocumentCaretAnchor;
+      if (input.composing) {
+        if (!wasComposing) frozen = last ?? input.exact;
+        anchor = feedbackAnchor(frozen, viewport);
+        frozen = anchor;
+        kind = "composing";
+      } else if (input.exact && visibleAnchor(input.exact, viewport)) {
+        anchor = input.exact;
+        kind = "exact";
+      } else {
+        anchor = feedbackAnchor(input.exact ?? last, viewport);
+        kind = input.exact ? "offscreen" : input.reason;
+      }
+      last = anchor;
+      wasComposing = input.composing;
+      return { scope, anchor, kind };
     },
-    cancel() {
-      pending = null;
-    },
+  };
+}
+
+/** 只截取真实源码行的当前输入上下文，不把反馈文字写入文档或排版产物。 */
+export function caretSourceContext(
+  source: string,
+  column: number,
+  from = 0,
+  to = source.length,
+): { before: string; after: string } {
+  const pos = Math.max(from, Math.min(to, from + column - 1));
+  // 行边界由快照索引提供，单次最多读取两侧各 42 个 UTF-16 单元。
+  const start = Math.max(from, pos - 42),
+    end = Math.min(to, pos + 42);
+  const before = Array.from(source.slice(start, pos));
+  const after = Array.from(source.slice(pos, end));
+  return {
+    before: (start > from || before.length > 20 ? "…" : "") + before.slice(-20).join(""),
+    after: after.slice(0, 20).join("") + (end < to || after.length > 20 ? "…" : ""),
   };
 }
 

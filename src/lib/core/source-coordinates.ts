@@ -51,5 +51,12 @@ export function createSourceCoordinates(text: string) {
     toPosition: (offset: number) => convert(offset, true),
     linePosition: (line: number, column: number) =>
       (lines[Math.max(0, Math.min(line - 1, lines.length - 1))] ?? 0) + column - 1,
+    lineRange: (line: number) => {
+      const index = Math.max(0, Math.min(line - 1, lines.length - 1));
+      return {
+        from: lines[index],
+        to: lines[index + 1] === undefined ? text.length : lines[index + 1] - 1,
+      };
+    },
   };
 }

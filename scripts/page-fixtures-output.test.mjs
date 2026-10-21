@@ -11,7 +11,7 @@ const samples = JSON.parse(
 
 // 每组最短的一条原始 println!，逐字取自本轮真实 Cargo 导出（没有替换 SVG/探针）。
 // 重复样本只构造数量边界，不把此输入冒充完整的原生导出。
-const counts = [8, 9, 64, 17, 37, 16];
+const counts = [8, 26, 64, 17, 37, 16];
 const lines = samples.flatMap((sample, index) => Array(counts[index]).fill(sample));
 const validOutput = lines.join("\n");
 

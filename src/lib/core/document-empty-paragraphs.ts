@@ -1,4 +1,4 @@
-// 空段占位只进入文档模式的排版投影，原文中的两个换行仍表示一个段落边界。
+// 空段与空列表项占位只进入文档模式的排版投影，不改写原文与列表输入语义。
 import { parser } from "codemirror-lang-typst/lezer";
 import type { DocumentProjection } from "./document-projection";
 
@@ -6,6 +6,7 @@ interface EmptyParagraph {
   from: number;
   to: number;
   at: number;
+  includeEnd?: boolean;
 }
 
 export const EMPTY_PARAGRAPH_SPACE = "\u00a0";
@@ -39,30 +40,48 @@ function emptyParagraphs(source: string): EmptyParagraph[] {
       else if (node.to === source.length) add(from, node.to);
     }
   }
-  // 只有设置/声明的文档，最后一个源码换行之后也应有可继续输入的空段。
+  // 空列表项的 Markup 是零长节点，标记后的空格可能在外层 Space 中。
+  // 只沿顶层列表的正文递归，避免进入代码、raw、公式或宏定义中的内容块。
+  const visitLists = (markup: typeof root) => {
+    for (let item = markup.firstChild; item; item = item.nextSibling) {
+      if (item.name !== "ListItem" && item.name !== "EnumItem") continue;
+      const body = item.lastChild;
+      if (body?.name !== "Markup") continue;
+      if (body.from === body.to) {
+        const spaces = source.slice(body.to).match(/^[ \t]*/)?.[0].length ?? 0;
+        const at = body.to + spaces;
+        paragraphs.push({ from: item.from, to: at, at, includeEnd: true });
+      } else visitLists(body);
+    }
+  };
+  visitLists(root);
+  // 设置/声明或列表后的末尾空行也能继续输入，包括退出列表和缩进续行。
   const last = children.at(-1);
+  const previous = children.at(-2);
   if (
-    !paragraphs.length &&
+    !paragraphs.some((paragraph) => paragraph.to === source.length) &&
     last?.name === "Space" &&
     /[\n\r]/.test(source.slice(last.from, last.to)) &&
-    children.every((node) =>
-      [
-        "Hash",
-        "SetRule",
-        "ShowRule",
-        "LetBinding",
-        "Import",
-        "LineComment",
-        "BlockComment",
-        "Space",
-        "Parbreak",
-      ].includes(node.name),
-    )
+    (previous?.name === "ListItem" ||
+      previous?.name === "EnumItem" ||
+      children.every((node) =>
+        [
+          "Hash",
+          "SetRule",
+          "ShowRule",
+          "LetBinding",
+          "Import",
+          "LineComment",
+          "BlockComment",
+          "Space",
+          "Parbreak",
+        ].includes(node.name),
+      ))
   ) {
     const newline = source.slice(last.from, last.to).match(/\r\n|[\n\r]/)!;
     add(last.from + newline.index! + newline[0].length, source.length);
   }
-  return paragraphs;
+  return paragraphs.sort((a, b) => a.at - b.at);
 }
 
 export function hasEmptyParagraphs(source: string): boolean {
@@ -77,6 +96,7 @@ export function projectEmptyParagraphs(
     from: prefixLength + paragraph.from,
     to: prefixLength + paragraph.to,
     at: prefixLength + paragraph.at,
+    includeEnd: paragraph.includeEnd,
   }));
   if (!paragraphs.length) return projection;
   let source = "";
@@ -125,7 +145,8 @@ export function projectEmptyParagraphs(
       const paragraph = paragraphs[index];
       return paragraph &&
         (rendered < paragraph.to ||
-          (rendered === paragraph.to && paragraph.to === projection.source.length))
+          (rendered === paragraph.to &&
+            (paragraph.includeEnd || paragraph.to === projection.source.length)))
         ? paragraph.at + index
         : forward(projection.sourceToCaret?.(pos) ?? rendered);
     },

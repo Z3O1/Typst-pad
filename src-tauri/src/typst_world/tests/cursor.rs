@@ -31,7 +31,7 @@ $ sum_(i=1)^n i = frac(n(n+1), 2) $
 
 fn fixtures() -> Vec<(&'static str, String, Vec<&'static str>)> {
     let mixed = mixed_source();
-    vec![
+    let mut fixtures = vec![
         ("mixed", mixed.clone(), vec!["中文标题 Heading", "a.Ag! office affine ffi fl fi.", "中文与 emoji 😀👩‍💻、组合字符 é 和空格。", "SMALLoffice", "LARGEoffice", "换行测试：This paragraph", "sum_(i=1)^n", "表格甲", "TURN30office", "TURN90office", "SCALEoffice", "第二页 Second page office 😀。"]),
         ("edited", mixed.replace("ASCII: a.Ag!", "ASCII: Za.Ag!"), vec!["Za.Ag!"]),
         ("raw", "#set page(width: 360pt, height: 300pt, margin: 24pt)\n```typ\n#let x = 1\n\n    // office ffi 中文 😀 é\n$x^2 + y$\n```\n".to_string(), vec!["#let x = 1", "// office ffi 中文 😀 é", "$x^2 + y$"]),
@@ -41,7 +41,63 @@ fn fixtures() -> Vec<(&'static str, String, Vec<&'static str>)> {
         ("blank", "#set page(width: 360pt, height: 300pt, margin: 24pt)\n#set text(size: 12pt)\nA\n\n\n\nB\n\n".into(), vec!["A", "B"]),
         ("blank-edited", "#set page(width: 360pt, height: 300pt, margin: 24pt)\n#set text(size: 12pt)\nA\n\nC\n\nB\n\n".into(), vec!["A", "C", "B"]),
         ("blank-spaces", "  \n\n    \n\n".into(), vec![]),
-    ]
+    ];
+    let page = "#set page(width: 360pt, height: 300pt, margin: 24pt)\n";
+    fixtures.push(("list-continuation", format!("{page}- 甲\n    "), vec![]));
+    for (names, body, marker, exit) in [
+        (
+            [
+                "list-bullet",
+                "list-bullet-empty",
+                "list-bullet-typed",
+                "list-bullet-exit",
+            ],
+            "- 甲",
+            "- ",
+            "- 甲\n",
+        ),
+        (
+            [
+                "list-auto",
+                "list-auto-empty",
+                "list-auto-typed",
+                "list-auto-exit",
+            ],
+            "+ 甲",
+            "+ ",
+            "+ 甲\n",
+        ),
+        (
+            [
+                "list-numbered",
+                "list-numbered-empty",
+                "list-numbered-typed",
+                "list-numbered-exit",
+            ],
+            "1. 甲",
+            "2. ",
+            "1. 甲\n",
+        ),
+        (
+            [
+                "list-nested",
+                "list-nested-empty",
+                "list-nested-typed",
+                "list-nested-exit",
+            ],
+            "- 父\n  - 甲",
+            "  - ",
+            "- 父\n  - 甲\n- ",
+        ),
+    ] {
+        fixtures.extend([
+            (names[0], format!("{page}{body}"), vec![]),
+            (names[1], format!("{page}{body}\n{marker}"), vec![]),
+            (names[2], format!("{page}{body}\n{marker}乙"), vec![]),
+            (names[3], format!("{page}{exit}"), vec![]),
+        ]);
+    }
+    fixtures
 }
 
 fn laid_out(source: &str) -> (PagedDocument, Vec<PlacedItem>, u64) {
@@ -234,6 +290,13 @@ fn cursor_fixture_source(name: &str, source: &str) -> String {
         "whitespace" | "blank-edited" => format!("{source}\u{a0}"),
         "blank" => format!("{}\u{a0}", source.replace("\n\n\n\n", "\n\n\u{a0}\n\n")),
         "blank-spaces" => "  \u{a0}\n\n    \u{a0}\n\n\u{a0}".into(),
+        name if name.starts_with("list-")
+            && (name.ends_with("-empty")
+                || name.ends_with("-exit")
+                || name == "list-continuation") =>
+        {
+            format!("{source}\u{a0}")
+        }
         _ => source.into(),
     }
 }
@@ -266,6 +329,36 @@ fn blank_paragraph_placeholders_have_real_typst_carets_and_click_targets() {
             assert!((hit.y_pt - caret.y_pt).abs() < 0.001);
         }
         assert!(!items.is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn empty_list_items_have_real_body_carets_instead_of_borrowing_markers() {
+    for (name, original, _) in fixtures().into_iter().filter(|(name, _, _)| {
+        name.starts_with("list-")
+            && (name.ends_with("-empty") || name.ends_with("-exit") || *name == "list-continuation")
+    }) {
+        let (_, _, original_id) = laid_out(&original);
+        assert!(
+            locate(original_id, original.len()).is_none(),
+            "{name}: 原文空项或空行没有字形停靠点"
+        );
+        let source = cursor_fixture_source(name, &original);
+        let (_, _, id) = laid_out(&source);
+        let caret = locate(id, original.len()).expect("列表正文占位提供真实光标");
+        assert!(caret.height_pt > 5.0, "{name}");
+        let hit = hit_test(
+            id,
+            caret.page,
+            caret.x_pt + 8.0,
+            caret.y_pt + caret.height_pt / 2.0,
+        )
+        .expect("空列表项可以点击继续输入");
+        assert!(
+            hit.offset == original.len() || hit.offset == source.len(),
+            "{name}: {hit:?}"
+        );
+        assert!((hit.y_pt - caret.y_pt).abs() < 0.001, "{name}");
     }
 }
 

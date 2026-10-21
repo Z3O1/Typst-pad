@@ -111,6 +111,15 @@
 
   let host: HTMLElement;
   let view: EditorView;
+  let stopComposition: (() => void) | undefined;
+  function observeComposition(): void {
+    stopComposition?.();
+    stopComposition = observeEditorComposition(view.contentDOM, (active) => {
+      // DOM/EditContext 两条路径统一；合成开始即撤销未动资格（含取消合成）。
+      if (active) view.dispatch({ effects: invalidatePristineMathScaffold.of(null) });
+      onComposition?.(active);
+    });
+  }
   let themeCompartment = new Compartment();
   let diagnosticsCompartment = new Compartment();
   let wrapCompartment = new Compartment();
@@ -244,14 +253,10 @@
       if (mode === "source") onScrollIntent?.();
     });
     scrollResize.observe(view.scrollDOM);
-    const stopComposition = observeEditorComposition(view.contentDOM, (active) => {
-      // 合成开始即撤销未动资格（含取消合成），DOM/EditContext 两条路径统一；不改原文/历史。
-      if (active) view?.dispatch({ effects: invalidatePristineMathScaffold.of(null) });
-      onComposition?.(active);
-    });
+    observeComposition();
 
     return () => {
-      stopComposition();
+      stopComposition?.();
       scrollEpoch++;
       for (const event of gestures) view.scrollDOM.removeEventListener(event, intent);
       view.scrollDOM.removeEventListener("scroll", scroll);
@@ -347,6 +352,8 @@
       caretAnchorEpoch += 1;
       caretAnchor = null;
       applyingExternal = true;
+      stopComposition?.();
+      onComposition?.(false);
       try {
         // setState 保留输入上下文但不推送文本/选区；先经公开事务同步（等长/同文本也一样），
         // 再清空历史与文档字段。此事务的 updateListener 同步页面光标，但不回写正文。
@@ -356,6 +363,8 @@
           annotations: Transaction.addToHistory.of(false),
         });
         view.setState(createDocumentState(doc));
+        // setState 可替换原生 EditContext，不能继续监听旧会话的合成事件。
+        observeComposition();
       } finally {
         applyingExternal = false;
       }

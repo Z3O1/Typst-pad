@@ -15,7 +15,7 @@ const fixtures = JSON.parse(
 // 真实产物/交互覆盖变化时，套件、计数与夹具依赖一起更新。
 const expectedSuites = [
   ["document-mode.mjs", 81],
-  ["document-cursor.mjs", 37],
+  ["document-cursor.mjs", 49],
   ["document-expansion.mjs", 114],
   ["document-expansion-style.mjs", 8],
   ["empty-formula.mjs", 39],

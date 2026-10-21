@@ -11,7 +11,10 @@
   import {
     caretScrollDelta,
     projectDocumentCaret,
+    createDocumentCaretFeedback,
     type DocumentCaretAnchor,
+    type CaretFallbackReason,
+    type CaretPresentation,
   } from "./document-caret";
   import type { PaperShape } from "$lib/core/preview-scale";
   import { layoutFormulaPreview } from "$lib/core/formula-preview-layout";
@@ -22,8 +25,10 @@
     editable = false,
     stale = false,
     caret = null,
-    caretAnchor = null,
     caretVisible = false,
+    caretSession = 0,
+    caretReason = "pending",
+    caretLocation = { line: 1, column: 1, before: "", after: "" },
     composing = false,
     selection = [],
     formulaPreview = null,
@@ -44,8 +49,10 @@
     editable?: boolean;
     stale?: boolean;
     caret?: DocumentCaret | null;
-    caretAnchor?: DocumentCaretAnchor | null;
     caretVisible?: boolean;
+    caretSession?: number;
+    caretReason?: CaretFallbackReason;
+    caretLocation?: { line: number; column: number; before: string; after: string };
     composing?: boolean;
     selection?: DocumentSelectionQuad[];
     formulaPreview?: FormulaPreview | null;
@@ -65,6 +72,17 @@
   let bodyEl = $state<HTMLElement | undefined>();
   let canvasEl: HTMLElement;
   let caretStyle = $state("");
+  let caretPresentation = $state<CaretPresentation | null>(null);
+  let feedbackStyle = $state("");
+  const caretFeedback = createDocumentCaretFeedback();
+  const feedbackMessages = {
+    pending: "正在定位/排版",
+    unmapped: "此处无排版输出",
+    unavailable: "排版暂不可用",
+    offscreen: "插入点在视区外",
+    composing: "输入法编辑中",
+    exact: "",
+  };
   let windowFocused = $state(true);
   let selectionPath = $state("");
   let formulaStyle = $state("");
@@ -107,6 +125,8 @@
   export function clearPages(): void {
     userScrolling = false;
     pages?.clear();
+    caretPresentation = null;
+    measureCaret();
   }
   export function pageWidthPt(): number {
     return pages?.widthPt() ?? 0;
@@ -176,11 +196,21 @@
     measureFrame = requestAnimationFrame(() => {
       measureFrame = 0;
       const hideCaret = () => {
-        if (!caretStyle) return;
-        caretStyle = "";
-        onCaretPosition?.(null);
+        caretPresentation = null;
+        if (caretStyle) {
+          caretStyle = "";
+          onCaretPosition?.(null);
+        }
+        caretFeedback.resolve({
+          scope: caretSession,
+          active: false,
+          composing: false,
+          exact: null,
+          reason: caretReason,
+          viewport: { left: 0, top: 0, width: 0, height: 0 },
+        });
       };
-      if (!editable || hidden || (stale && !composing && !caretAnchor) || !canvasEl || !paperEl) {
+      if (!editable || hidden || !canvasEl || !paperEl || !bodyEl) {
         selectionPath = "";
         formulaStyle = "";
         formulaFlipped = false;
@@ -239,7 +269,7 @@
         measured.set(number, value);
         return value;
       }
-      selectionPath = selection
+      selectionPath = (stale ? [] : selection)
         .map((quad) => {
           const page = pageMeasure(quad.page);
           if (!page) return "";
@@ -254,23 +284,50 @@
           );
         })
         .join(" ");
-      if (caretAnchor) {
-        // 物理输入锚点不是当前源码的几何；换页期间也不套用新页尺寸重投影。
-        caretStyle = `left:${caretAnchor.left - root.left}px;top:${caretAnchor.top - root.top}px;height:${caretAnchor.height}px;transform:rotate(${caretAnchor.rotation}deg)`;
-        return;
-      }
-      if (!caret) return hideCaret();
-      const page = pageMeasure(caret.page);
-      if (!page) return hideCaret();
-      const position = projectDocumentCaret(caret, page.rect, page.box);
-      if (!position) return hideCaret();
+      const body = bodyEl.getBoundingClientRect();
+      const viewport = {
+        left: body.left,
+        top: body.top,
+        width: bodyEl.clientWidth,
+        height: bodyEl.clientHeight,
+      };
+      const page = caret && !stale && status === "ready" ? pageMeasure(caret.page) : null;
+      const exact = caret && page ? projectDocumentCaret(caret, page.rect, page.box) : null;
+      const presentation = caretFeedback.resolve({
+        scope: caretSession,
+        active: caretVisible && windowFocused,
+        composing,
+        exact,
+        reason: caretReason,
+        viewport,
+      });
+      if (!presentation) return hideCaret();
+      caretPresentation = presentation;
+      const position = presentation.anchor;
       onCaretPosition?.(position);
       caretStyle = `left:${position.left - root.left}px;top:${position.top - root.top}px;height:${position.height}px;transform:rotate(${position.rotation}deg)`;
+      // 标签是输入反馈，不占文档版面；靠边翻转/平移，不撑开预览滚动区。
+      const width = Math.min(360, Math.max(0, viewport.width - 8));
+      const left = Math.max(
+        viewport.left + 4,
+        Math.min(position.left + 8, viewport.left + viewport.width - width - 4),
+      );
+      const top =
+        position.top + position.height + 60 < viewport.top + viewport.height
+          ? position.top + position.height + 4
+          : Math.max(viewport.top + 4, position.top - 56);
+      feedbackStyle =
+        viewport.height >= 60
+          ? `left:${left - root.left}px;top:${top - root.top}px;width:${width}px`
+          : "";
     });
   }
   $effect(() => {
     void caret;
-    void caretAnchor;
+    void caretVisible;
+    void caretSession;
+    void caretReason;
+    void windowFocused;
     void selection;
     void editable;
     void hidden;
@@ -287,7 +344,7 @@
     // 自然尺寸纸张不随栏宽变化，但居中位置会变，光标与选区也需要重测。
     if (bodyEl) observer.observe(bodyEl);
     const onFocus = () => {
-      windowFocused = true;
+      windowFocused = document.visibilityState === "visible";
     };
     const onBlur = () => {
       windowFocused = false;
@@ -503,14 +560,29 @@
         <svg class="document-selection" aria-hidden="true"><path d={selectionPath}></path></svg>
       {/if}
       {#key caret}
-        {#if caretStyle && (caret || caretAnchor) && caretVisible && windowFocused}
+        {#if caretStyle && caretPresentation?.scope === caretSession && caretVisible && windowFocused}
           <div
             class="document-caret"
             class:composing
-            class:pending={!!caretAnchor && !composing}
+            class:pending={caretPresentation.kind !== "exact" && !composing}
+            class:feedback={caretPresentation.kind !== "exact"}
+            data-caret-state={caretPresentation.kind}
+            data-caret-session={caretSession}
             style={caretStyle}
             aria-hidden="true"
           ></div>
+          {#if caretPresentation.kind !== "exact" && feedbackStyle}
+            <div class="document-caret-feedback" style={feedbackStyle} role="status">
+              <div>
+                {feedbackMessages[caretPresentation.kind]} · {caretLocation.line}:{caretLocation.column}
+              </div>
+              <code
+                ><span>{caretLocation.before}</span><span class="source-insertion">│</span><span
+                  >{caretLocation.after}</span
+                ></code
+              >
+            </div>
+          {/if}
         {/if}
       {/key}
     </div>
@@ -610,13 +682,42 @@
     user-select: none;
     cursor: text;
   }
+  .document-caret-feedback {
+    position: absolute;
+    z-index: 16;
+    padding: 4px 6px;
+    border: 1px solid var(--accent, #4daafc);
+    border-radius: 3px;
+    background: var(--panel-bg);
+    color: var(--panel-fg);
+    font-size: 12px;
+    line-height: 16px;
+    pointer-events: none;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .document-caret-feedback code {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: pre;
+  }
+  .source-insertion {
+    color: var(--accent, #4daafc);
+    font-weight: bold;
+  }
   .document-caret {
     position: absolute;
+    z-index: 15;
     width: 2px;
     background: var(--accent, #4daafc);
     pointer-events: none;
     transform-origin: top left;
     animation: document-caret-blink 1s step-end infinite;
+  }
+  .document-caret.feedback {
+    background: transparent;
+    border-left: 2px dashed var(--accent, #4daafc);
   }
   .document-caret.composing,
   .document-caret.pending {

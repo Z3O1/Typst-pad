@@ -13,7 +13,7 @@ import {
 } from "./harness.mjs";
 const cursorFixtures = loadFixtures("cursor-fixtures.json", {
   predicate: (fixtures) =>
-    fixtures.length === 9 && fixtures.every((f) => f.cursorQueries?.length && f.pages.length),
+    fixtures.length === 26 && fixtures.every((f) => f.cursorQueries?.length && f.pages.length),
   hint: "先跑 npm run fixtures:pages",
 });
 const pageFixtures = loadFixtures("page-fixtures.json");
@@ -104,7 +104,10 @@ async function pose(f, query, { dispatch = true, scroll = true } = {}) {
       `(() => {const v=window.__typstPadView;v.dispatch({selection:{anchor:${utf16At(f, query.offset)}}});v.focus();return true})()`,
     );
   if (!query.caret) {
-    await c.waitFor("!document.querySelector('.document-caret')", { timeout: 2500, interval: 16 });
+    await c.waitFor(
+      `(() => {const el=document.querySelector('.document-caret'),label=document.querySelector('.document-caret-feedback'),v=window.__typstPadView,line=v.state.doc.lineAt(v.state.selection.main.head);return el&&el.dataset.caretState!=='exact'&&label?.textContent.includes(line.number+':'+(v.state.selection.main.head-line.from+1))})()`,
+      { timeout: 2500, interval: 16 },
+    );
     return null;
   }
   if (scroll)
@@ -148,7 +151,7 @@ for (const name of ["mixed", "raw", "whitespace"]) {
     }
   }
   if (mapped === 0) throw new Error(`不允许用零光标几何验收：${name}`);
-  // 末尾空段定位到投影占位；真正不可映射的位置不沿用上一个光标。
+  // 末尾空段定位到占位；不可映射的位置保留带真实源码上下文的明确反馈。
   await pose(f, queryAt(f, Buffer.byteLength(f.doc)));
   check(
     `${name}：逐字素盒模型、分页、旋转、换行与不可映射位置正确`,
@@ -158,6 +161,77 @@ for (const name of ["mixed", "raw", "whitespace"]) {
   await showBlink();
   await c.screenshot(shotPath(`document-cursor-${name}`));
 }
+
+// 列表 Enter 生成的空项必须有本轮真实停靠点，不能只等临时 pending 锚点撑住。
+for (const kind of ["bullet", "auto", "numbered", "nested"]) {
+  const initial = fixture(`list-${kind}`);
+  const empty = fixture(`list-${kind}-empty`);
+  const typed = fixture(`list-${kind}-typed`);
+  const exit = fixture(`list-${kind}-exit`);
+  const endQuery = (f) => queryAt(f, Buffer.byteLength(f.doc));
+  const atEnd = (f) => pose(f, endQuery(f), { dispatch: false });
+  await replace(initial);
+  await pose(initial, endQuery(initial));
+  await c.key("Enter", { keyCode: 13 });
+  await settled(empty);
+  await atEnd(empty);
+  if ((await doc()) !== empty.doc || !(await compiledPagesMatch(empty)))
+    throw Error(`${kind}: 空项没有采用完整真实占位产物，或原文被污染`);
+  const point = await c.evaluate(
+    `(() => {const p=${expectedExpression(endQuery(empty).caret)};return {x:p.x+1,y:p.y+p.height/2}})()`,
+  );
+  await c.click(point.x, point.y);
+  await atEnd(empty);
+  if (!(await c.evaluate("window.__typstPadView.hasFocus")))
+    throw Error(`${kind}: 空项点击无法恢复输入`);
+  if (kind === "numbered") {
+    await showBlink();
+    await c.screenshot(shotPath("document-cursor-empty-list"));
+  }
+  await c.type("乙");
+  await settled(typed);
+  await atEnd(typed);
+  if ((await doc()) !== typed.doc || !(await compiledPagesMatch(typed)))
+    throw Error(`${kind}: 列表续写产物或源码错误`);
+  // 跨过 CodeMirror 的历史分组间隔，退格撤销不能与刚才的输入合并。
+  await sleep(600);
+  await c.key("Backspace", { keyCode: 8 });
+  await settled(empty);
+  await atEnd(empty);
+  await c.key("z", { keyCode: 90, modifiers: 2 });
+  await settled(typed);
+  await atEnd(typed);
+  await c.key("y", { keyCode: 89, modifiers: 2 });
+  await settled(empty);
+  await atEnd(empty);
+  await c.key("e", { keyCode: 69, modifiers: 2 });
+  await settled({ source: empty.doc });
+  if (!(await compiledPagesMatch({ pages: empty.originalPages })) || (await doc()) !== empty.doc)
+    throw Error(`${kind}: 源码模式没有恢复原文产物`);
+  await c.key("e", { keyCode: 69, modifiers: 2 });
+  await settled(empty);
+  await atEnd(empty);
+  await c.key("Enter", { keyCode: 13 });
+  await settled(exit);
+  await atEnd(exit);
+  check(
+    `${kind} 列表：空项点击/续写/删除/撤销重做/模式往返/退出都有真实光标`,
+    (await doc()) === exit.doc && (await compiledPagesMatch(exit)),
+  );
+}
+const listInitial = fixture("list-bullet"),
+  listContinuation = fixture("list-continuation");
+await replace(listInitial);
+await pose(listInitial, queryAt(listInitial, Buffer.byteLength(listInitial.doc)));
+await c.key("Enter", { keyCode: 13, modifiers: 8 });
+await settled(listContinuation);
+await pose(listContinuation, queryAt(listContinuation, Buffer.byteLength(listContinuation.doc)), {
+  dispatch: false,
+});
+check(
+  "列表 Shift+Enter 的空续行保留真实停靠点和源码缩进",
+  (await doc()) === listContinuation.doc && (await compiledPagesMatch(listContinuation)),
+);
 
 // 标题激活输入后自动展开：不能继续拿普通标题的字号/坐标断言源码面板。
 await replace(mixed);
@@ -606,7 +680,32 @@ if (!(await compiledPagesMatch(boundaryEdited)) || (await doc()) !== boundaryEdi
   throw new Error("模式往返重新打开公式或改变原文");
 console.log("闭合公式边界：编辑/左右键/选区收拢/迟到展开/模式往返均使用真实 Typst 产物");
 
-// 普通输入反馈不能冒充新几何。扣住真实夹具响应，逐帧采样并验证取消和期限。
+// 原生 EditContext 合成中换文件：不依赖 DOM blur/end 恰好到达来解除旧会话的暂停。
+await c.evaluate(
+  "window.__browserDevConfirm=true;window.__typstPadView.focus();window.__typstPadView.contentDOM.editContext.dispatchEvent(new CompositionEvent('compositionstart'));true",
+);
+await c.waitFor("window.__typstPadScheduleStats().composing");
+await c.key("n", { keyCode: 78, modifiers: 2 });
+await c.waitFor(
+  "window.__typstPadView.state.doc.length===0 && !window.__typstPadScheduleStats().composing",
+);
+await c.evaluate(
+  "window.__typstPadView.focus();window.__typstPadView.contentDOM.editContext.dispatchEvent(new CompositionEvent('compositionstart'));true",
+);
+await c.waitFor(
+  "window.__typstPadScheduleStats().composing && document.querySelector('.document-caret')?.classList.contains('composing')",
+);
+await c.evaluate(
+  "window.__typstPadView.contentDOM.editContext.dispatchEvent(new CompositionEvent('compositionend'));true",
+);
+await settled(fixture("empty"));
+await pose(fixture("empty"), queryAt(fixture("empty"), 0));
+check(
+  "原生 EditContext 在合成中切文件后解除旧暂停，并能重新开始/结束合成和恢复精确光标",
+  (await doc()) === "" && (await compiledPagesMatch(fixture("empty"))),
+);
+
+// 统一反馈不能冒充新几何；扣住真实响应，覆盖长等待、导航、失败及会话边界。
 await c.send("Emulation.setUserAgentOverride", originalAgent);
 await boot(c, `${DEV_URL}&compileslow=1`, { pageFixtures: fixtures });
 await c.evaluate(`(() => {
@@ -614,7 +713,7 @@ await c.evaluate(`(() => {
   window.__pendingInvoke=internals.invoke;
   window.__pendingCompileHold=false;window.__pendingCompileQueue=[];
   window.__pendingCursorHoldNext=false;window.__pendingCursorQueue=[];
-  window.__pendingCursorNull=false;window.__pendingNullReturns=0;
+  window.__pendingCursorNull=false;window.__pendingNullReturns=0;window.__pendingCursorReject=false;
   window.__pendingCompileFailure=false;window.__pendingCursorTrace=[];
   internals.invoke=async(command,args)=>{
     if(command==='compile_doc') {
@@ -625,6 +724,7 @@ await c.evaluate(`(() => {
       return result;
     }
     if(command==='document_cursor') {
+      if(window.__pendingCursorReject) throw Error('injected cursor IPC rejection');
       const hold=window.__pendingCursorHoldNext;
       window.__pendingCursorHoldNext=false;
       const result=await window.__pendingInvoke(command,args);
@@ -685,17 +785,20 @@ if (!(await c.evaluate("document.querySelector('.document-caret')?.classList.con
   throw Error("未移动的选区事务取消了仍对应输入位置的锚点");
 const pendingFrames = await c.evaluate(`(async()=>{
   const v=window.__typstPadView,at=${utf16At(mixed, asciiStart)},frames=[];
-  for(let i=0;i<8;i++) {
+  for(let i=0;i<24;i++) {
     const remove=i%2===0;
     v.dispatch({changes:{from:at,to:at+(remove?1:0),insert:remove?'':'Z'},selection:{anchor:at+(remove?0:1)},userEvent:'input.type'});
+    await new Promise(resolve=>setTimeout(resolve,80));
     await new Promise(requestAnimationFrame);
     const el=document.querySelector('.document-caret'),r=el?.getBoundingClientRect();
     frames.push({at:performance.now(),pending:el?.classList.contains('pending'),opacity:el&&getComputedStyle(el).opacity,
+      context:!!document.querySelector('.document-caret-feedback')?.textContent.includes(v.state.doc.lineAt(v.state.selection.main.head).number+':'+(v.state.selection.main.head-v.state.doc.lineAt(v.state.selection.main.head).from+1)),
       rect:r&&{left:r.left,top:r.top,height:r.height},anchor:{left:document.querySelector('.input-proxy').style.left,top:document.querySelector('.input-proxy').style.top}});
   }return frames;
 })()`);
 if (
-  pendingFrames.some((f) => !f.pending || f.opacity !== "1") ||
+  pendingFrames.at(-1).at - pendingFrames[0].at < 1500 ||
+  pendingFrames.some((f) => !f.pending || f.opacity !== "1" || !f.context) ||
   pendingFrames.some(
     (f) =>
       Math.abs(f.rect.left - pendingFrames[0].rect.left) > 0.1 ||
@@ -704,16 +807,56 @@ if (
 )
   throw Error("连续输入的待编译锚点消失或预测了新的字符位置");
 await c.screenshot(shotPath("document-cursor-pending"));
-await c.waitFor("!document.querySelector('.document-caret')", { timeout: 2500, interval: 16 });
-if (!(await c.evaluate("window.__pendingCompileQueue.length>0")))
-  throw Error("期限测试没有真正扣住编译");
+await sleep(400);
+if (
+  !(await c.evaluate(
+    "window.__pendingCompileQueue.length>0 && document.querySelector('.document-caret')?.dataset.caretState==='pending'",
+  ))
+)
+  throw Error("超过旧期限后输入反馈消失，或没有真正扣住编译");
 await c.evaluate(`(() => {const v=window.__typstPadView,at=${utf16At(mixed, asciiStart)};
   v.dispatch({changes:{from:at,to:at+1},selection:{anchor:at},userEvent:'input.type'});
   v.dispatch({changes:{from:at,insert:'Z'},selection:{anchor:at+1},userEvent:'input.type'});return true;
 })()`);
 await sleep(50);
-if (await c.evaluate("!!document.querySelector('.document-caret')"))
-  throw Error("没有新精确几何时编辑重新激活了过期锚点");
+if (
+  !(await c.evaluate("document.querySelector('.document-caret')?.dataset.caretState==='pending'"))
+)
+  throw Error("慢编译期间继续编辑清除了可见反馈");
+check("超过旧1500ms期限的持续输入逐帧常亮，源码上下文同步且不伪造精确位置", true);
+await c.send("Emulation.setDeviceMetricsOverride", {
+  width: 1000,
+  height: 420,
+  deviceScaleFactor: 1,
+  mobile: false,
+});
+await c.evaluate("document.querySelector('.preview-body').scrollTop+=300;true");
+await c.waitFor(
+  `(() => {const el=document.querySelector('.document-caret'),label=document.querySelector('.document-caret-feedback'),b=document.querySelector('.preview-body'),r=b.getBoundingClientRect(),c=el?.getBoundingClientRect(),l=label?.getBoundingClientRect();return c&&l&&c.left>=r.left&&c.right<=r.left+b.clientWidth&&c.top>=r.top&&c.bottom<=r.top+b.clientHeight&&l.left>=r.left&&l.right<=r.left+b.clientWidth&&l.bottom<=r.top+b.clientHeight})()`,
+);
+const feedbackClip = await c.evaluate(
+  "(() => {const r=document.querySelector('.document-caret').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,scale:1}})()",
+);
+const feedbackVisible = await c.send("Page.captureScreenshot", {
+  format: "png",
+  clip: feedbackClip,
+});
+await c.evaluate("document.querySelector('.document-caret').style.visibility='hidden';true");
+const feedbackHidden = await c.send("Page.captureScreenshot", {
+  format: "png",
+  clip: feedbackClip,
+});
+await c.evaluate("document.querySelector('.document-caret').style.visibility='';true");
+check(
+  "缩窗/滚动后反馈与源码标签仍在可见区，实际截图证明兜底光标有像素",
+  feedbackVisible.data !== feedbackHidden.data,
+);
+await c.send("Emulation.setDeviceMetricsOverride", {
+  width: 1200,
+  height: 900,
+  deviceScaleFactor: 1,
+  mobile: false,
+});
 await finishHeldEdit();
 if (
   !(await c.evaluate(
@@ -738,7 +881,9 @@ for (const cancellation of ["blur", "window-blur", "selection", "move", "mode"])
       `window.__typstPadView.dispatch({selection:{anchor:${utf16At(mixed, asciiStart) + 4}}});true`,
     );
   if (cancellation === "mode") await c.key("e", { keyCode: 69, modifiers: 2 });
-  await c.waitFor("!document.querySelector('.document-caret')");
+  if (cancellation === "move")
+    await c.waitFor("document.querySelector('.document-caret')?.dataset.caretState==='pending'");
+  else await c.waitFor("!document.querySelector('.document-caret')");
   if (cancellation === "window-blur")
     await c.evaluate("window.dispatchEvent(new Event('focus'));true");
   if (cancellation === "mode") await c.key("e", { keyCode: 69, modifiers: 2 });
@@ -746,10 +891,15 @@ for (const cancellation of ["blur", "window-blur", "selection", "move", "mode"])
     `window.__typstPadView.focus();window.__typstPadView.dispatch({selection:{anchor:${utf16At(mixed, asciiStart) + 1}}});true`,
   );
   await sleep(50);
-  if (await c.evaluate("!!document.querySelector('.document-caret')"))
-    throw Error(`取消 ${cancellation} 后旧锚点重新出现`);
+  if (
+    !(await c.evaluate(
+      "document.querySelector('.document-caret')?.dataset.caretState==='pending' && !!document.querySelector('.document-caret-feedback')",
+    ))
+  )
+    throw Error(`${cancellation} 恢复编辑后没有明确的待定位反馈`);
   await finishHeldEdit();
 }
+check("失焦/选区/源码模式隐藏，恢复编辑或独立导航仍有当前源码输入反馈", true);
 await startHeldEdit();
 await c.evaluate(
   "window.__typstPadView.contentDOM.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));true",
@@ -766,34 +916,69 @@ await startHeldEdit();
 await c.evaluate("window.__pendingCursorNull=true;window.__pendingNullReturns=0;true");
 await releasePendingCompile();
 await settled(edited);
-await c.waitFor("window.__pendingNullReturns>0 && !document.querySelector('.document-caret')");
+await c.waitFor(
+  "window.__pendingNullReturns>0 && document.querySelector('.document-caret')?.dataset.caretState==='unmapped'",
+);
 if (!(await compiledPagesMatch(edited))) throw Error("null cursor 验收没有使用当前真实产物");
-await c.evaluate("window.__pendingCursorNull=false;true");
+await c.evaluate(
+  "window.__pendingCursorNull=false;window.__pendingCursorReject=true;window.__typstPadView.dispatch({selection:{anchor:window.__typstPadView.state.selection.main.head+1}});true",
+);
+await c.waitFor("document.querySelector('.document-caret')?.dataset.caretState==='unmapped'");
+await c.evaluate("window.__pendingCursorReject=false;true");
+check("当前精确null和IPC拒绝保留已标记的源码反馈，不让迟到查询覆盖当前插入点", true);
 await startHeldEdit();
 await c.evaluate("window.__pendingCompileFailure=true;true");
 await releasePendingCompile();
 await c.waitFor(COMPILE_IDLE);
-await c.waitFor("!document.querySelector('.document-caret')");
+await c.waitFor("document.querySelector('.document-caret')?.dataset.caretState==='unavailable'");
 if (!(await compiledPagesMatch(mixed))) throw Error("不可用输出没有安全保留上轮完整页面");
+await c.screenshot(shotPath("document-cursor-unavailable"));
+check("编译失败仍可见真实源码输入上下文，旧页面只保留展示而不冒充可编辑几何", true);
 await c.evaluate("window.__pendingCompileFailure=false;true");
 await startHeldEdit();
-await c.evaluate("window.__browserDevConfirm=true;true");
+await c.evaluate(`window.__oldCaretSession=document.querySelector('.document-caret').dataset.caretSession;
+  window.__browserDevConfirm=true;window.__pendingCompileFailure=true;
+  const target=window.__typstPadView.contentDOM.editContext??window.__typstPadView.contentDOM;
+  target.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));true`);
+await c.waitFor("window.__typstPadScheduleStats().composing");
 await c.key("n", { keyCode: 78, modifiers: 2 });
 await c.waitFor(
-  "window.__typstPadView.state.doc.length===0 && !document.querySelector('.document-caret')",
+  "window.__typstPadView.state.doc.length===0 && !window.__typstPadScheduleStats().composing",
 );
+await c.evaluate("window.__typstPadView.focus();true");
 await releasePendingCompile();
+await c.waitFor(COMPILE_IDLE);
+await c.waitFor(
+  `(() => {const el=document.querySelector('.document-caret'),label=document.querySelector('.document-caret-feedback');return el?.dataset.caretState==='unavailable'&&el.dataset.caretSession!==window.__oldCaretSession&&label?.textContent.includes('1:1')&&!label.textContent.includes('ASCII')})()`,
+);
+await c.screenshot(shotPath("document-cursor-first-failure"));
+// 新会话监听新的 DOM/EditContext，旧合成不能把调度器永远锁住。
+await c.evaluate(
+  "(window.__typstPadView.contentDOM.editContext??window.__typstPadView.contentDOM).dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));true",
+);
+await c.waitFor(
+  "window.__typstPadScheduleStats().composing && document.querySelector('.document-caret')?.classList.contains('composing')",
+);
+await c.evaluate(
+  "(window.__typstPadView.contentDOM.editContext??window.__typstPadView.contentDOM).dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}));window.__pendingCompileFailure=false;true",
+);
+await c.waitFor("!window.__typstPadScheduleStats().composing");
+await c.key("e", { keyCode: 69, modifiers: 2 });
+await c.key("e", { keyCode: 69, modifiers: 2 });
 const emptySession = cursorFixtures.find((f) => f.name === "empty");
 await settled(emptySession);
-if (!(await compiledPagesMatch(emptySession)) || (await doc()) !== "")
-  throw Error("迟到编译回写了新会话");
+await pose(emptySession, queryAt(emptySession, 0));
+check(
+  "合成中切会话及首编译失败有全新反馈，合成监听/调度与精确光标可以恢复",
+  (await compiledPagesMatch(emptySession)) && (await doc()) === "",
+);
 await c.evaluate("window.__TAURI_INTERNALS__.invoke=window.__pendingInvoke;true");
 writeFileSync(
   new URL("../../.browser-check/pending-caret-frames.json", import.meta.url),
   JSON.stringify(pendingFrames, null, 2),
 );
 console.log(
-  "待编译锚点：连续输入实际逐帧常亮；1500ms期限不延长；迟到null/焦点/选区/移动/模式/null输出/失败/新会话安全取消，最终采用真实geometryId",
+  "统一光标反馈：跨越旧期限仍常亮；焦点/选区/模式正确隐藏与恢复，null/失败/导航/合成和新会话均覆盖，最终采用当前真实geometryId",
 );
 check(
   "光标渲染矩阵含闭合公式边界没有写盘或脚本异常",
@@ -802,7 +987,7 @@ check(
   ),
 );
 console.log(
-  `累计对照 ${checkedStops} 个真实字素停靠点；${hiddenStops} 个片段内不可映射位置按契约隐藏；截图保存在 .browser-check/document-cursor-*.png`,
+  `累计对照 ${checkedStops} 个真实字素停靠点；${hiddenStops} 个片段内不可映射位置均有明确源码反馈；截图保存在 .browser-check/document-cursor-*.png`,
 );
 await c.send("Emulation.setUserAgentOverride", originalAgent);
 await c.close();

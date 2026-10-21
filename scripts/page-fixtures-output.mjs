@@ -1,7 +1,7 @@
 // 协议来自 typst_world/tests/{paged,cursor,expansion,preview}.rs 的逐行 println!。
 const fixtureGroups = [
   { marker: "PAGEFIXTURE:", file: "page-fixtures.json", count: 8, probe: "carets" },
-  { marker: "CURSORFIXTURE:", file: "cursor-fixtures.json", count: 9, probe: "cursorQueries" },
+  { marker: "CURSORFIXTURE:", file: "cursor-fixtures.json", count: 26, probe: "cursorQueries" },
   {
     marker: "EXPANSIONFIXTURE:",
     file: "expansion-fixtures.json",
