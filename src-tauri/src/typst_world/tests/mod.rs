@@ -85,8 +85,13 @@ fn style_raw_ranges(source: &str, preview_available: bool) -> String {
         let body = raw.trim_matches('`');
         let block = body.starts_with('\n');
         let text = &body[1..body.len() - 1];
+        let styled = if block {
+            format!("```typ\n\n{text}\n```")
+        } else {
+            format!("`\n{text}`")
+        };
         output.push_str(&styled_raw_kind(
-            raw,
+            &styled,
             text.starts_with('$') && text.ends_with('$'),
         ));
         output.push_str(&expansion_preview(text, block, preview_available));

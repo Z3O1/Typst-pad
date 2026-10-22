@@ -128,7 +128,7 @@ pub(super) fn projected(doc: &str, range: Option<(usize, usize)>) -> String {
     let raw = if expanded_block(text) {
         format!("```typ\n\n{}\n```", raw_blank_placeholders(text))
     } else {
-        format!("` {text} `")
+        format!("`\n{text}`")
     };
     let declaration = declaration_prefix(text);
     let raw = styled_raw_kind(&raw, text.starts_with('$') && text.ends_with('$'));
@@ -162,7 +162,9 @@ pub(super) fn heading_source(text: &str) -> bool {
 }
 
 fn expanded_block(text: &str) -> bool {
-    heading_source(text) || text.contains('\n') || (text.starts_with("$ ") && text.ends_with(" $"))
+    heading_source(text)
+        || text.contains(['\n', '`'])
+        || (text.starts_with("$ ") && text.ends_with(" $"))
 }
 
 pub(super) fn declaration_prefix(text: &str) -> String {
@@ -184,7 +186,7 @@ fn preview_start(doc: &str, from: usize, to: usize) -> usize {
         } else {
             text.len()
         }
-        + if expanded_block(text) { 8 } else { 2 }
+        + if expanded_block(text) { 4 } else { 1 }
         + expansion_style()["tail"].as_str().unwrap().len()
         + expansion_style()[if expanded_block(text) {
             "previewBlockHead"
@@ -355,7 +357,7 @@ fn formula_glyph_line_boxes_are_direct_hits_but_line_side_is_whitespace() {
 
 #[test]
 fn floating_formula_preview_does_not_move_document_content() {
-    let raw = styled_raw_kind("` $998244353$ `", true);
+    let raw = styled_raw_kind("`\n$998244353$`", true);
     let base = format!("正文 {raw} 后文");
     let expanded = format!(
         "正文 {raw}{} 后文",
@@ -485,7 +487,7 @@ fn changed_read_dependency_can_fail_original_while_raw_expansion_still_renders()
     let expression = "#assert(read(\"value.txt\") == \"valid\")";
     let source = format!("BEFORE {expression} AFTER");
     // 错误回退只显示 raw，不执行失败的表达式或预览；对应前端 preserveDeclaration:false。
-    let raw = format!("BEFORE {} AFTER", styled_raw(&format!("` {expression} `")));
+    let raw = format!("BEFORE {} AFTER", styled_raw(&format!("`\n{expression}`")));
     let compile = |input: &str| {
         let world = TypstWorld::new(
             input.into(),
@@ -746,7 +748,13 @@ fn expansion_code_palette_keeps_exact_first_line_token_spans() {
 
 #[test]
 fn expansion_background_is_not_captured_by_user_white_binding() {
-    for expression in ["#(1 + 2)", "#(\n1 + 2\n)", "$1 + 2$", "$\n1 + 2\n$"] {
+    for expression in [
+        "#(1 + 2)",
+        "#(\n1 + 2\n)",
+        "$1 + 2$",
+        "$\n1 + 2\n$",
+        "#text(\"`\")",
+    ] {
         let original = format!("#let white = 0\nResult {expression} after");
         let world = TypstWorld::new(original.clone(), None, &fonts_dir(), &FontConfig::default());
         typst::compile::<PagedDocument>(&world)
@@ -958,6 +966,67 @@ fn dump_page_fixtures_expansion() {
     }
 }
 
+// 行内隐藏首行既不能打断段落，也不能让高亮 token 吞掉字符来源。
+#[test]
+fn highlighted_inline_expansion_keeps_exact_carets_hits_and_paragraph() {
+    for text in ["$a + b$", "$998244353$", "$$", "$x_12$", "#strong[中文🙂]"] {
+        let original = format!("BEFORE {text} AFTER");
+        let from = original.find(text).unwrap();
+        let source = projected(&original, Some((from, from + text.len())));
+        let start = visible_start(&original, from, from + text.len());
+        let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
+        let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+        let (document, _) = super::super::formula_preview::extract(&document);
+        let mut visible = String::new();
+        visible_frame_text(&document.pages()[0].frame, &mut visible);
+        assert_eq!(visible, original, "占位行和围栏不应增加空白或隐藏字符");
+        let svg = svg_for_page(&document.pages()[0]).to_lowercase();
+        assert!(svg.contains("#f2f0ea"), "仍使用行内 pill 而非块卡片");
+        assert!(
+            ["#0b7285", "#cf222e", "#6639ba"]
+                .iter()
+                .any(|color| svg.contains(color)),
+            "行内源码必须真实高亮：{text}"
+        );
+        let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+        let after = source.rfind("AFTER").unwrap();
+        let baseline = items
+            .iter()
+            .find(|item| item.range.start == 0)
+            .unwrap()
+            .baseline_pt;
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.range.start == after)
+                .unwrap()
+                .baseline_pt,
+            baseline
+        );
+        let id = store(items.clone(), source.len(), stats.foreign_ink);
+        for (offset, ch) in text.char_indices() {
+            let range = start + offset..start + offset + ch.len_utf8();
+            let item = items
+                .iter()
+                .find(|item| item.range == range)
+                .unwrap_or_else(|| panic!("行内高亮必须保留精确字符范围：{text}:{ch} at {offset}"));
+            assert_eq!(item.baseline_pt, baseline, "隐藏首行不能打断正文段落");
+            let caret = locate(id, range.start).unwrap();
+            assert!(
+                (caret.x_pt - item.caret_start.x.to_pt()).abs() < 0.01,
+                "光标必须位于该字符而非 token 或行首"
+            );
+            let point = item.caret_start
+                + (item.caret_end - item.caret_start) * 0.25
+                + item.caret_vector * 0.5;
+            let hit =
+                crate::document_geometry::hit_test(id, item.page, point.x.to_pt(), point.y.to_pt())
+                    .unwrap();
+            assert_eq!(hit.offset, range.start, "点击高亮字形仍命中原字符");
+        }
+    }
+}
+
 // typ 高亮 + 隐藏占位行的块展开：每个源码字符都必须保留真实 caret，且高亮确实生效。
 #[test]
 fn highlighted_block_expansion_keeps_every_source_char_caret() {
@@ -985,7 +1054,7 @@ fn highlighted_block_expansion_keeps_every_source_char_caret() {
         // 高亮必须真实生效：页面 SVG 中出现调色板颜色，而不是单色文本。
         let svg = svg_for_page(&document.pages()[0]).to_lowercase();
         assert!(
-            ["#5f6368", "#cf222e", "#0550ae", "#1a7f37", "#6639ba", "#0b7285", "#6b21a8"]
+            ["#5b5f63", "#cf222e", "#0550ae", "#197c35", "#6639ba", "#0b7285", "#6b21a8"]
                 .iter()
                 .any(|color| svg.contains(color)),
             "typ 高亮未生效，块展开退化为单色：{text:?}"

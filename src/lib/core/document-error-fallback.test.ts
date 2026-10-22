@@ -73,7 +73,7 @@ describe("文档模式编译错误源码回退", () => {
   it("错误回退也使用隔离样式，投影生成代码不污染原文诊断", async () => {
     const source = "正文 $unknown$";
     const compile = vi.fn(async (input: string) =>
-      input.includes("` $unknown$ `") ? ok : fail(input, ["unknown"]),
+      input.includes("`\n$unknown$`") ? ok : fail(input, ["unknown"]),
     );
     const output = await compileDocumentWithFallback({
       ...options(source),

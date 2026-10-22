@@ -257,10 +257,11 @@ async function sourceStyleMatches(value, { panel }) {
     const rounded=/[CcQq]/.test(background.getAttribute('d'));
     const stroked=[...svg.querySelectorAll('path[stroke]')].some(el=>(el.getAttribute('stroke')??'').toLowerCase()==='#e3e0d8');
     if(!${panel}) {
-      // 行内 raw 围栏两侧的原有空格仍有真实字形；圆角 pill 底色只多 1pt extent。
-      const valid=readable&&matchingSize&&contrast>=4.5&&rounded
-        &&x(first)-rect.left>=0&&x(first)-rect.left<8.5*scale;
-      return {valid,filter,readable,matchingSize,sourceFontPx,renderedFontPx:11*scale,contrast,rounded,left:(x(first)-rect.left)/scale};
+      // 隐藏首行不能增加可见空白；pill 仍保持 1pt extent，且必须真实呈现 token 颜色。
+      const highlighted=fills.some(color=>color!=='rgb(31, 31, 31)');
+      const valid=readable&&matchingSize&&contrast>=4.5&&rounded&&highlighted
+        &&Math.abs(x(first)-rect.left-scale)<.1*scale;
+      return {valid,filter,readable,matchingSize,highlighted,colors:fills.length,sourceFontPx,renderedFontPx:11*scale,contrast,rounded,left:(x(first)-rect.left)/scale};
     }
     const glyphs=glyphEls.map(el=>el.getBoundingClientRect());
     const inkTop=Math.min(...glyphs.map(r=>r.top)),inkBottom=Math.max(...glyphs.map(r=>r.bottom));

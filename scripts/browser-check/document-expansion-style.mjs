@@ -90,9 +90,15 @@ try {
       let stops = 0;
       for (let pos = expanded.range.from + 1; pos < expanded.range.to; pos++) {
         const p = caretAt(expanded, pos);
-        await c.evaluate(
-          `window.__typstPadView.dispatch({selection:{anchor:${pos}}});window.__typstPadView.focus();true`,
-        );
+        if (name === "math" || name === "empty-compact") {
+          // 真实点击每个高亮字符，不能仅把前端光标与同一份错误的原生查询互相比较。
+          await clickCaret(p);
+          await c.waitFor(`window.__typstPadView.state.selection.main.head===${pos}`);
+        } else {
+          await c.evaluate(
+            `window.__typstPadView.dispatch({selection:{anchor:${pos}}});window.__typstPadView.focus();true`,
+          );
+        }
         await c.waitFor(
           `(() => {const p=${JSON.stringify(p)},h=document.querySelectorAll('#preview-host>.document-page')[p.page-1],el=document.querySelector('.document-caret');if(!h||!el)return false;const r=h.getBoundingClientRect(),v=h.shadowRoot.querySelector('svg').viewBox.baseVal,actual=el.getBoundingClientRect(),x=r.left+(p.xPt-v.x)*r.width/v.width,y=r.top+(p.yPt-v.y)*r.height/v.height;return Math.abs(actual.left-x)<.1&&Math.abs(actual.top-y)<.1&&Math.abs(actual.height-p.heightPt*r.height/v.height)<.1})()`,
         );

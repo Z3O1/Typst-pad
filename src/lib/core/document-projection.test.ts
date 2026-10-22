@@ -47,15 +47,15 @@ describe("Typst 原地源码展开", () => {
     expect(expansionStyle.head).toContain(
       'std.highlight(fill: std.rgb("#f2f0ea"), radius: 2pt, extent: 1pt',
     );
-    expect(expansionStyle.head).toContain("lang: none, theme: bytes(");
+    expect(expansionStyle.head).toContain('lang: "typ", theme: bytes(');
     expect(expansionStyle.head).not.toContain("regex(");
   });
-  it("块展开高亮调色板在卡片底色与深色滤镜下都保持可读对比度", () => {
+  it("高亮调色板在块卡片、行内底色及深色滤镜下都保持可读对比度", () => {
     // 深色模式对整页套 invert(1) contrast(0.71)；调色板须在两种光路上都过 4.5。
     const themeMatch = expansionStyle.head.match(/theme: bytes\("((?:[^"\\]|\\.)*)"\)/);
     expect(themeMatch).not.toBeNull();
     const theme = JSON.parse(`"${themeMatch![1]}"`) as string;
-    const card = "#f6f5f1";
+    const cards = ["#f6f5f1", "#f2f0ea"];
     const toSrgb = (hex: string) => {
       const n = parseInt(hex.slice(1), 16);
       return [n >> 16, (n >> 8) & 255, n & 255].map((v) => v / 255);
@@ -66,22 +66,24 @@ describe("Typst 原地源码展开", () => {
     const night = (rgb: number[]) =>
       rgb.map((c) => Math.min(1, Math.max(0, (0.5 - c) * 0.71 + 0.5)));
     const contrast = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-    const bgDay = luminance(toSrgb(card));
-    const bgNight = luminance(night(toSrgb(card)));
     const colors = [
       ...theme.matchAll(
         /<key>scope<\/key><string>[^<]*<\/string><key>settings<\/key><dict><key>foreground<\/key><string>(#[0-9A-Fa-f]{6})<\/string>/g,
       ),
     ].map((m) => m[1]);
     expect(colors.length).toBeGreaterThan(5);
-    for (const color of colors) {
-      const day = contrast(luminance(toSrgb(color)), bgDay);
-      const nightContrast = contrast(luminance(night(toSrgb(color))), bgNight);
-      expect(day, `${color} 浅色对比度`).toBeGreaterThanOrEqual(4.5);
-      expect(nightContrast, `${color} 深色对比度`).toBeGreaterThanOrEqual(4.5);
+    for (const card of cards) {
+      const bgDay = luminance(toSrgb(card));
+      const bgNight = luminance(night(toSrgb(card)));
+      for (const color of colors) {
+        const day = contrast(luminance(toSrgb(color)), bgDay);
+        const nightContrast = contrast(luminance(night(toSrgb(color))), bgNight);
+        expect(day, `${color} 在 ${card} 上的浅色对比度`).toBeGreaterThanOrEqual(4.5);
+        expect(nightContrast, `${color} 在 ${card} 上的深色对比度`).toBeGreaterThanOrEqual(4.5);
+      }
     }
   });
-  it("块展开用 typ 高亮与隐藏占位行,行内展开无法占位保持无高亮", () => {
+  it("块与行内展开均用 typ 高亮和隐藏首行，非样式投影不携带占位", () => {
     expect(expansionStyle.head).toContain("it.lines.slice(1)");
     const source = "#let x = {\n 1\n}\n#x";
     const to = source.indexOf("\n#x");
@@ -92,6 +94,9 @@ describe("Typst 原地源码展开", () => {
     expect(plain.source).toContain("```\n" + source.slice(0, to) + "\n```");
     expect(plain.source).not.toContain("```typ");
     for (const text of [
+      '$a_12 + "中文🙂"$',
+      "$$",
+      "#strong[中文🙂]",
       '$a_12 + "中文🙂"$\n',
       '#let value = {\n  "中文🙂" // comment\n  12 + 34\n};',
     ]) {
@@ -100,9 +105,13 @@ describe("Typst 原地源码展开", () => {
         preview: true,
       });
       expect(p.original).toBe(text);
+      if (!text.includes("\n")) {
+        expect(p.source).toContain("`\n" + text + "`" + expansionStyle.tail);
+        expect(p.source).not.toContain("```typ");
+      }
       for (let pos = 0; pos <= text.length; pos++)
         expect(p.renderedToSource(p.sourceToRendered(pos))).toBe(pos);
-      const offset = text.indexOf("中");
+      const offset = Math.max(1, text.indexOf("中"));
       const rendered = p.sourceToRendered(offset);
       const before = p.source.slice(0, rendered);
       const [error] = sourceDiagnostics(p, [
@@ -275,7 +284,7 @@ describe("Typst 原地源码展开", () => {
     expect(projection.source).toBe(
       source.slice(0, from) +
         expansionStyle.head +
-        "` $a + 🙂$ `" +
+        "`\n$a + 🙂$`" +
         expansionStyle.tail +
         source.slice(to),
     );
@@ -305,7 +314,7 @@ describe("Typst 原地源码展开", () => {
     const projection = projectDocumentRanges(source, [{ from, to }], { styled: true });
     expect(projection.source.endsWith(expansionStyle.tail + "\n`USER-RAW`")).toBe(true);
     expect(expansionStyle.head).toContain("lines.map(line => line.body)");
-    expect(expansionStyle.head).toContain("#set std.raw(lang: none, theme: bytes(");
+    expect(expansionStyle.head).toContain('#set std.raw(lang: "typ", theme: bytes(');
   });
   it("展开完整表达式；中英文、emoji 与后文的位置可往返映射", () => {
     const doc = "前文🙂 $x^2 + y$，后文中文";
@@ -330,6 +339,15 @@ describe("Typst 原地源码展开", () => {
     expect(error.column).toBe(8);
     for (let pos = 0; pos <= doc.length; pos++)
       expect(projection.renderedToSource(projection.sourceToRendered(pos))).toBe(pos);
+  });
+  it("单个反引号也必须使用块围栏，不能生成表示空 raw 的双反引号", () => {
+    const source = '#text("`")';
+    for (const styled of [false, true]) {
+      const p = projectDocumentRanges(source, [{ from: 0, to: source.length }], { styled });
+      expect(p.source).toContain((styled ? "```typ\n\n" : "```\n") + source + "\n```");
+      for (let pos = 0; pos <= source.length; pos++)
+        expect(p.renderedToSource(p.sourceToRendered(pos))).toBe(pos);
+    }
   });
   it("多行及嵌套反引号选用不会提前闭合的围栏", () => {
     const doc = "#block[\n```typ\n#let x = 1\n```\n]";
