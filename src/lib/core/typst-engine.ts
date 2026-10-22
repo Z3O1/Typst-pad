@@ -4,7 +4,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { savePdfDialog } from "./file-ops";
 import { pdfFileName } from "./pdf-export";
-import { dbg } from "./debug";
 import type { PreviewPage } from "./preview-scale";
 
 // ---------------------------------------------------------------------------
@@ -238,9 +237,6 @@ export async function compileToSvg(
       };
     }
     const errors = errorLocations(out.diagnostics);
-    // 调试日志：原始诊断（结构化，severity/行列/path 原样输出）与转换后的位置列表各输出一次
-    dbg.log("compile-diagnostics", "raw", out.diagnostics);
-    dbg.log("compile-diagnostics", "converted", errors);
     const first = out.diagnostics[0];
     return {
       ok: false,

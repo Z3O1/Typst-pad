@@ -45,8 +45,6 @@
   import { squiggleRanges, offsetAt } from "../core/diagnostics-utils";
   import { planForCommand } from "../core/write-commands";
   import type { WriteCommand } from "../core/write-commands";
-  import { mark } from "../core/startup-timing";
-  import { dbg } from "../core/debug";
   import { anchorEffectAt, measureAnchorYMargin } from "./scroll-anchor";
   import type { SourceScrollAnchor } from "$lib/core/source-scroll-sync";
   // 浏览器验收用的测试钩子（只在 `?browserdev=1` 下真的挂到 window 上，桌面版是空操作）
@@ -220,7 +218,6 @@
   }
 
   onMount(() => {
-    mark("editor-mount-start");
     // 先写入初始诊断，再创建 view：buildExtensions 会按当时 diagState 生成装饰
     diagState = { list: diagnostics ?? [], prefix: prefixCode ?? "" };
     // 同理：换行开关的初值也由 buildExtensions 按当时的 wrap 建好，这里标记为"已应用"
@@ -231,7 +228,6 @@
       parent: host,
       state: createDocumentState(initialDoc),
     });
-    mark("editor-created");
     registerEditorView(view);
     const intent = () => {
       userScrolling = true;
@@ -383,7 +379,6 @@
     } finally {
       applyingExternal = false;
     }
-    dbg.log("editor", `外部文档替换 ${current.length} → ${doc.length} 字符`);
   });
 
   // 外部跳转请求（错误列表点击条目）：定位到指定行列并居中滚动可见。
@@ -505,10 +500,6 @@
         queueMicrotask(() => {
           if (epoch !== caretAnchorEpoch || target !== view) return;
           target.dispatch({ effects: anchorEffectAt(anchor.pos, yMargin) });
-          dbg.log(
-            "editor",
-            `模式切换：把光标（pos ${anchor.pos}）调回视口 y≈${Math.round(anchor.offsetFromTop)}（yMargin ${Math.round(yMargin)}，${mode} 布局）`,
-          );
         });
       },
     });
@@ -622,10 +613,6 @@
   /** 依据当前 diagState 生成红色波浪线装饰集（位置计算见 diagnostics-utils.squiggleRanges） */
   function computeDeco(state: EditorState): DecorationSet {
     const ranges = squiggleRanges(state.doc, diagState.list, diagState.prefix);
-    // 调试日志：存在诊断（或画出了波浪线）时输出实际条数，对照 compile-diagnostics 排查缺失/错位
-    if (diagState.list.length > 0 || ranges.length > 0) {
-      dbg.log("squiggle", `count:${ranges.length}/${diagState.list.length}`);
-    }
     if (ranges.length === 0) return Decoration.none;
     return Decoration.set(
       ranges.map((r) => Decoration.mark({ class: "cm-diag-wavy" }).range(r.from, r.to)),

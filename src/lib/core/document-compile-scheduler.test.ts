@@ -19,7 +19,6 @@ describe("createDocumentCompileScheduler", () => {
           release = resolve;
         }),
       debounceMs,
-      log: () => {},
     });
 
   beforeEach(() => {

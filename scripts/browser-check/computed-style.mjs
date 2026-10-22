@@ -185,4 +185,11 @@ for (const sel of [".statusbar", ".preview-paper", ".preview-pane"]) {
   );
 }
 
+check(
+  "诊断徽标仅显示简短错误/警告提示，不含渲染技术括注",
+  await c.evaluate(
+    `(() => { const error = document.querySelector('.error-badge:not(.warning-badge)'), warning = document.querySelector('.warning-badge'); return error?.title === '错误' && warning?.title === '警告'; })()`,
+  ),
+);
+
 finish(`通过 ${state.passed} 项检查（计算样式守卫）`);

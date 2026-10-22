@@ -11,7 +11,6 @@ import {
   dollarPairHistory,
   dollarPairs,
 } from "./dollar-pair-state";
-import { dbg } from "../core/debug";
 
 function dollarInput(state: EditorState, text: "$" | " "): Transaction | null {
   if (state.readOnly) return null;
@@ -133,8 +132,7 @@ export const dollarAutoPair = [
         if (!transaction) return false;
         view.dispatch(transaction);
         return true;
-      } catch (err) {
-        dbg.log("editor", "$ 自动配对失败，退回默认输入", err);
+      } catch {
         return false;
       }
     }),

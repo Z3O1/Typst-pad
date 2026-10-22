@@ -10,7 +10,6 @@
 // 3. Update 句柄持有 Rust 侧资源（rid），换版本时必须 close()，否则泄漏。
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { isTauri } from "./file-ops";
-import { dbg } from "./debug";
 import { describeUpdateError, progressFrom, type DownloadProgress } from "./update-utils";
 
 /** 可用的新版本（handle 是 plugin 的 Update 句柄，下载/安装都靠它） */
@@ -43,7 +42,6 @@ export async function checkForUpdate(): Promise<CheckOutcome> {
     const update = await check();
     // 新版本 API：无更新时 check() 返回 null（旧版靠 update.available 判断，已废弃）
     if (!update) return { kind: "none" };
-    dbg.log("updater", `available ${update.currentVersion} → ${update.version}`);
     return {
       kind: "available",
       update: {
@@ -55,7 +53,6 @@ export async function checkForUpdate(): Promise<CheckOutcome> {
       },
     };
   } catch (e) {
-    dbg.log("updater", "check failed", e);
     return { kind: "error", message: describeUpdateError(e) };
   }
 }
@@ -85,10 +82,8 @@ export async function downloadAndInstallUpdate(
       // 安装阶段由页面切到"正在安装"状态显示
       if (event.event !== "Finished") onProgress(progressFrom(downloaded, total));
     });
-    dbg.log("updater", `installed ${update.version}`);
     return { ok: true };
   } catch (e) {
-    dbg.log("updater", "install failed", e);
     return { ok: false, message: describeUpdateError(e) };
   }
 }

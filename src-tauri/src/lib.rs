@@ -22,20 +22,6 @@ mod file_watcher;
 mod font_commands;
 mod paths;
 
-// 启动时序打点：仅 debug 构建编译（release 零输出零开销）
-#[cfg(debug_assertions)]
-mod startup_timing;
-
-/// 命令行 --debug 开关（调试日志来源之一，仅桌面构建生效）：setup 解析命令行后存入，
-/// 前端经 get_debug_flag 命令异步查询
-struct CliDebugFlag(bool);
-
-/// 查询命令行 --debug 开关（支持 `--debug` 与 `--debug=1` 两种写法，其余值宽松视为未开启）
-#[tauri::command]
-fn get_debug_flag(state: tauri::State<'_, CliDebugFlag>) -> bool {
-    state.0
-}
-
 /// 禁用 WebView2 浏览器加速键（如 Ctrl+R 整页刷新）：
 /// WebView2 中加速键在 web 内容之前处理，页面 JS 的 preventDefault 无法拦截，
 /// 必须在此禁用，让 Ctrl+R 等快捷键完全交由前端处理
@@ -47,9 +33,6 @@ impl tauri::plugin::Plugin<tauri::Wry> for DisableBrowserAccelerators {
     }
 
     fn webview_created(&mut self, webview: tauri::Webview<tauri::Wry>) {
-        // 打点：webview 初始化完成（此处仅原生 webview 就绪，页面 HTML/JS 尚未加载）
-        #[cfg(debug_assertions)]
-        startup_timing::set_webview_created();
         #[cfg(target_os = "windows")]
         {
             use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
@@ -86,13 +69,6 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // 注意：不使用 single-instance——每次启动都打开独立实例/新窗口
         .setup(|app| {
-            // 打点：setup 入口（窗口创建阶段起点）
-            #[cfg(debug_assertions)]
-            startup_timing::set_setup_entry();
-            // --debug 命令行开关（调试日志来源之一，仅桌面构建生效）：支持 --debug 与
-            // --debug=1 两种写法，其余值宽松视为未开启；前端经 get_debug_flag 命令查询
-            let cli_debug = std::env::args().any(|a| a == "--debug" || a == "--debug=1");
-            app.manage(CliDebugFlag(cli_debug));
             // 首次启动：从命令行参数解析待打开的 .typ 文件
             app.manage(file_commands::initial_pending_files());
             // 当前编辑文件的外部变更监控状态（按窗口隔离）
@@ -113,7 +89,6 @@ pub fn run() {
             file_watcher::start_file_watch,
             file_watcher::stop_file_watch,
             dir_listing::list_dir_typ,
-            get_debug_flag,
             compile_commands::compile_doc,
             compile_commands::document_hit_test,
             compile_commands::document_cursor,
@@ -136,12 +111,6 @@ pub fn run() {
         {
             app.state::<file_watcher::FileWatcherState>()
                 .stop_for(label);
-        }
-        // 打点：前端页面加载完成（RunEvent::Ready = 事件循环首次迭代）；
-        // 以引用匹配避免消耗 event（后续 macOS 分支仍需要它）
-        #[cfg(debug_assertions)]
-        if let tauri::RunEvent::Ready = &event {
-            startup_timing::set_ready_and_report();
         }
         // macOS：Finder"打开方式"通过 Apple Events 传路径（命令行参数拿不到）
         #[cfg(target_os = "macos")]

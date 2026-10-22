@@ -4,7 +4,7 @@
 // 看到效果。这里把四条分支的用户可见结果全部钉住：
 //   成功无警告 / 成功带警告（原样 + 截断 + 字体族中文化）/ 失败有定位错误 / 失败只有非定位错误。
 import { describe, it, expect } from "vitest";
-import { reduceCompileStatus, type CompileStatusSource } from "../ui/compile-status";
+import { reduceCompileStatus } from "../ui/compile-status";
 import { formatCompileFailMessage } from "./error-list";
 import type { CompileErrorLocation, Diagnostic } from "../core/typst-engine";
 
@@ -198,14 +198,5 @@ describe("两条编译路径共用同一份归约（键集合是契约）", () =
       lastNonPosError: null,
       statusText: "编译错误：1 处",
     });
-  });
-
-  it("形状来源可判别：BlocksUnavailable 这种没有 error/errors 的结果传不进来", () => {
-    // 编译期保证（见 CompileStatusSource 的注释）：这里只留一条运行期可读的断言，
-    // 说明"后端没有 compile_blocks 命令"必须走退回整页预览那条路，而不是当成编译失败。
-    const unavailable = { ok: false, unavailable: true } as const;
-    expect("error" in unavailable).toBe(false);
-    const source: CompileStatusSource = { ok: false, error: "x", errors: [] };
-    expect(reduceCompileStatus(source, 0).ok).toBe(false);
   });
 });

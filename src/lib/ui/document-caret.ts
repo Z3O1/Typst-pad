@@ -106,25 +106,6 @@ export function createDocumentCaretFeedback() {
   };
 }
 
-/** 只截取真实源码行的当前输入上下文，不把反馈文字写入文档或排版产物。 */
-export function caretSourceContext(
-  source: string,
-  column: number,
-  from = 0,
-  to = source.length,
-): { before: string; after: string } {
-  const pos = Math.max(from, Math.min(to, from + column - 1));
-  // 行边界由快照索引提供，单次最多读取两侧各 42 个 UTF-16 单元。
-  const start = Math.max(from, pos - 42),
-    end = Math.min(to, pos + 42);
-  const before = Array.from(source.slice(start, pos));
-  const after = Array.from(source.slice(pos, end));
-  return {
-    before: (start > from || before.length > 20 ? "…" : "") + before.slice(-20).join(""),
-    after: after.slice(0, 20).join("") + (end < to || after.length > 20 ? "…" : ""),
-  };
-}
-
 /** 仅滚动真实光标越界的轴；不会为保持插入点而改变页面尺寸或排版。 */
 export function caretScrollDelta(
   position: { left: number; top: number; height: number; rotation: number },

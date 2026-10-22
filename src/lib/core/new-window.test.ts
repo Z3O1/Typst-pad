@@ -19,7 +19,6 @@ function hooks(over: Partial<NewWindowHooks> = {}): NewWindowHooks {
     isTauri: () => true,
     createWindow: vi.fn(),
     setStatus: vi.fn(),
-    logCreateFailure: vi.fn(),
     now: () => 1700000000000,
     ...over,
   };
@@ -69,7 +68,7 @@ describe("createNewWindow", () => {
     expect(h.setStatus).not.toHaveBeenCalled();
   });
 
-  it("异步失败（tauri://error 的 payload）→ 状态栏 + 调试日志", () => {
+  it("异步失败（tauri://error 的 payload）显示在状态栏", () => {
     const h = hooks();
     let onAsyncError: ((detail: unknown) => void) | undefined;
     h.createWindow = vi.fn((_label, _title, cb) => {
@@ -79,9 +78,6 @@ describe("createNewWindow", () => {
     onAsyncError?.("Command plugin:webview|create_webview_window not allowed by ACL");
     expect(h.setStatus).toHaveBeenCalledWith(
       "新建窗口失败：Command plugin:webview|create_webview_window not allowed by ACL",
-    );
-    expect(h.logCreateFailure).toHaveBeenCalledWith(
-      "Command plugin:webview|create_webview_window not allowed by ACL",
     );
   });
 
@@ -95,7 +91,5 @@ describe("createNewWindow", () => {
     expect(h.setStatus).toHaveBeenCalledWith(
       "新建窗口失败：a webview with label `editor-1` already exists",
     );
-    // 同步这条分支没有 payload 可记日志（页面那边也只有状态栏这一份现场）
-    expect(h.logCreateFailure).not.toHaveBeenCalled();
   });
 });

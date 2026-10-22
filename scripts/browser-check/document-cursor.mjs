@@ -105,7 +105,7 @@ async function pose(f, query, { dispatch = true, scroll = true } = {}) {
     );
   if (!query.caret) {
     await c.waitFor(
-      `(() => {const el=document.querySelector('.document-caret'),label=document.querySelector('.document-caret-feedback'),v=window.__typstPadView,line=v.state.doc.lineAt(v.state.selection.main.head);return el&&el.dataset.caretState!=='exact'&&label?.textContent.includes(line.number+':'+(v.state.selection.main.head-line.from+1))})()`,
+      `(() => {const el=document.querySelector('.document-caret');return el&&el.dataset.caretState!=='exact'&&!document.querySelector('.document-caret-feedback')})()`,
       { timeout: 2500, interval: 16 },
     );
     return null;
@@ -151,7 +151,7 @@ for (const name of ["mixed", "raw", "whitespace"]) {
     }
   }
   if (mapped === 0) throw new Error(`不允许用零光标几何验收：${name}`);
-  // 末尾空段定位到占位；不可映射的位置保留带真实源码上下文的明确反馈。
+  // 末尾空段定位到占位；不可映射的位置仍保留可见临时光标。
   await pose(f, queryAt(f, Buffer.byteLength(f.doc)));
   check(
     `${name}：逐字素盒模型、分页、旋转、换行与不可映射位置正确`,
@@ -792,13 +792,13 @@ const pendingFrames = await c.evaluate(`(async()=>{
     await new Promise(requestAnimationFrame);
     const el=document.querySelector('.document-caret'),r=el?.getBoundingClientRect();
     frames.push({at:performance.now(),pending:el?.classList.contains('pending'),opacity:el&&getComputedStyle(el).opacity,
-      context:!!document.querySelector('.document-caret-feedback')?.textContent.includes(v.state.doc.lineAt(v.state.selection.main.head).number+':'+(v.state.selection.main.head-v.state.doc.lineAt(v.state.selection.main.head).from+1)),
+      noOverlay:!document.querySelector('.document-caret-feedback'),
       rect:r&&{left:r.left,top:r.top,height:r.height},anchor:{left:document.querySelector('.input-proxy').style.left,top:document.querySelector('.input-proxy').style.top}});
   }return frames;
 })()`);
 if (
   pendingFrames.at(-1).at - pendingFrames[0].at < 1500 ||
-  pendingFrames.some((f) => !f.pending || f.opacity !== "1" || !f.context) ||
+  pendingFrames.some((f) => !f.pending || f.opacity !== "1" || !f.noOverlay) ||
   pendingFrames.some(
     (f) =>
       Math.abs(f.rect.left - pendingFrames[0].rect.left) > 0.1 ||
@@ -823,7 +823,7 @@ if (
   !(await c.evaluate("document.querySelector('.document-caret')?.dataset.caretState==='pending'"))
 )
   throw Error("慢编译期间继续编辑清除了可见反馈");
-check("超过旧1500ms期限的持续输入逐帧常亮，源码上下文同步且不伪造精确位置", true);
+check("持续输入逐帧保留临时光标，不显示技术浮层或伪造精确位置", true);
 await c.send("Emulation.setDeviceMetricsOverride", {
   width: 1000,
   height: 420,
@@ -832,7 +832,7 @@ await c.send("Emulation.setDeviceMetricsOverride", {
 });
 await c.evaluate("document.querySelector('.preview-body').scrollTop+=300;true");
 await c.waitFor(
-  `(() => {const el=document.querySelector('.document-caret'),label=document.querySelector('.document-caret-feedback'),b=document.querySelector('.preview-body'),r=b.getBoundingClientRect(),c=el?.getBoundingClientRect(),l=label?.getBoundingClientRect();return c&&l&&c.left>=r.left&&c.right<=r.left+b.clientWidth&&c.top>=r.top&&c.bottom<=r.top+b.clientHeight&&l.left>=r.left&&l.right<=r.left+b.clientWidth&&l.bottom<=r.top+b.clientHeight})()`,
+  `(() => {const el=document.querySelector('.document-caret'),b=document.querySelector('.preview-body'),r=b.getBoundingClientRect(),c=el?.getBoundingClientRect();return c&&c.left>=r.left&&c.right<=r.left+b.clientWidth&&c.top>=r.top&&c.bottom<=r.top+b.clientHeight&&!document.querySelector('.document-caret-feedback')})()`,
 );
 const feedbackClip = await c.evaluate(
   "(() => {const r=document.querySelector('.document-caret').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,scale:1}})()",
@@ -848,7 +848,7 @@ const feedbackHidden = await c.send("Page.captureScreenshot", {
 });
 await c.evaluate("document.querySelector('.document-caret').style.visibility='';true");
 check(
-  "缩窗/滚动后反馈与源码标签仍在可见区，实际截图证明兜底光标有像素",
+  "缩窗/滚动后只有临时光标留在可见区，实际截图证明光标有像素",
   feedbackVisible.data !== feedbackHidden.data,
 );
 await c.send("Emulation.setDeviceMetricsOverride", {
@@ -893,13 +893,13 @@ for (const cancellation of ["blur", "window-blur", "selection", "move", "mode"])
   await sleep(50);
   if (
     !(await c.evaluate(
-      "document.querySelector('.document-caret')?.dataset.caretState==='pending' && !!document.querySelector('.document-caret-feedback')",
+      "document.querySelector('.document-caret')?.dataset.caretState==='pending' && !document.querySelector('.document-caret-feedback')",
     ))
   )
     throw Error(`${cancellation} 恢复编辑后没有明确的待定位反馈`);
   await finishHeldEdit();
 }
-check("失焦/选区/源码模式隐藏，恢复编辑或独立导航仍有当前源码输入反馈", true);
+check("失焦/选区/源码模式隐藏，恢复编辑或独立导航仍有临时光标", true);
 await startHeldEdit();
 await c.evaluate(
   "window.__typstPadView.contentDOM.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));true",
@@ -925,7 +925,7 @@ await c.evaluate(
 );
 await c.waitFor("document.querySelector('.document-caret')?.dataset.caretState==='unmapped'");
 await c.evaluate("window.__pendingCursorReject=false;true");
-check("当前精确null和IPC拒绝保留已标记的源码反馈，不让迟到查询覆盖当前插入点", true);
+check("当前精确null和IPC拒绝保留临时光标，不让迟到查询覆盖当前插入点", true);
 await startHeldEdit();
 await c.evaluate("window.__pendingCompileFailure=true;true");
 await releasePendingCompile();
@@ -933,7 +933,7 @@ await c.waitFor(COMPILE_IDLE);
 await c.waitFor("document.querySelector('.document-caret')?.dataset.caretState==='unavailable'");
 if (!(await compiledPagesMatch(mixed))) throw Error("不可用输出没有安全保留上轮完整页面");
 await c.screenshot(shotPath("document-cursor-unavailable"));
-check("编译失败仍可见真实源码输入上下文，旧页面只保留展示而不冒充可编辑几何", true);
+check("编译失败仍可见临时光标，旧页面只保留展示而不冒充可编辑几何", true);
 await c.evaluate("window.__pendingCompileFailure=false;true");
 await startHeldEdit();
 await c.evaluate(`window.__oldCaretSession=document.querySelector('.document-caret').dataset.caretSession;
@@ -949,7 +949,7 @@ await c.evaluate("window.__typstPadView.focus();true");
 await releasePendingCompile();
 await c.waitFor(COMPILE_IDLE);
 await c.waitFor(
-  `(() => {const el=document.querySelector('.document-caret'),label=document.querySelector('.document-caret-feedback');return el?.dataset.caretState==='unavailable'&&el.dataset.caretSession!==window.__oldCaretSession&&label?.textContent.includes('1:1')&&!label.textContent.includes('ASCII')})()`,
+  `(() => {const el=document.querySelector('.document-caret');return el?.dataset.caretState==='unavailable'&&el.dataset.caretSession!==window.__oldCaretSession&&window.__typstPadView.state.doc.length===0&&!document.querySelector('.document-caret-feedback')})()`,
 );
 await c.screenshot(shotPath("document-cursor-first-failure"));
 // 新会话监听新的 DOM/EditContext，旧合成不能把调度器永远锁住。
@@ -987,7 +987,7 @@ check(
   ),
 );
 console.log(
-  `累计对照 ${checkedStops} 个真实字素停靠点；${hiddenStops} 个片段内不可映射位置均有明确源码反馈；截图保存在 .browser-check/document-cursor-*.png`,
+  `累计对照 ${checkedStops} 个真实字素停靠点；${hiddenStops} 个片段内不可映射位置均有临时光标且无技术浮层；截图保存在 .browser-check/document-cursor-*.png`,
 );
 await c.send("Emulation.setUserAgentOverride", originalAgent);
 await c.close();

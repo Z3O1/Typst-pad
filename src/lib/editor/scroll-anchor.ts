@@ -43,7 +43,7 @@ export function anchorYMargin(
  * 只读布局：算出"要让行盒顶部落在 `targetClientY` 这个视口高度"所需的 yMargin。
  * 拿不到滚动容器（视图未挂载 / 被拆掉）时返回 null。
  *
- * 与 `anchorPosEffect` 分开是为了**把读布局和写事务放进两个阶段**：写事务落在
+ * 与 `anchorEffectAt` 分开是为了把读布局和写事务放进两个阶段：写事务落在
  * CodeMirror 的 `requestMeasure().write` 里时不该再去读 `getBoundingClientRect`
  *（那会逼出一次计划外的重排）。见 Editor.svelte 的 restoreCaretAnchor。
  */
@@ -70,20 +70,4 @@ export function measureAnchorYMargin(
  */
 export function anchorEffectAt(pos: number, yMargin: number): StateEffect<unknown> {
   return EditorView.scrollIntoView(EditorSelection.cursor(pos), { y: "start", yMargin });
-}
-
-/**
- * "把 `pos` 钉在屏幕的某个高度"的滚动目标（放进 `view.dispatch({ effects })` 里，
- * **与选区变更同一个事务**：这样 CM 的测量循环一次算准，不会出现"先跳一下再修正"）。
- *
- * 拿不到滚动容器（视图未挂载）时返回 null，调用方照常只落选区。
- */
-export function anchorPosEffect(
-  view: View,
-  pos: number,
-  targetClientY: number,
-  mode: AnchorMode = "top",
-): StateEffect<unknown> | null {
-  const yMargin = measureAnchorYMargin(view, targetClientY, mode);
-  return yMargin === null ? null : anchorEffectAt(pos, yMargin);
 }

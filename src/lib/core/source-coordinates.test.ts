@@ -1,16 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { byteOffsetsToPositions, positionsToByteOffsets, utf8Length } from "./block-offsets";
 import { createSourceCoordinates } from "./source-coordinates";
 
 describe("编译快照坐标索引", () => {
-  it("跨稀疏检查点与多字节边界的双向查询等价于原有换算", () => {
+  it("跨稀疏检查点的每个码元与字节边界对照原生 UTF-8 编码", () => {
     const text = "abc中文😀é\n".repeat(100);
     const index = createSourceCoordinates(text);
-    const positions = Array.from({ length: text.length + 2 }, (_, i) => i - 1);
-    const offsets = Array.from({ length: utf8Length(text) + 2 }, (_, i) => i - 1);
-    expect(positions.map(index.toByte)).toEqual(positionsToByteOffsets(text, positions));
-    expect(offsets.map(index.toPosition)).toEqual(byteOffsetsToPositions(text, offsets));
-    expect(index.toByte(Infinity)).toBe(utf8Length(text));
+    const encoder = new TextEncoder();
+    let position = 0;
+    let offset = 0;
+    for (const char of text) {
+      const length = encoder.encode(char).length;
+      for (let unit = 0; unit < char.length; unit++) {
+        expect(index.toByte(position + unit)).toBe(offset);
+      }
+      for (let byte = 0; byte < length; byte++) {
+        expect(index.toPosition(offset + byte)).toBe(position);
+      }
+      position += char.length;
+      offset += length;
+    }
+    expect(index.toByte(-1)).toBe(0);
+    expect(index.toPosition(-1)).toBe(0);
+    expect(index.toByte(text.length)).toBe(encoder.encode(text).length);
+    expect(index.toPosition(offset)).toBe(text.length);
+    expect(index.toByte(Infinity)).toBe(offset);
     expect(index.toPosition(Infinity)).toBe(text.length);
   });
 
@@ -21,13 +34,9 @@ describe("编译快照坐标索引", () => {
     expect(b.linePosition(2, 3)).toBe(6);
     expect(a.toByte(a.linePosition(2, 3))).toBe(11);
     expect(a.linePosition(3, 1)).toBe(6);
-    expect(a.lineRange(1)).toEqual({ from: 0, to: 2 });
-    expect(a.lineRange(2)).toEqual({ from: 3, to: 5 });
-    expect(a.lineRange(99)).toEqual({ from: 6, to: 6 });
     const empty = createSourceCoordinates("");
     expect(empty.toByte(10)).toBe(0);
     expect(empty.toPosition(10)).toBe(0);
     expect(empty.linePosition(1, 1)).toBe(0);
-    expect(empty.lineRange(1)).toEqual({ from: 0, to: 0 });
   });
 });

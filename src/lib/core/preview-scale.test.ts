@@ -9,10 +9,7 @@ import {
   isReflowApplied,
   naturalScale,
   paperShapeFromPages,
-  previewCanvasWidth,
   previewPage,
-  previewScale,
-  reflowCanvasWidth,
   viewBoxSizePt,
 } from "./preview-scale";
 
@@ -71,36 +68,6 @@ describe("naturalScale", () => {
   });
 });
 
-describe("previewScale（兜底路径：等比缩放整页）", () => {
-  it("窄栏：画布铺满栏宽，但永远不超过它（永不横向滚动）", () => {
-    const width = previewCanvasWidth({ containerWidth: 400, pageWidthPt: A4_WIDTH_PT });
-    expect(width).toBeCloseTo(400, 10);
-    expect(width).toBeLessThanOrEqual(400);
-  });
-
-  it("宽栏：停在自然字号（不再随窗口放大），字与代码一样大", () => {
-    for (const containerWidth of [800, 960, 1600]) {
-      const width = previewCanvasWidth({ containerWidth, pageWidthPt: A4_WIDTH_PT });
-      expect(width).toBeCloseTo(A4_WIDTH_PT * naturalScale(), 10);
-      expect(width).toBeLessThanOrEqual(containerWidth);
-    }
-  });
-
-  it("任何栏宽下画布都 ≤ 栏宽（硬保证）", () => {
-    for (const containerWidth of [120, 300, 757.6, 758, 1200, 2400]) {
-      expect(previewCanvasWidth({ containerWidth, pageWidthPt: A4_WIDTH_PT })).toBeLessThanOrEqual(
-        containerWidth + 1e-9,
-      );
-    }
-  });
-
-  it("非法尺寸返回 NaN", () => {
-    expect(previewScale({ containerWidth: 0, pageWidthPt: A4_WIDTH_PT })).toBeNaN();
-    expect(previewScale({ containerWidth: Number.NaN, pageWidthPt: A4_WIDTH_PT })).toBeNaN();
-    expect(previewScale({ containerWidth: 800, pageWidthPt: 0 })).toBeNaN();
-  });
-});
-
 describe("previewPage（重排路径：纸张跟着预览栏走）", () => {
   it("栏宽 → 页宽 = 栏宽 × 11/14：正文按 14px 排版", () => {
     const page = previewPage(700);
@@ -143,28 +110,6 @@ describe("previewPage（重排路径：纸张跟着预览栏走）", () => {
       DEFAULT_PAPER.heightPt * (page!.widthPt / DEFAULT_PAPER.widthPt),
       6,
     );
-  });
-});
-
-describe("reflowCanvasWidth（重排生效时的画布）", () => {
-  it("恒 ≤ 栏宽：这是无横向滚动条的保证", () => {
-    for (const containerWidth of [180, 320, 700, 1400]) {
-      const page = previewPage(containerWidth);
-      if (!page) continue;
-      const canvas = reflowCanvasWidth(containerWidth, page.widthPt);
-      expect(canvas).toBeLessThanOrEqual(containerWidth + 1e-9);
-      expect(canvas).toBeCloseTo(containerWidth, 6);
-    }
-  });
-
-  it("页宽被下限夹住时不再铺满（栏太窄，画布跟着变小）", () => {
-    const page = previewPage(30)!;
-    expect(reflowCanvasWidth(30, page.widthPt)).toBeCloseTo(30, 10);
-  });
-
-  it("非法输入返回 NaN", () => {
-    expect(reflowCanvasWidth(0, 300)).toBeNaN();
-    expect(reflowCanvasWidth(500, Number.NaN)).toBeNaN();
   });
 });
 

@@ -126,7 +126,7 @@
     role="button"
     tabindex="0"
     aria-expanded={visible}
-    title={isErrors ? "编译错误（渲染已停止）" : "编译警告（不中断渲染）"}
+    title={isErrors ? "错误" : "警告"}
     onclick={toggle}
     onkeydown={(e) => {
       if (e.key === "Enter") toggle();

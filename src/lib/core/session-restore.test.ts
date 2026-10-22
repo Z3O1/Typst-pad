@@ -19,7 +19,6 @@ const stored = (patch: Partial<PersistedState> = {}): Partial<PersistedState> =>
   dirty: true,
   restoreSession: true,
   autoCheckUpdates: false,
-  lastUpdateCheckAt: 1700000000000,
   updateDismissedAt: 1700000001000,
   uiZoom: 1.5,
   chineseFont: "SimSun",
@@ -39,7 +38,6 @@ describe("planRestore · 偏好", () => {
     expect(p.showPreview).toBe(true);
     expect(p.editorWrap).toBe(true);
     expect(p.uiZoom).toBe(1.5);
-    expect(p.lastUpdateCheckAt).toBe(1700000000000);
     expect(p.updateDismissedAt).toBe(1700000001000);
   });
 
@@ -61,7 +59,6 @@ describe("planRestore · 偏好", () => {
       showPreview: false,
       editorWrap: false,
       uiZoom: 1,
-      lastUpdateCheckAt: null,
       updateDismissedAt: null,
       content: null,
     });
@@ -123,17 +120,11 @@ describe("planRestore · 偏好", () => {
   });
 
   it("时间戳只认数字：字符串 / null / 缺失一律 null", () => {
-    expect(
-      plan({ lastUpdateCheckAt: "1700000000000" as unknown as number }).lastUpdateCheckAt,
-    ).toBe(null);
-    expect(plan({ lastUpdateCheckAt: null }).lastUpdateCheckAt).toBe(null);
     expect(plan({ updateDismissedAt: "x" as unknown as number }).updateDismissedAt).toBe(null);
     // 缺失 → null；数字（含 0）→ 原样
     const empty = planRestore({}, { isSecondaryWindow: false });
-    expect(empty.lastUpdateCheckAt).toBe(null);
     expect(empty.updateDismissedAt).toBe(null);
     expect(plan({ updateDismissedAt: 123 }).updateDismissedAt).toBe(123);
-    expect(plan({ lastUpdateCheckAt: 0 }).lastUpdateCheckAt).toBe(0);
   });
 });
 

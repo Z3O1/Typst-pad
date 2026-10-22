@@ -14,7 +14,7 @@ import { ZOOM_CONFIRM_DELAY_MS, ZOOM_DEFAULT, ZOOM_SETTLE_MAX_MS } from "./zoom"
 
 interface Harness {
   c: ReturnType<typeof createZoomController>;
-  calls: { sets: number[]; status: string[]; logs: string[]; levels: number[] };
+  calls: { sets: number[]; status: string[]; levels: number[] };
   level(): number;
   setLevel(z: number): void;
   setWidth(w: number): void;
@@ -46,7 +46,6 @@ function harness(over: Partial<ZoomControllerHooks> = {}, manualSleep = false): 
   const calls = {
     sets: [] as number[],
     status: [] as string[],
-    logs: [] as string[],
     levels: [] as number[],
   };
 
@@ -78,9 +77,6 @@ function harness(over: Partial<ZoomControllerHooks> = {}, manualSleep = false): 
     },
     clearTimer: (id) => {
       timers.delete(id);
-    },
-    log: (m) => {
-      calls.logs.push(m);
     },
     ...over,
   };
@@ -182,16 +178,21 @@ describe("apply：校准 + 确认 + 收敛", () => {
     expect(h.calls.sets).toEqual([1.1, 1.2]);
   });
 
-  it("校准失败不影响后续（记日志、不抛）", async () => {
+  it("引擎写入失败不阻塞后续改档", async () => {
+    let reject = true;
+    const sets: number[] = [];
     const h = harness({
-      setWebviewZoom: async () => {
-        throw new Error("引擎不在");
+      setWebviewZoom: async (level) => {
+        if (reject) throw new Error("引擎不在");
+        sets.push(level);
       },
     });
     await expect(h.c.apply(1.5)).resolves.toBeUndefined();
-    expect(h.calls.logs.some((l) => l.includes("校准失败") || l.includes("setZoom failed"))).toBe(
-      true,
-    );
+    expect(h.pendingTimers()).toBe(0);
+    reject = false;
+    await h.c.apply(1.6);
+    expect(sets).toEqual([1.6]);
+    expect(h.c.debugState().appliedZoom).toBe(1.6);
   });
 });
 
@@ -514,13 +515,6 @@ describe("滚轮余量与键盘调档", () => {
     h.c.wheel(-40, 0, 0); // +0.4 档
     expect(h.c.wheel(40, 0, 0)).toBe(false); // 反向：丢掉 +0.4，只攒 -0.4
     expect(h.calls.levels).toEqual([]);
-  });
-
-  it("滚轮事件计数进诊断文案（区分'事件没到页面'与'引擎没动'）", () => {
-    const h = harness();
-    h.c.wheel(-40, 0, 0);
-    h.c.wheel(40, 0, 0);
-    expect(h.c.debugState().wheelEvents).toBe(2);
   });
 
   it("step() / resetWheel() 丢掉滚轮余量（键盘调档没有半格）", () => {

@@ -9,8 +9,6 @@ export interface DocumentCompileSchedulerHooks {
   debounceMs?: number | (() => number);
   /** 首份需求到启动的等待上限（缺省 300ms）；在途时间消耗预算，合成时间不计入。 */
   maxWaitMs?: number | (() => number);
-  /** 诊断日志（页面的 `dbg.log`） */
-  log?: (message: string) => void;
 }
 
 export interface DocumentCompileSchedulerStats {
@@ -53,7 +51,6 @@ export function createDocumentCompileScheduler(
     typeof option === "function" ? option() : (option ?? fallback);
   let pendingSince: number | null = null;
   let dueAt = 0;
-  const log = hooks.log ?? (() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
   let inFlight = false;
   /** 待执行的那**一份**需求（Set 而不是数组：新需求并进来，不追加） */
@@ -84,7 +81,6 @@ export function createDocumentCompileScheduler(
     if (disposed) return;
     if (composing) {
       // 合成期间**不启动**：理由留着，`setComposing(false)` 时再排
-      log(`整页编译：合成中，攒下 ${[...pending].join("+")}`);
       return;
     }
     if (pending.size === 0) return;
@@ -111,7 +107,6 @@ export function createDocumentCompileScheduler(
 
   async function pump(): Promise<void> {
     if (disposed || inFlight || composing || pending.size === 0) return;
-    const reasons = [...pending];
     pending.clear();
     pendingSince = null;
     pendingImmediate = false;
@@ -122,13 +117,10 @@ export function createDocumentCompileScheduler(
     waiters = [];
     inFlight = true;
     runs += 1;
-    log(`整页编译：开始（理由 ${reasons.join("+")}）`);
     try {
       await hooks.run();
-    } catch (e) {
-      // 编译失败**不许**变成未处理的 rejection（那会在 WebView 里冒到 window.onerror，
-      // 状态栏就多一条"脚本错误"）：吞掉并记日志，状态由 `run` 自己往状态栏写。
-      log(`整页编译失败：${e instanceof Error ? e.message : String(e)}`);
+    } catch {
+      // run 负责向状态栏报告失败；调度器仍释放等待者并继续后续需求。
     } finally {
       // **必须复位**：不复位就永远卡在"在途"，后续请求全部石沉大海
       inFlight = false;

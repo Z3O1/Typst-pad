@@ -211,7 +211,7 @@ export async function flushStateSeed(c, state) {
 /**
  * 字节偏移 → UTF-16 位置（`doc` 用 TextEncoder 编成 UTF-8 再截断后解码计长度）。
  * 夹具里的区间是**字节**偏移（Rust 侧），而页面里的位置是 UTF-16 —— 中文/emoji 直接当位置用会整篇错位。
- * 与 `src/lib/core/block-offsets.ts` 同源，但验收脚本跑在 Node 侧、不 import `src/`，所以这里保留一份。
+ * 验收使用原生编码器独立换算，不依赖前端坐标索引实现。
  */
 export const byteToPos = (doc, bytes) =>
   new TextDecoder().decode(new TextEncoder().encode(doc).slice(0, bytes)).length;

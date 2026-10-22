@@ -308,8 +308,7 @@ function pageFixtures(): PageFixture[] {
 /**
  * 每个假命令被调了多少次（只给验收脚本看，`window.__browserDevCallCounts`）。
  *
- * 报告 T3 的两条断言在 DOM 上看不出来："合成期间**零次**新的后台块编译"、"连续 8 次编辑
- * 只落 **1~2 次** `compile_blocks`"—— 只能数调用次数。
+ * 验收据此检查合成暂停、编辑合并及各 IPC 的调用次数。
  */
 function countCall(command: string): void {
   if (typeof window === "undefined") return;
@@ -575,8 +574,6 @@ async function handleCommand(
       return [...FAKE_FONT_FAMILIES_DEFAULT];
     case "take_pending_files":
       return [];
-    case "get_debug_flag":
-      return false;
     // 自动更新：浏览器开发模式没有真实 updater（更没有 Rust 侧的签名校验与安装器）。
     // 返回 null = "没有可用更新"——让"启动静默检查 → 更新状态机"这条链路在验收里安静走通，
     // 而不是刷一屏未知命令。真实更新行为只能在桌面版验证（见 docs/development/testing.md）。

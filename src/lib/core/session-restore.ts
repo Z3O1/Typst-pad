@@ -50,7 +50,6 @@ export interface RestorePlan {
   editorWrap: boolean;
   /** 已收敛到档位（`clampZoom`）：脏数据/缺失都回落到 100% */
   uiZoom: number;
-  lastUpdateCheckAt: number | null;
   updateDismissedAt: number | null;
   /** 要恢复的内容；`null` = 这次不恢复内容（页面就不许动 doc / editorDoc / filePath / dirty） */
   content: RestoredContent | null;
@@ -95,7 +94,6 @@ export function planRestore(
     showPreview: saved.showPreview ?? viewMode === "source",
     editorWrap: saved.editorWrap ?? false,
     uiZoom: clampZoom(saved.uiZoom),
-    lastUpdateCheckAt: typeof saved.lastUpdateCheckAt === "number" ? saved.lastUpdateCheckAt : null,
     updateDismissedAt: typeof saved.updateDismissedAt === "number" ? saved.updateDismissedAt : null,
     content: planContent(saved, settings.restoreSession, opts.isSecondaryWindow),
   };

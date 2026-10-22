@@ -46,8 +46,6 @@ export interface NewWindowHooks {
   createWindow(label: string, title: string, onAsyncError: (detail: unknown) => void): void;
   /** 失败文案进状态栏 */
   setStatus(text: string): void;
-  /** 建窗口失败的调试日志（发布版没有 devtools，留一份可查的现场） */
-  logCreateFailure(detail: unknown): void;
   /** 生成 label 用的时间戳（注入以便单测确定化） */
   now(): number;
 }
@@ -64,7 +62,6 @@ export function createNewWindow(hooks: NewWindowHooks): NewWindow {
       hooks.createWindow(newWindowLabel(hooks.now()), NEW_WINDOW_TITLE, (detail) => {
         // 创建失败（label 撞车 / 系统拒绝）在发布版里是看不见的（没有 devtools），报到状态栏
         hooks.setStatus(`新建窗口失败：${newWindowFailureReason(detail)}`);
-        hooks.logCreateFailure(detail);
       });
     } catch (e) {
       hooks.setStatus(`新建窗口失败：${newWindowFailureReason(e)}`);

@@ -5,7 +5,7 @@
 // 所以单测里可以用假时钟 / 假宽度 / 假引擎把三条红线钉死。
 //
 // 三条红线（展开见 docs/development/architecture.md 的缩放说明）：
-// 1. **只观察、绝不改档**（0.8.0 用户明确的取舍）：复核量到的读数只用于调试日志与一句状态栏说明，
+// 1. **只观察、绝不改档**：复核读数只用于状态栏说明，
 //    绝不写回档位、绝不回改引擎。用户原话「就应该缩放只有我能改，软件别自己动了」。
 // 2. **沉降窗口**：从"我们让引擎改档"到复核结束之间，resize 不许重校 100% 基准 —— 引擎改档自己
 //    会引发一次 resize，而那时档位估计还是旧值，一校就把基准压低，"引擎接受了"会被读成"引擎没动"
@@ -28,7 +28,6 @@ import {
   zoomApplied,
   zoomFromWidths,
   zoomIn,
-  zoomLabel,
   zoomOut,
   zoomUnobservedNotice,
 } from "./zoom";
@@ -57,7 +56,6 @@ export interface ZoomControllerHooks {
   nextFrame(): Promise<void>;
   setTimer(fn: () => void, ms: number): number;
   clearTimer(id: number): void;
-  log(message: string): void;
 }
 
 export interface ZoomController {
@@ -85,7 +83,6 @@ export interface ZoomController {
     dprAt100: number;
     verifyInFlight: boolean;
     settlingUntil: number;
-    wheelEvents: number;
   };
 }
 
@@ -110,8 +107,6 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
   let applySeq = 0;
   let pending: { target: number; seq: number } | null = null;
   let applying: Promise<void> | null = null;
-  /** 本会话收到的带 Ctrl 的滚轮事件次数（只用于诊断文案） */
-  let wheelEvents = 0;
   /** 滚轮位移的未走完余量（见 zoom.ts 的 accumulateWheelSteps） */
   const wheelAcc = createWheelAccumulator();
 
@@ -163,13 +158,11 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
       markSettling();
       try {
         await hooks.setWebviewZoom(target);
-      } catch (e) {
-        hooks.log(`setZoom failed：${String(e)}`);
+      } catch {
         continue;
       }
       if (disposed || seq !== applySeq) continue;
       appliedZoom = target;
-      hooks.log(`set ${zoomLabel(target)}`);
       if (!calibrated) {
         // 首次启动无法独立读取 WebView 的站点缩放。以请求档位建立推定基准，
         // 不宣称首次请求已被引擎接受；后续请求可用宽度与 DPR 的变化交叉观察。
@@ -181,7 +174,6 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
         if (Number.isFinite(width) && width > 0) baseline100 = width * target;
         if (Number.isFinite(dpr) && dpr > 0) dprAt100 = dpr / target;
         calibrated = true;
-        hooks.log(`当前档位基准（推定）：${zoomLabel(target)}，布局宽度 ${width}px`);
       }
       scheduleConfirm(target, seq);
     }
@@ -221,7 +213,7 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
   }
 
   /**
-   * 改档之后**只观察、不改状态**（0.8.0 用户明确要求）。量到的读数只用于调试日志 + 一句状态栏
+   * 改档之后只观察、不改状态，读数仅用于状态栏
    * 说明；**绝不写档位、绝不回改引擎**。因此"引擎上限"这类机器上状态可能高于引擎实际给的档位
    * （死区回来了）——那是用户接受的代价，真要收也该由用户自己按 Ctrl+Shift+-。
    */
@@ -231,20 +223,17 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
     const mySeq = ++verifySeq;
     let observed: number | null = null;
     let observedDpr: number | null = null;
-    let measurements = 0;
     stepInFlight = true;
     markSettling();
     try {
       for (const wait of ZOOM_VERIFY_WAITS_MS) {
         if (wait > 0) await hooks.sleep(wait);
         if (mySeq !== verifySeq) return; // 用户又调档了：这次观察作废
-        measurements += 1;
         observed = await measureEngineZoom();
         observedDpr = dprZoomNow();
         if (zoomApplied(target, observed) || zoomApplied(target, observedDpr)) break;
       }
-    } catch (e) {
-      hooks.log(`观察缩放结果时出错：${String(e)}`);
+    } catch {
       return;
     } finally {
       if (mySeq === verifySeq) {
@@ -253,18 +242,9 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
       }
     }
     if (mySeq !== verifySeq) return;
-    const currentWidth = hooks.layoutWidth();
-    if (zoomApplied(target, observed) || zoomApplied(target, observedDpr)) {
-      hooks.log(`观察：引擎侧与请求一致（${zoomLabel(target)}）`);
-      return;
-    }
+    if (zoomApplied(target, observed) || zoomApplied(target, observedDpr)) return;
     // **没有观察到变化**：可能是引擎没接受，也可能是两条判据都读不出来（真机上出现过）。
     // 无论哪种，都只写一句说明，档位保持用户操作后的值。
-    hooks.log(
-      `观察：没看到引擎侧变化（请求 ${zoomLabel(target)}，实测 ${
-        observed === null ? "读不到" : observed.toFixed(3)
-      }，量了 ${measurements} 次；布局宽度 ${Math.round(baseline100)}→${Math.round(currentWidth)}）`,
-    );
     hooks.setStatus(zoomUnobservedNotice(target, observed));
   }
 
@@ -277,17 +257,11 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
         settlingUntil,
         verifyInFlight: stepInFlight || applying !== null,
       });
-      if (!allowed) {
-        hooks.log("resize（缩放沉降窗口内，跳过基准重校）");
-        return;
-      }
+      if (!allowed) return;
       rebaseline();
     },
 
     wheel(deltaY, deltaX, deltaMode) {
-      // 计数只用于**诊断**（写进"未生效"文案）："页面压根没收到 Ctrl+滚轮"与"收到了但引擎没动"
-      // 是完全不同的两个成因，前者说明事件在到达页面之前就被吃掉了。
-      wheelEvents += 1;
       const steps = accumulateWheelSteps(wheelAcc, deltaY, deltaX, deltaMode);
       if (steps === 0) return false;
       const level = hooks.getLevel();
@@ -328,7 +302,6 @@ export function createZoomController(hooks: ZoomControllerHooks): ZoomController
         dprAt100,
         verifyInFlight: stepInFlight,
         settlingUntil,
-        wheelEvents,
       };
     },
   };

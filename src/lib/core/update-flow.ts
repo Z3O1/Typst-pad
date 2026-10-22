@@ -52,7 +52,7 @@ export interface UpdateCheckPlan {
 
 /**
  * 检查结果 → 下一步。`manual` = 用户从菜单/状态栏点的（必须有明确反馈）；自动检查保持安静：
- * 没更新、失败都只在状态机里留痕 + 调试日志，绝不刷状态栏。
+ * 无更新或自动检查失败时不刷状态栏。
  */
 export function planUpdateCheck(
   outcome: CheckOutcome,

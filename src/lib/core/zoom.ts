@@ -195,7 +195,7 @@ export const ZOOM_VERIFY_WAITS_MS = [0, 250, 700] as const;
 /** 一次 setZoom 之后等一帧 + 这段余量再读布局宽度（引擎要重排完才量得准） */
 export const ZOOM_MEASURE_SETTLE_MS = 80;
 
-/** 复核没观察到缩放时，只给用户留可行动的简短状态；测量细节记在调试日志。 */
+/** 复核未观察到缩放时的状态提示，不回写用户档位。 */
 export function zoomUnobservedNotice(target: number, observed: number | null): string {
   const saw = observed === null || !Number.isFinite(observed) ? "未知" : zoomLabel(observed);
   return `缩放可能未生效（目标 ${zoomLabel(target)}，当前 ${saw}）`;

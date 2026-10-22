@@ -20,7 +20,6 @@
     FormulaPreview,
   } from "$lib/core/typst-engine";
   import { createSourceCoordinates } from "$lib/core/source-coordinates";
-  import { caretSourceContext } from "$lib/ui/document-caret";
   import {
     createSourceScrollSync,
     type SourceScrollAnchor,
@@ -141,8 +140,6 @@
     scriptErrorStatus,
   } from "$lib/core/script-errors";
   import { copyPlainText } from "$lib/core/clipboard";
-  import { mark, reportStartup } from "$lib/core/startup-timing";
-  import { dbg, setCliDebug } from "$lib/core/debug";
   import {
     naturalScale,
     paperShapeFromPages,
@@ -202,9 +199,6 @@
 
   /** 副窗口首屏编译落地后写在状态栏的一句说明（见 onMount 末尾） */
   const NEW_WINDOW_NOTICE = "新窗口：这里的修改不会记进「上次内容」";
-
-  // 启动打点：组件脚本求值时刻（JS chunk 加载后的首个可测点）
-  mark("page-module-eval");
 
   /** Editor 组件实例方法（bind:this 获取，右键菜单调用） */
   interface EditorHandle {
@@ -388,7 +382,6 @@
     nextFrame: () => new Promise((r) => requestAnimationFrame(() => r())),
     setTimer: (fn, ms) => setTimeout(fn, ms) as unknown as number,
     clearTimer: (id) => clearTimeout(id),
-    log: (msg) => dbg.log("zoom", msg),
   });
   // 展开范围生成临时 Typst 编译输入；原文档与光标交互保持各自状态。
   let documentSession = $state(0);
@@ -413,10 +406,6 @@
   let documentHasSelection = $state(false);
   let inputComposing = $state(false);
   let documentCursorPending = $state(true);
-  const caretSource = $derived.by(() => {
-    const { from, to } = documentCoordinates.lineRange(cursorLine);
-    return caretSourceContext(doc, cursorCol, from, to);
-  });
   let interactionSeq = 0;
   let caretSeq = 0;
   let selectionSeq = 0;
@@ -782,8 +771,6 @@
   // 待安装的更新句柄：持有 Rust 侧资源（rid），不进响应式（模板不渲染它），换版本时 close
   let updateHandle: AvailableUpdate | null = null;
   let showUpdateDialog = $state(false);
-  /** 上次检查更新的时间（持久化）：**只是记录，不参与判定**（诊断用，见 update-utils.ts 的注解） */
-  let lastUpdateCheckAt: number | null = null;
   /**
    * 用户点过「稍后」的时刻（持久化）：有值 = 自动检查不再弹窗。
    * 用户要求原话「不更新就再也别跳出来，直到点了检查更新」——判定与清标记见
@@ -797,7 +784,7 @@
 
   /**
    * 检查更新。manual = 用户点菜单：这类操作必须有明确反馈（"已是最新"也要说）；
-   * 自动检查（manual = false）保持安静——没更新、失败都只留调试日志，
+   * 自动检查（manual = false）保持安静，
    * 绝不在状态栏刷"检查更新失败"打扰正在写作的人。
    */
   async function checkUpdates(manual: boolean) {
@@ -811,10 +798,6 @@
     }
 
     const outcome = await checkForUpdate();
-    // 记一笔"上次检查时间"备查（自动 / 手动都记）：**它不再是节流门**，别拿它拦启动检查
-    lastUpdateCheckAt = Date.now();
-    schedulePersist();
-
     // 有可用新版本：释放上一个句柄，换成新的
     if (outcome.kind === "available") {
       await closeUpdate(updateHandle);
@@ -887,15 +870,14 @@
   /**
    * 关于弹窗里的「项目主页」：交给系统默认浏览器打开（opener 插件，权限 `opener:default`
    * 里的 `allow-open-url`；**加新的外部链接时别忘了它还在权限表里**）。
-   * 失败只写状态栏 + 调试日志（不弹错窗）：这只是一种"顺手点一下"的动作。
+   * 失败显示在状态栏，不另弹错误窗口。
    */
   async function openProjectPage() {
     try {
       await openUrl(PROJECT_URL);
       showAbout = false;
       statusText = "已在浏览器打开项目主页";
-    } catch (e) {
-      dbg.log("about", "打开项目主页失败", e);
+    } catch {
       statusText = `打开项目主页失败：${PROJECT_URL}`;
     }
   }
@@ -924,7 +906,6 @@
           restoreSession,
           autoCheckUpdates,
           tabSpaces,
-          lastUpdateCheckAt,
           updateDismissedAt,
           uiZoom,
           chineseFont,
@@ -1547,7 +1528,6 @@
     run: () => runCompile(),
     debounceMs: () => (viewMode === "write" ? 30 : 150),
     maxWaitMs: () => (viewMode === "write" ? 100 : 300),
-    log: (message) => dbg.log("compile-schedule", message),
   });
   // 浏览器验收的只读计数钩子（`?browserdev=1` 才挂；桌面版空操作）
   registerWriteTestHooks(() => writeScheduler.stats());
@@ -1702,7 +1682,6 @@
       const next = desiredPreviewPage(body.clientWidth, shape);
       if (!reflowChanged(next, previewPageRequest)) return;
       previewPageRequest = next;
-      dbg.log("preview-reflow", next ? `页宽 ${next.widthPt.toFixed(1)}pt` : "关闭（不重排）");
       void compileNow("preview-reflow");
     }, PREVIEW_REFLOW_DELAY_MS);
   }
@@ -1750,7 +1729,6 @@
   }
 
   async function runCompile() {
-    if (compileSeq === 0) mark("compile-request");
     const paperInput = naturalPaperInput;
     const needsNaturalPaper = paperShapeInput !== paperInput;
     if (needsNaturalPaper) {
@@ -1839,10 +1817,6 @@
           return false;
         },
       });
-    if (mySeq === 1) {
-      mark("first-compile-result");
-      reportStartup();
-    }
     // 文本、会话、字体和前缀在等待期间变化时，迟到的成功与失败均不能落地。
     if (!isCurrent() || deferred) return;
     if (writeScheduler.stats().composing) {
@@ -1940,31 +1914,19 @@
     }
   }
 
-  /** 脚本错误统一提示：状态栏给出可读原因 + 调试日志留完整堆栈 */
-  /**
-   * Chromium 自己的提示，不算应用的脚本错误：
-   * "ResizeObserver loop completed with undelivered notifications." 是引擎在"RO 回调里改了布局、
-   * 同一帧又要再触发一次回调"时发的警告，规范上允许、后果只是把这次通知推迟到下一帧。
-   * 我们的预览画布正好是"量到宽度 → 设宽度"这种模式，所以它在缩放/改分栏时会偶发出现。
-   * 报成「脚本错误」会让用户以为应用坏了（2026-09-14 实测被反馈），只写调试日志。
-   */
-  function reportScriptError(label: string, detail: unknown) {
+  /** 脚本错误显示在状态栏；浏览器的无害布局通知不当作应用错误。 */
+  function reportScriptError(detail: unknown) {
     const msg = scriptErrorMessage(detail);
-    if (isBenignScriptError(msg)) {
-      dbg.log("error", `${label}（引擎提示，忽略）`, detail);
-      return;
-    }
+    if (isBenignScriptError(msg)) return;
     statusText = scriptErrorStatus(msg);
-    dbg.log("error", label, detail);
-    console.error(`[script-error] ${label}`, detail);
   }
 
   function onWindowError(e: ErrorEvent) {
-    reportScriptError("window.onerror", e.error ?? e.message);
+    reportScriptError(e.error ?? e.message);
   }
 
   function onUnhandledRejection(e: PromiseRejectionEvent) {
-    reportScriptError("unhandledrejection", e.reason);
+    reportScriptError(e.reason);
   }
 
   /**
@@ -1972,7 +1934,7 @@
    * 起来不恢复上次内容、写存档只写设置（见 isSecondaryWindow 的说明）。
    *
    * 三条规则（label 唯一 + 前缀与 capabilities 的 `editor-*` 一致 + 失败报到状态栏）在
-   * `$lib/core/new-window`：这里只把 Tauri 的建窗口动作、状态栏与调试日志喂进去。
+   * `$lib/core/new-window`：这里只提供 Tauri 的建窗口动作与状态栏回调。
    *
    * **`new WebviewWindow()` 走的是 `plugin:webview|create_webview_window`**，需要在
    * capabilities/default.json 里显式写 `core:webview:allow-create-webview-window`（`core:default`
@@ -1999,7 +1961,6 @@
     setStatus: (text) => {
       statusText = text;
     },
-    logCreateFailure: (detail) => dbg.log("window", "new-window error", detail),
     now: () => Date.now(),
   });
 
@@ -2122,7 +2083,6 @@
   onMount(() => {
     // 浏览器 gate：非 Tauri 环境（提示页）不初始化应用逻辑——编译走 Tauri 进程内命令，浏览器不可用
     if (!isDesktopApp) return;
-    mark("mount-start");
     // 启动恢复：主题/前缀/模式/字体/缩放总是恢复，**上次未保存的内容**按设置决定（默认恢复，
     // 见设置弹窗"启动时恢复上次内容"）——这是"内容丢了"的最后一道安全网。
     // 五条规则（主题只认合法值、副窗口不恢复内容、空白内容不算上次内容、开关关掉只恢复偏好、
@@ -2135,7 +2095,6 @@
     editorWrap = plan.editorWrap;
     uiZoom = plan.uiZoom;
     zoomReady = true;
-    lastUpdateCheckAt = plan.lastUpdateCheckAt;
     updateDismissedAt = plan.updateDismissedAt;
     if (plan.content) {
       documentSession++;
@@ -2149,7 +2108,6 @@
       baseline = plan.content.dirty ? null : plan.content.text;
       statusText = "已恢复上次内容";
     }
-    mark("persist-restore");
     // 浏览器验收的只读标记：**存档已经落到 $state 上**（`?browserdev=1` 才写；见 write-test-hook）。
     // 子组件的 onMount 比这里先跑完，所以验收脚本必须等这个标记再动手（见那边的说明）。
     reportSessionRestored();
@@ -2181,7 +2139,7 @@
     window.addEventListener("keydown", handleKeydown);
     // 未捕获的脚本异常 / Promise 拒绝：桌面 WebView 里没有可见控制台，错误会静默丢失，
     // 用户只看到"应用坏了"（实测踩过：装饰重建抛异常 → 编辑区卡死，却没有任何提示）。
-    // 这里统一报到状态栏 + 调试日志，便于用户直接把原因念给我们。
+    // 统一显示在状态栏，避免操作失败而没有反馈。
     window.addEventListener("error", onWindowError);
     window.addEventListener("unhandledrejection", onUnhandledRejection);
     // 自定义右键菜单：编辑器/预览区替换原生菜单（菜单栏/状态栏拦截无效果，其余区域放行给浏览器原生）
@@ -2235,11 +2193,6 @@
         else unlisteners.push(un);
       });
     if (isTauri()) {
-      // CLI --debug 开关（异步，仅桌面构建生效）：invoke 返回后补开调试日志；
-      // 浏览器 dev 环境无此来源（且 dev 构建本身已默认开启），跳过
-      invoke<boolean>("get_debug_flag")
-        .then(setCliDebug)
-        .catch(() => {});
       // 关闭确认：只有正文与基线不同（有未保存修改）才拦下来弹三按钮弹窗（规则见
       // `core/window-events.ts` 的 `createCloseGuard`）
       keepUnlisten(getCurrentWindow().onCloseRequested((event) => closeGuard.handle(event)));
@@ -2270,7 +2223,6 @@
         void openFileClaim.claimStartup();
       });
     }
-    mark("mount-listeners-done");
 
     // 自动更新：启动后延迟一次静默检查（不阻塞首屏）。
     // **每次启动都查**，只受设置里的开关约束 —— 这里曾经还有一道"距上次检查满 6 小时才查"的节流，
@@ -2280,7 +2232,6 @@
     if (autoCheckUpdates && !isSecondaryWindow) {
       startupCheckTimer = setTimeout(() => checkUpdates(false), AUTO_CHECK_DELAY_MS);
     }
-    mark("mount-end");
 
     return () => {
       disposed = true;
@@ -2376,7 +2327,6 @@
         caret={viewMode === "write" ? documentCaret : null}
         caretVisible={documentInputFocused && !documentHasSelection}
         caretSession={documentSession}
-        caretLocation={{ line: cursorLine, column: cursorCol, ...caretSource }}
         caretReason={!documentGeometryId && previewError
           ? "unavailable"
           : currentInput() !== renderedInput || documentCursorPending

@@ -1,9 +1,7 @@
 // update-utils 单元测试：自动更新的纯逻辑（进度换算、错误文案、说明裁剪、"别再自动弹窗"判定）。
 // Tauri 侧的 check/downloadAndInstall 不在这里测（浏览器里没有真实 updater），
 // 但"进度怎么显示""错误怎么说人话""点过稍后之后还弹不弹"这些判断全在这里。
-//
-// 注意这里**没有**"多久才该检查一次"的用例：那道 6 小时节流已经删掉（启动时每次都查），
-// 见 update-utils.ts 的注解与 wysiwyg.mjs 第 34 组的回归网。
+
 import { describe, it, expect } from "vitest";
 import {
   AUTO_CHECK_DELAY_MS,
@@ -98,31 +96,24 @@ describe("formatProgress", () => {
 });
 
 describe("describeUpdateError", () => {
-  it("签名校验失败 → 解释 + 原始错误", () => {
-    const msg = describeUpdateError(new Error("Signature verification failed"));
-    expect(msg).toContain("签名校验失败");
-    expect(msg).toContain("Signature verification failed");
-  });
-
-  it("清单取不到 / 404 → 指向 latest.json 与草稿态", () => {
-    expect(describeUpdateError("Could not fetch a valid release JSON from the remote")).toContain(
-      "latest.json",
-    );
-    expect(describeUpdateError("HTTP 404")).toContain("latest.json");
-  });
-
-  it("网络类错误 → 提示检查网络/代理", () => {
-    expect(describeUpdateError("error sending request for url (...)")).toContain("网络");
-    expect(describeUpdateError("operation timed out")).toContain("网络");
-  });
-
-  it("目标平台缺失 → 说明本次发布没带该平台", () => {
-    expect(describeUpdateError("target not found: darwin-aarch64")).toContain("本平台");
-  });
-
-  it('未知错误原样透出；空错误给"未知错误"', () => {
-    expect(describeUpdateError("莫名其妙的东西")).toBe("莫名其妙的东西");
-    expect(describeUpdateError(null)).toBe("未知错误");
-    expect(describeUpdateError("   ")).toBe("未知错误");
+  it.each([
+    [new Error("Signature verification failed"), "更新包签名校验失败，请重新下载或手动安装。"],
+    [
+      "Could not fetch a valid release JSON from the remote",
+      "暂时无法获取更新，请稍后重试或手动下载安装包。",
+    ],
+    ["HTTP 404", "暂时无法获取更新，请稍后重试或手动下载安装包。"],
+    [
+      "error sending request for url https://internal/latest.json",
+      "连接更新服务器失败，请检查网络或代理后重试。",
+    ],
+    ["operation timed out", "连接更新服务器失败，请检查网络或代理后重试。"],
+    ["target not found: darwin-aarch64", "暂不支持本平台的自动更新，请手动下载安装包。"],
+    ["permission denied: /private/installer", "更新被系统权限拦截，请手动下载安装包。"],
+    ["unexpected backend failure /internal/path", "更新失败，请稍后重试或手动下载安装包。"],
+    [null, "更新失败，请稍后重试或手动下载安装包。"],
+    ["   ", "更新失败，请稍后重试或手动下载安装包。"],
+  ])("%s 只显示简短原因与建议", (error, expected) => {
+    expect(describeUpdateError(error)).toBe(expected);
   });
 });

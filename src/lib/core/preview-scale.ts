@@ -5,7 +5,7 @@
 //    按新宽度重新排版、字号不变 —— 画布正好铺满预览栏，永不出现横向滚动条，而且预览字号
 //    始终与编辑器一致（11pt 正文 ↔ 14px 编辑区）。代价（用户明确接受）：预览的换行/分页
 //    不再等于导出的 PDF。几何在这里算，注入由 Rust 侧完成（见 typst_world::PreviewPage）。
-// 2. **兜底（[`previewScale`]）**：重排不适用或没生效时等比缩放整页 —— 画布恒 ≤ 栏宽
+// 2. **等比缩放**：重排不适用或没生效时，由页面宿主的 max-width 约束整页 —— 画布恒 ≤ 栏宽
 //    （永不横向滚动），字号不超过编辑区（自然尺寸就停住，居中显示）。
 //
 // 为什么不是"一直铺满栏宽"（2026-09-30 的旧行为）：固定版心的页面放大后会超出栏宽，
@@ -49,37 +49,9 @@ export interface PreviewPage {
   marginPt: number;
 }
 
-/** 预览缩放输入：容器可用宽度与页面物理宽度 */
-export interface PreviewScaleInput {
-  /** 预览容器可用宽度（px），如 .preview-body 的 clientWidth */
-  containerWidth: number;
-  /** 页面物理宽度（pt），从页 SVG 的 viewBox 读取 */
-  pageWidthPt: number;
-}
-
 /** 自然字号系数（px/pt）：让 typst 默认正文（11pt）渲成编辑区字号（14px） */
 export function naturalScale(targetFontPx: number = EDITOR_FONT_PX): number {
   return targetFontPx / TYPST_DEFAULT_TEXT_PT;
-}
-
-/**
- * 兜底路径的缩放系数（px/pt）：`min(铺满系数, 自然系数)`。
- * - 铺满系数 = 栏宽/页宽 —— 画布不会比栏宽宽（**永不横向滚动**）；
- * - 自然系数 —— 字号不超过编辑区，页宽不够时宁可小一号也不横滚。
- * 容器/页宽非法（非正数）时返回 NaN，调用方跳过应用（保留 CSS 回退 width: 100%）。
- */
-export function previewScale(input: PreviewScaleInput): number {
-  const { containerWidth, pageWidthPt } = input;
-  if (!(containerWidth > 0) || !(pageWidthPt > 0)) return NaN;
-  return Math.min(containerWidth / pageWidthPt, naturalScale());
-}
-
-/** 兜底路径的画布显示宽度（px）：页宽 × 系数；测量失败返回 NaN */
-export function previewCanvasWidth(input: PreviewScaleInput): number {
-  const scale = previewScale(input);
-  if (Number.isNaN(scale)) return NaN;
-  // 取较小值而不是直接 `页宽 × (栏宽/页宽)`：后者的浮点尾巴能做出 1e-13 的“溢出”
-  return Math.min(input.containerWidth, input.pageWidthPt * scale);
 }
 
 /**
@@ -133,15 +105,6 @@ export function usesDefaultPageLayout(source: string, shape: PaperShape): boolea
     },
   });
   return !explicit;
-}
-
-/**
- * 重排生效时的画布宽度（px）：**恒 ≤ 容器宽**——"永不出现横向滚动条"的保证。
- * 页宽被下限夹住时不再 1:1 铺满（栏太窄，字号只能跟着小）；正常情况就是栏宽。
- */
-export function reflowCanvasWidth(containerWidth: number, pageWidthPt: number): number {
-  if (!(containerWidth > 0) || !(pageWidthPt > 0)) return NaN;
-  return Math.min(containerWidth, pageWidthPt * naturalScale());
 }
 
 /**

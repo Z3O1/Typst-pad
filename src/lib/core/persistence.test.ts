@@ -19,7 +19,6 @@ const fullState = (over: Partial<PersistedState> = {}): PersistedState => ({
   dirty: false,
   restoreSession: true,
   autoCheckUpdates: true,
-  lastUpdateCheckAt: null,
   updateDismissedAt: null,
   uiZoom: 1,
   chineseFont: "",
@@ -38,7 +37,7 @@ describe("persistence", () => {
   });
 
   it("saveState 后 loadState 能读回完整状态", () => {
-    saveState({
+    const state = fullState({
       theme: "dark",
       content: "= hello",
       filePath: "D:\\doc.typ",
@@ -51,33 +50,14 @@ describe("persistence", () => {
       dirty: true,
       restoreSession: false,
       autoCheckUpdates: false,
-      lastUpdateCheckAt: 1_700_000_000_000,
       updateDismissedAt: 1_700_000_100_000,
       uiZoom: 1.3,
       chineseFont: "SimSun",
       fontDirs: ["D:\\fonts"],
       tabSpaces: 6,
     });
-    expect(loadState()).toEqual({
-      theme: "dark",
-      content: "= hello",
-      filePath: "D:\\doc.typ",
-      fileTitle: "doc.typ",
-      prefixEnabled: true,
-      prefixCode: "#set text(size: 12pt)\n",
-      viewMode: "source",
-      showPreview: true,
-      editorWrap: true,
-      dirty: true,
-      restoreSession: false,
-      autoCheckUpdates: false,
-      lastUpdateCheckAt: 1_700_000_000_000,
-      updateDismissedAt: 1_700_000_100_000,
-      uiZoom: 1.3,
-      chineseFont: "SimSun",
-      fontDirs: ["D:\\fonts"],
-      tabSpaces: 6,
-    });
+    saveState(state);
+    expect(loadState()).toEqual(state);
   });
 
   it("损坏的 JSON 返回空对象（不抛错）", () => {
@@ -86,51 +66,13 @@ describe("persistence", () => {
   });
 
   it("clearState 后回到空对象", () => {
-    saveState({
-      theme: "light",
-      content: "x",
-      filePath: null,
-      fileTitle: null,
-      prefixEnabled: false,
-      prefixCode: "",
-      viewMode: "write",
-      showPreview: false,
-      editorWrap: false,
-      dirty: false,
-      restoreSession: true,
-      autoCheckUpdates: true,
-      lastUpdateCheckAt: null,
-      updateDismissedAt: null,
-      uiZoom: 1,
-      chineseFont: "",
-      fontDirs: [],
-      tabSpaces: 2,
-    });
+    saveState(fullState({ theme: "light", content: "x" }));
     clearState();
     expect(loadState()).toEqual({});
   });
 
   it("支持 theme 为 system 的偏好", () => {
-    saveState({
-      theme: "system",
-      content: "",
-      filePath: null,
-      fileTitle: null,
-      prefixEnabled: false,
-      prefixCode: "",
-      viewMode: "write",
-      showPreview: false,
-      editorWrap: false,
-      dirty: false,
-      restoreSession: true,
-      autoCheckUpdates: true,
-      lastUpdateCheckAt: null,
-      updateDismissedAt: null,
-      uiZoom: 1,
-      chineseFont: "",
-      fontDirs: [],
-      tabSpaces: 2,
-    });
+    saveState(fullState());
     expect(loadState().theme).toBe("system");
   });
 
@@ -244,7 +186,6 @@ describe("persistence", () => {
     expect(state.content).toBe("旧内容");
     // 旧存档没有自动更新字段：默认开启（启动时会检查一次，不再有"上次检查时间"这道门）
     expect(state.autoCheckUpdates).toBe(true);
-    expect(state.lastUpdateCheckAt).toBeNull();
     // "点过稍后 = 别再自动弹窗"也是新字段：旧存档读出来是 null（= 照常弹窗）
     expect(state.updateDismissedAt).toBeNull();
     // 界面缩放也是新增字段：旧存档读出来是默认 100%
@@ -283,11 +224,6 @@ describe("persistence", () => {
     const state = loadState();
     expect(state.chineseFont).toBe("");
     expect(state.fontDirs).toEqual([]);
-  });
-
-  it("lastUpdateCheckAt 损坏（字符串/NaN 之类）时不写进状态（它现在只是记录，别再被当成判定依据）", () => {
-    localStorage.setItem("typst-pad:state", JSON.stringify({ lastUpdateCheckAt: "刚刚" }));
-    expect(loadState().lastUpdateCheckAt).toBeNull();
   });
 
   it("updateDismissedAt 损坏时不写进状态（否则一个坏值会让更新弹窗永远不再出现）", () => {

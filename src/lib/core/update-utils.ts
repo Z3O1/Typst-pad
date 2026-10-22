@@ -4,22 +4,11 @@
 /**
  * 启动后延迟多久做首次自动检查。
  * 不放在 mount 里立刻做：首次编译、恢复上次内容、字体加载都在抢启动那几秒，
- * 更新检查要走网络，晚一点做对启动耗时没有任何影响（见 startup-timing.ts）。
+ * 更新检查延后到首屏之后，不与恢复和首次编译竞争。
  */
 export const AUTO_CHECK_DELAY_MS = 4000;
 
-// 关于自动检查更新"要不要节流 / 要不要弹窗"这条路（2026-09-14，三轮，别走回头路）：
-//
-// 1) 最早有一道 `AUTO_CHECK_MIN_INTERVAL_MS`（6 小时）+ `isCheckDue(lastCheckAt, now)`：
-//    「同一台机器两次自动检查至少隔 6 小时」。用户报「自动更新没法用」，复现出来就是它——
-//    那次启动的检查被上一条时间戳（安装完 0.7.6 时记下的）拦掉了，于是**打开应用永远不会自己
-//    发现新版本**，只有手动点「检查更新」才查得到（用户原话：「打开的时候没有自动更新，但是
-//    检查的时候能检查到」）。更坑的是**手动检查也会刷新那个时间戳**，越手动查越不会自动查。
-//    → 这道"按时间无条件静默"的节流已删除，启动时每次都查。
-// 2) 中途按"点稍后 → 静默 6 小时"实现过一版，被用户否掉：
-//    **「算了，不更新就再也别跳出来，直到点了检查更新」**。
-//
-// 现在的规则（最终版）：
+// 自动检查与弹窗规则：
 //   * 启动时**每次都做自动检查**（只受设置里「启动时自动检查更新」开关约束）——网络请求照发，
 //     所以新版本一来状态栏那个「可更新到 vX」入口就会出现，不会让你彻底蒙在鼓里；
 //   * 自动检查**不再自己弹窗**，前提是用户点过更新弹窗里的「稍后」（= `updateDismissedAt` 有值）；
@@ -27,7 +16,6 @@ export const AUTO_CHECK_DELAY_MS = 4000;
 //     这就是用户说的"直到点了检查更新"，之后自动弹窗恢复正常；
 //   * 点状态栏的更新入口、点「下载并安装」同样算显式操作，也会清掉标记。
 //   实现见 +page.svelte 的 checkUpdates / dismissUpdatePrompt / openUpdateDialogFromNotice。
-//   **不要再往启动路径上加任何"上次检查时间"式的无条件节流。**
 
 /**
  * 用户点过「稍后」之后的状态栏提示（说明"以后不会再自动弹，但可以手动查"）。
@@ -106,9 +94,7 @@ export function formatProgress(progress: DownloadProgress): string {
 }
 
 /**
- * 更新相关报错 → 用户能看懂的一句话。
- * 原文照抄进日志，但状态栏/弹窗只给可行动的解释：这些错误几乎都发生在
- * "网络不通""清单/资产还没发出来""签名对不上"三类里，直接甩英文原文用户没法处理。
+ * 更新报错只展示简短原因与处理建议，不向用户输出内部路径或发布排障信息。
  */
 export function describeUpdateError(error: unknown): string {
   const raw =
@@ -119,28 +105,21 @@ export function describeUpdateError(error: unknown): string {
         : error === undefined || error === null
           ? ""
           : String(error);
-  const message = raw.trim();
-  const lower = message.toLowerCase();
+  const lower = raw.trim().toLowerCase();
 
   if (lower.includes("signature")) {
-    return `更新包签名校验失败（可能是下载不完整或来源被篡改），请稍后重试或到 GitHub Releases 手动下载。原始错误：${message}`;
+    return "更新包签名校验失败，请重新下载或手动安装。";
   }
   // 注意顺序：「target not found」必须排在通用 not found 之前，否则会被当成"清单取不到"
   if (lower.includes("target not found") || lower.includes("targetnotfound")) {
-    return `这次发布的安装包里没有本平台的更新包（仅发布了部分平台）。原始错误：${message}`;
+    return "暂不支持本平台的自动更新，请手动下载安装包。";
   }
   if (
     lower.includes("could not fetch a valid release json") ||
     lower.includes("404") ||
     lower.includes("not found")
   ) {
-    // 这条错误我们实际踩过两次：插件对**非 2xx** 只记日志、当成"没有 release"，最后统一报成
-    // "Could not fetch a valid release JSON from the remote"，所以字面上完全看不出是 404。
-    // 三个已知原因按可能性排序。2026-09-14 之前排在第一位的是"仓库是私有的"（当时确实是私有，
-    // 匿名请求一律 404）；那一天仓库已转公开（`gh api repos/Z3O1/Typst-pad --jq .private` → false），
-    // 所以现在主因变成"清单还没发出来"，私有只作为"你把它改回私有 / fork 到私有仓库"的兜底提示。
-    // 排查时先看仓库可见性，再确认 Release 是不是 Publish 过了。
-    return `没有取到更新清单（latest.json）。常见原因：① 该版本还没发布、Release 还是草稿（草稿资产客户端拿不到，必须 Publish）；② 网络不通；③ 仓库是私有的——客户端的更新检查不带任何 GitHub 凭据，匿名请求私有仓库一律 404。原始错误：${message}`;
+    return "暂时无法获取更新，请稍后重试或手动下载安装包。";
   }
   if (
     lower.includes("dns") ||
@@ -150,14 +129,14 @@ export function describeUpdateError(error: unknown): string {
     lower.includes("network") ||
     lower.includes("error sending request")
   ) {
-    return `连接更新服务器失败（检查网络或代理设置）。原始错误：${message}`;
+    return "连接更新服务器失败，请检查网络或代理后重试。";
   }
   if (
     lower.includes("permission") ||
     lower.includes("not allowed") ||
     lower.includes("forbidden")
   ) {
-    return `没有执行更新的权限（安装程序可能被系统策略拦下），可到 GitHub Releases 手动下载安装包。原始错误：${message}`;
+    return "更新被系统权限拦截，请手动下载安装包。";
   }
-  return message === "" ? "未知错误" : message;
+  return "更新失败，请稍后重试或手动下载安装包。";
 }

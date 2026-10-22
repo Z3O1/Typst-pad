@@ -28,7 +28,6 @@
     caretVisible = false,
     caretSession = 0,
     caretReason = "pending",
-    caretLocation = { line: 1, column: 1, before: "", after: "" },
     composing = false,
     selection = [],
     formulaPreview = null,
@@ -52,7 +51,6 @@
     caretVisible?: boolean;
     caretSession?: number;
     caretReason?: CaretFallbackReason;
-    caretLocation?: { line: number; column: number; before: string; after: string };
     composing?: boolean;
     selection?: DocumentSelectionQuad[];
     formulaPreview?: FormulaPreview | null;
@@ -73,16 +71,7 @@
   let canvasEl: HTMLElement;
   let caretStyle = $state("");
   let caretPresentation = $state<CaretPresentation | null>(null);
-  let feedbackStyle = $state("");
   const caretFeedback = createDocumentCaretFeedback();
-  const feedbackMessages = {
-    pending: "正在定位/排版",
-    unmapped: "此处无排版输出",
-    unavailable: "排版暂不可用",
-    offscreen: "插入点在视区外",
-    composing: "输入法编辑中",
-    exact: "",
-  };
   let windowFocused = $state(true);
   let selectionPath = $state("");
   let formulaStyle = $state("");
@@ -306,20 +295,6 @@
       const position = presentation.anchor;
       onCaretPosition?.(position);
       caretStyle = `left:${position.left - root.left}px;top:${position.top - root.top}px;height:${position.height}px;transform:rotate(${position.rotation}deg)`;
-      // 标签是输入反馈，不占文档版面；靠边翻转/平移，不撑开预览滚动区。
-      const width = Math.min(360, Math.max(0, viewport.width - 8));
-      const left = Math.max(
-        viewport.left + 4,
-        Math.min(position.left + 8, viewport.left + viewport.width - width - 4),
-      );
-      const top =
-        position.top + position.height + 60 < viewport.top + viewport.height
-          ? position.top + position.height + 4
-          : Math.max(viewport.top + 4, position.top - 56);
-      feedbackStyle =
-        viewport.height >= 60
-          ? `left:${left - root.left}px;top:${top - root.top}px;width:${width}px`
-          : "";
     });
   }
   $effect(() => {
@@ -571,18 +546,6 @@
             style={caretStyle}
             aria-hidden="true"
           ></div>
-          {#if caretPresentation.kind !== "exact" && feedbackStyle}
-            <div class="document-caret-feedback" style={feedbackStyle} role="status">
-              <div>
-                {feedbackMessages[caretPresentation.kind]} · {caretLocation.line}:{caretLocation.column}
-              </div>
-              <code
-                ><span>{caretLocation.before}</span><span class="source-insertion">│</span><span
-                  >{caretLocation.after}</span
-                ></code
-              >
-            </div>
-          {/if}
         {/if}
       {/key}
     </div>
@@ -683,30 +646,6 @@
   .document-pane .preview-body {
     user-select: none;
     cursor: text;
-  }
-  .document-caret-feedback {
-    position: absolute;
-    z-index: 16;
-    padding: 4px 6px;
-    border: 1px solid var(--accent, #4daafc);
-    border-radius: 3px;
-    background: var(--panel-bg);
-    color: var(--panel-fg);
-    font-size: 12px;
-    line-height: 16px;
-    pointer-events: none;
-    overflow: hidden;
-    white-space: nowrap;
-  }
-  .document-caret-feedback code {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: pre;
-  }
-  .source-insertion {
-    color: var(--accent, #4daafc);
-    font-weight: bold;
   }
   .document-caret {
     position: absolute;

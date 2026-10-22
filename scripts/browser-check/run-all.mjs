@@ -38,7 +38,7 @@ const SUITES = [
   ["empty-formula.mjs", 39],
   ["document-transaction.mjs", 6],
   ["document-performance.mjs", 6],
-  ["computed-style.mjs", 18],
+  ["computed-style.mjs", 19],
   ["preview-reflow.mjs", 28],
   ["zoom-stability.mjs", 38],
   ["source-workflows.mjs", 59],

@@ -3,7 +3,6 @@ import {
   caretScrollDelta,
   projectDocumentCaret,
   createDocumentCaretFeedback,
-  caretSourceContext,
   type CaretFallbackReason,
 } from "./document-caret";
 
@@ -114,19 +113,6 @@ describe("统一编辑光标反馈", () => {
       expect(
         createDocumentCaretFeedback().resolve({ ...input, viewport: { ...input.viewport, width } }),
       ).toBeNull();
-  });
-
-  it("源码上下文保留真实插入点、空行和 Unicode；长行两侧分别截断", () => {
-    expect(caretSourceContext("中文😀abc", 5)).toEqual({ before: "中文😀", after: "abc" });
-    expect(caretSourceContext("", 1)).toEqual({ before: "", after: "" });
-    expect(caretSourceContext("first\n中文😀abc\nlast", 5, 6, 13)).toEqual({
-      before: "中文😀",
-      after: "abc",
-    });
-    expect(caretSourceContext("😀".repeat(50), 51)).toEqual({
-      before: "…" + "😀".repeat(20),
-      after: "😀".repeat(20) + "…",
-    });
   });
 });
 

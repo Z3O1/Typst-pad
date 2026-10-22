@@ -42,12 +42,6 @@ export interface PersistedState {
    */
   autoCheckUpdates: boolean;
   /**
-   * 上次检查更新的时间戳（ms）：**只是一条记录，不参与任何判定**。
-   * 它曾经用来做跨启动节流（6 小时才自动查一次），2026-09-14 用户报「自动更新没法用」就是被它拦的
-   * ——现在是"每次启动都查"，留这个字段只为了出问题时能看出上次检查发生在什么时候（见 update-utils.ts）。
-   */
-  lastUpdateCheckAt: number | null;
-  /**
    * 用户点过更新弹窗里的「稍后」的时刻（ms）：**非 null = 以后别再自动弹更新窗**
    * （用户要求原话「不更新就再也别跳出来，直到点了检查更新」）。
    * 自动检查照常做（状态栏仍会出现「可更新到 vX」入口），但不再弹窗、也不改状态文字；
@@ -94,9 +88,7 @@ export function loadState(): Partial<PersistedState> {
     // 恢复会话默认开
     if (state.dirty === undefined) state.dirty = false;
     if (state.restoreSession === undefined) state.restoreSession = true;
-    // 自动更新（0.7.2 后的存档才有）：默认开；没检查过时时间戳为 null（→ 启动即检查一次）
     if (state.autoCheckUpdates === undefined) state.autoCheckUpdates = true;
-    if (typeof state.lastUpdateCheckAt !== "number") state.lastUpdateCheckAt = null;
     // "点过稍后 = 别再自动弹更新窗"（0.7.7 之后的存档才有）：缺失 → null = 照常弹窗
     if (typeof state.updateDismissedAt !== "number") state.updateDismissedAt = null;
     // 界面缩放（旧存档没有）：默认 100%；只认数字，越界值交给调用方收敛（读档方用 zoom.clampZoom）
