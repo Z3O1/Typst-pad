@@ -126,7 +126,7 @@ pub(super) fn projected(doc: &str, range: Option<(usize, usize)>) -> String {
     };
     let text = &doc[from..to];
     let raw = if expanded_block(text) {
-        format!("```\n{}\n```", raw_blank_placeholders(text))
+        format!("```typ\n\n{}\n```", raw_blank_placeholders(text))
     } else {
         format!("` {text} `")
     };
@@ -184,7 +184,7 @@ fn preview_start(doc: &str, from: usize, to: usize) -> usize {
         } else {
             text.len()
         }
-        + if expanded_block(text) { 4 } else { 2 }
+        + if expanded_block(text) { 8 } else { 2 }
         + expansion_style()["tail"].as_str().unwrap().len()
         + expansion_style()[if expanded_block(text) {
             "previewBlockHead"
@@ -207,7 +207,7 @@ pub(super) fn visible_start(doc: &str, from: usize, to: usize) -> usize {
         .as_str()
         .unwrap()
         .len()
-        + if expanded_block(text) { 4 } else { 2 }
+        + if expanded_block(text) { 8 } else { 2 }
 }
 
 #[test]
@@ -528,11 +528,11 @@ fn expanded_raw_blank_lines_have_real_source_glyphs_and_click_targets() {
                 // 对照无 tab 的普通 raw：隔离空行本身没有字形的根因。
                 text.replace('\t', " ")
             };
-            let source = styled_raw_kind(&format!("```\n{raw_text}\n```"), formula);
+            let source = styled_raw_kind(&format!("```typ\n\n{raw_text}\n```"), formula);
             let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
             let document = typst::compile::<PagedDocument>(&world).output.unwrap();
             let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
-            let start = source.find("```\n").unwrap() + 4;
+            let start = source.find("```typ\n\n").unwrap() + 8;
             let mut line_start = start;
             let mut previous_row = None;
             for line in raw_text.split('\n') {
@@ -604,7 +604,7 @@ fn styled_source_lines_wrap_at_spaces_with_original_caret_locations() {
     let text = format!("#block[\n{line}\n]");
     let source = format!(
         "#set page(width: 240pt, height: 260pt, margin: 24pt)\n{}",
-        styled_raw(&format!("```\n{text}\n```"))
+        styled_raw(&format!("```typ\n\n{text}\n```"))
     );
     let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
     let document = typst::compile::<PagedDocument>(&world).output.unwrap();
@@ -667,7 +667,7 @@ fn expansion_editor_style_has_readable_type_spacing_and_cross_page_carets() {
         );
         let source = format!(
             "#set page(width: 240pt, height: 180pt, margin: 24pt)\n#set text(size: 40pt)\n{}",
-            styled_raw_kind(&format!("```\n{text}\n```"), formula)
+            styled_raw_kind(&format!("```typ\n\n{text}\n```"), formula)
         );
         let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
         let document = typst::compile::<PagedDocument>(&world).output.unwrap();
@@ -714,10 +714,11 @@ fn expansion_editor_style_has_readable_type_spacing_and_cross_page_carets() {
 
 #[test]
 fn expansion_code_palette_keeps_exact_first_line_token_spans() {
-    // typ 高亮和 regex show 会丢切片偏移；统一色板必须保留首行每个 token 的真实来源。
+    // typ 高亮在 Typst 0.15.1 会把 raw 首行 token 的 span_offset 重置为 0；
+    // 围栏后的隐藏占位空行让真实首行成为第二行，逐 token 范围必须保持精确。
     let text = "#let office = 123 + 456; // first 中文\n\"second\" == value != other -> end";
     for formula in [false, true] {
-        let source = styled_raw_kind(&format!("```\n{text}\n```"), formula);
+        let source = styled_raw_kind(&format!("```typ\n\n{text}\n```"), formula);
         let start = source.find(text).unwrap();
         let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
         let document = typst::compile::<PagedDocument>(&world).output.unwrap();
@@ -953,6 +954,41 @@ fn dump_page_fixtures_expansion() {
         println!(
             "EXPANSIONFIXTURE:{}",
             serde_json::json!({ "name": name, "doc": src, "original": original, "range": range, "pages": pages, "visibleText": visible_text, "formulaPreview": formula_preview, "formulaHits": formula_hits, "formulaGlyphHits": formula_glyph_hits, "whitespaceHits": heading_whitespace_hits, "carets": carets, "cursorQueries": queries, "selectionQuads": selection(id, 0, src.len()) })
+        );
+    }
+}
+
+// typ 高亮 + 隐藏占位行的块展开：每个源码字符都必须保留真实 caret，且高亮确实生效。
+#[test]
+fn highlighted_block_expansion_keeps_every_source_char_caret() {
+    for text in [
+        "#let office = 123 + 456; // first 中文\n\"second\" == value != other -> end",
+        "#block[\n多行脚本正文。\n第二行中文与 😀。\n]",
+        "#let helper = {\n let value = 1\n\n // 代码空白 中文🙂\n \t\n\t \n\n value\n\n};",
+    ] {
+        let body = raw_blank_placeholders(text);
+        let source = styled_raw(&format!("```typ\n\n{body}\n```"));
+        let raw_start = source.find("```typ\n\n").unwrap() + 8;
+        let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
+        let document = typst::compile::<PagedDocument>(&world).output.unwrap();
+        let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+        let id = store(items, source.len(), stats.foreign_ink);
+        for (offset, ch) in body.char_indices() {
+            if ch == '\n' {
+                continue;
+            }
+            assert!(
+                locate(id, raw_start + offset).is_some(),
+                "高亮块展开丢字符 caret：{ch:?} at body+{offset}"
+            );
+        }
+        // 高亮必须真实生效：页面 SVG 中出现调色板颜色，而不是单色文本。
+        let svg = svg_for_page(&document.pages()[0]).to_lowercase();
+        assert!(
+            ["#5f6368", "#cf222e", "#0550ae", "#1a7f37", "#6639ba", "#0b7285", "#6b21a8"]
+                .iter()
+                .any(|color| svg.contains(color)),
+            "typ 高亮未生效，块展开退化为单色：{text:?}"
         );
     }
 }

@@ -10,7 +10,7 @@ describe("Typst 原地源码展开", () => {
       const from = source.indexOf(title),
         to = from + title.length;
       const p = projectDocumentRanges(source, [{ from, to }], { styled: true, preview: true });
-      expect(p.source).toContain(`\`\`\`\n${title}\n\`\`\`${expansionStyle.tail}\n\n`);
+      expect(p.source).toContain(`\`\`\`typ\n\n${title}\n\`\`\`${expansionStyle.tail}\n\n`);
       expect(p.source).toContain(
         `${expansionStyle.outputHead}\n${title}${expansionStyle.outputTail}\n\n`,
       );
@@ -47,8 +47,50 @@ describe("Typst 原地源码展开", () => {
     expect(expansionStyle.head).toContain(
       'std.highlight(fill: std.rgb("#f2f0ea"), radius: 2pt, extent: 1pt',
     );
-    expect(expansionStyle.head).toContain("lang: none, theme: none");
+    expect(expansionStyle.head).toContain("lang: none, theme: bytes(");
     expect(expansionStyle.head).not.toContain("regex(");
+  });
+  it("块展开高亮调色板在卡片底色与深色滤镜下都保持可读对比度", () => {
+    // 深色模式对整页套 invert(1) contrast(0.71)；调色板须在两种光路上都过 4.5。
+    const themeMatch = expansionStyle.head.match(/theme: bytes\("((?:[^"\\]|\\.)*)"\)/);
+    expect(themeMatch).not.toBeNull();
+    const theme = JSON.parse(`"${themeMatch![1]}"`) as string;
+    const card = "#f6f5f1";
+    const toSrgb = (hex: string) => {
+      const n = parseInt(hex.slice(1), 16);
+      return [n >> 16, (n >> 8) & 255, n & 255].map((v) => v / 255);
+    };
+    const toLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+    const luminance = (rgb: number[]) =>
+      0.2126 * toLinear(rgb[0]) + 0.7152 * toLinear(rgb[1]) + 0.0722 * toLinear(rgb[2]);
+    const night = (rgb: number[]) =>
+      rgb.map((c) => Math.min(1, Math.max(0, (0.5 - c) * 0.71 + 0.5)));
+    const contrast = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    const bgDay = luminance(toSrgb(card));
+    const bgNight = luminance(night(toSrgb(card)));
+    const colors = [
+      ...theme.matchAll(
+        /<key>scope<\/key><string>[^<]*<\/string><key>settings<\/key><dict><key>foreground<\/key><string>(#[0-9A-Fa-f]{6})<\/string>/g,
+      ),
+    ].map((m) => m[1]);
+    expect(colors.length).toBeGreaterThan(5);
+    for (const color of colors) {
+      const day = contrast(luminance(toSrgb(color)), bgDay);
+      const nightContrast = contrast(luminance(night(toSrgb(color))), bgNight);
+      expect(day, `${color} 浅色对比度`).toBeGreaterThanOrEqual(4.5);
+      expect(nightContrast, `${color} 深色对比度`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+  it("块展开用 typ 高亮与隐藏占位行,行内展开无法占位保持无高亮", () => {
+    expect(expansionStyle.head).toContain("it.lines.slice(1)");
+    const source = "#let x = {\n 1\n}\n#x";
+    const to = source.indexOf("\n#x");
+    const styled = projectDocumentRanges(source, [{ from: 0, to }], { styled: true });
+    expect(styled.source).toContain("```typ\n\n" + source.slice(0, to) + "\n```");
+    // 非样式投影没有 show 规则隐藏占位行,不能携带语言标签或占位行。
+    const plain = projectDocumentRanges(source, [{ from: 0, to }]);
+    expect(plain.source).toContain("```\n" + source.slice(0, to) + "\n```");
+    expect(plain.source).not.toContain("```typ");
     for (const text of [
       '$a_12 + "中文🙂"$\n',
       '#let value = {\n  "中文🙂" // comment\n  12 + 34\n};',
@@ -169,7 +211,7 @@ describe("Typst 原地源码展开", () => {
       styled: true,
       preview: true,
     });
-    expect(p.source).toContain("```\n" + source + "\n```");
+    expect(p.source).toContain("```typ\n\n" + source + "\n```");
     expect(p.source).toContain(expansionStyle.previewBlockHead);
     const preview = p.source.lastIndexOf("missing");
     const before = p.source.slice(0, preview);
@@ -246,7 +288,7 @@ describe("Typst 原地源码展开", () => {
     const to = source.indexOf("\n#x");
     const projection = projectDocumentRanges(source, [{ from: 0, to }], { styled: true });
     expect(
-      projection.source.startsWith(source.slice(0, to) + "\n" + expansionStyle.head + "```\n"),
+      projection.source.startsWith(source.slice(0, to) + "\n" + expansionStyle.head + "```typ\n\n"),
     ).toBe(true);
     expect(
       projection.source.slice(projection.sourceToRendered(0), projection.sourceToRendered(to)),
@@ -262,8 +304,8 @@ describe("Typst 原地源码展开", () => {
     expect(projectDocumentRanges(source, [], { styled: true }).source).toBe(source);
     const projection = projectDocumentRanges(source, [{ from, to }], { styled: true });
     expect(projection.source.endsWith(expansionStyle.tail + "\n`USER-RAW`")).toBe(true);
-    expect(expansionStyle.head).toContain("it.lines.map(line => line.body)");
-    expect(expansionStyle.head).toContain("#set std.raw(lang: none, theme: none)");
+    expect(expansionStyle.head).toContain("lines.map(line => line.body)");
+    expect(expansionStyle.head).toContain("#set std.raw(lang: none, theme: bytes(");
   });
   it("展开完整表达式；中英文、emoji 与后文的位置可往返映射", () => {
     const doc = "前文🙂 $x^2 + y$，后文中文";

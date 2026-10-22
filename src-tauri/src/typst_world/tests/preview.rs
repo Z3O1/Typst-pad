@@ -336,7 +336,7 @@ fn dump_page_fixtures_preview_paper() {
     let diagnostics =
         compile(broken.clone(), None, &fonts_dir(), &FontConfig::default()).diagnostics;
     assert!(!diagnostics.is_empty());
-    let recovered = format!("````\n{broken}\n````");
+    let recovered = format!("````typ\n\n{broken}\n````");
     let default_page = compile("正文".into(), None, &fonts_dir(), &FontConfig::default());
     let a4_width = view_box_width(&default_page.pages[0]).unwrap();
     let width = 400.0 * 11.0 / 14.0;
@@ -346,13 +346,13 @@ fn dump_page_fixtures_preview_paper() {
         ("original", source.clone()),
         (
             "retained",
-            styled_raw_kind(&format!("```\n{source}\n```"), false),
+            styled_raw_kind(&format!("```typ\n\n{source}\n```"), false),
         ),
         ("recovered", styled_raw_kind(&recovered, false)),
         ("small-original", small.clone()),
         (
             "small-retained",
-            styled_raw_kind(&format!("```\n{small}\n```"), false),
+            styled_raw_kind(&format!("```typ\n\n{small}\n```"), false),
         ),
     ] {
         let mut previews = vec![
