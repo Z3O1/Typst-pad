@@ -218,17 +218,16 @@ async function sourceStyleMatches(value, { panel }) {
     const host=document.querySelectorAll('#preview-host>.document-page')[first.page-1];
     const svg=host.shadowRoot.querySelector('svg'),view=svg.viewBox.baseVal;
     const scale=host.getBoundingClientRect().width/view.width;
-    const fill="#ffffff";
-    const ink="#1f1f1f";
+    const fill=${panel}?"#f6f5f1":"#f2f0ea";
     const page=host.getBoundingClientRect();
     const x=p=>page.left+(p.xPt-view.x)*scale;
     const y=p=>page.top+(p.yPt-view.y)*scale;
-    // 页底本身也是白色 path；必须找到包含真实源码停靠点的局部底色，不能测整页。
+    // 页底本身也是白色 path；必须找到包含真实源码停靠点的局部卡片底色，不能测整页。
     const background=[...svg.querySelectorAll('path[fill="'+fill+'"]')].find(el=>{
       const r=el.getBoundingClientRect(),cx=x(first)+.1,cy=y(first)+first.heightPt*scale/2;
       return r.width<page.width-.1&&cx>=r.left&&cx<r.right&&cy>=r.top&&cy<r.bottom;
     });
-    const glyph=svg.querySelector('use[fill="'+ink+'"]');
+    const glyph=svg.querySelector('use');
     if(!background||!glyph||first.page!==last.page) return false;
     const filter=getComputedStyle(host).filter;
     if(filter!=='none'&&filter!=='invert(1) contrast(0.71)') return false;
@@ -238,32 +237,43 @@ async function sourceStyleMatches(value, { panel }) {
         .map(c=>c<=.04045?c/12.92:((c+.055)/1.055)**2.4);
       return channels[0]*.2126+channels[1]*.7152+channels[2]*.0722;
     };
-    const a=luminance(getComputedStyle(glyph).fill),b=luminance(getComputedStyle(background).fill);
-    const contrast=(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+    const rect=background.getBoundingClientRect();
+    const bgLum=luminance(getComputedStyle(background).fill);
+    const contrastOf=(color)=>(Math.max(luminance(color),bgLum)+.05)/(Math.min(luminance(color),bgLum)+.05);
+    // 高亮卡片含有多种 token 颜色（标题等可能整卡单色）：按字形中心收集底色盒内全部字形，逐颜色核对对比度。
+    const glyphEls=[...svg.querySelectorAll('use')].filter(el=>{
+      const r=el.getBoundingClientRect();
+      const cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2;
+      return r.width>0&&cx>=rect.left&&cx<=rect.right&&cy>=rect.top&&cy<=rect.bottom;
+    });
+    if(!glyphEls.length) return false;
+    const fills=[...new Set(glyphEls.map(el=>getComputedStyle(el).fill))];
+    const contrast=Math.min(...fills.map(contrastOf));
     const readable=first.heightPt>=10&&first.heightPt<=14&&first.heightPt*scale>=12;
     // 页面当前夹具的缩放应把 11pt 源码显示成与编辑器相同的 14px。
     const sourceFontPx=parseFloat(getComputedStyle(document.querySelector('.cm-editor')).fontSize);
     const matchingSize=Math.abs(11*scale-sourceFontPx)<.1;
-    const square=!/[Cc]/.test(background.getAttribute('d'));
-    const outline=background.parentElement.querySelector('path[stroke]');
-    const borderless=!outline||getComputedStyle(outline).stroke==='none';
-    const rect=background.getBoundingClientRect();
+    // 代码卡片：圆角底色（path 含曲线段）；块级另有 0.45pt 细描边。
+    const rounded=/[CcQq]/.test(background.getAttribute('d'));
+    const stroked=[...svg.querySelectorAll('path[stroke]')].some(el=>(el.getAttribute('stroke')??'').toLowerCase()==='#e3e0d8');
     if(!${panel}) {
-      // 行内 raw 围栏两侧的原有空格仍有真实字形；底色只含这一字符，不额外加 extent。
-      const valid=readable&&matchingSize&&contrast>=4.5&&square&&borderless
-        &&x(first)-rect.left>=0&&x(first)-rect.left<7*scale;
-      return {valid,filter,readable,matchingSize,sourceFontPx,renderedFontPx:11*scale,contrast,square,borderless,left:(x(first)-rect.left)/scale};
+      // 隐藏首行不能增加可见空白；pill 仍保持 1pt extent，且必须真实呈现 token 颜色。
+      const highlighted=fills.some(color=>color!=='rgb(31, 31, 31)');
+      const valid=readable&&matchingSize&&contrast>=4.5&&rounded&&highlighted
+        &&Math.abs(x(first)-rect.left-scale)<.1*scale;
+      return {valid,filter,readable,matchingSize,highlighted,colors:fills.length,sourceFontPx,renderedFontPx:11*scale,contrast,rounded,left:(x(first)-rect.left)/scale};
     }
-    const glyphs=[...svg.querySelectorAll('use[fill="'+ink+'"]')].map(el=>el.getBoundingClientRect());
+    const glyphs=glyphEls.map(el=>el.getBoundingClientRect());
     const inkTop=Math.min(...glyphs.map(r=>r.top)),inkBottom=Math.max(...glyphs.map(r=>r.bottom));
-    // 源码贴齐版心；仅 2pt 纵向留白，不再画胶囊、圆角、描边或大内距。
+    // 代码卡片：6pt 横向、上 4pt / 下 6pt 内距（墨迹会探出行盒，下内距补视觉平衡），0.45pt 细描边、3pt 圆角，源码不再贴齐版心。
     // Typst baseline 布局不等于 caret 的字体 em 盒，不用背景盒裁剪光标。
-    const valid=readable&&matchingSize&&contrast>=4.5&&square&&borderless
+    // typ 高亮必须保持逐 token 颜色对比度达标（token 数量随内容而变，单色标题也合法）。
+    const valid=readable&&matchingSize&&contrast>=4.5&&rounded&&stroked
       &&Math.abs(rect.width/scale-312)<1
-      &&Math.abs(x(first)-rect.left)<.1*scale&&rect.right-x(last)>=0
-      &&inkTop-rect.top>=0&&inkTop-rect.top<=2.1*scale
-      &&rect.bottom-inkBottom>=-1*scale&&rect.bottom-inkBottom<=2.1*scale;
-    return {valid,filter,readable,matchingSize,sourceFontPx,renderedFontPx:11*scale,contrast,square,borderless,width:rect.width/scale,left:(x(first)-rect.left)/scale,right:(rect.right-x(last))/scale,top:(inkTop-rect.top)/scale,bottom:(rect.bottom-inkBottom)/scale,caretBottom:(rect.bottom-y(last)-last.heightPt*scale)/scale};
+      &&Math.abs(x(first)-rect.left-6*scale)<1*scale&&rect.right-x(last)>=0
+      &&inkTop-rect.top>=2.5*scale&&inkTop-rect.top<=5.5*scale
+      &&rect.bottom-inkBottom>=3*scale&&rect.bottom-inkBottom<=7*scale;
+    return {valid,filter,readable,matchingSize,sourceFontPx,renderedFontPx:11*scale,contrast,rounded,stroked,colors:fills.length,width:rect.width/scale,left:(x(first)-rect.left)/scale,right:(rect.right-x(last))/scale,top:(inkTop-rect.top)/scale,bottom:(rect.bottom-inkBottom)/scale,caretBottom:(rect.bottom-y(last)-last.heightPt*scale)/scale};
   })()`);
   styleMeasurements.push({ name: value.name, panel, result });
   writeFileSync(
@@ -424,14 +434,14 @@ check(
   "公式预览为源码下方黑色浮动气泡，SVG 来自真实 Typst 帧",
   (await bubbleMatches(math)) &&
     (await c.evaluate(
-      "document.querySelector('.formula-preview').getBoundingClientRect().top > document.querySelector('.document-caret').getBoundingClientRect().bottom && getComputedStyle(document.querySelector('.formula-preview')).backgroundColor === 'rgb(17, 17, 17)'",
+      "document.querySelector('.formula-preview').getBoundingClientRect().top > document.querySelector('.document-caret').getBoundingClientRect().bottom && getComputedStyle(document.querySelector('.formula-preview')).backgroundColor === 'rgb(20, 22, 27)'",
     )),
 );
 check(
   "向上箭头真实可见且指向源码（外层不裁剪）",
   (await arrowVisible("up")) &&
     (await c.evaluate(
-      `(() => {const el=document.querySelector('.formula-preview');const cs=getComputedStyle(el,'::before');return cs.borderBottomWidth==='8px'&&cs.borderBottomColor==='rgb(17, 17, 17)'&&cs.borderBottomStyle==='solid'})()`,
+      `(() => {const el=document.querySelector('.formula-preview');const cs=getComputedStyle(el,'::before');return cs.borderBottomWidth==='8px'&&cs.borderBottomColor==='rgb(20, 22, 27)'&&cs.borderBottomStyle==='solid'})()`,
     )),
 );
 check("向上箭头连同卡片都落在预览可见区内", await cardWithinViewport());

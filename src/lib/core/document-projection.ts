@@ -65,7 +65,7 @@ export function projectDocumentRanges(
     const block =
       heading ||
       text.includes("\n") ||
-      longest >= 2 ||
+      longest > 0 ||
       (options.preview && /^\$\s[\s\S]*\s\$$/.test(text));
     // raw 空行没有带来源的字形；仅在展示副本的缩进之后加入真实 Typst 占位。
     const blankLines = block
@@ -97,8 +97,8 @@ export function projectDocumentRanges(
     const isDeclaration = /^#(?:let|set|show|import)\b/.test(text);
     const declaration = preserveDeclaration !== false && isDeclaration ? `${text}\n` : "";
     // Typst 0.15.1 的 typ 高亮把 raw 第一行各 token 的 span_offset 重置为 0。
-    // regex show 的 slice_textual 同样不保留切片起点的 span_offset，不能用它绕过高亮问题。
-    // 展开以源码停靠点为准：使用无语言 raw 和统一代码色板，不切分文本或猜字形坐标。
+    // 块 raw 与单反引号行内 raw 都加隐藏首行，样式用 it.lines.slice(1) 丢弃；
+    // 单反引号即使含换行也保持 inline，不用会变成块的三反引号围栏或丢失来源的 raw()。
     // 局部规则消费 raw 的原始行 body，防止用户 show raw 隐藏/替换源码；不重造字形来源。
     const formula = syntax.kind === "math" && syntax.from === from && syntax.to === to;
     const style = options.styled
@@ -107,9 +107,22 @@ export function projectDocumentRanges(
           tail: expansionStyle.tail,
         }
       : { head: "", tail: "" };
-    const head = declaration + style.head + (block ? `${fence}\n` : `${fence} `);
+    // 占位行只被样式 show 规则隐藏，非样式投影不能携带它。
+    const head =
+      declaration +
+      style.head +
+      (options.styled
+        ? block
+          ? `${fence}typ\n\n`
+          : `${fence}\n`
+        : block
+          ? `${fence}\n`
+          : `${fence} `);
     // 单行标题也必须是 block raw；段落边界隔离后文，不能把它黏入标题或隐藏副本。
-    const tail = (block ? `\n${fence}` : ` ${fence}`) + style.tail + (heading ? "\n\n" : "");
+    const tail =
+      (block ? `\n${fence}` : options.styled ? fence : ` ${fence}`) +
+      style.tail +
+      (heading ? "\n\n" : "");
     const start = from + offset;
     const textStart = start + head.length;
     const textEnd = textStart + rawText.length;
