@@ -37,7 +37,6 @@
 //!   * `svg_fingerprint.rs` 默认 SVG 输入指纹与有界帧摘要
 //!   * `svg_cache.rs`   增量传输清单与有界 SVG 缓存
 //!   * `cache.rs`       小容量 LRU / 帧摘要 FIFO 的数量与权重边界
-//!   * `math.rs`        公式级渲染：贴边透明单页 SVG + 基线探针 + 墨迹撑画布
 //!   * `pdf.rs`         PDF 导出
 //!   * `diagnostics.rs` 诊断转换（span → 1-based 行列）
 //!   * `paths.rs`       项目根放宽 + 相对导入预检
@@ -52,10 +51,7 @@ use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::layout::{Abs, Frame, FrameItem, Point};
 use typst::syntax::{FileId, LinkedNode, RootedPath, Source, SyntaxKind, VirtualPath, VirtualRoot};
-use typst::text::{
-    BottomEdge, BottomEdgeMetric, Font, FontBook, FontFamily, FontList, TextEdgeBounds, TextElem,
-    TopEdge, TopEdgeMetric,
-};
+use typst::text::{Font, FontBook, FontFamily, FontList, TextElem};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
 use typst_layout::{Page, PagedDocument};
@@ -68,7 +64,6 @@ mod dependency_cache;
 mod diagnostics;
 mod fonts;
 mod formula_preview;
-mod math;
 mod paths;
 mod pdf;
 mod source_cache;
@@ -80,7 +75,6 @@ pub use compile::*;
 pub(crate) use diagnostics::*;
 pub use fonts::*;
 pub use formula_preview::FormulaPreview;
-pub use math::*;
 pub use paths::*;
 pub use pdf::*;
 pub use world::*;

@@ -6,15 +6,12 @@
 //   - `compile_commands` —— 编译/导出/点击定位 + **编译通道**（一把互斥锁 + spawn_blocking）
 //   - `font_commands`    —— 默认族 / 打包字体字节 / 可用族列举
 //   - `paths`            —— 路径安全校验（唯一闸门）
-//   - `packages` / `typst_world` / `block_geometry` —— 包系统、编译世界、块级几何
+//   - `packages` / `typst_world` / `block_geometry` —— 包系统、编译世界、整页帧几何
 use tauri::Manager;
 
 mod packages;
 mod typst_world;
 
-// 源块 ↔ 版面区域的几何映射 + 写作模式的块级渲染（见 docs/development/writing-rendering.md）。
-// 阶段 0 的探针函数只有测试在用，故整体允许"未使用"告警。
-#[allow(dead_code)]
 mod block_geometry;
 mod document_geometry;
 
@@ -121,9 +118,6 @@ pub fn run() {
             compile_commands::document_hit_test,
             compile_commands::document_cursor,
             compile_commands::document_selection,
-            compile_commands::compile_blocks,
-            compile_commands::block_hit_test,
-            compile_commands::compile_math,
             compile_commands::export_pdf,
             font_commands::list_font_families,
             font_commands::default_font_families,

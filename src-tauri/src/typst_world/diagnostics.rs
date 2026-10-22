@@ -1,10 +1,9 @@
 // 诊断转换：typst `SourceDiagnostic` → 前端 `Diagnostic`（span → 1-based 行列）。
 use super::*;
 
-/// 切片的行首注入与预览的中途字节注入共用诊断转换；后者还原同行后缀的列号。
+/// 预览页设置的字节注入映射，诊断还原到原文行列。
 #[derive(Clone, Copy, Default)]
 pub(crate) struct InjectedLines<'a> {
-    at_line: u32,
     insertion: Option<(&'a typst::syntax::Lines<String>, OffsetMapping)>,
 }
 
@@ -14,25 +13,7 @@ impl<'a> InjectedLines<'a> {
         mapping: OffsetMapping,
     ) -> Self {
         Self {
-            at_line: 0,
             insertion: Some((lines, mapping)),
-        }
-    }
-
-    /// 注入在编译源最前面（`compile_blocks` 的切片路径：它的注入行永远在开头）
-    pub(crate) fn front() -> Self {
-        Self {
-            at_line: 1,
-            insertion: None,
-        }
-    }
-
-    /// 编译源行号（1-based）→ 注入前的源行号
-    pub(crate) fn to_source_line(self, line: u32) -> u32 {
-        if self.at_line > 0 && line > self.at_line {
-            line - 1
-        } else {
-            line
         }
     }
 }
@@ -96,13 +77,6 @@ pub(crate) fn to_diagnostic(
         .map(|(_, p)| p.trim_end_matches(')').to_string())
         .or_else(|| world.path_of(id));
 
-    // 主源诊断的行号减回注入的行（include 文件的行号是它自己的，不动）
-    let lines = if id == world.main() {
-        injected
-    } else {
-        InjectedLines::default()
-    };
-
     // 「越界」这类只有引擎黑话的诊断补上可操作信息（见 escape_hint）
     let message = match escape_hint(&diag.message, world.project_root()) {
         Some(hint) => format!("{} {hint}", diag.message),
@@ -112,9 +86,9 @@ pub(crate) fn to_diagnostic(
     Some(Diagnostic {
         message,
         severity: severity.to_string(),
-        line: lines.to_source_line(start.0 as u32 + 1),
+        line: start.0 as u32 + 1,
         column: start.1 as u32 + 1,
-        end_line: Some(lines.to_source_line(end.0 as u32 + 1)),
+        end_line: Some(end.0 as u32 + 1),
         end_column: Some(end.1 as u32 + 1),
         path,
     })
