@@ -37,6 +37,7 @@
   import { observeEditorComposition } from "./editor-composition";
   import type { SourceCursorChange } from "$lib/core/document-source-expansion";
   import { dollarAutoPair } from "./dollar-auto-pair";
+  import { createPaste } from "./paste";
   import { invalidatePristineMathScaffold } from "./dollar-pair-state";
   import { INDENT_UNIT } from "./auto-indent";
   import { oneDark } from "@codemirror/theme-one-dark";
@@ -83,6 +84,14 @@
     wrap?: boolean;
     /** Tab 一档插几个空格（0 = 制表符）；来自设置，改动后不重建键位、下一次 Tab 生效 */
     tabSpaces?: number;
+    /**
+     * **粘贴进来的图片**：父组件负责写盘（`core/file-ops.ts` 的 `savePastedImage`），返回写进
+     * 源码的**相对路径**；编辑器负责在粘贴位置插入 `#image("…")`。抛错 = 这次粘贴失败。
+     * 没给这个 prop（单测、嵌入场景）就不挂粘贴扩展，行为与从前一致。
+     */
+    onPasteImage?: (file: File) => Promise<string>;
+    onPasteError?: (message: string) => void;
+    onPasteSaved?: (relativePath: string) => void;
   }
 
   let {
@@ -105,6 +114,9 @@
     onSourceScroll,
     wrap = false,
     tabSpaces = defaultSettings().tabSpaces,
+    onPasteImage,
+    onPasteError,
+    onPasteSaved,
   }: Props = $props();
 
   let host: HTMLElement;
@@ -178,6 +190,17 @@
       typst_lezer(),
       typstHeadingHighlight, // 压掉默认高亮给标题加的下划线（见 typst-highlight.ts 的根因注释）
       dollarAutoPair, // `$` 配对、选区包裹和闭合符跳过；支持多光标，粘贴/IME 不介入
+      // 粘贴：图片落盘后插 `#image("…")`、Ctrl/Cmd+Shift+V 强制纯文本、只有 HTML 时抽文本。
+      // 没给 `onPasteImage` 时不挂这条扩展（见 paste.ts 的说明）。
+      ...(onPasteImage
+        ? [
+            createPaste({
+              onPasteImage,
+              onPasteError: (message) => onPasteError?.(message),
+              onPasteSaved: (relative) => onPasteSaved?.(relative),
+            }),
+          ]
+        : []),
       themeCompartment.of(theme === "dark" ? oneDark : []),
       diagnosticsCompartment.of(diagnosticsExtensions()),
       wrapCompartment.of(wrap ? EditorView.lineWrapping : []),
