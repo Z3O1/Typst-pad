@@ -56,12 +56,31 @@ pub fn write_file(path: String, content: String) -> Result<(), String> {
     fs::write(final_path, content).map_err(|e| e.to_string())
 }
 
-/// 写入二进制文件（导出 PDF 用）：bytes 由前端以 JSON 数字数组传来
+/// 写入二进制文件（**只新建，不覆盖既有文件**）：bytes 由前端以 JSON 数字数组传来。
+///
+/// 贴入图片的文件名是自动生成的（`image-<时间戳>-<序号>`），若目标已存在还静默覆盖，就会把
+/// 用户原有的同名资源改掉、也让文档里已有的 `#image` 指向新内容。所以这里用 `create_new`，
+/// 冲突时返回可识别的错误，由前端换名重试。
 #[tauri::command]
 pub fn write_binary(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    use std::io::Write;
     let final_path = validate_write_path(&path)?;
-    fs::write(final_path, bytes).map_err(|e| e.to_string())
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&final_path)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                format!("{WRITE_BINARY_EXISTS}: {}", final_path.display())
+            }
+            _ => e.to_string(),
+        })?;
+    file.write_all(&bytes).map_err(|e| e.to_string())
 }
+
+/// `write_binary` 目标已存在时的错误前缀（前端据它换名重试，见 `core/file-ops.ts`）。
+/// 改字面前先搜前端引用。
+pub const WRITE_BINARY_EXISTS: &str = "目标文件已存在";
 
 /// 取走待打开的 .typ 文件队列（仅一次，供前端就绪后逐个加载）
 #[tauri::command]
@@ -85,4 +104,42 @@ pub fn queue_open(app: &tauri::AppHandle, path: String) {
         }
     }
     let _ = app.emit("open-file", path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// 临时目录下的唯一路径（测试并行跑也不撞名）
+    fn temp_target(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "typst-pad-write-binary-{}-{tag}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("建临时目录");
+        dir.join("image.png")
+    }
+
+    #[test]
+    fn write_binary_creates_file_with_exact_bytes() {
+        let target = temp_target("create");
+        let _ = fs::remove_file(&target);
+        write_binary(target.to_string_lossy().into(), vec![1, 2, 3]).expect("写入新文件");
+        assert_eq!(fs::read(&target).expect("读回"), vec![1, 2, 3]);
+        let _ = fs::remove_file(&target);
+    }
+
+    #[test]
+    fn write_binary_refuses_to_overwrite_existing_file() {
+        let target = temp_target("exists");
+        fs::write(&target, b"old").expect("预置旧内容");
+        let err = write_binary(target.to_string_lossy().into(), vec![9]).expect_err("不覆盖");
+        assert!(
+            err.starts_with(WRITE_BINARY_EXISTS),
+            "错误信息应可被前端识别：{err}"
+        );
+        assert_eq!(fs::read(&target).expect("旧内容仍在"), b"old");
+        let _ = fs::remove_file(&target);
+    }
 }

@@ -66,6 +66,7 @@
     startFileWatch,
     stopFileWatch,
     pickFontDir,
+    savePastedImage,
     isTauri,
   } from "$lib/core/file-ops";
   import { invoke } from "@tauri-apps/api/core";
@@ -527,6 +528,14 @@
     void openUrl(href).catch((e) => {
       statusText = truncateStatus(`打开链接失败：${e}`);
     });
+  }
+
+  /**
+   * **粘贴进来的图片**：写进**文档所在目录**（`image-<时间戳>-<序号>.<ext>`），把相对路径交给
+   * 编辑器插 `#image("…")`。未保存的文档直接拒绕并提示（不猜目录、不隐式写盘，见 files-and-security）。
+   */
+  async function handlePasteImage(file: File): Promise<string> {
+    return await savePastedImage(filePath, file);
   }
 
   async function handlePageClick(req: { page: number; xPt: number; yPt: number }): Promise<void> {
@@ -2313,6 +2322,13 @@
             wrap={viewMode === "source" ? editorWrap : false}
             {tabSpaces}
             onComposition={handleComposition}
+            onPasteImage={handlePasteImage}
+            onPasteSaved={(relative) => {
+              statusText = truncateStatus(`已保存图片 ${relative}`);
+            }}
+            onPasteError={(message) => {
+              statusText = truncateStatus(`粘贴图片失败：${message}`);
+            }}
             onScrollIntent={() => scrollSync.intent()}
             onSourceScroll={() =>
               scrollSync.observe("source", () => editorRef?.sourceScrollAnchor() ?? null)}

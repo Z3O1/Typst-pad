@@ -219,6 +219,16 @@ const fileChangeStub = {
   },
 };
 
+/** 只用于粘贴图片验收：扣住一次 `write_binary` 的响应，并在内存里记下字节数。 */
+const binaryStub = {
+  hold: deferredFileResponse(),
+  failure: { message: null as string | null },
+  /** 每次调用（含撞名重试）：(绝对路径, 字节长度)。验收据此断言图片真写到了文档旁边。 */
+  writes: [] as { path: string; bytes: number }[],
+  /** 已存在的路径（与 Rust 侧 `create_new` 对齐） */
+  paths: new Set<string>(),
+};
+
 /** 已提示过的命令（编译每次输入都会触发，只提示一次，避免刷屏） */
 const notified = new Set<string>();
 
@@ -558,10 +568,23 @@ async function handleCommand(
       notify(command);
       return { ok: false, error: "浏览器开发模式不提供 PDF 导出（请在桌面版验证）" };
     }
-    case "write_binary":
+    case "write_binary": {
+      notify(command);
+      const path = String(a.path ?? "");
+      const bytes = Array.isArray(a.bytes) ? a.bytes.length : 0;
+      binaryStub.writes.push({ path, bytes });
+      await binaryStub.hold.wait();
+      const failure = binaryStub.failure.message;
+      binaryStub.failure.message = null;
+      if (failure) throw new Error(failure);
+      // 与 Rust 侧一致：只新建不覆盖（前端撞名时换序号重试）
+      if (binaryStub.paths.has(path)) throw new Error(`目标文件已存在: ${path}`);
+      binaryStub.paths.add(path);
+      return null;
+    }
     case "list_dir_typ":
       notify(command);
-      return command === "list_dir_typ" ? [] : null;
+      return [];
     // 字体：设置里「正文字体」下拉的选项来源 + Rust 内置默认列表
     case "list_font_families": {
       notify(command);
@@ -864,6 +887,10 @@ export function installBrowserDevStub(): void {
   (window as unknown as Record<string, unknown>).__browserDevStub = {
     fakeZoom: !zoomSimEnabled && !interceptor,
   };
+  // 粘贴图片验收：假 `write_binary` 的写入记录、扣住/失败开关（与文件变更桩同一种形状）。
+  host.__browserDevBinaryWrites = binaryStub.writes;
+  host.__browserDevBinaryHold = binaryStub.hold;
+  host.__browserDevBinaryFailure = binaryStub.failure;
 
   installFakeClipboard();
 
