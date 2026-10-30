@@ -335,6 +335,68 @@ describe("editorKeymap 行为（jsdom 按键模拟）", () => {
     sourceView.destroy();
   });
 
+  it("写作模式：列表结构化退格（空项 / 体首 / 行首 / 嵌套反缩进），源码模式不接管", () => {
+    // ① 空项退格：整条抹掉，留一个空段落（不是孤立的 `-`）
+    let view = makeWriteView("- 甲\n- ");
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("- 甲\n");
+    view.destroy();
+
+    // ② 体首退格（正文非空）：去掉标记，正文退成普通段落
+    view = makeWriteView("- 甲");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("甲");
+    expect(view.state.selection.main.head).toBe(0);
+    view.destroy();
+
+    // ③ 行首（标记之前）退格：并进上一行
+    view = makeWriteView("甲\n- 乙");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("甲乙");
+    expect(view.state.selection.main.head).toBe(1);
+    view.destroy();
+
+    // ④ 嵌套项退格：先反缩进一档（默认 tabSpaces=2，与 Tab 对称）
+    view = makeWriteView("  - 甲");
+    view.dispatch({ selection: { anchor: 4 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("- 甲");
+    view.destroy();
+
+    // ⑤ 正文里退格仍是普通删字（不吞按键、不动结构）
+    view = makeWriteView("- 甲乙");
+    view.dispatch({ selection: { anchor: 4 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("- 甲");
+    view.destroy();
+
+    // ⑥ 代码块里的同形文本不是列表项：体首退格只删一个空格，不把标记当结构去掉
+    view = makeWriteView("```typ\n- 甲\n```");
+    view.dispatch({ selection: { anchor: 9 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("```typ\n-甲\n```");
+    view.destroy();
+
+    // ⑦ 源码模式不接管：保留原来把两行合并成一个字面 `- 甲- 乙` 的默认行为
+    view = makeView("甲\n- 乙");
+    view.dispatch({ selection: { anchor: 2 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("甲- 乙");
+    view.destroy();
+
+    // ⑧ 空 `$` 配对整对删优先于列表结构判定，且作为一次编辑可撤销
+    view = makeWriteView("- $$");
+    view.dispatch({ selection: { anchor: 3 } });
+    press(view, { key: "Backspace", code: "Backspace", keyCode: 8 });
+    expect(view.state.doc.toString()).toBe("- ");
+    press(view, { key: "z", code: "KeyZ", keyCode: 90, ctrlKey: true });
+    expect(view.state.doc.toString()).toBe("- $$");
+    view.destroy();
+  });
+
   it("Ctrl+Tab 缩进与回车继承是同一套宽度：缩出来的 4 格，回车后照抄", () => {
     const view = makeView("#foo\n");
     view.dispatch({ selection: { anchor: 0 } });

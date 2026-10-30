@@ -22,6 +22,7 @@ import {
   pristineMathScaffold,
 } from "./dollar-pair-state";
 import { indentForNewLine, isBlankLine } from "./auto-indent";
+import { planListBackspace } from "./list-structure";
 import { enterMathRanges, mathContinuationPrefix, mathEnterTree } from "./math-enter";
 import type { EnterMathRange } from "./math-enter";
 import { scanNonMarkupRegions } from "../core/typst-lex";
@@ -436,6 +437,39 @@ function listAwareEnter(
   };
 }
 
+/**
+ * 写作模式的**结构化退格**：判定全在 `list-structure.ts` 的纯函数里，这里只做三件事 ——
+ * ① 先让「空 `$` 配对整对删」照旧优先（既有行为，两种模式都生效）；② 只对单个空光标、且不在
+ * 代码 / raw / 注释 / 公式里生效；③ 执行一次 `dispatch`。任何不满足的情形都返回 false 交回默认
+ * 退格 —— 输入链路绝不吞按键。
+ */
+function listAwareBackspace(isWriteMode: () => boolean, unit: () => string): Command {
+  return (view) => {
+    // 空配对整对删优先：`$$` / 空脚手架里的退格语义不变（见 deleteEmptyDollarPair）
+    if (deleteEmptyDollarPair(view)) return true;
+    if (!isWriteMode()) return false;
+    const { state } = view;
+    if (state.readOnly || view.composing || view.compositionStarted) return false;
+    if (state.selection.ranges.length !== 1 || !state.selection.main.empty) return false;
+    const doc = state.doc.toString();
+    const opaque = scanNonMarkupRegions(doc);
+    const tree = ensureSyntaxTree(state, state.doc.length, 20);
+    const math = enterMathRanges(mathEnterTree(doc, tree ?? undefined));
+    const pos = state.selection.main.head;
+    // 代码 / raw / 注释 / 公式里的 `- x` 不是列表项，别在那里动结构
+    if (touchesOpaqueContext(pos, pos, doc, opaque, math)) return false;
+    const plan = planListBackspace(doc, pos, unit());
+    if (!plan) return false;
+    view.dispatch({
+      changes: { from: plan.from, to: plan.to, insert: plan.insert },
+      selection: { anchor: plan.caret },
+      scrollIntoView: true,
+      userEvent: "delete",
+    });
+    return true;
+  };
+}
+
 function continueMathPrefix(view: EditorView): boolean {
   const { state } = view;
   if (state.readOnly || view.composing || view.compositionStarted) return false;
@@ -545,7 +579,11 @@ export function createEditorKeymap(opts: EditorKeymapOptions = {}) {
           run: listAwareEnter(isWriteMode, insertTypstListContinuation, true),
           preventDefault: true,
         },
-        { key: "Backspace", run: deleteEmptyDollarPair, preventDefault: true }, // 空配对整对删
+        {
+          key: "Backspace",
+          run: listAwareBackspace(isWriteMode, () => tabUnit(tabSpaces())),
+          preventDefault: true,
+        }, // 空配对整对删 + 列表结构化退格
         // Ctrl+Shift+D / Cmd+Shift+D = VS Code 的 Ctrl+D：空选区先选中当前词，
         // 再次按下追加下一个相同文本的选区/多光标；已选文本同样追加下一处。
         // 复用 @codemirror/search 的 selectNextOccurrence，不自己实现匹配算法。

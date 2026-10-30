@@ -25,6 +25,7 @@ const expectedSuites = [
   ["preview-reflow.mjs", 28],
   ["zoom-stability.mjs", 38],
   ["source-workflows.mjs", 59],
+  ["writing-lists.mjs", 12],
   ["dollar-completion.mjs", 32],
   ["document-completion.mjs", 21],
   ["editor-shortcuts.mjs", 22],
@@ -59,7 +60,7 @@ describe("browser-check/run-all headless launch", () => {
 });
 
 describe("browser-check/run-all registration", () => {
-  it("runs all sixteen suites with their exact assertion counts", () => {
+  it("runs all seventeen suites with their exact assertion counts", () => {
     expect(suites).toEqual(expectedSuites);
     for (const [file] of suites) {
       expect(readFileSync(new URL(file, import.meta.url), "utf8").length).toBeGreaterThan(0);
@@ -89,6 +90,7 @@ describe("browser-check/run-all registration", () => {
     const fixtureFree = new Set([
       "computed-style.mjs",
       "source-workflows.mjs",
+      "writing-lists.mjs",
       "dollar-completion.mjs",
       "editor-shortcuts.mjs",
       "file-changes.mjs",

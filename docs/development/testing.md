@@ -53,7 +53,7 @@ ONLY=editor-shortcuts.mjs,file-changes.mjs npm run verify:browser
 CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 ```
 
-运行器默认运行全部 16 套（期望断言数见下表），并导出套件依赖的真实夹具。运行器启动独立服务和显式 `--headless=new` Chromium，只清理自己创建的进程，避开桌面开发端口。自动验证不得弹出可见窗口；桌面抽查须用户单独明确授权，未执行的 WebView2、真实 IME 等能力应标记未验证。`ONLY` 必须匹配实际套件；期望断言数量不符、夹具为空或导出失败均直接失败。产物和截图保存在 `.browser-check/`。`SKIP_DEV=1` 可复用服务；`SKIP_FIXTURES=1` 只在夹具与当前代码一致时使用。
+运行器默认运行全部 17 套（期望断言数见下表），并导出套件依赖的真实夹具。运行器启动独立服务和显式 `--headless=new` Chromium，只清理自己创建的进程，避开桌面开发端口。自动验证不得弹出可见窗口；桌面抽查须用户单独明确授权，未执行的 WebView2、真实 IME 等能力应标记未验证。`ONLY` 必须匹配实际套件；期望断言数量不符、夹具为空或导出失败均直接失败。产物和截图保存在 `.browser-check/`。`SKIP_DEV=1` 可复用服务；`SKIP_FIXTURES=1` 只在夹具与当前代码一致时使用。
 
 | 套件（期望断言数） | 证明的行为 |
 | --- | --- |
@@ -65,6 +65,7 @@ CHROME_PATH=/path/to/chromium PORT=1430 CDP_PORT=9336 npm run verify:browser
 | `document-transaction.mjs`（6） | 16 份同请求原文测量/最终展示事务夹具；同输入的新产物作废旧点击，自然测量先决定最终展示纸型 |
 | `document-performance.mjs`（6） | 重复真实 SVG 组成 100 页 DOM 隔离探针：完整节点、引用作用域、单页更新复用、离屏尺寸与末页命中；直接 SVG 与 Shadow DOM 首屏像素一致，输出初始化及更新耗时，不设固定时间阈值 |
 | `source-workflows.mjs`（59） | 输入无隐式写盘，取消保存/新建，显式保存、路径变化重编译、打开文件、会话恢复与字体配置、Tab 档宽（tabSpaces）设置恢复后按键生效、空行 `$` 脚手架与其 Enter 展开；闭合 `$` 后 Enter 退出公式并生成段落分隔 |
+| `writing-lists.mjs`（12） | 写作模式列表结构化退格的真实按键与重排：输入列表项、Enter 续项后空项退格整条抹掉、体首去标记、行首并入上一行、嵌套项反缩进一档（默认 2 空格）、正文内只删一字、显式编号与代码块同形文本不误判、一次撤销恢复、源码模式保留默认语义；无夹具依赖 |
 | `dollar-completion.mjs`（32） | `$` 与原生 `(` 的词中输入/闭合符对照、默认紧凑配对、空格与 Enter 行间手势、未闭合上下文、原样选区与反向选区、多光标、缩进三行脚手架、两级退格与撤销、粘贴及 DOM/EditContext（含空格）合成护栏、两种模式共用输入且无隐式写盘；多行公式行首 `\ =&` / `\ &=` 对齐标记在 Enter 时延续 |
 | `document-completion.mjs`（21） | 文档模式与源码模式共用 CodeMirror/typst_lezer 补全候选；候选浮层脱离透明输入层并以页面真实光标为锚点，Enter/Tab/方向键/鼠标接受、Esc/失焦/模式切换/滚动缩放/底边翻转行为与源码模式一致（21 项断言，依赖 `fixtures:pages`） |
 | `computed-style.mjs`（19） | 弹窗和窄窗口的 box-sizing、主题颜色及溢出边界；设置弹窗含 Tab 档宽输入，诊断徽标只显示「错误」「警告」简短提示 |
