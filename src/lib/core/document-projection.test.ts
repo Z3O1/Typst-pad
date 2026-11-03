@@ -12,7 +12,7 @@ describe("Typst 原地源码展开", () => {
       const p = projectDocumentRanges(source, [{ from, to }], { styled: true, preview: true });
       expect(p.source).toContain(`\`\`\`typ\n\n${title}\n\`\`\`${expansionStyle.tail}\n\n`);
       expect(p.source).toContain(
-        `${expansionStyle.outputHead}\n${title}${expansionStyle.outputTail}\n\n`,
+        `${expansionStyle.outputHead}\n${title}${expansionStyle.outputBlockTail}\n\n`,
       );
       expect(p.source).not.toContain(expansionStyle.previewInlineHead);
       expect(p.original).toBe(source);
@@ -222,6 +222,8 @@ describe("Typst 原地源码展开", () => {
     });
     expect(p.source).toContain("```typ\n\n" + source + "\n```");
     expect(p.source).toContain(expansionStyle.previewBlockHead);
+    // 块预览自成一段，用不参与流布局的 place 包住副本，避免多占一行把后文推远。
+    expect(p.source).toContain(`${source}${expansionStyle.previewBlockTail}`);
     const preview = p.source.lastIndexOf("missing");
     const before = p.source.slice(0, preview);
     const errors = sourceDiagnostics(p, [

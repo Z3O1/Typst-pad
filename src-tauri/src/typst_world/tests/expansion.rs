@@ -198,6 +198,87 @@ fn preview_start(doc: &str, from: usize, to: usize) -> usize {
         .len()
 }
 
+/// 展开区间的可见底边与其后正文顶端的间距；块卡片落页尾等取不到后文时返回 None。
+fn following_gap(
+    items: &[crate::block_geometry::PlacedItem],
+    from: usize,
+    to: usize,
+) -> Option<f64> {
+    let (page, bottom) = items
+        .iter()
+        .filter(|item| item.range.start >= from && item.range.end <= to)
+        .max_by(|a, b| a.rect.max.y.to_pt().total_cmp(&b.rect.max.y.to_pt()))
+        .map(|item| (item.page, item.rect.max.y.to_pt()))?;
+    items
+        .iter()
+        .filter(|item| {
+            item.page == page
+                && item.kind == crate::block_geometry::PlacedItemKind::Text
+                && item.range.start >= to
+                && item.rect.min.y.to_pt() > bottom
+        })
+        .map(|item| item.rect.min.y.to_pt())
+        .min_by(f64::total_cmp)
+        .map(|top| top - bottom)
+}
+
+/// 隐藏预览副本只服务于编号/计数/query，不能把后文推得更远、
+/// 也不能让原本有光标几何的插入点失效；否则文档模式点击与输入会跨空白跳位置。
+#[test]
+fn expansion_preview_keeps_following_content_and_caret_geometry_in_place() {
+    let mut checked = 0;
+    for (name, original, range) in expansion_sources() {
+        let Some((from, to)) = range else { continue };
+        let source = projected(&original, Some((from, to)));
+        let start = visible_start(&original, from, to);
+        let added = source.len() - original.len();
+        let base = TypstWorld::new(original.clone(), None, &fonts_dir(), &FontConfig::default());
+        let base_document = typst::compile::<PagedDocument>(&base).output.expect(name);
+        let (base_document, _) = super::super::formula_preview::extract(&base_document);
+        let (base_items, _) = crate::block_geometry::collect_geometry(&base, &base_document);
+        let world = TypstWorld::new(source.clone(), None, &fonts_dir(), &FontConfig::default());
+        let document = typst::compile::<PagedDocument>(&world).output.expect(name);
+        let (document, _) = super::super::formula_preview::extract(&document);
+        let (items, stats) = crate::block_geometry::collect_geometry(&world, &document);
+        let id = store(items.clone(), source.len(), stats.foreign_ink);
+        let base_id = store(base_items.clone(), original.len(), Vec::new());
+        // 展开只换展示，不能把其后内容推远：允许一行内的行高差异，不允许幽灵空行。
+        let base_gap = following_gap(&base_items, from, to);
+        let expanded_gap = following_gap(&items, start, start + (to - from));
+        if let (Some(base_gap), Some(expanded_gap)) = (base_gap, expanded_gap) {
+            assert!(
+                expanded_gap <= base_gap + 6.0,
+                "{name}: 展开后与后文的间距 {expanded_gap:.1}pt 超过基准 {base_gap:.1}pt（隐藏副本占了流空间）"
+            );
+        }
+        // 展开区间及其两侧的插入点：原来有光标几何的，展开后不能失效。
+        for pos in from.saturating_sub(1)..=(to + 1).min(original.len()) {
+            if !original.is_char_boundary(pos) {
+                continue;
+            }
+            let rendered = if pos < from {
+                pos
+            } else if pos <= to {
+                start + pos - from
+            } else {
+                pos + added
+            };
+            if locate(base_id, pos).is_none() {
+                continue;
+            }
+            checked += 1;
+            let caret = locate(id, rendered)
+                .unwrap_or_else(|| panic!("{name}: 插入点 {pos} 展开后失去光标几何"));
+            assert!(
+                caret.page > 0 && caret.height_pt > 0.0,
+                "{name}: 插入点 {pos} 光标几何退化：{caret:?}"
+            );
+        }
+    }
+    // 防止逐例跳过把用例变成空转：区间内外的插入点绝大多数在基准里就有几何。
+    assert!(checked > 100, "光标几何比对覆盖过少：{checked}");
+}
+
 pub(super) fn visible_start(doc: &str, from: usize, to: usize) -> usize {
     let text = &doc[from..to];
     from + declaration_prefix(text).len()

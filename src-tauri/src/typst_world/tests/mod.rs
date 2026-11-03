@@ -47,15 +47,20 @@ fn expansion_preview(text: &str, block: bool, available: bool) -> String {
     } else {
         "previewInlineHead"
     };
+    // 块预览自成一段：零尺寸 box 仍占一行，投影改用 place 收掉这段高度。
+    let tail = match (formula, block) {
+        (true, true) => "previewBlockTail",
+        (true, false) => "previewTail",
+        (false, true) => "outputBlockTail",
+        (false, false) => "outputTail",
+    };
     let heading = expansion::heading_source(text);
     let start = if heading { "\n" } else { "" };
     let end = if heading { "\n\n" } else { "" };
     format!(
         "{}{start}{text}{}{end}",
         style[head].as_str().unwrap(),
-        style[if formula { "previewTail" } else { "outputTail" }]
-            .as_str()
-            .unwrap()
+        style[tail].as_str().unwrap()
     )
 }
 

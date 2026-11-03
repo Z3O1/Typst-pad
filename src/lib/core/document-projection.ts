@@ -129,17 +129,22 @@ export function projectDocumentRanges(
     const previewLive = !!options.preview && preserveDeclaration !== false && !isDeclaration;
     const previewHead = previewLive
       ? formula
-        ? expansionStyle.previewInlineHead
+        ? block
+          ? expansionStyle.previewBlockHead
+          : expansionStyle.previewInlineHead
         : expansionStyle.outputHead + (heading ? "\n" : "")
       : "";
     const previewBody = previewLive ? text : "";
+    // 块预览自成一段：零尺寸 box 仍会占一整行，改用不参与流布局的 place 收掉这段高度。
+    const previewTail = formula
+      ? block
+        ? expansionStyle.previewBlockTail
+        : expansionStyle.previewTail
+      : block
+        ? expansionStyle.outputBlockTail
+        : expansionStyle.outputTail;
     const preview =
-      previewHead +
-      previewBody +
-      (previewLive
-        ? (formula ? expansionStyle.previewTail : expansionStyle.outputTail) +
-          (heading ? "\n\n" : "")
-        : "");
+      previewHead + previewBody + (previewLive ? previewTail + (heading ? "\n\n" : "") : "");
     const previewFrom = textEnd + tail.length;
     const previewTextStart = previewFrom + previewHead.length;
     const previewTextEnd = previewTextStart + previewBody.length;

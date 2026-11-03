@@ -5,6 +5,8 @@
   "previewInlineHead": "#[#let body = [#set std.text(fill: std.rgb(\"#ffffff\"));",
   "previewBlockHead": "#[#let body = [#set std.text(fill: std.rgb(\"#ffffff\"));",
   "previewTail": "\n];#context { let size = std.measure(body); std.box(width: 0pt, height: 0pt)[#std.box(width: size.width, height: size.height)[#body] <_typstpad_formula_preview>] }]",
+  "previewBlockTail": "\n];#context { let size = std.measure(body); std.place([#std.box(width: size.width, height: size.height)[#body] <_typstpad_formula_preview>], float: false) }]",
   "outputHead": "#[#let body = [",
-  "outputTail": "\n];#context { let size = std.measure(body); std.box(width: 0pt, height: 0pt)[#std.box(width: size.width, height: size.height)[#body] <_typstpad_expansion_output>] }]"
+  "outputTail": "\n];#context { let size = std.measure(body); std.box(width: 0pt, height: 0pt)[#std.box(width: size.width, height: size.height)[#body] <_typstpad_expansion_output>] }]",
+  "outputBlockTail": "\n];#context { let size = std.measure(body); std.place([#std.box(width: size.width, height: size.height)[#body] <_typstpad_expansion_output>], float: false) }]"
 }
